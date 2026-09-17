@@ -19,11 +19,11 @@
 
       <label for="api-key">OpenAI API Key <span class="required" aria-label="required">*</span></label>
       <input id="api-key" type="password" autocomplete="off" spellcheck="false" placeholder="sk-…" required>
-      <p class="field-help">Use a separate <strong>Restricted OpenAI API Key</strong>. Set its <strong>Permissions</strong> to <code>Tunnels: Read + Use</code>. Open <a href="#" data-open="apiKeys">OpenAI API Keys <svg class="external-link-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7M21 3l-9 9M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg></a></p>
+      <p class="field-help">Use a <strong>Restricted OpenAI API Key</strong> with <code>Tunnels: Read + Use</code> permissions. Open <a href="#" data-open="apiKeys">OpenAI API Keys <svg class="external-link-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7M21 3l-9 9M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg></a></p>
 
       <label for="tunnel-id">Tunnel ID <span class="required" aria-label="required">*</span></label>
       <div class="copy-row"><input id="tunnel-id" type="text" autocomplete="off" spellcheck="false" placeholder="tunnel_…" required><button id="copy-tunnel" class="secondary" type="button">Copy Tunnel ID</button></div>
-      <p class="field-help">Paste the tunnel identifier, not its name or URL. It begins with <code>tunnel_</code>, for example <code>tunnel_abc123…</code>. Open <a href="#" data-open="tunnels">OpenAI Tunnels <svg class="external-link-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7M21 3l-9 9M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg></a></p>
+      <p class="field-help">Paste the Tunnel ID, e.g. <code>tunnel_abc123…</code>. Open <a href="#" data-open="tunnels">OpenAI Tunnels <svg class="external-link-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7M21 3l-9 9M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg></a></p>
 
       <div class="actions"><button id="test-connection">Save and test connection</button></div>
       <div id="test-result" hidden role="status"></div>
@@ -33,9 +33,9 @@
       <h2>2. Connect ChatGPT</h2>
       <p>Developer Mode is required to add a local Tunnel connection. Use a ChatGPT plan or workspace with Developer Mode access—typically Plus or higher.</p>
       <ol>
-        <li>Open <a href="#" data-open="chatgptSettings">ChatGPT Settings <svg class="external-link-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7M21 3l-9 9M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1 2-2V5a2 2 0 0 1 2-2h5"/></svg></a> and enable <strong>Developer Mode</strong>.</li>
+        <li>Open <a href="#" data-open="chatgptSettings">ChatGPT Settings <svg class="external-link-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7M21 3l-9 9M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg></a> and enable <strong>Developer Mode</strong>.</li>
         <li>Copy the Tunnel ID above.</li>
-        <li>Open <a href="#" data-open="chatgpt">ChatGPT Plugins <svg class="external-link-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7M21 3l-9 9M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1 2-2V5a2 2 0 0 1 2-2h5"/></svg></a>, then select the plus button to create a developer-mode app.</li>
+        <li>Open <a href="#" data-open="chatgpt">ChatGPT Plugins <svg class="external-link-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7M21 3l-9 9M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg></a>, then select the plus button to create a developer-mode app.</li>
         <li>Choose <strong>Tunnel</strong> under Connection, then select or paste the Tunnel ID.</li>
         <li>Name the app <strong>ResearchTube</strong><button id="copy-app-name" class="copy-inline" type="button">Copy name</button>, then save it.</li>
       </ol>

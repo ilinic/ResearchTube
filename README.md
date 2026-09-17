@@ -41,19 +41,22 @@ ResearchTube is designed so that you do **not** need to understand MCP transport
 After the extension is installed, its local **Settings** page opens automatically. It:
 
 - opens the relevant official OpenAI and ChatGPT pages in normal browser tabs;
-- asks only for a Tunnel ID and a restricted OpenAI API key;
+- asks only for a Tunnel ID and a Restricted OpenAI API Key;
 - explains the recommended key permissions; and
 - tests the real connection before you use the extension in ChatGPT.
 
 The toolbar popup shows the connection status and lets you reopen Settings. The extension uses the fixed official OpenAI endpoint, so there is no custom server address to configure.
 
-### Install
+### Install and connect
 
 1. Download the latest release and extract it to a folder you will keep.
-2. Open `chrome://extensions`, enable **Developer mode**, choose **Load unpacked**, and select the extracted folder.
-3. Follow the Settings page that opens in Chrome, then add the created tunnel in ChatGPT's developer-mode Plugins area.
+2. Open `chrome://extensions`, enable **Developer mode**, choose **Load unpacked**, and select the extracted folder. ResearchTube opens its Settings page.
+3. In Settings, create or choose an OpenAI tunnel and copy its **Tunnel ID**. This is the identifier beginning with `tunnel_`—not the tunnel's name or URL.
+4. Create a separate **Restricted OpenAI API Key**. In the key's **Permissions**, allow only **Tunnels: Read + Use**. Do not use an organisation-owner, administrator, or unrestricted key. Paste both values into Settings and select **Save and test connection**.
+5. In ChatGPT Settings, enable **Developer Mode**. You need a ChatGPT plan or workspace with Developer Mode access—typically Plus or higher. Then open the ChatGPT Plugins area, select the plus button, choose **Tunnel** as the connection, select or paste the same Tunnel ID, and name the app **ResearchTube**.
+6. Start a new ChatGPT chat and use `@ResearchTube` before your request, for example: `@ResearchTube Find recent videos about quantum computing and compare their transcripts.`
 
-For the extension API key, use a separate **Restricted OpenAI API Key**. Set its **Permissions** to only **Tunnels: Read + Use**. Do not use an organisation-owner, administrator, or unrestricted key. The [OpenAI Secure MCP Tunnel guide](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels) explains the tunnel model.
+The [OpenAI Secure MCP Tunnel guide](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels) explains the tunnel model.
 
 ## Tools available to ChatGPT
 
