@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ResearchTube Setup</title>
+  <link rel="stylesheet" href="onboarding.css">
+</head>
+<body>
+  <main>
+    <header>
+      <img src="icons/researchtube-48.png" alt="">
+      <div><h1>ResearchTube Setup</h1><p>Connect this local Chrome extension to your OpenAI tunnel and ChatGPT.</p></div>
+    </header>
+
+    <section>
+      <h2>OpenAI connection</h2>
+      <p class="intro">Create or choose an OpenAI tunnel and a separate Restricted API key. Both fields are required.</p>
+
+      <label for="api-key">OpenAI API key <span class="required" aria-label="required">*</span></label>
+      <input id="api-key" type="password" autocomplete="off" spellcheck="false" placeholder="sk-…" required>
+      <p class="field-help">Use a separate <strong>Restricted</strong> key with <code>Tunnels: Read + Use</code>. Open <a href="#" data-open="apiKeys">OpenAI API Keys <svg class="external-link-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7M21 3l-9 9M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg></a></p>
+
+      <label for="tunnel-id">Tunnel ID <span class="required" aria-label="required">*</span></label>
+      <div class="copy-row"><input id="tunnel-id" type="text" autocomplete="off" spellcheck="false" placeholder="tunnel_…" required><button id="copy-tunnel" class="secondary" type="button">Copy Tunnel ID</button></div>
+      <p class="field-help">Open <a href="#" data-open="tunnels">OpenAI Tunnels <svg class="external-link-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7M21 3l-9 9M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg></a></p>
+
+      <div class="actions"><button id="test-connection">Save and test connection</button></div>
+      <div id="test-result" hidden role="status"></div>
+    </section>
+
+    <section>
+      <h2>Connect ChatGPT</h2>
+      <p>Add this tunnel to ChatGPT after the connection test succeeds. ResearchTube cannot change your ChatGPT account settings itself.</p>
+      <ol>
+        <li>Copy the Tunnel ID above.</li>
+        <li>Open <a href="#" data-open="chatgpt">ChatGPT Plugins <svg class="external-link-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7M21 3l-9 9M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg></a>, then select the plus button to create a developer-mode app.</li>
+        <li>Choose <strong>Tunnel</strong> under Connection, then select or paste the Tunnel ID.</li>
+        <li>Name the app <strong>ResearchTube</strong><button id="copy-app-name" class="copy-inline" type="button">Copy name</button>, then save it.</li>
+      </ol>
+    </section>
+
+    <section>
+      <h2>Try ResearchTube</h2>
+      <div class="example-row"><blockquote id="example-prompt">Use ResearchTube to search YouTube for recent videos about quantum computing. Read the relevant transcripts and summarize the main ideas.</blockquote><button id="copy-prompt" class="secondary" type="button">Copy example prompt</button></div>
+      <p class="field-help">Open a new <a href="#" data-open="chatgptNewChat">ChatGPT chat <svg class="external-link-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7M21 3l-9 9M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg></a> and paste the example prompt.</p>
+    </section>
+
+    <footer><button id="open-settings" class="link" type="button">Settings</button><span>Required fields are marked <span class="required">*</span>.</span></footer>
+  </main>
+  <script src="onboarding.js"></script>
+</body>
+</html>

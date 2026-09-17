@@ -1,0 +1,12 @@
+{
+  "scripts": {
+    "build": "esbuild background.js --bundle --format=esm --target=chrome120 --outfile=dist/background.js && esbuild youtube-page-bridge.src.js --bundle --format=iife --target=chrome120 --outfile=youtube-page-bridge.js",
+    "check": "npm run build && node --check background.js && node --check youtube-content.js && node --check dist/background.js && node --check youtube-page-bridge.js"
+  },
+  "dependencies": {
+    "youtubei.js": "18.0.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.9"
+  }
+}

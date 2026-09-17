@@ -1,0 +1,21 @@
+const $ = (id) => document.getElementById(id);
+const messages = {
+  API_KEY_INVALID: "The OpenAI API key was rejected. Check the key and try again.",
+  TUNNEL_PERMISSION_DENIED: "The API key is valid, but it cannot access this tunnel. Use a Restricted key with Tunnels: Read + Use.",
+  TUNNEL_NOT_FOUND: "The tunnel could not be found. Check the Tunnel ID and try again.",
+  NETWORK_ERROR: "ResearchTube could not reach OpenAI. Check your internet connection and try again.",
+  API_KEY_MISSING: "Enter your OpenAI API key.",
+  TUNNEL_ID_MISSING: "Enter your Tunnel ID."
+};
+async function call(message) { return chrome.runtime.sendMessage(message); }
+function escapeHtml(value) { const element = document.createElement("span"); element.textContent = value; return element.innerHTML; }
+function renderResult(result) { const box = $("test-result"); box.hidden = false; box.className = result.ok ? "ok" : "error"; if (result.ok) box.innerHTML = "<strong>Connection successful.</strong><br>✓ API key accepted<br>✓ Tunnel found<br>✓ ResearchTube can access the tunnel"; else { const message = messages[result.errorCode] || result.message || "Connection test failed."; box.innerHTML = `<strong>${escapeHtml(message)}</strong>${result.detail ? `<details><summary>Technical details</summary>${escapeHtml(result.detail)}</details>` : ""}`; } }
+async function saveAndTest() { $("test-connection").disabled = true; $("test-connection").textContent = "Testing…"; const saved = await call({ type: "save-connection", payload: { tunnelId: $("tunnel-id").value, apiKey: $("api-key").value } }); const result = saved.ok ? await call({ type: "test-connection" }) : saved; renderResult(result); if (result.ok) { await call({ type: "save-connection", payload: { tunnelId: $("tunnel-id").value, onboardingCompleted: true } }); $("api-key").value = ""; $("api-key").placeholder = "••••••••••••••••"; } $("test-connection").disabled = false; $("test-connection").textContent = "Save and test connection"; }
+$("test-connection").addEventListener("click", saveAndTest);
+document.querySelectorAll("[data-open]").forEach((link) => link.addEventListener("click", (event) => { event.preventDefault(); call({ type: "open-external", target: link.dataset.open }); }));
+$("copy-tunnel").addEventListener("click", async () => { await navigator.clipboard.writeText($("tunnel-id").value.trim()); $("copy-tunnel").textContent = "Copied"; setTimeout(() => { $("copy-tunnel").textContent = "Copy Tunnel ID"; }, 1400); });
+$("copy-app-name").addEventListener("click", async () => { await navigator.clipboard.writeText("ResearchTube"); $("copy-app-name").textContent = "Copied"; setTimeout(() => { $("copy-app-name").textContent = "Copy name"; }, 1400); });
+$("copy-prompt").addEventListener("click", async () => { await navigator.clipboard.writeText($("example-prompt").textContent.trim()); $("copy-prompt").textContent = "Copied"; setTimeout(() => { $("copy-prompt").textContent = "Copy example prompt"; }, 1400); });
+$("open-settings").addEventListener("click", () => chrome.runtime.openOptionsPage());
+async function init() { const state = await call({ type: "status" }); $("tunnel-id").value = state.tunnelId || ""; if (state.apiKeyPresent) $("api-key").placeholder = "••••••••••••••••"; }
+init();

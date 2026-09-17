@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>ResearchTube Settings</title><link rel="stylesheet" href="options.css"></head>
+<body>
+  <main>
+    <header><img src="icons/researchtube-48.png" alt=""><div><h1>ResearchTube Settings</h1><p>Configure the connection between this Chrome extension and your OpenAI tunnel.</p></div></header>
+    <section><h2>OpenAI</h2>
+      <label for="tunnel">Tunnel ID <span class="required" aria-label="required">*</span></label><input id="tunnel" type="text" autocomplete="off" spellcheck="false" placeholder="tunnel_…" required>
+      <p class="hint">Open <a href="#" data-open="tunnels">OpenAI Tunnels <svg class="external-link-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7M21 3l-9 9M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg></a></p>
+      <label for="key">OpenAI API key <span class="required" aria-label="required">*</span></label><input id="key" type="password" autocomplete="off" placeholder="sk-…" required>
+      <p class="hint" id="key-hint">Use a separate Restricted key with Tunnels: Read + Use. Open <a href="#" data-open="apiKeys">OpenAI API Keys <svg class="external-link-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7M21 3l-9 9M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg></a></p>
+      <div class="actions"><button id="save">Save connection</button><button id="clear" class="minor" type="button">Clear API key</button><button id="test" class="minor" type="button">Test connection</button></div>
+      <div id="test-result" hidden role="status"></div>
+    </section>
+    <section><h2>ChatGPT</h2><p>After the connection test succeeds, add this tunnel in ChatGPT Plugins. Open <a href="#" data-open="chatgpt">ChatGPT Plugins <svg class="external-link-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7M21 3l-9 9M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg></a>.</p><p id="tunnel-copy" class="tunnel-copy"></p><button id="copy-tunnel" class="minor" type="button">Copy Tunnel ID</button></section>
+    <section><h2>Status</h2><p id="status">Checking status…</p></section>
+    <footer>ResearchTube v<span id="version"></span> · Public YouTube research for ChatGPT</footer>
+  </main>
+  <script src="options.js"></script>
+</body>
+</html>
