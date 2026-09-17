@@ -3,14 +3,14 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>ResearchTube Setup</title>
+  <title>ResearchTube Settings</title>
   <link rel="stylesheet" href="onboarding.css">
 </head>
 <body>
   <main>
     <header>
       <img src="icons/researchtube-48.png" alt="">
-      <div><h1>ResearchTube Setup</h1><p>Connect this local Chrome extension to your OpenAI tunnel and ChatGPT.</p></div>
+      <div><h1>ResearchTube Settings</h1><p>Connect this local Chrome extension to your OpenAI tunnel and ChatGPT.</p></div>
     </header>
 
     <section>
@@ -30,6 +30,11 @@
     </section>
 
     <section>
+      <h2>Status</h2>
+      <p id="status">Checking status…</p>
+    </section>
+
+    <section>
       <h2>Connect ChatGPT</h2>
       <p>Add this tunnel to ChatGPT after the connection test succeeds. ResearchTube cannot change your ChatGPT account settings itself.</p>
       <ol>
@@ -42,11 +47,11 @@
 
     <section>
       <h2>Try ResearchTube</h2>
-      <div class="example-row"><blockquote id="example-prompt">Use ResearchTube to search YouTube for recent videos about quantum computing. Read the relevant transcripts and summarize the main ideas.</blockquote><button id="copy-prompt" class="secondary" type="button">Copy example prompt</button></div>
+      <div class="example-row"><blockquote id="example-prompt">@ResearchTube Search YouTube for recent videos about quantum computing. Read the relevant transcripts and summarize the main ideas.</blockquote><button id="copy-prompt" class="secondary" type="button">Copy example prompt</button></div>
       <p class="field-help">Open a new <a href="#" data-open="chatgptNewChat">ChatGPT chat <svg class="external-link-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7M21 3l-9 9M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg></a> and paste the example prompt.</p>
     </section>
 
-    <footer><button id="open-settings" class="link" type="button">Settings</button><span>Required fields are marked <span class="required">*</span>.</span></footer>
+    <footer><span>Required fields are marked <span class="required">*</span>.</span></footer>
   </main>
   <script src="onboarding.js"></script>
 </body>

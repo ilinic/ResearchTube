@@ -42,7 +42,7 @@ The extension is the local tunnel client and the MCP server. The OpenAI tunnel p
 | Service worker | `background.js` | Polls the tunnel, implements JSON-RPC/MCP, validates tool input, searches and reads metadata, manages YouTube tabs, and sends tool responses. |
 | Isolated content script | `youtube-content.js` | Bridges extension messages to and from the YouTube MAIN world using origin-checked `window.postMessage`. |
 | MAIN-world bridge | `youtube-page-bridge.src.js` → `youtube-page-bridge.js` | Runs in a `youtube.com` document and performs transcript, comment, and reply operations in the normal YouTube page origin. |
-| Onboarding and settings | `onboarding.*`, `options.*`, `popup.*` | Provide local setup, status, and connection-test UI. The Tunnel ID and restricted OpenAI API key are stored in `chrome.storage.local`; the control-plane address is fixed in the service worker. |
+| Settings and popup | `onboarding.*`, `popup.*` | Provide the single local Settings page, status, connection-test UI, and toolbar status. The Tunnel ID and restricted OpenAI API key are stored in `chrome.storage.local`; the control-plane address is fixed in the service worker. |
 | Bundled dependency | `youtubei.js` | Used only in the MAIN-world bridge for comments and reply continuations. |
 
 ## Request lifecycle
@@ -155,6 +155,8 @@ All YouTube data requests explicitly use `credentials: "omit"`. The manifest doe
 
 The Tunnel ID and restricted OpenAI API key are stored in `chrome.storage.local`. They are not embedded in source code, committed to the repository, sent to YouTube, or exposed to the page-world bridge.
 
+`youtubei.js` normally bundles static public YouTube client-key literals. The build step replaces those literals with a getter for the live `INNERTUBE_API_KEY` on the YouTube document. The release bundle therefore does not contain a Google-style API-key literal.
+
 Use a dedicated key with only `Tunnels: Read + Use`. Creating or changing a tunnel should be done with a separate, more privileged Platform session or key.
 
 ### Permissions
@@ -188,7 +190,7 @@ npm run check
 ├── youtube-content.js            # isolated-world bridge
 ├── youtube-page-bridge.src.js    # MAIN-world source and YouTube transport
 ├── youtube-page-bridge.js        # generated MAIN-world bundle
-├── options.html / options.js     # local configuration UI
+├── onboarding.html / onboarding.js # single local Settings UI
 ├── manifest.json                 # Chrome extension manifest
 ├── icons/                        # Chrome extension icon sizes
 ├── docs/ARCHITECTURE.md          # this document

@@ -14,7 +14,7 @@ var DEFAULTS = {
   youtubeSearchCooldownUntil: 0,
   youtubeSearchCooldownLevel: 0
 };
-var PAGE_BRIDGE_VERSION = "1.2.2";
+var PAGE_BRIDGE_VERSION = "1.2.3";
 var POLL_RETRY_DELAY_MS = 250;
 var SEARCH_MIN_START_INTERVAL_MS = 3e3;
 var SEARCH_CACHE_TTL_MS = 5 * 6e4;
@@ -291,7 +291,7 @@ async function pollOnceInternal() {
         "Authorization": `Bearer ${config.runtimeApiKey}`,
         "Accept": "application/json",
         "X-Tunnel-Client-Name": "researchtube-extension",
-        "X-Tunnel-Client-Version": "1.2.2",
+        "X-Tunnel-Client-Version": "1.2.3",
         "X-Tunnel-Client-Wire-Protocol-Version": "2026-08-25",
         "X-Tunnel-MCP-Server-Info": JSON.stringify({ version: 1, channels: [{ name: "main" }] })
       }
@@ -420,7 +420,7 @@ async function handleMcpRequest(request) {
     return {
       jsonrpc: "2.0",
       id: request.id,
-      result: { protocolVersion: "2025-06-18", capabilities: { tools: { listChanged: false } }, serverInfo: { name: "researchtube", version: "1.2.2" } }
+      result: { protocolVersion: "2025-06-18", capabilities: { tools: { listChanged: false } }, serverInfo: { name: "researchtube", version: "1.2.3" } }
     };
   }
   if (request?.method === "notifications/initialized") return null;

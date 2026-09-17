@@ -109,7 +109,10 @@ import { Innertube } from "youtubei.js";
 
   // The library is bundled into this MAIN-world file. Its fetch implementation
   // is deliberately pinned to the YouTube document's native fetch: that is what
-  // gives the request the page's https://www.youtube.com origin.
+  // gives the request the page's https://www.youtube.com origin. During the
+  // build, youtubei.js's static public client-key literals are replaced with a
+  // getter for this document's live INNERTUBE_API_KEY, so no such literal is
+  // committed in the extension bundle.
   async function getInnertube() {
     if (!innertubePromise) {
       const visitorData = window.ytcfg?.get?.("VISITOR_DATA") || undefined;

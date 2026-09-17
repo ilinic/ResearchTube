@@ -38,20 +38,20 @@ Separate claims made in the videos from recurring points made by commenters.
 
 ResearchTube is designed so that you do **not** need to understand MCP transport, browser messaging, or the extension's internals to connect it.
 
-After the extension is installed, its local **Setup** page opens automatically. It:
+After the extension is installed, its local **Settings** page opens automatically. It:
 
 - opens the relevant official OpenAI and ChatGPT pages in normal browser tabs;
 - asks only for a Tunnel ID and a restricted OpenAI API key;
 - explains the recommended key permissions; and
 - tests the real connection before you use the extension in ChatGPT.
 
-The toolbar popup shows the connection status and lets you reopen Setup or Settings later. The extension uses the fixed official OpenAI endpoint, so there is no custom server address to configure.
+The toolbar popup shows the connection status and lets you reopen Settings. The extension uses the fixed official OpenAI endpoint, so there is no custom server address to configure.
 
 ### Install
 
 1. Download the latest release and extract it to a folder you will keep.
 2. Open `chrome://extensions`, enable **Developer mode**, choose **Load unpacked**, and select the extracted folder.
-3. Follow the Setup page that opens in Chrome, then add the created tunnel in ChatGPT's developer-mode Plugins area.
+3. Follow the Settings page that opens in Chrome, then add the created tunnel in ChatGPT's developer-mode Plugins area.
 
 For the extension API key, use a separate **restricted** OpenAI key with only **Tunnels: Read + Use**. Do not use an organisation-owner, administrator, or unrestricted key. The [OpenAI Secure MCP Tunnel guide](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels) explains the tunnel model.
 
