@@ -3,7 +3,8 @@ const EXTERNAL_URLS = Object.freeze({
   tunnels: "https://platform.openai.com/settings/organization/tunnels",
   apiKeys: "https://platform.openai.com/settings/organization/api-keys",
   chatgpt: "https://chatgpt.com/plugins",
-  chatgptNewChat: "https://chatgpt.com/"
+  chatgptNewChat: "https://chatgpt.com/",
+  chatgptSettings: "https://chatgpt.com/#settings/Connectors"
 });
 const DEFAULTS = {
   tunnelId: "",
@@ -13,7 +14,7 @@ const DEFAULTS = {
   youtubeSearchCooldownUntil: 0,
   youtubeSearchCooldownLevel: 0
 };
-const PAGE_BRIDGE_VERSION = "1.2.3";
+const PAGE_BRIDGE_VERSION = "1.2.6";
 const POLL_RETRY_DELAY_MS = 250;
 const SEARCH_MIN_START_INTERVAL_MS = 3_000;
 const SEARCH_CACHE_TTL_MS = 5 * 60_000;
@@ -284,7 +285,7 @@ async function pollOnceInternal() {
         "Authorization": `Bearer ${config.runtimeApiKey}`,
         "Accept": "application/json",
         "X-Tunnel-Client-Name": "researchtube-extension",
-        "X-Tunnel-Client-Version": "1.2.3",
+        "X-Tunnel-Client-Version": "1.2.6",
         "X-Tunnel-Client-Wire-Protocol-Version": "2026-08-25",
         "X-Tunnel-MCP-Server-Info": JSON.stringify({ version: 1, channels: [{ name: "main" }] })
       }
@@ -426,7 +427,7 @@ async function handleMcpRequest(request) {
   if (request?.method === "initialize") {
     return {
       jsonrpc: "2.0", id: request.id,
-      result: { protocolVersion: "2025-06-18", capabilities: { tools: { listChanged: false } }, serverInfo: { name: "researchtube", version: "1.2.3" } }
+      result: { protocolVersion: "2025-06-18", capabilities: { tools: { listChanged: false } }, serverInfo: { name: "researchtube", version: "1.2.6" } }
     };
   }
   if (request?.method === "notifications/initialized") return null;

@@ -25,7 +25,7 @@ Read the primary transcripts of the most useful ones and compare their explanati
 ```
 
 ```text
-Research practical vacuum pump designs on YouTube.
+Research practical vacuum toilet designs on YouTube.
 Summarise the technical approaches, then analyse recurring questions in the top comments.
 ```
 
@@ -53,7 +53,7 @@ The toolbar popup shows the connection status and lets you reopen Settings. The 
 2. Open `chrome://extensions`, enable **Developer mode**, choose **Load unpacked**, and select the extracted folder.
 3. Follow the Settings page that opens in Chrome, then add the created tunnel in ChatGPT's developer-mode Plugins area.
 
-For the extension API key, use a separate **restricted** OpenAI key with only **Tunnels: Read + Use**. Do not use an organisation-owner, administrator, or unrestricted key. The [OpenAI Secure MCP Tunnel guide](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels) explains the tunnel model.
+For the extension API key, use a separate **Restricted OpenAI API Key**. Set its **Permissions** to only **Tunnels: Read + Use**. Do not use an organisation-owner, administrator, or unrestricted key. The [OpenAI Secure MCP Tunnel guide](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels) explains the tunnel model.
 
 ## Tools available to ChatGPT
 
