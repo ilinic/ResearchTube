@@ -25,7 +25,7 @@ Read the primary transcripts of the most useful ones and compare their explanati
 ```
 
 ```text
-Research practical vacuum toilet designs on YouTube.
+Research practical vacuum pump designs on YouTube.
 Summarise the technical approaches, then analyse recurring questions in the top comments.
 ```
 
