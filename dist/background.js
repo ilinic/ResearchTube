@@ -15,9 +15,9 @@ var DEFAULTS = {
   youtubeSearchCooldownUntil: 0,
   youtubeSearchCooldownLevel: 0
 };
-var PAGE_BRIDGE_VERSION = "1.3.0";
+var PAGE_BRIDGE_VERSION = "1.3.1";
 var POLL_RETRY_DELAY_MS = 250;
-var SEARCH_MIN_START_INTERVAL_MS = 3e3;
+var SEARCH_MIN_START_INTERVAL_MS = 500;
 var SEARCH_CACHE_TTL_MS = 5 * 6e4;
 var SEARCH_COOLDOWN_STEPS_MS = [2e3, 5e3, 1e4, 2e4, 4e4, 6e4];
 var SEARCH_DIAGNOSTIC_MAX_ENTRIES = 250;
@@ -309,7 +309,7 @@ async function pollOnceInternal() {
         "Authorization": `Bearer ${config.runtimeApiKey}`,
         "Accept": "application/json",
         "X-Tunnel-Client-Name": "researchtube-extension",
-        "X-Tunnel-Client-Version": "1.3.0",
+        "X-Tunnel-Client-Version": "1.3.1",
         "X-Tunnel-Client-Wire-Protocol-Version": "2026-08-25",
         "X-Tunnel-MCP-Server-Info": JSON.stringify({ version: 1, channels: [{ name: "main" }] })
       }
@@ -438,7 +438,7 @@ async function handleMcpRequest(request) {
     return {
       jsonrpc: "2.0",
       id: request.id,
-      result: { protocolVersion: "2025-06-18", capabilities: { tools: { listChanged: false } }, serverInfo: { name: "researchtube", version: "1.3.0" } }
+      result: { protocolVersion: "2025-06-18", capabilities: { tools: { listChanged: false } }, serverInfo: { name: "researchtube", version: "1.3.1" } }
     };
   }
   if (request?.method === "notifications/initialized") return null;

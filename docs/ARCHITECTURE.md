@@ -65,7 +65,7 @@ The control-plane request carries the restricted OpenAI API key. It never enters
 
 `youtube_search` is intentionally more conservative than the tunnel transport:
 
-- Requests are placed in one local FIFO queue, with at least three seconds between search starts.
+- Requests are placed in one local FIFO queue, with at least 500 ms between search starts.
 - Identical `(query, limit)` calls share a cached result or in-flight request for five minutes.
 - A YouTube redirect to its verification flow, an HTTP 403, or an HTTP 429 starts a persisted backoff ladder of **2, 5, 10, 20, 40, then 60 seconds**. A successful search or an expired delay resets the ladder, so a new incident always starts at two seconds.
 - During the backoff ResearchTube returns the MCP tool error `YOUTUBE_SEARCH_RATE_LIMITED` with the concrete retry delay. It does not add `google.com` permissions or attempt to bypass verification.
