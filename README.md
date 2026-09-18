@@ -4,7 +4,7 @@
 
 **Turn public YouTube videos into research material for ChatGPT.**
 
-ResearchTube is a local Chrome extension that gives ChatGPT structured access to public YouTube search results, video details, primary transcripts, comments, and selected reply threads. It is built for the part of YouTube that ordinary search often misses: long explanations, first-hand accounts, technical demonstrations, and the discussion underneath them.
+ResearchTube is a local Chrome extension that gives ChatGPT structured access to public YouTube search results, video details, caption tracks and transcripts, comments, and selected reply threads. It is built for the part of YouTube that ordinary search often misses: long explanations, first-hand accounts, technical demonstrations, and the discussion underneath them.
 
 Ask ChatGPT to find relevant videos, read the underlying transcript, compare competing views, and inspect the most useful public comment threads—all from one conversation.
 
@@ -63,8 +63,8 @@ The [OpenAI Secure MCP Tunnel guide](https://developers.openai.com/api/docs/guid
 | Tool | What ChatGPT can do with it |
 | --- | --- |
 | `youtube_search` | Find public videos by topic, keywords, channel, or date. |
-| `youtube_get_video` | Read a video's scale and context: metadata, normalized views/likes/comments, caption availability, and YouTube's original display counts. |
-| `youtube_get_transcript` | Retrieve timestamped text from the first public caption track. |
+| `youtube_get_video` | Read a video's scale and context: metadata, normalized views/likes/comments, every public caption track with its selectable `trackIndex`, and YouTube's original display counts. |
+| `youtube_get_transcript` | Retrieve timestamped text from a public caption track. By default it uses track `0`; pass a `trackIndex` from `youtube_get_video` to select another language or track. |
 | `youtube_get_comments` | Retrieve ranked public top-level comments, sorted by top or newest, with normalized and display engagement counts. |
 | `youtube_get_comment_replies` | Read one selected public comment thread, including its total size and the returned sample. |
 
@@ -74,7 +74,8 @@ The [OpenAI Secure MCP Tunnel guide](https://developers.openai.com/api/docs/guid
 - YouTube requests are anonymous: the extension does not request Chrome's `cookies` permission and does not read, store, or send YouTube cookies.
 - The OpenAI API key stays in local Chrome extension storage. It is sent only to OpenAI for tunnel access—never to YouTube, a webpage bridge, analytics, or a ResearchTube developer server.
 - YouTube may disable comments, omit captions, restrict a video, or change its page formats. Public access cannot be guaranteed for every video.
-- Searches are serialized and cached briefly. If YouTube asks for verification, ResearchTube pauses new searches and tells ChatGPT exactly when to retry instead of repeatedly sending requests.
+- Searches are serialized and cached briefly. They use the open YouTube page context without changing its URL or playback. If YouTube asks for verification, ResearchTube pauses new searches and tells ChatGPT exactly when to retry instead of repeatedly sending requests.
+- Settings includes a local diagnostics log for troubleshooting. It records concise tool timing, safe request summaries, errors, search queue state, and YouTube HTTP outcomes, but never API keys, Tunnel IDs, cookies, request headers, response bodies, transcript text, or comment text.
 
 For transcripts, comments, and replies, ResearchTube uses a normal YouTube page context. It reuses an open YouTube tab when possible; otherwise it creates an inactive tab and retries once with a fresh tab if the page context becomes stale. It never opens a separate window or steals focus.
 

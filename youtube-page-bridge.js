@@ -38493,11 +38493,10 @@ ${getNsigProcessorFn(eval_args.n, eval_args.sp, eval_args.sig)}`;
     const originalFetch = window.fetch.bind(window);
     const originalXhrOpen = XMLHttpRequest.prototype.open;
     const originalXhrSend = XMLHttpRequest.prototype.send;
-    const MAX_CAPTURE_BYTES = 15e5;
     const responseLog = [];
     let innertubePromise = null;
     function isRelevant(url) {
-      return /\/youtubei\/v1\/|\/api\/timedtext(?:\?|$)/.test(url);
+      return /\/(?:watch|results)(?:\?|$)|\/youtubei\/v1\/|\/api\/timedtext(?:\?|$)/.test(url);
     }
     function post(type, payload) {
       window.postMessage({ source: SOURCE, type, payload }, location.origin);
@@ -38515,18 +38514,20 @@ ${getNsigProcessorFn(eval_args.n, eval_args.sp, eval_args.sig)}`;
     }
     function captureResponse(url, response, method = "GET") {
       if (!url || !isRelevant(url)) return;
-      response.clone().text().then((body) => {
-        const payload = {
-          url,
-          method,
-          status: response.status,
-          body: body.length <= MAX_CAPTURE_BYTES ? body : body.slice(0, MAX_CAPTURE_BYTES),
-          truncated: body.length > MAX_CAPTURE_BYTES
-        };
-        rememberResponse(payload);
-        post("network-response", payload);
-      }).catch(() => {
-      });
+      const payload = {
+        url,
+        method,
+        status: response.status,
+        responseType: response.type,
+        redirected: response.redirected
+      };
+      rememberResponse(payload);
+      post("network-response", payload);
+    }
+    async function observedFetch(input, init = {}) {
+      const response = await originalFetch(input, init);
+      captureResponse(urlFrom(input), response, String(init.method || "GET").toUpperCase());
+      return response;
     }
     window.fetch = async function(...args) {
       const response = await originalFetch(...args);
@@ -38541,14 +38542,13 @@ ${getNsigProcessorFn(eval_args.n, eval_args.sp, eval_args.sig)}`;
     };
     XMLHttpRequest.prototype.send = function(...args) {
       this.addEventListener("loadend", () => {
-        if (!this.__youtubeResearchUrl || !isRelevant(this.__youtubeResearchUrl) || typeof this.responseText !== "string") return;
-        const body = this.responseText;
+        if (!this.__youtubeResearchUrl || !isRelevant(this.__youtubeResearchUrl)) return;
         const payload = {
           url: this.__youtubeResearchUrl,
           method: String(this.__youtubeResearchMethod || "GET").toUpperCase(),
           status: this.status,
-          body: body.length <= MAX_CAPTURE_BYTES ? body : body.slice(0, MAX_CAPTURE_BYTES),
-          truncated: body.length > MAX_CAPTURE_BYTES
+          responseType: this.responseType || "",
+          redirected: false
         };
         rememberResponse(payload);
         post("network-response", payload);
@@ -38598,7 +38598,7 @@ ${getNsigProcessorFn(eval_args.n, eval_args.sp, eval_args.sig)}`;
           retrieve_player: false,
           enable_session_cache: false,
           visitor_data: visitorData,
-          fetch: (input, init) => originalFetch(input, {
+          fetch: (input, init) => observedFetch(input, {
             ...init,
             credentials: "omit"
           })
@@ -38648,7 +38648,7 @@ ${getNsigProcessorFn(eval_args.n, eval_args.sp, eval_args.sig)}`;
       return `${status}: ${reason}`;
     }
     async function getAnonymousWatchHtml(videoId) {
-      const response = await originalFetch(`/watch?v=${encodeURIComponent(videoId)}`, {
+      const response = await observedFetch(`/watch?v=${encodeURIComponent(videoId)}`, {
         credentials: "omit",
         cache: "no-store",
         headers: { Accept: "text/html" }
@@ -38697,11 +38697,11 @@ ${getNsigProcessorFn(eval_args.n, eval_args.sp, eval_args.sig)}`;
       if (!segments.length) throw new Error("YouTube timedtext returned neither JSON3 nor readable XML");
       return segments;
     }
-    async function getTranscriptFromPlayer({ videoId, limit }) {
+    async function getTranscriptFromPlayer({ videoId, limit, trackIndex = 0 }) {
       const pageHtml = await getAnonymousWatchHtml(videoId);
       const apiKey = pageHtml.match(/"INNERTUBE_API_KEY":"([^"]+)"/)?.[1];
       if (!apiKey) throw new Error("INNERTUBE_API_KEY was not found in the anonymous YouTube watch page");
-      const playerResponse = await originalFetch(`/youtubei/v1/player?key=${encodeURIComponent(apiKey)}`, {
+      const playerResponse = await observedFetch(`/youtubei/v1/player?key=${encodeURIComponent(apiKey)}`, {
         method: "POST",
         credentials: "omit",
         cache: "no-store",
@@ -38717,20 +38717,26 @@ ${getNsigProcessorFn(eval_args.n, eval_args.sp, eval_args.sig)}`;
       if (!tracks.length) {
         throw new Error(`No public caption track is available (${playerStatus(player)})`);
       }
-      const track = tracks[0];
-      if (!track?.baseUrl || !isAllowedTimedTextUrl(track.baseUrl)) {
-        throw new Error("The primary caption track did not contain a valid YouTube timedtext URL");
+      const selectedTrackIndex = Number(trackIndex);
+      if (!Number.isInteger(selectedTrackIndex) || selectedTrackIndex < 0 || selectedTrackIndex >= tracks.length) {
+        const available = tracks.map((item, index) => `${index}: ${item.languageCode || "unknown"} (${textOf(item.name) || "unnamed"})`).join(", ");
+        throw new Error(`Caption track index ${trackIndex} is unavailable. Available tracks: ${available}`);
       }
-      const captionResponse = await originalFetch(track.baseUrl, {
+      const track = tracks[selectedTrackIndex];
+      if (!track?.baseUrl || !isAllowedTimedTextUrl(track.baseUrl)) {
+        throw new Error(`Caption track ${selectedTrackIndex} did not contain a valid YouTube timedtext URL`);
+      }
+      const captionResponse = await observedFetch(track.baseUrl, {
         credentials: "omit",
         cache: "no-store"
       });
       if (!captionResponse.ok) throw new Error(`YouTube timedtext request failed: HTTP ${captionResponse.status}`);
       const segments = parseCaptionResponse(await captionResponse.text()).filter((segment) => segment.text).filter(Boolean).slice(0, Math.max(1, Number(limit || 800)));
-      if (!segments.length) throw new Error("The primary caption track returned no readable timedtext events");
+      if (!segments.length) throw new Error(`Caption track ${selectedTrackIndex} returned no readable timedtext events`);
       return {
         videoId,
         selectedTrack: {
+          trackIndex: selectedTrackIndex,
           languageCode: track.languageCode || null,
           name: textOf(track.name) || null,
           isAutoGenerated: track.kind === "asr"
@@ -38738,6 +38744,163 @@ ${getNsigProcessorFn(eval_args.n, eval_args.sp, eval_args.sig)}`;
         segments,
         returned: segments.length,
         requested: Math.max(1, Number(limit || 800))
+      };
+    }
+    function searchEndpoint(url) {
+      return new URL(url, location.href).pathname.replace("/youtubei/v1/", "youtubei/");
+    }
+    function isSearchVerificationResponse(response) {
+      const responseUrl = String(response.url || "");
+      return response.type === "opaqueredirect" || response.status === 0 || response.status >= 300 && response.status < 400 || response.status === 403 || response.status === 429 || response.redirected || !responseUrl.startsWith("https://www.youtube.com/");
+    }
+    async function searchFetch(trace, url, init = {}) {
+      const requestNumber = trace.filter((item) => item.event === "http_request").length + 1;
+      const endpoint = searchEndpoint(url);
+      trace.push({ event: "http_request", endpoint, request_number: requestNumber, method: init.method || "GET" });
+      try {
+        const response = await observedFetch(url, { ...init, credentials: "omit", redirect: "manual" });
+        trace.push({
+          event: "http_response",
+          endpoint,
+          request_number: requestNumber,
+          status: response.status,
+          response_type: response.type,
+          redirected: response.redirected
+        });
+        return { response, endpoint, requestNumber };
+      } catch (error2) {
+        trace.push({ event: "http_network_error", endpoint, request_number: requestNumber, error: String(error2?.message || error2).slice(0, 280) });
+        throw error2;
+      }
+    }
+    function extractSearchJson(text, markers) {
+      for (const marker of markers) {
+        const start = text.indexOf(marker);
+        if (start < 0) continue;
+        const objectStart = text.indexOf("{", start + marker.length);
+        if (objectStart < 0) continue;
+        let depth = 0;
+        let inString = false;
+        let escaped = false;
+        for (let index = objectStart; index < text.length; index += 1) {
+          const character = text[index];
+          if (inString) {
+            if (escaped) escaped = false;
+            else if (character === "\\") escaped = true;
+            else if (character === '"') inString = false;
+            continue;
+          }
+          if (character === '"') {
+            inString = true;
+            continue;
+          }
+          if (character === "{") depth += 1;
+          else if (character === "}" && --depth === 0) {
+            try {
+              return JSON.parse(text.slice(objectStart, index + 1));
+            } catch {
+              break;
+            }
+          }
+        }
+      }
+      return null;
+    }
+    function searchConfig(html, key) {
+      return html.match(new RegExp(`"${key}":"([^"\\\\]+)"`))?.[1] || null;
+    }
+    function walkSearchData(value, visitor) {
+      visitor(value);
+      if (!value || typeof value !== "object") return;
+      for (const child of Object.values(value)) walkSearchData(child, visitor);
+    }
+    function searchText(value) {
+      return value?.simpleText || value?.runs?.map((run) => run?.text || "").join("") || "";
+    }
+    function findSearchContinuation(value) {
+      let token = null;
+      walkSearchData(value, (node) => {
+        if (!token) token = node?.continuationItemRenderer?.continuationEndpoint?.continuationCommand?.token || null;
+      });
+      return token;
+    }
+    function appendSearchVideos(data, target) {
+      walkSearchData(data, (node) => {
+        const renderer = node?.videoRenderer;
+        if (!renderer?.videoId || target.some((item) => item.videoId === renderer.videoId)) return;
+        const viewsText = searchText(renderer.viewCountText) || null;
+        target.push({
+          videoId: renderer.videoId,
+          title: searchText(renderer.title),
+          channel: searchText(renderer.ownerText) || searchText(renderer.longBylineText),
+          url: `https://www.youtube.com/watch?v=${renderer.videoId}`,
+          durationText: searchText(renderer.lengthText) || null,
+          publishedText: searchText(renderer.publishedTimeText) || null,
+          views: parseYouTubeCount(viewsText),
+          viewsText,
+          snippet: searchText(renderer.detailedMetadataSnippets?.[0]?.snippetText) || searchText(renderer.snippet) || null
+        });
+      });
+    }
+    async function searchPublicVideos({ query, limit }) {
+      const requested = Math.max(1, Math.min(50, Number(limit || 10)));
+      const trace = [];
+      const first = await searchFetch(trace, `/results?search_query=${encodeURIComponent(String(query || ""))}`, {
+        headers: { Accept: "text/html" }
+      });
+      if (isSearchVerificationResponse(first.response)) {
+        return {
+          verification_rejected: true,
+          rejected_endpoint: first.endpoint,
+          rejected_status: first.response.status,
+          rejected_response_type: first.response.type,
+          diagnostics: trace,
+          results: [],
+          returned: 0,
+          requested,
+          hasMore: false
+        };
+      }
+      if (!first.response.ok) throw new Error(`YouTube search page failed: HTTP ${first.response.status}`);
+      const html = await first.response.text();
+      const initialData = extractSearchJson(html, ["var ytInitialData =", "ytInitialData ="]);
+      if (!initialData) throw new Error("ytInitialData was not found in the YouTube search response");
+      const results = [];
+      appendSearchVideos(initialData, results);
+      const initialResults = results.length;
+      let continuation = findSearchContinuation(initialData);
+      const apiKey = searchConfig(html, "INNERTUBE_API_KEY") || window.ytcfg?.get?.("INNERTUBE_API_KEY") || null;
+      const clientVersion = searchConfig(html, "INNERTUBE_CLIENT_VERSION") || window.ytcfg?.get?.("INNERTUBE_CLIENT_VERSION") || "2.20260101.00.00";
+      const visitorData = searchConfig(html, "VISITOR_DATA") || window.ytcfg?.get?.("VISITOR_DATA") || null;
+      let continuationRejected = false;
+      while (results.length < requested && continuation && apiKey) {
+        const next = await searchFetch(trace, `/youtubei/v1/search?key=${encodeURIComponent(apiKey)}&prettyPrint=false`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-YouTube-Client-Name": "1", "X-YouTube-Client-Version": clientVersion },
+          body: JSON.stringify({ context: { client: { clientName: "WEB", clientVersion, ...visitorData ? { visitorData } : {} } }, continuation })
+        });
+        if (isSearchVerificationResponse(next.response)) {
+          continuationRejected = true;
+          break;
+        }
+        if (!next.response.ok) break;
+        const page = await next.response.json();
+        const before = results.length;
+        appendSearchVideos(page, results);
+        continuation = findSearchContinuation(page);
+        if (results.length === before) break;
+      }
+      return {
+        verification_rejected: false,
+        diagnostics: trace,
+        initial_results: initialResults,
+        continuation_available: Boolean(continuation),
+        api_key_available: Boolean(apiKey),
+        continuation_rejected: continuationRejected,
+        results: results.slice(0, requested),
+        returned: Math.min(results.length, requested),
+        requested,
+        hasMore: Boolean(continuation)
       };
     }
     function normalizeCommentThread(thread, rank) {
@@ -38893,6 +39056,7 @@ ${getNsigProcessorFn(eval_args.n, eval_args.sp, eval_args.sig)}`;
       try {
         let data;
         if (message.action === "page-state") data = pageState();
+        else if (message.action === "search") data = await searchPublicVideos(message.payload || {});
         else if (message.action === "transcript-player") data = await getTranscriptFromPlayer(message.payload || {});
         else if (message.action === "network-after") data = { responses: responseLog.filter((response) => response.at >= Number(message.payload?.after ?? 0)) };
         else if (message.action === "comments-ytjs") data = await getCommentsWithYtjs(message.payload || {});

@@ -48,6 +48,13 @@
     </section>
 
     <section>
+      <h2>Diagnostics</h2>
+      <p class="field-help">For troubleshooting only. The local log records concise tool timing, safe request summaries, errors, search queue state, and YouTube HTTP status. It never records OpenAI API keys, Tunnel IDs, YouTube cookies, request headers, response bodies, transcript text, or comment text.</p>
+      <div class="actions"><button id="copy-diagnostics" class="secondary" type="button">Copy diagnostics log</button><button id="clear-diagnostics" class="secondary" type="button">Clear diagnostics log</button></div>
+      <p id="diagnostics-summary" class="field-help" role="status">Loading diagnostics…</p>
+    </section>
+
+    <section>
       <h2>Status</h2>
       <p id="status">Checking status…</p>
     </section>
