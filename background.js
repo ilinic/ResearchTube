@@ -14,7 +14,7 @@ const DEFAULTS = {
   youtubeSearchCooldownUntil: 0,
   youtubeSearchCooldownLevel: 0
 };
-const PAGE_BRIDGE_VERSION = "1.3.1";
+const PAGE_BRIDGE_VERSION = "1.3.3";
 const POLL_RETRY_DELAY_MS = 250;
 const SEARCH_MIN_START_INTERVAL_MS = 500;
 const SEARCH_CACHE_TTL_MS = 5 * 60_000;
@@ -36,11 +36,12 @@ let commandDiagnosticWrite = Promise.resolve();
 const searchCache = new Map();
 
 const nullableString = { type: ["string", "null"] };
+const nullableInteger = { type: ["integer", "null"] };
 const videoSearchItemSchema = {
   type: "object", additionalProperties: false,
   properties: {
     videoId: { type: "string" }, title: { type: "string" }, channel: { type: "string" }, url: { type: "string" },
-    durationText: nullableString, publishedText: nullableString, views: { type: ["number", "null"] }, viewsText: nullableString, snippet: nullableString
+    durationText: nullableString, publishedText: nullableString, views: nullableInteger, viewsText: nullableString, snippet: nullableString
   },
   required: ["videoId", "title", "channel", "url", "durationText", "publishedText", "views", "viewsText", "snippet"]
 };
@@ -58,8 +59,8 @@ const commentSchema = {
   type: "object", additionalProperties: false,
   properties: {
     rank: { type: "integer", minimum: 1 }, commentId: { type: "string" }, author: commentAuthorSchema, text: { type: "string" },
-    publishedAt: nullableString, publishedText: nullableString, likes: { type: ["number", "null"] }, likesText: nullableString,
-    replyCount: { type: ["number", "null"] }, replyCountText: nullableString,
+    publishedAt: nullableString, publishedText: nullableString, likes: nullableInteger, likesText: nullableString,
+    replyCount: nullableInteger, replyCountText: nullableString,
     isPinned: { type: "boolean" }, isHearted: { type: "boolean" }, hasReplies: { type: "boolean" },
     authorIsCreator: { type: "boolean" }, creatorReplied: { type: ["boolean", "null"] }
   },
@@ -69,7 +70,7 @@ const replySchema = {
   type: "object", additionalProperties: false,
   properties: {
     rank: { type: "integer", minimum: 1 }, commentId: { type: "string" }, author: commentAuthorSchema, text: { type: "string" },
-    publishedAt: nullableString, publishedText: nullableString, likes: { type: ["number", "null"] }, likesText: nullableString,
+    publishedAt: nullableString, publishedText: nullableString, likes: nullableInteger, likesText: nullableString,
     authorIsCreator: { type: "boolean" }, isHearted: { type: "boolean" }
   },
   required: ["rank", "commentId", "author", "text", "publishedAt", "publishedText", "likes", "likesText", "authorIsCreator", "isHearted"]
@@ -77,8 +78,8 @@ const replySchema = {
 const commentParentSchema = {
   type: "object", additionalProperties: false,
   properties: {
-    commentId: { type: "string" }, text: { type: "string" }, likes: { type: ["number", "null"] }, likesText: nullableString,
-    replyCount: { type: ["number", "null"] }, replyCountText: nullableString
+    commentId: { type: "string" }, text: { type: "string" }, likes: nullableInteger, likesText: nullableString,
+    replyCount: nullableInteger, replyCountText: nullableString
   },
   required: ["commentId", "text", "likes", "likesText", "replyCount", "replyCountText"]
 };
@@ -105,7 +106,7 @@ function toolDefinitions() {
       description: "Inspect one public YouTube video by video ID. Returns research metadata including title, description, channel, duration, absolute publication date when available, normalized views, likes, and comment count plus YouTube display text, category, tags, thumbnail, and all public caption tracks. Each caption track has a trackIndex for youtube_get_transcript. Use it to assess a search result before retrieving transcript or comments. It does not return caption text, comment text, replies, account-only, private, member-only, or age-restricted content.",
       annotations: pureReadAnnotations,
       inputSchema: { type: "object", additionalProperties: false, properties: { videoId: { type: "string", minLength: 6, description: "YouTube video ID obtained from a watch URL or youtube_search." } }, required: ["videoId"] },
-      outputSchema: { type: "object", additionalProperties: false, properties: { videoId: { type: "string" }, url: { type: "string" }, title: { type: "string" }, description: { type: "string" }, channel: commentAuthorSchema, publishedAt: nullableString, durationSeconds: { type: ["number", "null"] }, views: { type: ["number", "null"] }, viewsText: nullableString, likes: { type: ["number", "null"] }, likesText: nullableString, commentCount: { type: ["number", "null"] }, commentCountText: nullableString, category: nullableString, tags: { type: "array", items: { type: "string" } }, thumbnailUrl: nullableString, captions: { type: "object", additionalProperties: false, properties: { available: { type: "boolean" }, tracks: { type: "array", items: captionTrackSchema } }, required: ["available", "tracks"] } }, required: ["videoId", "url", "title", "description", "channel", "publishedAt", "durationSeconds", "views", "viewsText", "likes", "likesText", "commentCount", "commentCountText", "category", "tags", "thumbnailUrl", "captions"] }
+      outputSchema: { type: "object", additionalProperties: false, properties: { videoId: { type: "string" }, url: { type: "string" }, title: { type: "string" }, description: { type: "string" }, channel: commentAuthorSchema, publishedAt: nullableString, durationSeconds: { type: ["number", "null"] }, views: nullableInteger, viewsText: nullableString, likes: nullableInteger, likesText: nullableString, commentCount: nullableInteger, commentCountText: nullableString, category: nullableString, tags: { type: "array", items: { type: "string" } }, thumbnailUrl: nullableString, captions: { type: "object", additionalProperties: false, properties: { available: { type: "boolean" }, tracks: { type: "array", items: captionTrackSchema } }, required: ["available", "tracks"] } }, required: ["videoId", "url", "title", "description", "channel", "publishedAt", "durationSeconds", "views", "viewsText", "likes", "likesText", "commentCount", "commentCountText", "category", "tags", "thumbnailUrl", "captions"] }
     },
     {
       name: "youtube_get_transcript",
@@ -129,7 +130,7 @@ function toolDefinitions() {
       description: "Retrieve public replies beneath one top-level YouTube comment. First call youtube_get_comments, then pass its commentId here with the same videoId. Returns the parent summary, reply rank, author, text, publication text, and normalized plus display like counts. totalReplies distinguishes the size of the whole thread from this returned sample. This tool is for one selected conversation branch; it does not search for comments, return other top-level threads, or perform any account action.",
       annotations: pageReadAnnotations,
       inputSchema: { type: "object", additionalProperties: false, properties: { videoId: { type: "string", minLength: 6, description: "Video ID used in the preceding youtube_get_comments call." }, commentId: { type: "string", minLength: 1, description: "Top-level comment ID returned by youtube_get_comments." }, limit: { type: "integer", minimum: 1, maximum: 100, default: 20, description: "Maximum number of replies to return for this one comment thread." } }, required: ["videoId", "commentId"] },
-      outputSchema: { type: "object", additionalProperties: false, properties: { videoId: { type: "string" }, parentCommentId: { type: "string" }, parent: commentParentSchema, replies: { type: "array", items: replySchema }, returned: { type: "integer" }, requested: { type: "integer" }, totalReplies: { type: ["number", "null"] } }, required: ["videoId", "parentCommentId", "parent", "replies", "returned", "requested", "totalReplies"] }
+      outputSchema: { type: "object", additionalProperties: false, properties: { videoId: { type: "string" }, parentCommentId: { type: "string" }, parent: commentParentSchema, replies: { type: "array", items: replySchema }, returned: { type: "integer" }, requested: { type: "integer" }, totalReplies: nullableInteger }, required: ["videoId", "parentCommentId", "parent", "replies", "returned", "requested", "totalReplies"] }
     }
   ];
 }
@@ -302,7 +303,7 @@ async function pollOnceInternal() {
         "Authorization": `Bearer ${config.runtimeApiKey}`,
         "Accept": "application/json",
         "X-Tunnel-Client-Name": "researchtube-extension",
-        "X-Tunnel-Client-Version": "1.3.1",
+        "X-Tunnel-Client-Version": "1.3.3",
         "X-Tunnel-Client-Wire-Protocol-Version": "2026-08-25",
         "X-Tunnel-MCP-Server-Info": JSON.stringify({ version: 1, channels: [{ name: "main" }] })
       }
@@ -444,7 +445,7 @@ async function handleMcpRequest(request) {
   if (request?.method === "initialize") {
     return {
       jsonrpc: "2.0", id: request.id,
-      result: { protocolVersion: "2025-06-18", capabilities: { tools: { listChanged: false } }, serverInfo: { name: "researchtube", version: "1.3.1" } }
+      result: { protocolVersion: "2025-06-18", capabilities: { tools: { listChanged: false } }, serverInfo: { name: "researchtube", version: "1.3.3" } }
     };
   }
   if (request?.method === "notifications/initialized") return null;
@@ -1153,9 +1154,39 @@ function findContinuationToken(value) {
 function findLikeText(value) {
   let likes = null;
   walk(value, (node) => {
-    if (!likes && node?.segmentedLikeDislikeButtonRenderer?.likeButton?.toggleButtonRenderer) likes = textOf(node.segmentedLikeDislikeButtonRenderer.likeButton.toggleButtonRenderer.defaultText);
+    if (likes || !node || typeof node !== "object") return;
+    // Older watch pages expose defaultText here. Current pages increasingly
+    // use buttonViewModel and put the actual number in accessibilityText.
+    // Check both representations and accept only a numeric "likes" label,
+    // never a generic prompt such as "Like this video".
+    const oldRenderer = node?.segmentedLikeDislikeButtonRenderer?.likeButton?.toggleButtonRenderer;
+    const candidates = [
+      oldRenderer?.defaultText,
+      oldRenderer?.accessibility?.accessibilityData?.label,
+      node.accessibilityText,
+      node.accessibility?.accessibilityData?.label,
+      node.buttonViewModel?.accessibilityText,
+      node.defaultButtonViewModel?.buttonViewModel?.accessibilityText,
+      node.toggleButtonViewModel?.defaultButtonViewModel?.buttonViewModel?.accessibilityText,
+      node.likeButtonViewModel?.toggleButtonViewModel?.defaultButtonViewModel?.buttonViewModel?.accessibilityText
+    ];
+    for (const candidate of candidates) {
+      const text = textOf(candidate) || (typeof candidate === "string" ? candidate : "");
+      if (isLikeCountText(text)) {
+        likes = text;
+        break;
+      }
+    }
   });
   return likes;
+}
+
+function isLikeCountText(value) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  // YouTube's browser accessibility label is localised, but it always couples
+  // a number with the equivalent of "like". Keep this conservative so a
+  // descriptive prompt cannot be misreported as a count.
+  return /\d/.test(text) && /\b(?:likes?|thumbs up)\b|нравится|отмет(?:ок|ки)?\s+[«\"]?нравится/i.test(text);
 }
 
 function findViewText(value) {

@@ -91,14 +91,14 @@ Each tool definition has a title, an LLM-facing description, strict input and ou
 
 The worker routes search through the MAIN-world bridge in an already open YouTube document. The bridge anonymously fetches `/results?search_query=...`, extracts `ytInitialData`, and normalises `videoRenderer` entries. If the first page is not enough, it follows the search continuation through `youtubei/v1/search` using public client data extracted from the response. The bridge never changes the selected tab's URL, playback, or DOM.
 
-Output is a compact result list with ID, title, channel, URL, duration and publication text, normalized numeric views plus YouTube's display text, and a snippet when available.
+Output is a compact result list with ID, title, channel, URL, duration and publication text, normalized integer views plus YouTube's display text, and a snippet when available.
 
 ### Video metadata: `youtube_get_video`
 
 The worker anonymously fetches `/watch?v={videoId}`, extracts `ytInitialPlayerResponse` and `ytInitialData`, and returns:
 
 - title, description, channel, duration, category, tags, thumbnail, and caption-track metadata only (not caption text). Every track includes a zero-based `trackIndex`, language code, display name, and auto-generated flag;
-- normalized numeric views, likes, and comment count, each paired with the original YouTube display text;
+- normalized integer views, likes, and comment count, each paired with the original YouTube display text;
 - an absolute publication date when YouTube supplies one.
 
 ### Transcript: `youtube_get_transcript`
