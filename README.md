@@ -13,6 +13,7 @@ Ask ChatGPT to find relevant videos, read the underlying transcript, compare com
 ## Demo
 
 See ResearchTube in action:
+
 https://github.com/user-attachments/assets/35614a7a-98fa-4d36-9632-a0da1d7c8805
 
 ## What it makes possible
