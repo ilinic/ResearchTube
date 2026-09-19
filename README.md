@@ -10,6 +10,12 @@ Ask ChatGPT to find relevant videos, read the underlying transcript, compare com
 
 > ResearchTube is a personal developer-mode integration for ChatGPT, connected through an OpenAI Secure MCP Tunnel. It is not a public ChatGPT Plugin Directory listing.
 
+## Demo
+
+See ResearchTube in action:
+
+https://github.com/user-attachments/assets/35614a7a-98fa-4d36-9632-a0da1d7c8805
+
 ## What it makes possible
 
 - **Go beyond titles and summaries.** Search YouTube, then ground an answer in the actual spoken content of relevant videos.
