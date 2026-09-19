@@ -14,7 +14,7 @@ const DEFAULTS = {
   youtubeSearchCooldownUntil: 0,
   youtubeSearchCooldownLevel: 0
 };
-const PAGE_BRIDGE_VERSION = "1.3.3";
+const PAGE_BRIDGE_VERSION = "1.4.3";
 const POLL_RETRY_DELAY_MS = 250;
 const SEARCH_MIN_START_INTERVAL_MS = 500;
 const SEARCH_CACHE_TTL_MS = 5 * 60_000;
@@ -44,6 +44,46 @@ const videoSearchItemSchema = {
     durationText: nullableString, publishedText: nullableString, views: nullableInteger, viewsText: nullableString, snippet: nullableString
   },
   required: ["videoId", "title", "channel", "url", "durationText", "publishedText", "views", "viewsText", "snippet"]
+};
+const channelIdentitySchema = {
+  type: "object", additionalProperties: false,
+  properties: { id: nullableString, name: nullableString, handle: nullableString },
+  required: ["id", "name", "handle"]
+};
+const channelVideoItemSchema = {
+  type: "object", additionalProperties: false,
+  properties: {
+    videoId: { type: "string", description: "YouTube video ID for youtube_get_video, youtube_get_transcript, or youtube_get_comments." },
+    title: { type: "string", description: "Public video title as displayed by YouTube." },
+    channel: { ...nullableString, description: "Video owner name when present on the card; otherwise the known parent channel or playlist owner; null only if YouTube supplied neither." },
+    url: { type: "string", description: "Canonical public watch URL constructed from videoId." },
+    position: { ...nullableInteger, minimum: 0, description: "Zero-based playlist item index supplied by YouTube; null for channel catalogues or when YouTube does not expose an index." },
+    durationSeconds: { ...nullableInteger, minimum: 0, description: "Normalized duration derived from durationText; null for live, upcoming, or undisclosed-duration items." },
+    durationText: { ...nullableString, description: "YouTube's displayed duration, normally H:MM:SS or M:SS; null when absent." },
+    publishedAt: { ...nullableString, format: "date-time", description: "Absolute publication timestamp only when YouTube provides one in the catalogue; otherwise null. Do not infer it from publishedText." },
+    publishedText: { ...nullableString, description: "YouTube's relative publication label, for example '3 days ago'; null when absent." },
+    views: { ...nullableInteger, minimum: 0, description: "Integer view count parsed from viewsText; null when the catalogue does not display a count." },
+    viewsText: { ...nullableString, description: "Original displayed view-count label from YouTube; retained alongside views." },
+    isShort: { type: "boolean", description: "True only when the card is identified as a YouTube Short." },
+    isLive: { type: "boolean", description: "True for live, upcoming, streamed, or premiered items indicated by YouTube." }
+  },
+  required: ["videoId", "title", "channel", "url", "position", "durationSeconds", "durationText", "publishedAt", "publishedText", "views", "viewsText", "isShort", "isLive"]
+};
+const playlistItemSchema = {
+  type: "object", additionalProperties: false,
+  properties: {
+    playlistId: { type: "string", description: "Public playlist ID accepted by youtube_get_playlist_videos." },
+    title: { type: "string", description: "Public playlist title as displayed by YouTube." },
+    videoCount: { ...nullableInteger, minimum: 0, description: "Integer playlist size parsed from videoCountText; null when YouTube does not display it." },
+    videoCountText: { ...nullableString, description: "Original YouTube playlist-size label; retained alongside videoCount." },
+    thumbnailUrl: { ...nullableString, format: "uri", description: "Public thumbnail URL when supplied by YouTube." }
+  },
+  required: ["playlistId", "title", "videoCount", "videoCountText", "thumbnailUrl"]
+};
+const playlistIdentitySchema = {
+  type: "object", additionalProperties: false,
+  properties: { id: { type: "string" }, title: nullableString, channelId: nullableString, channelName: nullableString },
+  required: ["id", "title", "channelId", "channelName"]
 };
 const captionTrackSchema = {
   type: "object", additionalProperties: false,
@@ -107,6 +147,30 @@ function toolDefinitions() {
       annotations: pureReadAnnotations,
       inputSchema: { type: "object", additionalProperties: false, properties: { videoId: { type: "string", minLength: 6, description: "YouTube video ID obtained from a watch URL or youtube_search." } }, required: ["videoId"] },
       outputSchema: { type: "object", additionalProperties: false, properties: { videoId: { type: "string" }, url: { type: "string" }, title: { type: "string" }, description: { type: "string" }, channel: commentAuthorSchema, publishedAt: nullableString, durationSeconds: { type: ["number", "null"] }, views: nullableInteger, viewsText: nullableString, likes: nullableInteger, likesText: nullableString, commentCount: nullableInteger, commentCountText: nullableString, category: nullableString, tags: { type: "array", items: { type: "string" } }, thumbnailUrl: nullableString, captions: { type: "object", additionalProperties: false, properties: { available: { type: "boolean" }, tracks: { type: "array", items: captionTrackSchema } }, required: ["available", "tracks"] } }, required: ["videoId", "url", "title", "description", "channel", "publishedAt", "durationSeconds", "views", "viewsText", "likes", "likesText", "commentCount", "commentCountText", "category", "tags", "thumbnailUrl", "captions"] }
+    },
+    {
+      name: "youtube_get_channel_videos",
+      title: "List public videos from a YouTube channel",
+      description: "List the public video catalogue for one YouTube channel. Accepts an @handle, channel URL, or UC channel ID and returns compact video records with duration, publication display text, views, Shorts/live flags, and an opaque continuation when more results are available. Use this to select video IDs for youtube_get_video, youtube_get_transcript, or youtube_get_comments. Catalogue pages do not reliably expose likes, comment counts, or absolute publication dates, so those fields are deliberately absent or null. The request runs anonymously through a YouTube page context and never changes that page's URL or playback.",
+      annotations: pageReadAnnotations,
+      inputSchema: { type: "object", additionalProperties: false, properties: { channel: { type: "string", minLength: 2, description: "YouTube @handle, full channel URL, or UC channel ID." }, limit: { type: "integer", minimum: 1, maximum: 100, default: 30, description: "Maximum public video records to return. Results may be fewer at YouTube's page boundary; use continuation when supplied." }, continuation: { type: ["string", "null"], description: "Opaque token from this same tool and channel. Pass it back unchanged; never construct, edit, reuse for another channel, or log it." }, includeShorts: { type: "boolean", default: true, description: "Whether to include items YouTube marks as Shorts." }, includeStreams: { type: "boolean", default: true, description: "Whether to include live, upcoming, or streamed items." } }, required: ["channel"] },
+      outputSchema: { type: "object", additionalProperties: false, properties: { channel: channelIdentitySchema, videos: { type: "array", items: channelVideoItemSchema }, returned: { type: "integer" }, requested: { type: "integer" }, continuation: nullableString }, required: ["channel", "videos", "returned", "requested", "continuation"] }
+    },
+    {
+      name: "youtube_get_channel_playlists",
+      title: "List public playlists from a YouTube channel",
+      description: "List public playlists shown by one YouTube channel. Accepts an @handle, channel URL, or UC channel ID and returns playlist IDs, titles, displayed video counts, thumbnails, and an opaque continuation when more playlists are available. Use a returned playlistId with youtube_get_playlist_videos. It reads only public catalogue data and never changes the YouTube page being used as the request context.",
+      annotations: pageReadAnnotations,
+      inputSchema: { type: "object", additionalProperties: false, properties: { channel: { type: "string", minLength: 2, description: "YouTube @handle, full channel URL, or UC channel ID." }, limit: { type: "integer", minimum: 1, maximum: 100, default: 30, description: "Maximum public playlist records to return. Results may be fewer at YouTube's page boundary; use continuation when supplied." }, continuation: { type: ["string", "null"], description: "Opaque token from this same tool and channel. Pass it back unchanged; never construct, edit, reuse for another channel, or log it." } }, required: ["channel"] },
+      outputSchema: { type: "object", additionalProperties: false, properties: { channel: channelIdentitySchema, playlists: { type: "array", items: playlistItemSchema }, returned: { type: "integer" }, requested: { type: "integer" }, continuation: nullableString }, required: ["channel", "playlists", "returned", "requested", "continuation"] }
+    },
+    {
+      name: "youtube_get_playlist_videos",
+      title: "List public videos in a YouTube playlist",
+      description: "List the public videos in one YouTube playlist. Accepts a PL playlist ID or full playlist URL and returns its metadata, ordered video records, and an opaque continuation when more items are available. position is YouTube's zero-based playlist item index, not a display ordinal. Use this catalogue to choose video IDs for transcript or comment research; it does not retrieve those texts itself and does not navigate the YouTube page used for network context.",
+      annotations: pageReadAnnotations,
+      inputSchema: { type: "object", additionalProperties: false, properties: { playlist: { type: "string", minLength: 3, description: "YouTube playlist ID beginning with PL or a full playlist URL containing list=." }, limit: { type: "integer", minimum: 1, maximum: 100, default: 30, description: "Maximum public playlist video records to return. Results may be fewer at YouTube's page boundary; use continuation when supplied." }, continuation: { type: ["string", "null"], description: "Opaque token from this same tool and playlist. Pass it back unchanged; never construct, edit, reuse for another playlist, or log it." } }, required: ["playlist"] },
+      outputSchema: { type: "object", additionalProperties: false, properties: { playlist: playlistIdentitySchema, videos: { type: "array", items: channelVideoItemSchema }, returned: { type: "integer" }, requested: { type: "integer" }, continuation: nullableString }, required: ["playlist", "videos", "returned", "requested", "continuation"] }
     },
     {
       name: "youtube_get_transcript",
@@ -303,7 +367,7 @@ async function pollOnceInternal() {
         "Authorization": `Bearer ${config.runtimeApiKey}`,
         "Accept": "application/json",
         "X-Tunnel-Client-Name": "researchtube-extension",
-        "X-Tunnel-Client-Version": "1.3.3",
+        "X-Tunnel-Client-Version": "1.4.3",
         "X-Tunnel-Client-Wire-Protocol-Version": "2026-08-25",
         "X-Tunnel-MCP-Server-Info": JSON.stringify({ version: 1, channels: [{ name: "main" }] })
       }
@@ -445,7 +509,7 @@ async function handleMcpRequest(request) {
   if (request?.method === "initialize") {
     return {
       jsonrpc: "2.0", id: request.id,
-      result: { protocolVersion: "2025-06-18", capabilities: { tools: { listChanged: false } }, serverInfo: { name: "researchtube", version: "1.3.3" } }
+      result: { protocolVersion: "2025-06-18", capabilities: { tools: { listChanged: false } }, serverInfo: { name: "researchtube", version: "1.4.3" } }
     };
   }
   if (request?.method === "notifications/initialized") return null;
@@ -463,6 +527,29 @@ async function handleMcpRequest(request) {
   if (request?.method === "tools/call" && request.params?.name === "youtube_get_video") {
     const videoId = requireVideoId(request.params.arguments);
     return executeToolCall(request.id, "youtube_get_video", { videoId }, () => youtubeGetVideo(videoId));
+  }
+  if (request?.method === "tools/call" && request.params?.name === "youtube_get_channel_videos") {
+    const args = request.params.arguments ?? {};
+    const channel = requireCatalogueIdentifier(args.channel, "channel");
+    const limit = boundedInt(args.limit, 30, 1, 100);
+    const continuation = optionalContinuation(args.continuation);
+    const includeShorts = args.includeShorts !== false;
+    const includeStreams = args.includeStreams !== false;
+    return executeToolCall(request.id, "youtube_get_channel_videos", { channel, limit, continuation, includeShorts, includeStreams }, () => youtubeGetChannelVideos({ channel, limit, continuation, includeShorts, includeStreams }));
+  }
+  if (request?.method === "tools/call" && request.params?.name === "youtube_get_channel_playlists") {
+    const args = request.params.arguments ?? {};
+    const channel = requireCatalogueIdentifier(args.channel, "channel");
+    const limit = boundedInt(args.limit, 30, 1, 100);
+    const continuation = optionalContinuation(args.continuation);
+    return executeToolCall(request.id, "youtube_get_channel_playlists", { channel, limit, continuation }, () => youtubeGetChannelPlaylists({ channel, limit, continuation }));
+  }
+  if (request?.method === "tools/call" && request.params?.name === "youtube_get_playlist_videos") {
+    const args = request.params.arguments ?? {};
+    const playlist = requireCatalogueIdentifier(args.playlist, "playlist");
+    const limit = boundedInt(args.limit, 30, 1, 100);
+    const continuation = optionalContinuation(args.continuation);
+    return executeToolCall(request.id, "youtube_get_playlist_videos", { playlist, limit, continuation }, () => youtubeGetPlaylistVideos({ playlist, limit, continuation }));
   }
   if (request?.method === "tools/call" && request.params?.name === "youtube_get_transcript") {
     const args = request.params.arguments ?? {};
@@ -524,13 +611,16 @@ async function executeToolCall(id, tool, input, work, operation = null) {
 function summarizeCommandInput(tool, input) {
   if (tool === "youtube_search") return { query: searchDiagnosticQuery(input.query), limit: input.limit };
   if (tool === "youtube_get_comment_replies") return { videoId: input.videoId, commentId: input.commentId, limit: input.limit };
+  if (tool === "youtube_get_channel_videos") return { channel: input.channel, limit: input.limit, includeShorts: input.includeShorts, includeStreams: input.includeStreams, continuationProvided: Boolean(input.continuation) };
+  if (tool === "youtube_get_channel_playlists") return { channel: input.channel, limit: input.limit, continuationProvided: Boolean(input.continuation) };
+  if (tool === "youtube_get_playlist_videos") return { playlist: input.playlist, limit: input.limit, continuationProvided: Boolean(input.continuation) };
   return { ...input };
 }
 
 function summarizeCommandOutput(value) {
   if (!value || typeof value !== "object") return null;
   const summary = {};
-  for (const key of ["videoId", "query", "returned", "requested", "hasMore", "totalReplies"]) {
+  for (const key of ["videoId", "query", "returned", "requested", "hasMore", "totalReplies", "continuation"]) {
     if (Object.hasOwn(value, key)) summary[key] = value[key];
   }
   return summary;
@@ -906,6 +996,31 @@ async function youtubeGetCommentReplies(videoId, commentId, limit) {
   return runYouTubePageTool("replies", videoId, { commentId, limit });
 }
 
+async function youtubeGetChannelVideos(args) {
+  return runYouTubePageTool("channel-videos", null, args);
+}
+
+async function youtubeGetChannelPlaylists(args) {
+  return runYouTubePageTool("channel-playlists", null, args);
+}
+
+async function youtubeGetPlaylistVideos(args) {
+  return runYouTubePageTool("playlist-videos", null, args);
+}
+
+function requireCatalogueIdentifier(value, label) {
+  const identifier = String(value ?? "").trim();
+  if (identifier.length < 2 || identifier.length > 2_000) throw new Error(`${label} is required`);
+  return identifier;
+}
+
+function optionalContinuation(value) {
+  if (value === undefined || value === null || value === "") return null;
+  const continuation = String(value);
+  if (continuation.length > 20_000) throw new Error("continuation is too long");
+  return continuation;
+}
+
 async function runYouTubePageTool(action, videoId, args) {
   try {
     return await runYouTubePageToolAttempt(action, videoId, args);
@@ -1218,7 +1333,10 @@ function parseYouTubeCount(value) {
   const text = normalizeText(value);
   if (!text) return null;
   const compact = text.replace(/[\u00A0\u202F\s]/g, "");
-  const suffix = compact.match(/(\d+(?:[.,]\d+)?)\s*([KMBT])\b/i);
+  // Spaces were removed above: "1.2M views" is now "1.2Mviews". The
+  // compact abbreviations used by YouTube are uppercase, which avoids
+  // mistaking ordinary words such as "minutes" for a multiplier.
+  const suffix = compact.match(/(\d+(?:[.,]\d+)?)\s*([KMBT])/);
   if (suffix) {
     const amount = Number(suffix[1].replace(",", "."));
     const multiplier = { K: 1_000, M: 1_000_000, B: 1_000_000_000, T: 1_000_000_000_000 }[suffix[2].toUpperCase()];

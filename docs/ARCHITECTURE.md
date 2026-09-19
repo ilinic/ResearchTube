@@ -78,12 +78,12 @@ The worker implements these MCP methods:
 
 - `initialize` returns server information `researchtube` and the tools capability.
 - `notifications/initialized` is acknowledged without a response payload.
-- `tools/list` returns the five production tool definitions.
+- `tools/list` returns the eight production tool definitions.
 - `tools/call` validates arguments, executes the selected handler, and returns either a structured success result or a tool execution error.
 
 Successful calls include both `content` (JSON text for compatibility) and `structuredContent` (machine-readable output). Expected execution failures return `isError: true`; malformed JSON-RPC requests use JSON-RPC errors. Normal successful outputs contain research data only: they never expose selected tab IDs, page-bridge transport, client profile, session mode, or other execution diagnostics.
 
-Each tool definition has a title, an LLM-facing description, strict input and output JSON schemas (`additionalProperties: false`), and MCP annotations. Search and metadata are read-only. Transcript, comments, and replies are marked non-destructive but not strictly read-only because they may create an inactive local YouTube tab.
+Each tool definition has a title, an LLM-facing description, strict input and output JSON schemas (`additionalProperties: false`), and MCP annotations. Video metadata is read-only. Search, channel catalogues, playlists, transcript, comments, and replies are non-destructive but not strictly read-only because they may create an inactive local YouTube tab.
 
 ## Tool data paths
 
@@ -92,6 +92,20 @@ Each tool definition has a title, an LLM-facing description, strict input and ou
 The worker routes search through the MAIN-world bridge in an already open YouTube document. The bridge anonymously fetches `/results?search_query=...`, extracts `ytInitialData`, and normalises `videoRenderer` entries. If the first page is not enough, it follows the search continuation through `youtubei/v1/search` using public client data extracted from the response. The bridge never changes the selected tab's URL, playback, or DOM.
 
 Output is a compact result list with ID, title, channel, URL, duration and publication text, normalized integer views plus YouTube's display text, and a snippet when available.
+
+### Channel catalogue: `youtube_get_channel_videos`
+
+The bridge anonymously fetches the selected channel's `/videos` page. It accepts an `@handle`, complete YouTube channel URL, or `UC...` channel ID, extracts the channel identity and compact video cards from `ytInitialData`, and follows an explicitly supplied opaque continuation through `/youtubei/v1/browse` when needed. Both legacy `gridVideoRenderer` / `videoRenderer` cards and current `lockupViewModel` cards are normalized to the same stable output.
+
+Each item contains the video ID, title, watch URL, duration and duration in seconds, publication display text, normalized integer views plus display text, and Shorts/live flags. Catalogue pages do not reliably include like or comment counts, so callers use `youtube_get_video` only for selected videos that need those details. The optional `includeShorts` and `includeStreams` filters are applied to YouTube's own renderer labels.
+
+### Channel playlists: `youtube_get_channel_playlists`
+
+The bridge fetches the channel's `/playlists` page using the same public page context and normalizes its playlist cards. It supports legacy playlist renderers and the current `lockupViewModel` representation. It returns playlist ID, title, displayed and normalized video count, thumbnail, and an opaque continuation. No videos are fetched by this tool; use a returned ID with `youtube_get_playlist_videos`.
+
+### Playlist catalogue: `youtube_get_playlist_videos`
+
+The bridge fetches `/playlist?list={playlistId}` for a public playlist ID or URL and normalizes legacy playlist renderers, playlist panel cards, and current lockup cards. It preserves the displayed playlist position when YouTube provides it, along with the same compact video fields used for channel catalogues. Continuations use anonymous `/youtubei/v1/browse` requests in the page world. This is a catalogue operation only: transcript and comments remain separate, targeted MCP calls.
 
 ### Video metadata: `youtube_get_video`
 

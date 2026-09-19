@@ -47,9 +47,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 });
 
 async function runUiTool({ action, videoId, args }) {
-  if (action === "bridge-version") return { version: "1.3.3" };
+  if (action === "bridge-version") return { version: "1.4.3" };
   if (action === "page-state") return waitForPageData();
   if (action === "search") return callMainWorld("search", args, 45_000);
+  if (action === "channel-videos") return callMainWorld("channel-videos", args, 60_000);
+  if (action === "channel-playlists") return callMainWorld("channel-playlists", args, 60_000);
+  if (action === "playlist-videos") return callMainWorld("playlist-videos", args, 60_000);
   if (action === "network-after") return callMainWorld("network-after", args, 5_000);
   if (action === "transcript") return callMainWorld("transcript-player", { videoId, ...args }, 45_000);
   if (action === "comments") return callMainWorld("comments-ytjs", { videoId, ...args }, 60_000);

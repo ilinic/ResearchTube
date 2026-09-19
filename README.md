@@ -63,6 +63,13 @@ The [OpenAI Secure MCP Tunnel guide](https://developers.openai.com/api/docs/guid
 | Tool | What ChatGPT can do with it |
 | --- | --- |
 | `youtube_search` | Find public videos by topic, keywords, channel, or date. |
+| `youtube_get_channel_videos` | Browse a channel's public video catalogue by handle, URL, or channel ID; choose precise videos for deeper research. |
+| `youtube_get_channel_playlists` | List the public playlists displayed by a channel. |
+| `youtube_get_playlist_videos` | Read the ordered public video catalogue for one playlist. |
+
+Channel and playlist catalogues are parsed from YouTube's public page data. The
+parser supports both the older `*Renderer` cards and the current `lockupViewModel`
+cards used on many channel and playlist pages.
 | `youtube_get_video` | Read a video's scale and context: metadata, normalized views/likes/comments, every public caption track with its selectable `trackIndex`, and YouTube's original display counts. |
 | `youtube_get_transcript` | Retrieve timestamped text from a public caption track. By default it uses track `0`; pass a `trackIndex` from `youtube_get_video` to select another language or track. |
 | `youtube_get_comments` | Retrieve ranked public top-level comments, sorted by top or newest, with normalized and display engagement counts. |
@@ -74,7 +81,7 @@ The [OpenAI Secure MCP Tunnel guide](https://developers.openai.com/api/docs/guid
 - YouTube requests are anonymous: the extension does not request Chrome's `cookies` permission and does not read, store, or send YouTube cookies.
 - The OpenAI API key stays in local Chrome extension storage. It is sent only to OpenAI for tunnel access—never to YouTube, a webpage bridge, analytics, or a ResearchTube developer server.
 - YouTube may disable comments, omit captions, restrict a video, or change its page formats. Public access cannot be guaranteed for every video.
-- Searches are serialized and cached briefly. They use the open YouTube page context without changing its URL or playback. If YouTube asks for verification, ResearchTube pauses new searches and tells ChatGPT exactly when to retry instead of repeatedly sending requests.
+- Searches are serialized and cached briefly. Searches, channel catalogues, and playlists use the open YouTube page context without changing its URL or playback. If YouTube asks for verification, ResearchTube pauses new searches and tells ChatGPT exactly when to retry instead of repeatedly sending requests.
 - Settings includes a local diagnostics log for troubleshooting. It records concise tool timing, safe request summaries, errors, search queue state, and YouTube HTTP outcomes, but never API keys, Tunnel IDs, cookies, request headers, response bodies, transcript text, or comment text.
 
 For transcripts, comments, and replies, ResearchTube uses a normal YouTube page context. It reuses an open YouTube tab when possible; otherwise it creates an inactive tab and retries once with a fresh tab if the page context becomes stale. It never opens a separate window or steals focus.

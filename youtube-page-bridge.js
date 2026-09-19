@@ -38687,10 +38687,10 @@ ${getNsigProcessorFn(eval_args.n, eval_args.sp, eval_args.sig)}`;
         const d = readAttribute(attributes, "d");
         const end = readAttribute(attributes, "end");
         const startSeconds = start ? secondsFromClock(start) : begin ? secondsFromClock(begin) : t ? Number(t) / 1e3 : 0;
-        const durationSeconds = duration ? secondsFromClock(duration) : d ? Number(d) / 1e3 : end ? Math.max(0, secondsFromClock(end) - startSeconds) : 0;
+        const durationSeconds2 = duration ? secondsFromClock(duration) : d ? Number(d) / 1e3 : end ? Math.max(0, secondsFromClock(end) - startSeconds) : 0;
         segments.push({
           start: Number.isFinite(startSeconds) ? startSeconds : 0,
-          duration: Number.isFinite(durationSeconds) ? durationSeconds : 0,
+          duration: Number.isFinite(durationSeconds2) ? durationSeconds2 : 0,
           text: decodeCaptionMarkup(match[2])
         });
       }
@@ -38815,7 +38815,9 @@ ${getNsigProcessorFn(eval_args.n, eval_args.sp, eval_args.sig)}`;
       for (const child of Object.values(value)) walkSearchData(child, visitor);
     }
     function searchText(value) {
-      return value?.simpleText || value?.runs?.map((run) => run?.text || "").join("") || "";
+      if (typeof value === "string") return value;
+      if (!value || typeof value !== "object") return "";
+      return value.simpleText || value.content || value.label || value.runs?.map((run) => run?.text || "").join("") || searchText(value.text) || searchText(value.title) || "";
     }
     function findSearchContinuation(value) {
       let token = null;
@@ -38903,6 +38905,402 @@ ${getNsigProcessorFn(eval_args.n, eval_args.sp, eval_args.sig)}`;
         hasMore: Boolean(continuation)
       };
     }
+    function catalogueChannelPath(channel, tab) {
+      const raw = String(channel || "").trim();
+      if (!raw) throw new Error("channel is required");
+      let path;
+      if (/^UC[\w-]+$/i.test(raw)) path = `/channel/${raw}`;
+      else if (raw.startsWith("@")) path = `/${encodeURI(raw)}`;
+      else {
+        let url;
+        try {
+          url = new URL(raw);
+        } catch {
+          throw new Error("channel must be an @handle, YouTube channel URL, or UC channel ID");
+        }
+        if (!/(^|\.)youtube\.com$/i.test(url.hostname)) throw new Error("channel URL must be on youtube.com");
+        path = url.pathname;
+      }
+      path = path.replace(/\/(videos|playlists|streams|shorts|featured)\/?$/i, "").replace(/\/+$/, "");
+      if (!path || path === "/") throw new Error("channel URL does not identify a channel");
+      return `${path}/${tab}`;
+    }
+    function cataloguePlaylistPath(playlist) {
+      const raw = String(playlist || "").trim();
+      if (!raw) throw new Error("playlist is required");
+      let playlistId = null;
+      if (/^[A-Za-z0-9_-]+$/.test(raw) && !raw.includes("/")) playlistId = raw;
+      else {
+        let url;
+        try {
+          url = new URL(raw);
+        } catch {
+          throw new Error("playlist must be a playlist ID or a YouTube playlist URL");
+        }
+        if (!/(^|\.)youtube\.com$/i.test(url.hostname)) throw new Error("playlist URL must be on youtube.com");
+        playlistId = url.searchParams.get("list");
+      }
+      if (!playlistId) throw new Error("playlist URL must include a list parameter");
+      return `/playlist?list=${encodeURIComponent(playlistId)}`;
+    }
+    function publicPageFailure(response) {
+      const responseUrl = String(response.url || "");
+      return response.type === "opaqueredirect" || response.status === 0 || response.status >= 300 && response.status < 400 || response.status === 403 || response.status === 429 || response.redirected || !responseUrl.startsWith("https://www.youtube.com/");
+    }
+    async function loadCataloguePage(path) {
+      const response = await observedFetch(path, {
+        credentials: "omit",
+        redirect: "manual",
+        headers: { Accept: "text/html" }
+      });
+      if (publicPageFailure(response)) {
+        throw new Error(`YouTube rejected the public catalogue page (HTTP ${response.status || 0})`);
+      }
+      if (!response.ok) throw new Error(`YouTube catalogue page failed: HTTP ${response.status}`);
+      const html = await response.text();
+      const data = extractSearchJson(html, ["var ytInitialData =", "ytInitialData ="]);
+      if (!data) throw new Error("ytInitialData was not found in the YouTube catalogue response");
+      return {
+        data,
+        apiKey: searchConfig(html, "INNERTUBE_API_KEY") || window.ytcfg?.get?.("INNERTUBE_API_KEY") || null,
+        clientVersion: searchConfig(html, "INNERTUBE_CLIENT_VERSION") || window.ytcfg?.get?.("INNERTUBE_CLIENT_VERSION") || "2.20260101.00.00",
+        visitorData: searchConfig(html, "VISITOR_DATA") || window.ytcfg?.get?.("VISITOR_DATA") || null
+      };
+    }
+    async function loadCatalogueContinuation(continuation, config) {
+      if (!config.apiKey) throw new Error("YouTube did not provide an Innertube key for this catalogue continuation");
+      const response = await observedFetch(`/youtubei/v1/browse?key=${encodeURIComponent(config.apiKey)}&prettyPrint=false`, {
+        method: "POST",
+        credentials: "omit",
+        redirect: "manual",
+        headers: { "Content-Type": "application/json", "X-YouTube-Client-Name": "1", "X-YouTube-Client-Version": config.clientVersion },
+        body: JSON.stringify({
+          context: { client: { clientName: "WEB", clientVersion: config.clientVersion, ...config.visitorData ? { visitorData: config.visitorData } : {} } },
+          continuation
+        })
+      });
+      if (publicPageFailure(response)) throw new Error(`YouTube rejected the public catalogue continuation (HTTP ${response.status || 0})`);
+      if (!response.ok) throw new Error(`YouTube catalogue continuation failed: HTTP ${response.status}`);
+      return response.json();
+    }
+    function channelIdentity(data, channel) {
+      const identity = { id: null, name: null, handle: null };
+      walkSearchData(data, (node) => {
+        const header = node?.c4TabbedHeaderRenderer || node?.pageHeaderRenderer?.content?.pageHeaderViewModel || null;
+        const metadata = node?.channelMetadataRenderer || null;
+        if (header) {
+          identity.id ||= header.channelId || null;
+          identity.name ||= searchText(header.title) || null;
+          identity.handle ||= searchText(header.channelHandleText) || null;
+        }
+        if (metadata) {
+          identity.id ||= metadata.externalId || null;
+          identity.name ||= metadata.title || null;
+          if (!identity.handle && metadata.vanityChannelUrl) {
+            const match = String(metadata.vanityChannelUrl).match(/\/(%40|@)([^/?#]+)/i);
+            identity.handle = match ? `@${decodeURIComponent(match[2])}` : null;
+          }
+        }
+      });
+      if (!identity.handle && String(channel || "").trim().startsWith("@")) identity.handle = String(channel).trim();
+      if (!identity.id && /^UC[\w-]+$/i.test(String(channel || "").trim())) identity.id = String(channel).trim();
+      return identity;
+    }
+    function durationSeconds(value) {
+      const text = String(value || "").trim();
+      if (!/^\d+(?::\d+){1,2}$/.test(text)) return null;
+      const parts = text.split(":").map(Number);
+      return parts.reduce((total, part) => total * 60 + part, 0);
+    }
+    function rendererText(renderer, ...keys) {
+      for (const key of keys) {
+        const text = searchText(renderer?.[key]);
+        if (text) return text;
+      }
+      return "";
+    }
+    function nestedCommand(value) {
+      return value?.innertubeCommand || value?.command || value || null;
+    }
+    function rendererWatchEndpoint(renderer) {
+      const candidates = [
+        renderer?.navigationEndpoint,
+        renderer?.endpoint,
+        nestedCommand(renderer?.onTap),
+        nestedCommand(renderer?.rendererContext?.commandContext?.onTap)
+      ];
+      return candidates.map((candidate) => candidate?.watchEndpoint).find(Boolean) || null;
+    }
+    function rendererBrowseEndpoint(renderer) {
+      const candidates = [
+        renderer?.navigationEndpoint,
+        renderer?.endpoint,
+        nestedCommand(renderer?.onTap),
+        nestedCommand(renderer?.rendererContext?.commandContext?.onTap)
+      ];
+      return candidates.map((candidate) => candidate?.browseEndpoint).find(Boolean) || null;
+    }
+    function lockupMetadata(renderer) {
+      return renderer?.metadata?.lockupMetadataViewModel || renderer?.lockupMetadataViewModel || null;
+    }
+    function metadataTextParts(renderer) {
+      const parts = [];
+      const seen = /* @__PURE__ */ new Set();
+      const add = (value) => {
+        const text = searchText(value).replace(/\s+/g, " ").trim();
+        if (text && !seen.has(text)) {
+          seen.add(text);
+          parts.push(text);
+        }
+      };
+      const metadata = lockupMetadata(renderer);
+      add(metadata?.title);
+      walkSearchData(metadata?.metadata, (node) => {
+        if (Array.isArray(node?.metadataParts)) {
+          add(node.metadataParts.map((part) => searchText(part?.text)).filter(Boolean).join(" "));
+        }
+        if (node?.content) add(node.content);
+        if (node?.simpleText || node?.runs) add(node);
+      });
+      return parts;
+    }
+    function firstMetadataMatch(renderer, expression) {
+      for (const text of metadataTextParts(renderer)) {
+        const match = text.match(expression);
+        if (match) return match[0];
+      }
+      return null;
+    }
+    function rendererVideoId(renderer) {
+      const watch = rendererWatchEndpoint(renderer);
+      const direct = renderer?.videoId || watch?.videoId || null;
+      if (direct) return direct;
+      return /VIDEO/i.test(String(renderer?.contentType || "")) ? renderer?.contentId || null : null;
+    }
+    function rendererTitle(renderer) {
+      return rendererText(renderer, "title") || searchText(lockupMetadata(renderer)?.title) || searchText(renderer?.headline) || "";
+    }
+    function rendererThumbnailSources(renderer) {
+      return renderer?.thumbnail?.thumbnails || renderer?.thumbnailRenderer?.playlistVideoThumbnailRenderer?.thumbnail?.thumbnails || renderer?.contentImage?.collectionThumbnailViewModel?.primaryThumbnail?.thumbnailViewModel?.image?.sources || renderer?.contentImage?.thumbnailViewModel?.image?.sources || [];
+    }
+    function rendererDurationText(renderer) {
+      const direct = rendererText(renderer, "lengthText");
+      if (direct) return direct;
+      let duration = null;
+      walkSearchData([renderer?.thumbnailOverlays, renderer?.contentImage], (node) => {
+        if (duration) return;
+        for (const value of [node?.text, node?.accessibility?.accessibilityData?.label, node?.accessibilityText]) {
+          const text = searchText(value);
+          if (/^\d{1,2}:\d{2}(?::\d{2})?$/.test(text)) {
+            duration = text;
+            return;
+          }
+        }
+      });
+      return duration;
+    }
+    function textMatchIn(value, expression) {
+      let matched = null;
+      walkSearchData(value, (node) => {
+        if (matched) return;
+        const candidates = [
+          typeof node === "string" ? node : null,
+          node?.content,
+          node?.simpleText,
+          node?.runs ? node : null,
+          node?.text,
+          node?.label,
+          node?.accessibilityText,
+          node?.accessibility?.accessibilityData?.label
+        ];
+        for (const candidate of candidates) {
+          const text = searchText(candidate).replace(/\s+/g, " ").trim();
+          const match = text.match(expression);
+          if (match) {
+            matched = match[0];
+            return;
+          }
+        }
+      });
+      return matched;
+    }
+    function rendererPlaylistVideoCountText(renderer) {
+      const direct = rendererText(renderer, "videoCountText", "videoCountShortText", "videoCount", "viewPlaylistText");
+      if (direct) return direct;
+      const label = /\b\d+(?:[,.]\d+)?\s*[KMBT]?\s+(?:videos?|видео)\b/i;
+      return firstMetadataMatch(renderer, label) || textMatchIn([renderer?.contentImage, renderer?.thumbnail, renderer?.thumbnailRenderer, renderer?.thumbnailOverlays], label) || null;
+    }
+    function rendererBadges(renderer) {
+      const values = [
+        ...renderer?.badges || [],
+        ...renderer?.ownerBadges || [],
+        ...renderer?.thumbnailOverlays || []
+      ];
+      return values.map((value) => JSON.stringify(value)).join(" ").toLowerCase();
+    }
+    function rendererUrl(renderer) {
+      const watch = rendererWatchEndpoint(renderer);
+      return renderer?.navigationEndpoint?.commandMetadata?.webCommandMetadata?.url || renderer?.endpoint?.commandMetadata?.webCommandMetadata?.url || nestedCommand(renderer?.onTap)?.commandMetadata?.webCommandMetadata?.url || watch?.videoId && `/watch?v=${watch.videoId}` || "";
+    }
+    function appendCatalogueVideos(data, target, { includeShorts = true, includeStreams = true, playlist = false, channelName = null } = {}) {
+      walkSearchData(data, (node) => {
+        const renderer = playlist ? node?.playlistVideoRenderer || node?.playlistPanelVideoRenderer || node?.lockupViewModel : node?.gridVideoRenderer || node?.videoRenderer || node?.lockupViewModel;
+        const videoId = rendererVideoId(renderer);
+        if (!videoId || target.some((item) => item.videoId === videoId)) return;
+        const urlPath = rendererUrl(renderer);
+        const metadata = metadataTextParts(renderer).join(" ");
+        const badges = `${rendererBadges(renderer)} ${metadata}`.toLowerCase();
+        const isShort = /\/shorts\//i.test(urlPath) || /shorts/.test(badges);
+        const isLive = /\blive\b|upcoming|streamed|premiered/.test(badges) || /\blive\b|upcoming/i.test(rendererText(renderer, "thumbnailOverlays"));
+        if (!includeShorts && isShort || !includeStreams && isLive) return;
+        const durationText = rendererDurationText(renderer) || firstMetadataMatch(renderer, /\b\d{1,2}:\d{2}(?::\d{2})?\b/) || null;
+        const viewsText = rendererText(renderer, "viewCountText", "shortViewCountText") || firstMetadataMatch(renderer, /\b\d+(?:[.,]\d+)?\s*[KMBT]?\s*(?:views?|просмотров?)\b/i) || null;
+        const rawPosition = playlist ? renderer?.index ?? rendererWatchEndpoint(renderer)?.index ?? renderer?.playlistIndex ?? "" : "";
+        const positionText = typeof rawPosition === "number" ? String(rawPosition) : searchText(rawPosition) || String(rawPosition || "");
+        const position = /^\d+$/.test(positionText) ? Number(positionText) : null;
+        target.push({
+          videoId,
+          title: rendererTitle(renderer),
+          channel: rendererText(renderer, "shortBylineText", "longBylineText", "ownerText") || channelName,
+          url: `https://www.youtube.com/watch?v=${videoId}`,
+          position,
+          durationSeconds: durationSeconds(durationText),
+          durationText,
+          publishedAt: null,
+          publishedText: rendererText(renderer, "publishedTimeText") || firstMetadataMatch(renderer, /\b(?:streamed|premiered)\b|\b\d+\s+(?:minutes?|hours?|days?|weeks?|months?|years?)\s+ago\b|\b\d+\s+(?:минут[аы]?|час(?:а|ов)?|дн(?:я|ей)|недел[ьяи]|месяц(?:а|ев)?|год(?:а|лет))\s+назад\b/i) || null,
+          views: parseYouTubeCount(viewsText),
+          viewsText,
+          isShort,
+          isLive
+        });
+      });
+    }
+    function playlistIdFromRenderer(renderer) {
+      const candidates = [
+        renderer?.playlistId,
+        /PLAYLIST/i.test(String(renderer?.contentType || "")) ? renderer?.contentId : null,
+        renderer?.navigationEndpoint?.watchEndpoint?.playlistId,
+        renderer?.navigationEndpoint?.browseEndpoint?.browseId,
+        renderer?.endpoint?.watchEndpoint?.playlistId,
+        renderer?.onTap?.innertubeCommand?.watchEndpoint?.playlistId,
+        renderer?.onTap?.innertubeCommand?.browseEndpoint?.browseId,
+        rendererBrowseEndpoint(renderer)?.browseId
+      ];
+      const id = candidates.find((candidate) => typeof candidate === "string" && candidate);
+      return id?.startsWith("VL") ? id.slice(2) : id || null;
+    }
+    function appendChannelPlaylists(data, target) {
+      walkSearchData(data, (node) => {
+        const renderer = node?.gridPlaylistRenderer || node?.playlistRenderer || node?.lockupViewModel || null;
+        const playlistId = playlistIdFromRenderer(renderer);
+        if (!playlistId || target.some((item) => item.playlistId === playlistId)) return;
+        const videoCountText = rendererPlaylistVideoCountText(renderer);
+        const thumbnails = rendererThumbnailSources(renderer);
+        target.push({
+          playlistId,
+          title: rendererTitle(renderer),
+          videoCount: parseYouTubeCount(videoCountText),
+          videoCountText,
+          thumbnailUrl: thumbnails.at(-1)?.url || null
+        });
+      });
+    }
+    function playlistIdentity(data, playlist) {
+      const identity = { id: playlist, title: null, channelId: null, channelName: null };
+      walkSearchData(data, (node) => {
+        const header = node?.playlistHeaderRenderer || node?.playlistHeaderViewModel || node?.playlistSidebarPrimaryInfoRenderer || node?.playlistMetadataRenderer || null;
+        if (header) {
+          identity.title ||= rendererTitle(header) || rendererText(header, "title");
+          identity.channelName ||= rendererText(header, "ownerText", "ownerName", "author", "byline") || null;
+          identity.channelId ||= header?.ownerEndpoint?.browseEndpoint?.browseId || header?.owner?.browseEndpoint?.browseId || rendererBrowseEndpoint(header)?.browseId || null;
+        }
+        const owner = node?.videoOwnerRenderer || node?.owner?.videoOwnerRenderer || null;
+        if (owner) {
+          identity.channelName ||= rendererText(owner, "title") || null;
+          identity.channelId ||= rendererBrowseEndpoint(owner)?.browseId || null;
+        }
+        const metadata = node?.playlistMetadataRenderer || null;
+        if (metadata) {
+          identity.title ||= rendererText(metadata, "title") || null;
+          identity.channelName ||= rendererText(metadata, "owner") || null;
+        }
+        const microformat = node?.microformatDataRenderer || null;
+        if (microformat) {
+          identity.title ||= rendererText(microformat, "title") || null;
+          identity.channelName ||= microformat.ownerChannelName || null;
+          identity.channelId ||= microformat.externalChannelId || null;
+        }
+      });
+      return identity;
+    }
+    function playlistIdFromInput(value) {
+      const raw = String(value || "").trim();
+      if (/^[A-Za-z0-9_-]+$/.test(raw) && !raw.includes("/")) return raw;
+      try {
+        return new URL(raw).searchParams.get("list") || raw;
+      } catch {
+        return raw;
+      }
+    }
+    async function pageThroughCatalogue({ config, firstData, continuation, requested, append }) {
+      let next = continuation || findSearchContinuation(firstData);
+      for (let pageNumber = 0; pageNumber < 10 && next && append.count() < requested; pageNumber += 1) {
+        const page = await loadCatalogueContinuation(next, config);
+        append.page(page);
+        const following = findSearchContinuation(page);
+        if (!following || following === next) {
+          next = null;
+          break;
+        }
+        next = following;
+      }
+      return next || null;
+    }
+    async function validateCatalogueContinuation(config, continuation, countItems) {
+      if (!continuation) return null;
+      try {
+        const page = await loadCatalogueContinuation(continuation, config);
+        return countItems(page) > 0 ? continuation : null;
+      } catch {
+        return continuation;
+      }
+    }
+    async function getChannelVideos({ channel, limit, continuation, includeShorts, includeStreams }) {
+      const requested = Math.max(1, Math.min(100, Number(limit || 30)));
+      const config = await loadCataloguePage(catalogueChannelPath(channel, "videos"));
+      const identity = channelIdentity(config.data, channel);
+      const videos = [];
+      const append = { count: () => videos.length, page: (data) => appendCatalogueVideos(data, videos, { includeShorts, includeStreams, channelName: identity.name }) };
+      if (!continuation) append.page(config.data);
+      const next = await pageThroughCatalogue({ config, firstData: config.data, continuation, requested, append });
+      return { channel: identity, videos: videos.slice(0, requested), returned: Math.min(videos.length, requested), requested, continuation: next };
+    }
+    async function getChannelPlaylists({ channel, limit, continuation }) {
+      const requested = Math.max(1, Math.min(100, Number(limit || 30)));
+      const config = await loadCataloguePage(catalogueChannelPath(channel, "playlists"));
+      const playlists = [];
+      const append = { count: () => playlists.length, page: (data) => appendChannelPlaylists(data, playlists) };
+      if (!continuation) append.page(config.data);
+      let next = await pageThroughCatalogue({ config, firstData: config.data, continuation, requested, append });
+      if (!continuation && next) {
+        next = await validateCatalogueContinuation(config, next, (page) => {
+          const probe = [];
+          appendChannelPlaylists(page, probe);
+          return probe.length;
+        });
+      }
+      return { channel: channelIdentity(config.data, channel), playlists: playlists.slice(0, requested), returned: Math.min(playlists.length, requested), requested, continuation: next };
+    }
+    async function getPlaylistVideos({ playlist, limit, continuation }) {
+      const requested = Math.max(1, Math.min(100, Number(limit || 30)));
+      const config = await loadCataloguePage(cataloguePlaylistPath(playlist));
+      const identity = playlistIdentity(config.data, playlistIdFromInput(playlist));
+      const videos = [];
+      const append = { count: () => videos.length, page: (data) => appendCatalogueVideos(data, videos, { playlist: true, channelName: identity.channelName }) };
+      if (!continuation) append.page(config.data);
+      const next = await pageThroughCatalogue({ config, firstData: config.data, continuation, requested, append });
+      return { playlist: identity, videos: videos.slice(0, requested), returned: Math.min(videos.length, requested), requested, continuation: next };
+    }
     function normalizeCommentThread(thread, rank) {
       const comment = thread?.comment;
       if (!comment?.comment_id) return null;
@@ -38954,7 +39352,7 @@ ${getNsigProcessorFn(eval_args.n, eval_args.sp, eval_args.sig)}`;
       const text = normalizedText(value);
       if (!text) return null;
       const compact = text.replace(/[\u00A0\u202F\s]/g, "");
-      const suffix = compact.match(/(\d+(?:[.,]\d+)?)\s*([KMBT])\b/i);
+      const suffix = compact.match(/(\d+(?:[.,]\d+)?)\s*([KMBT])/);
       if (suffix) {
         const amount = Number(suffix[1].replace(",", "."));
         const multiplier = { K: 1e3, M: 1e6, B: 1e9, T: 1e12 }[suffix[2].toUpperCase()];
@@ -39057,6 +39455,9 @@ ${getNsigProcessorFn(eval_args.n, eval_args.sp, eval_args.sig)}`;
         let data;
         if (message.action === "page-state") data = pageState();
         else if (message.action === "search") data = await searchPublicVideos(message.payload || {});
+        else if (message.action === "channel-videos") data = await getChannelVideos(message.payload || {});
+        else if (message.action === "channel-playlists") data = await getChannelPlaylists(message.payload || {});
+        else if (message.action === "playlist-videos") data = await getPlaylistVideos(message.payload || {});
         else if (message.action === "transcript-player") data = await getTranscriptFromPlayer(message.payload || {});
         else if (message.action === "network-after") data = { responses: responseLog.filter((response) => response.at >= Number(message.payload?.after ?? 0)) };
         else if (message.action === "comments-ytjs") data = await getCommentsWithYtjs(message.payload || {});
