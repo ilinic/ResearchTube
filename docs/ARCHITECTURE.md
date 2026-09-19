@@ -1,5 +1,23 @@
 # Architecture
 
+
+## Instructions for AI coding tools
+
+This document is the authoritative architecture contract for ResearchTube. An LLM or other coding agent must read the whole document before changing the project or generating a ResearchTube extension.
+
+When implementing a request:
+
+1. First classify the change as one of four kinds: existing Chrome/MCP functionality, YouTube page-context functionality, built-in Local Agent functionality, or a third-party external extension.
+2. Change only the layer that owns that responsibility. Do not move working YouTube page-context code into the Agent merely because an Agent exists.
+3. Preserve the invariant that the Chrome Extension is the MCP-facing component and the Local Agent uses a private ResearchTube protocol.
+4. Preserve public-data and credential boundaries. Never pass OpenAI secrets into YouTube code or page-world messages.
+5. Preserve the built-in workspace sandbox for Agent file tools.
+6. Treat external extensions as trusted arbitrary executable code, not as sandboxed built-ins.
+7. Do not introduce schedulers, global concurrency limits, push-event systems, background infrastructure, or new runtimes unless a concrete requirement in this document needs them.
+8. Prefer the smallest implementation that preserves the contracts below.
+
+If a requested implementation conflicts with this document, the coding agent should surface the conflict rather than silently inventing a new architecture.
+
 ## Purpose and scope
 
 ResearchTube is a Manifest V3 Chrome extension that implements a private MCP server for ChatGPT through an OpenAI Secure MCP Tunnel. It is designed for research on public YouTube content:
@@ -184,6 +202,445 @@ Use a dedicated key with only `Tunnels: Read + Use`. Creating or changing a tunn
 | `https://api.openai.com/*` | Tunnel control-plane polling and responses. |
 | `https://www.youtube.com/*` | Public YouTube pages and MAIN-world bridge injection. |
 
+
+## Product architecture with the Local Agent
+
+ResearchTube v1 is one product with two cooperating runtime parts:
+
+    ChatGPT / LLM
+          |
+          | MCP over OpenAI Secure MCP Tunnel
+          v
+    +----------------------------------+
+    | ResearchTube Chrome Extension    |
+    |                                  |
+    | - MCP server / adapter           |
+    | - existing YouTube research      |
+    | - Settings and tunnel transport  |
+    +----------------+-----------------+
+                     |
+                     | private ResearchTube HTTP/JSON
+                     | 127.0.0.1:<configured port>
+                     v
+    +----------------------------------+
+    | ResearchTube Local Agent         |
+    | Python / asyncio                 |
+    |                                  |
+    | - local files                    |
+    | - workspace sandbox              |
+    | - yt-dlp                         |
+    | - ffmpeg / ffprobe               |
+    | - long-running tasks             |
+    | - external extension launcher    |
+    +----------------------------------+
+
+The Local Agent is optional. The existing public YouTube research tools must continue to work when the Agent is absent. Agent-backed tools may report that the Agent is required, but Agent absence must not break unrelated YouTube search, transcript, comments, channel, or playlist functionality.
+
+The Agent is not a general-purpose public MCP server. The Chrome Extension remains the MCP-facing component. The Extension may translate MCP calls into a private local request format and translate Agent responses back into MCP results. Because both sides belong to ResearchTube, that private protocol may evolve with the product without supporting arbitrary third-party MCP clients.
+
+### Local transport
+
+The Agent binds only to loopback:
+
+    127.0.0.1:<port>
+
+It must not bind to 0.0.0.0 by default.
+
+The default v1 port is:
+
+    17843
+
+The port is configurable in both the Agent configuration and Chrome Extension Settings. No automatic port discovery is required for v1. The Settings page contains a Local Agent section with the configured port and a Test connection button.
+
+The first permanent Agent-backed MCP tool is:
+
+    researchtube_agent_status
+
+It is not a temporary ping. It reports the state of the optional Local Agent by calling the same Agent health endpoint used by the Settings Test connection button:
+
+    GET /health
+
+The MCP tool remains valid when the Agent is unavailable; it should return a normal structured result indicating AGENT_UNAVAILABLE rather than turning the absence of an optional local component into a malformed MCP request.
+
+Do not duplicate MCP tool discovery inside Agent health. MCP tools/list remains the source of truth for LLM-visible tools.
+
+## Local installation and workspace
+
+For v1, keep the local installation visible and simple. The intended installed layout is flat for executable components:
+
+    ResearchTube/
+    ├── ResearchTubeAgent.exe      Windows example
+    ├── yt-dlp.exe
+    ├── ffmpeg.exe
+    ├── ffprobe.exe
+    ├── workspace/
+    └── extensions/
+
+Linux and macOS use platform-appropriate executable names.
+
+Do not create a runtime directory merely to hide the native executables. The ResearchTube root is the directory containing the Agent executable or development entry script, not the process current working directory. This matters when the Agent is launched from another directory.
+
+The normal ResearchTube installation should not require a system Python merely to run ResearchTube. The project may package its own Python Agent for each platform. A third-party extension that chooses Python may require its own system/runtime dependency; that is the extension author's responsibility.
+
+### Workspace sandbox
+
+The workspace directory is the root for built-in ResearchTube file operations:
+
+    ResearchTube/workspace/
+
+Built-in Agent tools must accept workspace-relative paths and resolve them canonically before access. A path that resolves outside the workspace must be rejected. This includes parent traversal and equivalent path tricks.
+
+The sandbox protects built-in ResearchTube tools only. It does not contain the Agent executable, yt-dlp, ffmpeg, ffprobe, or the extensions directory.
+
+If workspace is missing, the Agent should attempt to create it. If creation or access fails, health must expose that condition.
+
+Do not build a transactional filesystem or complex lock manager in v1. Concurrent conflicting operations may fail naturally and return structured errors.
+
+## Native executable discovery
+
+For yt-dlp, ffmpeg, and ffprobe use this lookup order:
+
+    1. executable next to the ResearchTube Agent
+    2. executable resolved through the operating-system PATH
+    3. missing
+
+A local bundled executable always wins over PATH. This allows normal users to use tested bundled versions while developers can omit them and reuse tools already installed on the machine.
+
+For every resolved component, keep enough information for diagnostics:
+
+    status   = available | missing | error
+    version  = detected version or null
+    source   = local | path | null
+    path     = actual resolved executable path or null
+
+An example health payload is:
+
+    {
+      "status": "ok",
+      "agentVersion": "0.1.0",
+      "workspace": {
+        "status": "available"
+      },
+      "components": {
+        "ytDlp": {
+          "status": "available",
+          "version": "2026.xx.xx",
+          "source": "local",
+          "path": "D:\\ResearchTube\\yt-dlp.exe"
+        },
+        "ffmpeg": {
+          "status": "available",
+          "version": "...",
+          "source": "path",
+          "path": "C:\\Tools\\ffmpeg.exe"
+        },
+        "ffprobe": {
+          "status": "missing",
+          "version": null,
+          "source": null,
+          "path": null
+        }
+      }
+    }
+
+Agent health describes local installation state; it is not another tool-capability registry.
+
+## Agent console logging
+
+The v1 Agent uses compact human-readable console logging so a user can see that it is alive and receiving work.
+
+Use a simple timestamp prefix:
+
+    [HH:MM:SS] message
+
+At startup, log at least:
+
+- Agent version;
+- listening host and port;
+- workspace path/status;
+- yt-dlp version/source/path or missing/error;
+- ffmpeg version/source/path or missing/error;
+- ffprobe version/source/path or missing/error.
+
+Example:
+
+    [21:59:03] ResearchTube Agent 0.1.0 started
+    [21:59:03] Listening on 127.0.0.1:17843
+    [21:59:03] Workspace: D:\ResearchTube\workspace
+    [21:59:03] yt-dlp: 2026.09.18 (local: D:\ResearchTube\yt-dlp.exe)
+    [21:59:03] ffmpeg: 8.0 (PATH: C:\Tools\ffmpeg.exe)
+    [21:59:03] ffprobe: missing
+    [21:59:08] GET /health -> 200
+
+Log top-level requests and important task lifecycle events. Do not dump complete protocol JSON or every internal call by default. INFO and ERROR are sufficient concepts for v1; rotating file logs and a large logging subsystem are not required.
+
+## Asynchronous execution and MCP Tasks
+
+The Agent is an asynchronous coordinator built around Python asyncio. Long-running native operations must use asynchronous subprocess APIs so the Agent stays responsive while operating-system processes perform the work.
+
+Conceptually:
+
+    ResearchTube Agent
+          |
+          +-- Task A -> yt-dlp subprocess
+          +-- Task B -> yt-dlp subprocess
+          +-- Task C -> ffmpeg subprocess
+          +-- short health/file requests continue concurrently
+
+Do not add an internal jobId. Use the MCP taskId concept end-to-end, including as the key in the Agent TaskManager.
+
+The v1 task model is polling-based. Push events are deliberately out of scope. The Extension maps between MCP Tasks and the Agent's private task operations. The useful lifecycle is:
+
+    tools/call
+        -> create taskId
+        -> Agent starts async work
+        -> MCP receives task handle
+
+    tasks/get(taskId)
+        -> Extension queries Agent
+        -> working / completed / failed / cancelled
+
+    tasks/cancel(taskId)
+        -> Extension asks Agent to terminate/cancel work
+
+The Agent should keep only the state needed to answer polling and cancellation requests, for example:
+
+    taskId
+    status
+    progress
+    message
+    result
+    error
+    process
+    createdAt
+    updatedAt
+
+Task persistence across Agent restarts is not required for the first implementation.
+
+### Task ID format
+
+ResearchTube task IDs use 96 bits of cryptographically strong randomness encoded as URL-safe Base64 without padding. In Python the intended generation is equivalent to:
+
+    secrets.token_urlsafe(12)
+
+This yields a compact 16-character URL-safe identifier. Do not replace it with a sequential counter and do not introduce a second identifier for the same task.
+
+### Concurrency policy
+
+Independent tasks are independent. Do not impose arbitrary global semaphores or concurrency limits on yt-dlp, ffmpeg, file operations, or external modules merely to protect the user from high CPU/network/disk usage. If a user starts many operations, the operating system and native programs may naturally become slower.
+
+Serialization is allowed only where a concrete backend requires it. The existing YouTube page-context search queue is an example: it exists because parallel page-context traffic may trigger YouTube verification/rate limiting, not because ResearchTube has a general one-request-at-a-time policy.
+
+Short requests, task polling, and unrelated operations must remain responsive while long tasks execute.
+
+## Agent-backed built-in tools
+
+The planned first built-in local tools are intentionally narrow:
+
+    researchtube_agent_status
+    youtube_download
+    media_probe
+    media_capture_frame
+    media_extract_audio_clip
+    workspace_list
+    workspace_stat
+    workspace_mkdir
+    workspace_move
+    workspace_delete
+
+These are ResearchTube built-ins, not external extensions. Implement them directly in the Agent and expose them through the Chrome MCP adapter.
+
+The existing YouTube browsing/research tools remain in their current Chrome/page-context implementation unless there is a demonstrated reason to move one later.
+
+### youtube_download
+
+youtube_download is the first intended long-running Agent-backed tool. It launches yt-dlp asynchronously and returns an MCP Task.
+
+Multiple calls for the same video are still separate tasks. Do not deduplicate them in v1.
+
+Every downloaded file must include both the YouTube video ID and the complete ResearchTube taskId in its filename so independent simultaneous downloads cannot collide merely because they refer to the same video.
+
+The intended naming form is:
+
+    <sanitized title> [yt_<youtubeId>] [<taskId>].<ext>
+
+The YouTube prefix is exactly lowercase:
+
+    yt_
+
+Example:
+
+    Why Gravity Is Not a Force [yt_XRr1kaXKBsU] [5Jr8pL2xQmN4_vZa].mp4
+
+The title must be sanitized for portable filesystem use. Prefer yt-dlp's filename handling rather than maintaining a second elaborate sanitizer. Use Windows-compatible filename rules as the cross-platform baseline and trim overly long titles conservatively. Preserve Unicode where possible; do not use an aggressively ASCII-only naming policy by default.
+
+Large downloaded video data is never returned inline through MCP. Return workspace-relative file metadata.
+
+### media_probe
+
+media_probe returns metadata for an existing workspace media file using ffprobe: duration, container, streams, codecs, dimensions, frame rate, and other bounded metadata useful to later tools.
+
+### media_capture_frame
+
+media_capture_frame extracts an image at a requested timestamp. The Extension should expose the returned image to MCP as an image content block when inline return is requested; do not present raw base64 text to the LLM as if it were the user-facing result.
+
+### media_extract_audio_clip
+
+media_extract_audio_clip extracts a short audio interval. The v1 design uses a hard maximum duration of approximately 30 seconds so an LLM call cannot accidentally request an unbounded inline audio payload. The Extension should translate inline audio to the corresponding MCP audio content representation.
+
+### Workspace operations
+
+workspace_move also covers rename. workspace_delete and all other built-in file operations remain restricted to workspace. Do not add arbitrary shell execution as a built-in file tool.
+
+## External ResearchTube extensions
+
+External extensions are deliberately different from built-in Agent tools.
+
+An external extension is an arbitrary executable program launched by the Agent. It may be written in Python, Node.js, C++, Rust, Go, Java, shell, or any other environment the user's machine can execute.
+
+ResearchTube does not install language runtimes solely to support arbitrary third-party modules. If an extension requires Python, Node.js, Java, or another runtime, its author/user is responsible for that prerequisite.
+
+External extensions are trusted executable code and run with the permissions of the current operating-system user. They are not constrained by the built-in workspace sandbox. Documentation and UI must not imply that third-party extensions are sandboxed.
+
+### Extension directory
+
+Each extension lives under:
+
+    ResearchTube/extensions/<extension-id>/
+
+Example:
+
+    ResearchTube/
+    └── extensions/
+        └── example-hello/
+            ├── module.json
+            ├── hello.cmd
+            └── hello.sh
+
+The Agent, not the Chrome Extension, reads the local extension files.
+
+### Manifest contract
+
+module.json is the declarative contract that lets the Agent discover an extension and lets the Chrome Extension publish its tools through MCP.
+
+A minimal cross-platform example is:
+
+    {
+      "id": "example-hello",
+      "version": "1.0.0",
+      "commands": {
+        "windows": ["cmd.exe", "/d", "/s", "/c", "hello.cmd"],
+        "linux": ["/bin/sh", "hello.sh"],
+        "macos": ["/bin/sh", "hello.sh"]
+      },
+      "tools": [
+        {
+          "name": "example_hello",
+          "description": "Minimal example ResearchTube extension",
+          "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+          }
+        }
+      ]
+    }
+
+Rules:
+
+- id identifies the extension directory/package.
+- version is the extension's own version.
+- commands selects the process command for the current platform.
+- relative script/executable paths are resolved relative to that extension directory.
+- tools contains one or more LLM-visible tool definitions.
+- each tool needs a stable name, a precise LLM-facing description, and a JSON input schema.
+- an outputSchema may be supplied when the extension has a stable structured output and is strongly recommended for nontrivial tools.
+- tool descriptions must explain important limits and side effects; do not hide destructive behavior from the model.
+
+The exact manifest may gain optional fields later, but existing v1 fields should retain their meaning.
+
+### External process protocol v1
+
+The external module protocol is private ResearchTube JSON, not MCP. One module invocation corresponds to one process invocation, so no second correlation ID is required in the minimal protocol.
+
+The Agent writes exactly one JSON request to the process stdin:
+
+    {
+      "tool": "example_hello",
+      "arguments": {}
+    }
+
+The module writes exactly one JSON response object to stdout.
+
+Success:
+
+    {
+      "result": {
+        "message": "Hello from a ResearchTube extension"
+      }
+    }
+
+Controlled error:
+
+    {
+      "error": {
+        "code": "INPUT_INVALID",
+        "message": "The supplied input is not valid",
+        "data": {}
+      }
+    }
+
+Protocol rules:
+
+1. stdout is protocol-only. It must contain one valid JSON response object and no banners, progress text, or debugging chatter.
+2. Logs and diagnostics go to stderr.
+3. A normal controlled failure should return a structured error response.
+4. Empty stdout, invalid JSON, process-launch failure, timeout, or an uncontrolled crash becomes a structured Agent module-execution/protocol error.
+5. v1 does not require a streaming external-module protocol. If progress streaming is later needed, extend the protocol deliberately rather than accepting arbitrary mixed stdout text.
+
+A minimal shell example is allowed to ignore stdin and simply emit a constant valid result. This is useful as the repository's zero-dependency reference extension and proves that the extension API is language-independent.
+
+### Extension discovery and Refresh
+
+The Settings page will contain an Extensions section with a Refresh action.
+
+Refresh means:
+
+    Chrome Extension
+        -> ask Agent to rescan extensions/
+        -> Agent reads and validates module.json files
+        -> Agent returns the discovered tool catalogue
+        -> Chrome Extension updates the MCP tool catalogue
+
+The Chrome Extension must not browse the local filesystem itself.
+
+An invalid extension must not break the Agent or hide otherwise valid extensions. Report validation failures diagnostically and continue scanning.
+
+### External-extension execution model
+
+The Agent launches the command declared by the module and connects stdin/stdout/stderr as pipes.
+
+For short tools, the Agent can wait asynchronously for the process result without blocking unrelated requests.
+
+For a future long-running external tool, the Agent may wrap the process in the same ResearchTube taskId/TaskManager mechanism used by built-in long operations. Do not require the external program itself to implement MCP.
+
+## Where new functionality belongs
+
+Use this decision table before coding:
+
+| New functionality | Correct owner |
+| --- | --- |
+| MCP tunnel, tools/list, MCP schemas, mapping Agent results to MCP content | Chrome Extension / service worker |
+| Anonymous YouTube requests requiring youtube.com page context | YouTube MAIN-world bridge plus existing Chrome bridge |
+| Local filesystem, downloads, ffmpeg, ffprobe, native processes | Local Agent |
+| Core ResearchTube local functionality shipped with the product | Built-in Agent module/handler |
+| User-supplied arbitrary functionality | External extension under extensions/ |
+| External extension discovery/launch | Local Agent |
+| Display/configuration of Agent port and extension Refresh | Chrome Settings UI |
+
+Do not create an external process merely to implement a trusted built-in ResearchTube feature. Conversely, do not import arbitrary third-party extension code directly into the Agent process when the executable-process contract is sufficient.
+
+
 ## Build and verification
 
 ```bash
@@ -219,12 +676,35 @@ npm run check
 - The extension depends on `youtubei.js` for comments and replies. Update it carefully and verify continuations against live public videos.
 - This is a private developer-mode integration. Secure MCP Tunnel does not make this extension a publicly distributed OpenAI plugin.
 
-## Extension points
+## Adding or changing tools
 
-When adding a tool:
+Before adding a tool, classify it using the ownership table above.
 
-1. Add one narrowly scoped handler in `background.js`.
-2. Add a precise tool definition with strict schemas, truthful annotations, and a description that tells the model what it does and does not return.
-3. Reuse the page bridge only when YouTube page context is required.
-4. Return normalised public data, never raw cookies or full unbounded YouTube responses.
-5. Add validation in the MCP contract test and test the flow in a real Chrome profile.
+For an existing Chrome/page-context YouTube tool:
+
+1. Add or update the narrowly scoped handler in the current Chrome/page-bridge path.
+2. Keep the MCP definition precise, with strict schemas and truthful descriptions.
+3. Reuse the page bridge only when YouTube page context is actually required.
+4. Return normalized bounded data rather than raw unbounded YouTube responses.
+5. Update contract validation and test in a real Chrome profile.
+
+For a built-in Agent-backed tool:
+
+1. Implement the local operation in the Agent.
+2. Keep all built-in file paths workspace-relative and sandbox-checked.
+3. Use async subprocesses for long native operations.
+4. Use one taskId for the whole long-running lifecycle; do not invent jobId.
+5. Add the MCP tool definition/adapter in the Chrome Extension.
+6. Test Agent absent, Agent available, success, structured failure, and concurrent unrelated requests.
+
+For a third-party external extension:
+
+1. Create an extension directory under extensions/.
+2. Add module.json with platform command(s) and precise tool schema(s).
+3. Implement the stdin/stdout JSON contract exactly.
+4. Write diagnostics to stderr, never mixed into protocol stdout.
+5. Declare/document any external runtime prerequisite.
+6. Use Settings Refresh to make the Agent rescan extensions and republish the tool catalogue.
+7. Assume the module is trusted arbitrary code with normal user permissions; do not claim ResearchTube sandboxing for it.
+
+The architecture should evolve only when a real implementation need appears. Prefer extending these contracts compatibly rather than adding parallel mechanisms for the same responsibility.
