@@ -95,9 +95,10 @@ The Agent reads its optional `agent-config.json` `{ "port": 17843 }` and otherwi
 ```json
 {
   "status": "ok",
-  "agentVersion": "0.9.0",
-  "interfaceVersion": 7,
-  "workspace": { "status": "available" },
+  "agentVersion": "0.9.1",
+  "interfaceVersion": 8,
+  "platform": { "operatingSystem": "Windows", "release": "11", "version": "10.0.26100", "architecture": "AMD64" },
+  "workspace": { "status": "available", "availableBytes": 1234567890 },
   "components": {
     "ytDlp": { "status": "available|missing|error", "version": "...|null", "source": "local|path|null" },
     "ffmpeg": { "status": "available|missing|error", "version": "...|null", "source": "local|path|null" },
@@ -106,7 +107,7 @@ The Agent reads its optional `agent-config.json` `{ "port": 17843 }` and otherwi
 }
 ```
 
-`researchtube_agent_status` has no input. The Extension normalizes health into a strict MCP output contract. A missing or unreadable interface version is represented as `null` and is incompatible. If the Agent cannot be reached, the status call remains a successful tool result rather than an MCP error:
+`researchtube_agent_status` has no input. The Extension normalizes health into a strict MCP output contract. `platform` contains the public OS family, release, version, and processor architecture; it never contains a hostname, account name, physical path, network address, or other host identifier. `workspace.availableBytes` is the currently free space on the filesystem containing the Agent workspace, not a physical path. A missing or unreadable interface version is represented as `null` and is incompatible. If the Agent cannot be reached, the status call remains a successful tool result rather than an MCP error:
 
 ```json
 {
@@ -114,7 +115,11 @@ The Agent reads its optional `agent-config.json` `{ "port": 17843 }` and otherwi
   "error": "AGENT_UNAVAILABLE",
   "message": "ResearchTube Local Agent is not available on port 17843.",
   "status": null,
+  "extensionVersion": "1.9.1",
+  "extensionInterfaceVersion": 8,
   "agentVersion": null,
+  "interfaceVersion": null,
+  "platform": null,
   "workspace": null,
   "components": null
 }

@@ -139,35 +139,6 @@ print(f'researchtube_file:{output}', flush=True)
             "message": "The selected YouTube format is no longer available to yt-dlp.",
         })
 
-    def test_yt_dlp_format_diagnostic_is_url_free_and_normalized(self) -> None:
-        document = agent.public_yt_dlp_formats({"formats": [{
-            "format_id": "137", "ext": "mp4", "vcodec": "avc1.640028", "acodec": "none",
-            "width": 1920, "height": 1080, "fps": 30, "tbr": 4_000,
-            "filesize": 250_000_000, "format_note": "1080p", "url": "https://secret.invalid/media",
-        }, {
-            "format_id": "251", "ext": "webm", "vcodec": "none", "acodec": "opus",
-            "abr": 160, "asr": 48_000, "audio_channels": 2, "filesize_approx": 30_000_000,
-            "url": "https://secret.invalid/audio",
-        }]})
-        self.assertEqual(document["source"], "ytDlp")
-        self.assertTrue(document["available"])
-        self.assertEqual(document["video"][0], {
-            "formatId": "137", "kind": "video", "container": "mp4", "videoCodec": "avc1.640028", "audioCodec": None,
-            "width": 1920, "height": 1080, "fps": 30.0, "bitrateBps": 4_000_000,
-            "audioSampleRateHz": None, "audioChannels": None, "qualityLabel": "1080p", "sizeBytes": 250_000_000,
-        })
-        self.assertNotIn("url", repr(document).lower())
-
-    def test_explicit_probe_debug_preserves_raw_program_output(self) -> None:
-        debug = agent.yt_dlp_format_probe_debug(
-            ["C:/ResearchTube/agent/tools/yt-dlp/yt-dlp.exe", "--dump-single-json"], 1,
-            b'{"url":"https://media.example.invalid/temporary"}', b"ERROR: diagnostic failure",
-        )
-        self.assertEqual(debug["exitCode"], 1)
-        self.assertIn("yt-dlp.exe", debug["command"][0])
-        self.assertIn("https://", debug["stdout"])
-        self.assertEqual(debug["stderr"], "ERROR: diagnostic failure")
-
     def test_format_selection_rejects_mixed_combined_and_tracks(self) -> None:
         with self.assertRaisesRegex(agent.AgentApiError, "do not mix"):
             agent.parse_download_selection({"combined": "22", "video": "137"})

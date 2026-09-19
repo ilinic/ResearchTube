@@ -16,11 +16,10 @@ var DEFAULTS = {
   youtubeSearchCooldownUntil: 0,
   youtubeSearchCooldownLevel: 0
 };
-var EXTENSION_VERSION = "1.9.0";
-var REQUIRED_AGENT_INTERFACE_VERSION = 7;
+var EXTENSION_VERSION = "1.9.1";
+var REQUIRED_AGENT_INTERFACE_VERSION = 8;
 var AGENT_HEALTH_TIMEOUT_MS = 5e3;
 var AGENT_TASK_TIMEOUT_MS = 1e4;
-var AGENT_FORMAT_PROBE_TIMEOUT_MS = 55e3;
 var POLL_RETRY_DELAY_MS = 250;
 var SEARCH_MIN_START_INTERVAL_MS = 500;
 var SEARCH_CACHE_TTL_MS = 5 * 6e4;
@@ -74,25 +73,6 @@ var downloadFormatsSchema = {
     audio: { type: "array", items: downloadFormatSchema, description: "YouTube audio-only tracks. They can be downloaded alone or paired with one video track." }
   },
   required: ["available", "source", "message", "combined", "video", "audio"]
-};
-var ytDlpDownloadFormatsSchema = {
-  ...downloadFormatsSchema,
-  properties: {
-    ...downloadFormatsSchema.properties,
-    source: { type: "string", const: "ytDlp", description: "This diagnostic list was resolved by the currently configured local yt-dlp with the same Deno runtime and automatic YouTube client selection used by downloads." },
-    message: { ...nullableString, description: "Explanation when yt-dlp could not return a comparable format list. It never exposes media URLs, credentials, command lines, or local paths." }
-  }
-};
-var ytDlpFormatProbeDebugSchema = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    command: { type: "array", items: { type: "string" }, description: "Exact local argv passed to yt-dlp. In debug mode it may include local executable paths." },
-    exitCode: { type: ["integer", "null"], description: "yt-dlp process exit code; null only when the process could not start." },
-    stdout: { type: "string", description: "Complete unmodified yt-dlp standard output for this one probe. It may include temporary media URLs and other local diagnostic data." },
-    stderr: { type: "string", description: "Complete unmodified yt-dlp standard error for this one probe. It may include temporary media URLs and other local diagnostic data." }
-  },
-  required: ["command", "exitCode", "stdout", "stderr"]
 };
 var videoSearchItemSchema = {
   type: "object",
@@ -219,8 +199,11 @@ var commentParentSchema = {
 var agentWorkspaceSchema = {
   type: "object",
   additionalProperties: false,
-  properties: { status: { type: "string", enum: ["available", "error"] } },
-  required: ["status"]
+  properties: {
+    status: { type: "string", enum: ["available", "error"] },
+    availableBytes: { ...nullableInteger, minimum: 0, description: "Free bytes on the filesystem that contains the Local Agent workspace; null when the workspace cannot be inspected." }
+  },
+  required: ["status", "availableBytes"]
 };
 var agentComponentSchema = {
   type: "object",
@@ -232,6 +215,17 @@ var agentComponentSchema = {
     message: nullableString
   },
   required: ["status", "version", "source", "message"]
+};
+var agentPlatformSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    operatingSystem: { type: "string", description: "Public operating-system family reported by the Local Agent, such as Windows, Linux, or Darwin." },
+    release: { type: "string", description: "Public operating-system release reported by the Local Agent." },
+    version: { type: "string", description: "Public operating-system version string reported by the Local Agent." },
+    architecture: { type: "string", description: "Processor architecture reported by the Local Agent, such as AMD64 or arm64." }
+  },
+  required: ["operatingSystem", "release", "version", "architecture"]
 };
 var agentStatusSchema = {
   type: "object",
@@ -245,6 +239,7 @@ var agentStatusSchema = {
     extensionInterfaceVersion: { type: "integer", minimum: 1, description: "Extension \u2194 Agent interface version required by this Extension." },
     agentVersion: nullableString,
     interfaceVersion: { ...nullableInteger, minimum: 1, description: "Local Agent interface version. null means the response did not contain a readable positive integer, so the Agent is not accepted for Agent tools." },
+    platform: { anyOf: [agentPlatformSchema, { type: "null" }], description: "Public operating-system information for the machine running the Local Agent. It excludes host name, user name, paths, network addresses, and other host identifiers." },
     workspace: { anyOf: [agentWorkspaceSchema, { type: "null" }] },
     components: {
       anyOf: [{
@@ -255,7 +250,7 @@ var agentStatusSchema = {
       }, { type: "null" }]
     }
   },
-  required: ["available", "error", "message", "status", "extensionVersion", "extensionInterfaceVersion", "agentVersion", "interfaceVersion", "workspace", "components"]
+  required: ["available", "error", "message", "status", "extensionVersion", "extensionInterfaceVersion", "agentVersion", "interfaceVersion", "platform", "workspace", "components"]
 };
 var youtubeDownloadResultSchema = {
   type: "object",
@@ -425,7 +420,7 @@ function toolDefinitions() {
     {
       name: "researchtube_agent_status",
       title: "Get ResearchTube Local Agent status",
-      description: "Check the optional ResearchTube Local Agent on the configured localhost port. Returns the serving Chrome Extension implementation version and its required Extension \u2194 Agent interface version, plus the Agent implementation version, Agent interface version, workspace health, and status, version, discovery source, and diagnostic message for yt-dlp, Deno, ffmpeg, and ffprobe. Deno is an optional local JavaScript runtime passed explicitly to yt-dlp when available. Physical host paths are intentionally never exposed through MCP. A missing or mismatched Agent interfaceVersion prevents the Extension from using Agent tools, but does not affect ordinary YouTube research tools.",
+      description: "Check the optional ResearchTube Local Agent on the configured localhost port. Returns the serving Chrome Extension implementation version and its required Extension \u2194 Agent interface version, plus the Agent implementation version, interface version, public operating-system information, workspace health, and status, version, discovery source, and diagnostic message for yt-dlp, Deno, ffmpeg, and ffprobe. Deno is an optional local JavaScript runtime passed explicitly to yt-dlp when available. Physical host paths and host identity are intentionally never exposed through MCP. A missing or mismatched Agent interfaceVersion prevents the Extension from using Agent tools, but does not affect ordinary YouTube research tools.",
       annotations: localAgentReadAnnotations,
       inputSchema: { type: "object", additionalProperties: false, properties: {} },
       outputSchema: agentStatusSchema
@@ -528,14 +523,6 @@ function toolDefinitions() {
       annotations: pureReadAnnotations,
       inputSchema: { type: "object", additionalProperties: false, properties: { videoId: { type: "string", minLength: 6, description: "YouTube video ID obtained from youtube_search, a channel or playlist catalogue, or a prior youtube_get_video response." } }, required: ["videoId"] },
       outputSchema: { type: "object", additionalProperties: false, properties: { videoId: { type: "string" }, title: { type: "string" }, description: { type: "string" }, channel: commentAuthorSchema, publishedAt: nullableString, durationSeconds: { type: ["number", "null"] }, views: nullableInteger, viewsText: nullableString, likes: nullableInteger, likesText: nullableString, commentCount: nullableInteger, commentCountText: nullableString, category: nullableString, tags: { type: "array", items: { type: "string" } }, thumbnailUrl: nullableString, captions: { type: "object", additionalProperties: false, properties: { available: { type: "boolean" }, tracks: { type: "array", items: captionTrackSchema } }, required: ["available", "tracks"] }, downloadFormats: downloadFormatsSchema }, required: ["videoId", "title", "description", "channel", "publishedAt", "durationSeconds", "views", "viewsText", "likes", "likesText", "commentCount", "commentCountText", "category", "tags", "thumbnailUrl", "captions", "downloadFormats"] }
-    },
-    {
-      name: "youtube_get_yt_dlp_formats",
-      title: "Diagnose formats available to local yt-dlp",
-      description: "Diagnostic read for resolving a download-format mismatch. For one public YouTube video ID, asks the configured ResearchTube Local Agent to run yt-dlp in metadata-only mode with the same local Deno runtime and automatic YouTube client selection used by youtube_download. It returns a separate, normalized yt-dlp format snapshot; compare its numeric formatId values with youtube_get_video(videoId).downloadFormats. It never downloads media, changes youtube_get_video, accepts a URL, or accepts arbitrary yt-dlp arguments. By default debug is false and the response is URL-free. Set debug to true only for troubleshooting a local installation: the response then deliberately includes the complete local command, stdout, and stderr, which can contain host paths and temporary media URLs.",
-      annotations: localAgentReadAnnotations,
-      inputSchema: { type: "object", additionalProperties: false, properties: { videoId: { type: "string", pattern: "^[A-Za-z0-9_-]{6,}$", description: "Public YouTube video ID to inspect with the local yt-dlp diagnostic." }, debug: { type: "boolean", default: false, description: "False by default. Set true only when diagnosing this local installation; it returns raw command, stdout, and stderr to the LLM." } }, required: ["videoId"] },
-      outputSchema: { type: "object", additionalProperties: false, properties: { videoId: { type: "string" }, downloadFormats: ytDlpDownloadFormatsSchema, debug: { anyOf: [ytDlpFormatProbeDebugSchema, { type: "null" }], description: "Null unless the request explicitly set debug=true." } }, required: ["videoId", "downloadFormats", "debug"] }
     },
     {
       name: "youtube_get_channel_videos",
@@ -714,6 +701,7 @@ function agentUnavailableStatus(port) {
     extensionInterfaceVersion: REQUIRED_AGENT_INTERFACE_VERSION,
     agentVersion: null,
     interfaceVersion: null,
+    platform: null,
     workspace: null,
     components: null
   };
@@ -727,7 +715,16 @@ function agentInterfaceIsCompatible(status) {
 function normalizeAgentWorkspace(workspace) {
   if (!workspace || typeof workspace !== "object") return null;
   const status = workspace.status === "available" || workspace.status === "error" ? workspace.status : "error";
-  return { status };
+  const availableBytes = Number.isInteger(workspace.availableBytes) && workspace.availableBytes >= 0 ? workspace.availableBytes : null;
+  return { status, availableBytes };
+}
+function normalizeAgentPlatform(value) {
+  if (!value || typeof value !== "object") return null;
+  const operatingSystem = typeof value.operatingSystem === "string" && value.operatingSystem.trim() ? value.operatingSystem.trim() : null;
+  const release = typeof value.release === "string" && value.release.trim() ? value.release.trim() : null;
+  const version = typeof value.version === "string" && value.version.trim() ? value.version.trim() : null;
+  const architecture = typeof value.architecture === "string" && value.architecture.trim() ? value.architecture.trim() : null;
+  return operatingSystem && release && version && architecture ? { operatingSystem, release, version, architecture } : null;
 }
 function normalizeAgentComponent(value) {
   const status = value?.status;
@@ -772,6 +769,7 @@ async function getAgentStatus(port = null) {
       extensionInterfaceVersion: REQUIRED_AGENT_INTERFACE_VERSION,
       agentVersion: typeof health.agentVersion === "string" ? health.agentVersion : null,
       interfaceVersion,
+      platform: normalizeAgentPlatform(health.platform),
       workspace: normalizeAgentWorkspace(health.workspace),
       components: normalizeAgentComponents(health.components)
     };
@@ -916,68 +914,6 @@ function nullableAgentString(value) {
 }
 function nullableAgentNumber(value, integer = false) {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 && (!integer || Number.isInteger(value)) ? value : null;
-}
-function normalizeYtDlpFormat(value, expectedKind) {
-  if (!value || typeof value !== "object" || Array.isArray(value) || typeof value.formatId !== "string" || !/^\d+$/.test(value.formatId) || value.kind !== expectedKind) {
-    throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid yt-dlp format record.");
-  }
-  return {
-    formatId: value.formatId,
-    kind: expectedKind,
-    container: nullableAgentString(value.container),
-    videoCodec: nullableAgentString(value.videoCodec),
-    audioCodec: nullableAgentString(value.audioCodec),
-    width: nullableAgentNumber(value.width, true),
-    height: nullableAgentNumber(value.height, true),
-    fps: nullableAgentNumber(value.fps),
-    bitrateBps: nullableAgentNumber(value.bitrateBps, true),
-    audioSampleRateHz: nullableAgentNumber(value.audioSampleRateHz, true),
-    audioChannels: nullableAgentNumber(value.audioChannels, true),
-    qualityLabel: nullableAgentString(value.qualityLabel),
-    sizeBytes: nullableAgentNumber(value.sizeBytes, true)
-  };
-}
-function normalizeYtDlpFormats(value) {
-  if (!value || typeof value !== "object" || Array.isArray(value) || value.source !== "ytDlp" || typeof value.available !== "boolean") {
-    throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid yt-dlp format diagnostic.");
-  }
-  const output = {
-    available: value.available,
-    source: "ytDlp",
-    message: nullableAgentString(value.message),
-    combined: [],
-    video: [],
-    audio: []
-  };
-  for (const kind of ["combined", "video", "audio"]) {
-    if (!Array.isArray(value[kind]) || value[kind].length > 100) {
-      throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid yt-dlp format diagnostic.");
-    }
-    output[kind] = value[kind].map((item) => normalizeYtDlpFormat(item, kind));
-  }
-  return output;
-}
-function normalizeYtDlpProbeDebug(value, enabled) {
-  if (!enabled) {
-    if (value !== null && value !== void 0) {
-      throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned debug output without an explicit debug request.");
-    }
-    return null;
-  }
-  if (!value || typeof value !== "object" || Array.isArray(value) || !Array.isArray(value.command) || value.command.some((item) => typeof item !== "string") || !(value.exitCode === null || Number.isInteger(value.exitCode)) || typeof value.stdout !== "string" || typeof value.stderr !== "string") {
-    throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid raw yt-dlp diagnostic.");
-  }
-  return { command: value.command, exitCode: value.exitCode, stdout: value.stdout, stderr: value.stderr };
-}
-async function getYtDlpFormats(videoId, debug = false) {
-  if (!/^[A-Za-z0-9_-]{6,}$/.test(videoId)) throw localAgentError("INVALID_VIDEO_ID", "videoId is required.");
-  const document = await agentJsonRequest("/diagnostics/yt-dlp-formats", {
-    method: "POST",
-    body: { videoId, debug },
-    timeoutMs: AGENT_FORMAT_PROBE_TIMEOUT_MS
-  });
-  if (document.videoId !== videoId) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned a format diagnostic for another video.");
-  return { videoId, downloadFormats: normalizeYtDlpFormats(document.downloadFormats), debug: normalizeYtDlpProbeDebug(document.debug, debug) };
 }
 async function getYouTubeDownloadTask(taskId) {
   if (typeof taskId !== "string" || !taskId) throw localAgentError("TASK_NOT_FOUND", "taskId is required.");
@@ -1349,15 +1285,6 @@ async function handleMcpRequest(request) {
   if (request?.method === "tools/call" && request.params?.name === "youtube_get_video") {
     const videoId = requireVideoId(request.params.arguments);
     return executeToolCall(request.id, "youtube_get_video", { videoId }, () => youtubeGetVideo(videoId));
-  }
-  if (request?.method === "tools/call" && request.params?.name === "youtube_get_yt_dlp_formats") {
-    const args = request.params.arguments ?? {};
-    const videoId = requireVideoId(args);
-    if (args.debug !== void 0 && typeof args.debug !== "boolean") {
-      return { jsonrpc: "2.0", id: request.id, error: { code: -32602, message: "debug must be a boolean" } };
-    }
-    const debug = args.debug === true;
-    return executeToolCall(request.id, "youtube_get_yt_dlp_formats", { videoId, debug }, () => getYtDlpFormats(videoId, debug));
   }
   if (request?.method === "tools/call" && request.params?.name === "youtube_get_channel_videos") {
     const args = request.params.arguments ?? {};

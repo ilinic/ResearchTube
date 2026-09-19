@@ -102,7 +102,9 @@ class WorkspacePathResolverTests(unittest.TestCase):
 
     def test_health_serialization_omits_host_paths(self) -> None:
         snapshot = {
-            "status": "ok", "agentVersion": "0.5.0", "interfaceVersion": 1, "workspace": {"status": "available"},
+            "status": "ok", "agentVersion": "0.5.0", "interfaceVersion": 1,
+            "platform": {"operatingSystem": "Windows", "release": "11", "version": "10.0.26100", "architecture": "AMD64"},
+            "workspace": {"status": "available", "availableBytes": 123456789},
             "components": {
                 "ytDlp": {"status": "available", "version": "x", "source": "local", "privatePath": "C:/private/yt-dlp.exe", "message": None},
                 "deno": {"status": "available", "version": "x", "source": "local", "privatePath": "C:/private/deno.exe", "message": None},
@@ -114,11 +116,23 @@ class WorkspacePathResolverTests(unittest.TestCase):
         self.assertNotIn("C:/private", serialized)
         self.assertNotIn("privatePath", serialized)
         self.assertIn('"interfaceVersion": 1', serialized)
+        self.assertIn('"operatingSystem": "Windows"', serialized)
+        self.assertIn('"availableBytes": 123456789', serialized)
+
+    def test_workspace_health_reports_available_space_without_a_path(self) -> None:
+        health = agent.workspace_health()
+        self.assertEqual(health["status"], "available")
+        self.assertIsInstance(health["availableBytes"], int)
+        self.assertGreaterEqual(health["availableBytes"], 0)
 
     def test_startup_log_explains_interface_version_requirement(self) -> None:
         messages: list[str] = []
         with patch.object(agent, "log", side_effect=lambda message, error=False: messages.append(message)):
-            agent.log_startup_health({"interfaceVersion": 1, "workspace": {"status": "available"}, "components": {}}, 17843)
+            agent.log_startup_health({
+                "interfaceVersion": 1,
+                "platform": {"operatingSystem": "Windows", "release": "11", "version": "10.0", "architecture": "AMD64"},
+                "workspace": {"status": "available", "availableBytes": 1}, "components": {},
+            }, 17843)
         self.assertIn(
             "Agent interface version: 1 — it must match the ResearchTube Extension interface version.",
             messages,

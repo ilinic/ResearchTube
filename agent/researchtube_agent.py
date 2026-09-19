@@ -12,6 +12,7 @@ import argparse
 import asyncio
 import json
 import os
+import platform
 import re
 import secrets
 import shutil
@@ -22,8 +23,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-AGENT_VERSION = "0.9.0"
-INTERFACE_VERSION = 7
+AGENT_VERSION = "0.9.1"
+INTERFACE_VERSION = 8
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
 TASK_POLL_INTERVAL_MS = 1_000
@@ -43,10 +44,6 @@ WINDOWS_INVALID_FILENAME_CHARACTERS = frozenset('<>:"|?*')
 WINDOWS_RESERVED_BASENAMES = frozenset({
     "CON", "PRN", "AUX", "NUL", *(f"COM{index}" for index in range(1, 10)), *(f"LPT{index}" for index in range(1, 10)),
 })
-YTDLP_FORMAT_PROBE_TIMEOUT_SECONDS = 45
-MAX_FORMATS_PER_KIND = 100
-
-
 class AgentApiError(Exception):
     def __init__(self, code: str, message: str, detail: str | None = None) -> None:
         super().__init__(message)
@@ -93,13 +90,13 @@ def configured_port() -> int:
     return DEFAULT_PORT
 
 
-def workspace_health() -> dict[str, str]:
+def workspace_health() -> dict[str, str | int | None]:
     try:
         WORKSPACE_PATH.mkdir(parents=True, exist_ok=True)
-        return {"status": "available"}
+        return {"status": "available", "availableBytes": shutil.disk_usage(WORKSPACE_PATH).free}
     except OSError as error:
         log(f"workspace health check failed at {WORKSPACE_PATH}: {error.__class__.__name__}", error=True)
-        return {"status": "error"}
+        return {"status": "error", "availableBytes": None}
 
 
 def local_executable(path: Path, root: Path) -> Path | None:
@@ -188,170 +185,6 @@ def yt_dlp_js_runtime_arguments(deno_executable: str | None) -> list[str]:
     return ["--no-js-runtimes", "--js-runtimes", f"deno:{deno_executable}"]
 
 
-def empty_yt_dlp_formats(message: str) -> dict[str, Any]:
-    """Return the public diagnostic shape without leaking yt-dlp internals."""
-    return {
-        "available": False,
-        "source": "ytDlp",
-        "message": message,
-        "combined": [],
-        "video": [],
-        "audio": [],
-    }
-
-
-def nullable_nonnegative_int(value: Any) -> int | None:
-    try:
-        number = int(float(value))
-    except (TypeError, ValueError):
-        return None
-    return number if number >= 0 else None
-
-
-def nullable_nonnegative_float(value: Any) -> float | None:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return None
-    return number if number >= 0 else None
-
-
-def yt_dlp_codec(value: Any) -> str | None:
-    return value if isinstance(value, str) and value and value != "none" else None
-
-
-def normalize_yt_dlp_format(format_data: Any) -> dict[str, Any] | None:
-    """Map one yt-dlp format record to the same URL-free public schema.
-
-    A raw -J record contains ephemeral media URLs, headers and other playback
-    data.  This allowlist deliberately retains only the stable attributes that
-    are useful for comparing itags with the browser's YouTube snapshot.
-    """
-    if not isinstance(format_data, dict):
-        return None
-    format_id = str(format_data.get("format_id") or "").strip()
-    video_codec = yt_dlp_codec(format_data.get("vcodec"))
-    audio_codec = yt_dlp_codec(format_data.get("acodec"))
-    # The public download contract deliberately accepts YouTube itags only.
-    # Skip yt-dlp's generated/non-itag representations so this diagnostic can
-    # be compared one-for-one with the browser's numeric format snapshot.
-    if not re.fullmatch(r"[0-9]+", format_id) or (video_codec is None and audio_codec is None):
-        return None
-    kind = "combined" if video_codec and audio_codec else "video" if video_codec else "audio"
-    bitrate_kbps = nullable_nonnegative_float(format_data.get("tbr"))
-    if bitrate_kbps is None:
-        bitrate_kbps = nullable_nonnegative_float(format_data.get("vbr" if video_codec else "abr"))
-    bitrate_bps = round(bitrate_kbps * 1_000) if bitrate_kbps is not None else None
-    size_bytes = nullable_nonnegative_int(format_data.get("filesize"))
-    if size_bytes is None:
-        size_bytes = nullable_nonnegative_int(format_data.get("filesize_approx"))
-    return {
-        "formatId": format_id,
-        "kind": kind,
-        "container": format_data.get("ext") if isinstance(format_data.get("ext"), str) else None,
-        "videoCodec": video_codec,
-        "audioCodec": audio_codec,
-        "width": nullable_nonnegative_int(format_data.get("width")) if video_codec else None,
-        "height": nullable_nonnegative_int(format_data.get("height")) if video_codec else None,
-        "fps": nullable_nonnegative_float(format_data.get("fps")) if video_codec else None,
-        "bitrateBps": bitrate_bps,
-        "audioSampleRateHz": nullable_nonnegative_int(format_data.get("asr")) if audio_codec else None,
-        "audioChannels": nullable_nonnegative_int(format_data.get("audio_channels")) if audio_codec else None,
-        "qualityLabel": format_data.get("format_note") if isinstance(format_data.get("format_note"), str) else None,
-        "sizeBytes": size_bytes,
-    }
-
-
-def compare_yt_dlp_formats(item: dict[str, Any]) -> tuple[int, int, int, str]:
-    return (
-        -(item["height"] or 0),
-        -round(item["fps"] or 0),
-        -(item["bitrateBps"] or 0),
-        item["formatId"],
-    )
-
-
-def public_yt_dlp_formats(payload: Any) -> dict[str, Any]:
-    if not isinstance(payload, dict) or not isinstance(payload.get("formats"), list):
-        return empty_yt_dlp_formats("yt-dlp did not return a usable format list for this video.")
-    groups: dict[str, list[dict[str, Any]]] = {"combined": [], "video": [], "audio": []}
-    seen: set[str] = set()
-    for raw_format in payload["formats"]:
-        item = normalize_yt_dlp_format(raw_format)
-        if item is None or item["formatId"] in seen:
-            continue
-        seen.add(item["formatId"])
-        if len(groups[item["kind"]]) < MAX_FORMATS_PER_KIND:
-            groups[item["kind"]].append(item)
-    for group in groups.values():
-        group.sort(key=compare_yt_dlp_formats)
-    if not seen:
-        return empty_yt_dlp_formats("yt-dlp did not report downloadable media formats for this video.")
-    return {"available": True, "source": "ytDlp", "message": None, **groups}
-
-
-def yt_dlp_format_probe_debug(command: list[str], exit_code: int | None, stdout: bytes = b"", stderr: bytes = b"") -> dict[str, Any]:
-    """Full local diagnostic data, returned only after explicit debug opt-in."""
-    return {
-        "command": command,
-        "exitCode": exit_code,
-        "stdout": stdout.decode("utf-8", errors="replace"),
-        "stderr": stderr.decode("utf-8", errors="replace"),
-    }
-
-
-async def yt_dlp_format_probe(video_id: Any, *, debug: bool = False) -> tuple[dict[str, Any], dict[str, Any] | None]:
-    """Inspect yt-dlp's current view of public formats without downloading.
-
-    This endpoint is diagnostic only.  It uses precisely the runtime and
-    YouTube client passed to downloads, but it never feeds this list back into
-    youtube_get_video. Raw execution output is returned only when the caller
-    explicitly requests the local debug mode.
-    """
-    stable_video_id = validate_video_id(video_id)
-    yt_dlp = find_component("ytDlp", COMPONENTS["ytDlp"][0])
-    if yt_dlp.error:
-        raise AgentApiError("YTDLP_DISCOVERY_ERROR", "yt-dlp discovery is ambiguous.", yt_dlp.error)
-    if not yt_dlp.executable:
-        raise AgentApiError("YTDLP_NOT_AVAILABLE", "yt-dlp is not available. Place it in tools/yt-dlp or install it on PATH.")
-    deno_executable = resolve_deno_runtime()
-    command = [
-        yt_dlp.executable,
-        *yt_dlp_js_runtime_arguments(deno_executable),
-        "--no-playlist",
-        "--skip-download",
-        "--no-warnings",
-        "--dump-single-json",
-        f"https://www.youtube.com/watch?v={stable_video_id}",
-    ]
-    try:
-        process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-    except OSError as error:
-        log(f"yt-dlp format probe could not start for {stable_video_id}: {error.__class__.__name__}", error=True)
-        raw = yt_dlp_format_probe_debug(command, None, stderr=str(error).encode("utf-8", errors="replace"))
-        return empty_yt_dlp_formats("yt-dlp could not be started for this format diagnostic."), raw if debug else None
-    try:
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=YTDLP_FORMAT_PROBE_TIMEOUT_SECONDS)
-    except asyncio.TimeoutError:
-        process.kill()
-        stdout, stderr = await process.communicate()
-        log(f"yt-dlp format probe timed out for {stable_video_id}", error=True)
-        raw = yt_dlp_format_probe_debug(command, process.returncode, stdout, stderr)
-        return empty_yt_dlp_formats("yt-dlp format diagnostic timed out."), raw if debug else None
-    if process.returncode != 0:
-        log(f"yt-dlp format probe failed for {stable_video_id} (exit {process.returncode})", error=True)
-        raw = yt_dlp_format_probe_debug(command, process.returncode, stdout, stderr)
-        return empty_yt_dlp_formats("yt-dlp could not retrieve format information for this video."), raw if debug else None
-    try:
-        document = json.loads(stdout.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        log(f"yt-dlp format probe returned invalid JSON for {stable_video_id}", error=True)
-        raw = yt_dlp_format_probe_debug(command, process.returncode, stdout, stderr)
-        return empty_yt_dlp_formats("yt-dlp returned invalid format information for this video."), raw if debug else None
-    raw = yt_dlp_format_probe_debug(command, process.returncode, stdout, stderr)
-    return public_yt_dlp_formats(document), raw if debug else None
-
-
 async def component_health(name: str, definition: tuple[tuple[str, ...], tuple[str, ...]]) -> tuple[str, dict[str, str | None]]:
     candidates, version_args = definition
     discovery = find_component(name, candidates)
@@ -374,7 +207,17 @@ async def health_snapshot() -> dict[str, Any]:
     results = await asyncio.gather(*(component_health(name, definition) for name, definition in COMPONENTS.items()))
     return {
         "status": "ok", "agentVersion": AGENT_VERSION, "interfaceVersion": INTERFACE_VERSION,
-        "workspace": workspace_health(), "components": dict(results),
+        "platform": public_platform_metadata(), "workspace": workspace_health(), "components": dict(results),
+    }
+
+
+def public_platform_metadata() -> dict[str, str]:
+    """Return portable OS facts without host, user, path, or network identity."""
+    return {
+        "operatingSystem": platform.system() or "Unknown",
+        "release": platform.release() or "Unknown",
+        "version": platform.version() or "Unknown",
+        "architecture": platform.machine() or "Unknown",
     }
 
 
@@ -389,13 +232,20 @@ def public_health_document(snapshot: dict[str, Any]) -> dict[str, Any]:
     }
     return {
         "status": snapshot["status"], "agentVersion": snapshot["agentVersion"], "interfaceVersion": snapshot["interfaceVersion"],
-        "workspace": {"status": snapshot["workspace"]["status"]}, "components": components,
+        "platform": snapshot["platform"],
+        "workspace": {
+            "status": snapshot["workspace"]["status"],
+            "availableBytes": snapshot["workspace"]["availableBytes"],
+        },
+        "components": components,
     }
 
 
 def log_startup_health(health: dict[str, Any], port: int) -> None:
     log(f"ResearchTube Agent {AGENT_VERSION} started")
     log(f"Agent interface version: {health['interfaceVersion']} — it must match the ResearchTube Extension interface version.")
+    platform_metadata = health["platform"]
+    log(f"Platform: {platform_metadata['operatingSystem']} {platform_metadata['release']} ({platform_metadata['architecture']})")
     log(f"Listening on 127.0.0.1:{port}")
     log(f"Workspace: {WORKSPACE_PATH} ({health['workspace']['status']})")
     for name, component in health["components"].items():
@@ -1194,18 +1044,6 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             response_status, response_body = "204 No Content", None
         elif method == "GET" and path == "/health":
             response_status, response_body = "200 OK", public_health_document(await health_snapshot())
-        elif method == "POST" and path == "/diagnostics/yt-dlp-formats":
-            payload = parse_json_body(body)
-            video_id = validate_video_id(payload.get("videoId"))
-            debug = payload.get("debug", False)
-            if not isinstance(debug, bool):
-                raise AgentApiError("INVALID_REQUEST", "debug must be a boolean when supplied.")
-            formats, debug_output = await yt_dlp_format_probe(video_id, debug=debug)
-            response_status, response_body = "200 OK", {
-                "videoId": video_id,
-                "downloadFormats": formats,
-                "debug": debug_output,
-            }
         elif method == "POST" and path == "/workspace/list":
             response_status, response_body = "200 OK", workspace_list(parse_json_body(body))
         elif method == "POST" and path == "/workspace/stat":
