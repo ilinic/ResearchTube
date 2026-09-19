@@ -94,7 +94,17 @@ For transcripts, comments, and replies, ResearchTube uses a normal YouTube page 
 
 ## For developers
 
-Read [Architecture](docs/ARCHITECTURE.md) for the component model, page-bridge design, MCP contract, tool schemas, build process, and project layout.
+Read [Architecture](docs/ARCHITECTURE.md) for the complete system contract: the Chrome/MCP side, YouTube page-context bridge, Local Agent, workspace model, long-running tasks, native media tools, and the external extension protocol.
+
+**If you use an LLM or another AI coding tool to modify ResearchTube, extend its architecture, or write a ResearchTube extension, tell it to read `docs/ARCHITECTURE.md` completely before making changes and to treat that document as the authoritative architectural contract.** This is especially important because ResearchTube deliberately separates MCP-facing Chrome code, YouTube page-context code, Agent-backed local operations, and arbitrary third-party executable extensions.
+
+A useful instruction is:
+
+```text
+Read docs/ARCHITECTURE.md completely before changing ResearchTube.
+Preserve its architectural boundaries and invariants.
+If you are adding an external extension, follow the extension manifest and stdin/stdout JSON contract described there.
+```
 
 ## Status
 
