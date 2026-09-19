@@ -1,7 +1,6 @@
 const $ = (id) => document.getElementById(id);
 async function call(message) { return chrome.runtime.sendMessage(message); }
 function shortTunnel(id) { return id && id.length > 14 ? `${id.slice(0, 9)}…${id.slice(-4)}` : id || "Not configured"; }
-function setResult(result) { const box = $("result"); box.hidden = false; box.className = result.ok ? "ok" : "error"; box.textContent = result.ok ? "Connection successful." : (result.message || "Connection test failed."); }
 function agentSummary(agent, port) {
   if (!agent?.available) return { text: `Unavailable · ${port}`, className: "bad" };
   if (agent.error === "AGENT_INTERFACE_INCOMPATIBLE") return { text: "Version mismatch", className: "bad" };
@@ -9,7 +8,6 @@ function agentSummary(agent, port) {
 }
 async function load() {
   const state = await call({ type: "status" });
-  const tested = state.lastConnectionTest;
   const configured = state.configured;
   const youtubeSearch = state.youtubeSearch;
   const searchLimited = Boolean(youtubeSearch?.rateLimited);
@@ -23,10 +21,7 @@ async function load() {
   $("interface-version").className = "good";
   $("agent-status").textContent = agent.text;
   $("agent-status").className = agent.className;
-  $("test-status").textContent = tested ? (tested.success ? "Successful" : "Failed") : "Not run";
-  $("test-status").className = tested?.success ? "good" : (tested ? "bad" : "");
 }
-$("test").addEventListener("click", async () => { $("test").disabled = true; $("test").textContent = "Testing YT…"; const result = await call({ type: "test-connection" }); setResult(result); await load(); $("test").disabled = false; $("test").textContent = "Test YT Connection"; });
 $("chatgpt").addEventListener("click", () => call({ type: "open-external", target: "chatgptNewChat" }));
 $("settings").addEventListener("click", () => chrome.runtime.openOptionsPage());
 load();

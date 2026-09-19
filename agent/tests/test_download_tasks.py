@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import stat
 import tempfile
 import unittest
@@ -15,6 +16,13 @@ from agent import researchtube_agent as agent
 
 @unittest.skipIf(os.name == "nt", "The fake yt-dlp fixture is a POSIX script.")
 class DownloadTaskTests(unittest.IsolatedAsyncioTestCase):
+    def test_generated_task_id_is_readable_and_compact(self) -> None:
+        manager = agent.DownloadTaskManager()
+        task_ids = {manager.new_task_id() for _ in range(100)}
+        self.assertEqual(len(task_ids), 100)
+        self.assertTrue(all(re.fullmatch(r"tsk_[A-Za-z0-9_-]{10}", task_id) for task_id in task_ids))
+        self.assertTrue(all(len(task_id) == len("yt_aqz-KE-bpKQ") for task_id in task_ids))
+
     async def asyncSetUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)

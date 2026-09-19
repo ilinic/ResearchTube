@@ -16,7 +16,7 @@ var DEFAULTS = {
   youtubeSearchCooldownUntil: 0,
   youtubeSearchCooldownLevel: 0
 };
-var EXTENSION_VERSION = "1.8.7";
+var EXTENSION_VERSION = "1.8.9";
 var REQUIRED_AGENT_INTERFACE_VERSION = 6;
 var AGENT_HEALTH_TIMEOUT_MS = 5e3;
 var AGENT_TASK_TIMEOUT_MS = 1e4;

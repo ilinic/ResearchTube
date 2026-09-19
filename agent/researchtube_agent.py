@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-AGENT_VERSION = "0.8.4"
+AGENT_VERSION = "0.8.5"
 INTERFACE_VERSION = 6
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
@@ -611,7 +611,7 @@ class DownloadTaskManager:
                 )
             ffmpeg_executable = ffmpeg.executable
         now = utc_now()
-        task = DownloadTask(secrets.token_urlsafe(12), url, video_id, selection, output_directory, output_directory_relative, now, now)
+        task = DownloadTask(self.new_task_id(), url, video_id, selection, output_directory, output_directory_relative, now, now)
         # Store before responding: returned IDs are immediately pollable.
         self.tasks[task.task_id] = task
         task.runner = asyncio.create_task(
@@ -619,6 +619,13 @@ class DownloadTaskManager:
             name=f"researchtube-download-{task.task_id}",
         )
         return self.snapshot(task)
+
+    def new_task_id(self) -> str:
+        """Return a short opaque ID with the same length as yt_<videoId>."""
+        while True:
+            task_id = f"tsk_{secrets.token_urlsafe(7)}"
+            if task_id not in self.tasks:
+                return task_id
 
     def get(self, task_id: str) -> DownloadTask:
         if not isinstance(task_id, str) or not task_id or task_id not in self.tasks:
