@@ -22,8 +22,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-AGENT_VERSION = "0.8.5"
-INTERFACE_VERSION = 6
+AGENT_VERSION = "0.9.0"
+INTERFACE_VERSION = 7
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
 TASK_POLL_INTERVAL_MS = 1_000
@@ -37,6 +37,8 @@ TOOLS_PATH = ROOT / "tools"
 DEFAULT_DOWNLOAD_DIRECTORY = "downloads"
 MAX_LOGICAL_PATH_LENGTH = 1_024
 MAX_LOGICAL_COMPONENT_LENGTH = 240
+MAX_WORKSPACE_LIST_ENTRIES = 500
+MEDIA_PROBE_TIMEOUT_SECONDS = 15
 WINDOWS_INVALID_FILENAME_CHARACTERS = frozenset('<>:"|?*')
 WINDOWS_RESERVED_BASENAMES = frozenset({
     "CON", "PRN", "AUX", "NUL", *(f"COM{index}" for index in range(1, 10)), *(f"LPT{index}" for index in range(1, 10)),
@@ -495,7 +497,9 @@ class WorkspacePathResolver:
             raise AgentApiError("WORKSPACE_UNAVAILABLE", "The Agent workspace is unavailable.") from error
 
     @staticmethod
-    def logical_parts(value: Any, *, field_name: str, error_code: str) -> tuple[tuple[str, ...], str]:
+    def logical_parts(value: Any, *, field_name: str, error_code: str, allow_root: bool = False) -> tuple[tuple[str, ...], str]:
+        if allow_root and value == "":
+            return (), ""
         if not isinstance(value, str) or not value or value != value.strip():
             raise AgentApiError(error_code, f"{field_name} must be a non-empty logical workspace-relative path.")
         if len(value) > MAX_LOGICAL_PATH_LENGTH or "\x00" in value or "\\" in value or value.startswith("/") or re.match(r"^[A-Za-z]:", value):
@@ -514,9 +518,19 @@ class WorkspacePathResolver:
                 raise AgentApiError(error_code, f"{field_name} contains a non-portable workspace path component.")
         return tuple(parts), "/".join(parts)
 
-    def resolve_destination(self, value: Any, *, field_name: str, error_code: str) -> ResolvedWorkspacePath:
-        parts, logical_path = self.logical_parts(value, field_name=field_name, error_code=error_code)
+    def resolve_destination(self, value: Any, *, field_name: str, error_code: str, allow_root: bool = False) -> ResolvedWorkspacePath:
+        parts, logical_path = self.logical_parts(value, field_name=field_name, error_code=error_code, allow_root=allow_root)
         candidate = self.root.joinpath(*parts)
+        # Do not let built-in tools traverse a symbolic link or Windows
+        # junction even when its current target happens to be inside workspace.
+        # This also prevents delete/move from unexpectedly operating on the
+        # target rather than the link itself.
+        component = self.root
+        for part in parts:
+            component = component / part
+            is_junction = getattr(component, "is_junction", lambda: False)
+            if component.is_symlink() or is_junction():
+                raise AgentApiError(error_code, f"{field_name} cannot traverse a workspace filesystem redirect.")
         try:
             resolved_candidate = candidate.resolve(strict=False)
         except OSError as error:
@@ -525,6 +539,25 @@ class WorkspacePathResolver:
         if not path_is_within(resolved_candidate, self.root):
             raise AgentApiError(error_code, f"{field_name} must stay inside the ResearchTube workspace.")
         return ResolvedWorkspacePath(logical_path, resolved_candidate)
+
+    def resolve_existing(self, value: Any, *, field_name: str, expected_type: str | None = None, allow_root: bool = False) -> ResolvedWorkspacePath:
+        resolved = self.resolve_destination(
+            value, field_name=field_name, error_code="WORKSPACE_PATH_INVALID", allow_root=allow_root,
+        )
+        try:
+            physical_path = resolved.physical_path.resolve(strict=True)
+        except FileNotFoundError as error:
+            code = "DIRECTORY_NOT_FOUND" if expected_type == "directory" else "FILE_NOT_FOUND" if expected_type == "file" else "WORKSPACE_NOT_FOUND"
+            raise AgentApiError(code, f"The requested workspace {expected_type or 'path'} does not exist.") from error
+        except OSError as error:
+            raise AgentApiError("WORKSPACE_UNAVAILABLE", "The Agent workspace is unavailable.") from error
+        if not path_is_within(physical_path, self.root):
+            raise AgentApiError("WORKSPACE_PATH_OUTSIDE_SANDBOX", f"{field_name} must stay inside the ResearchTube workspace.")
+        if expected_type == "file" and not physical_path.is_file():
+            raise AgentApiError("FILE_NOT_FOUND", "The requested workspace file does not exist.")
+        if expected_type == "directory" and not physical_path.is_dir():
+            raise AgentApiError("DIRECTORY_NOT_FOUND", "The requested workspace directory does not exist.")
+        return ResolvedWorkspacePath(resolved.logical_path, physical_path)
 
     def logical_existing_file(self, physical_path: Path, *, error_code: str) -> str:
         try:
@@ -545,6 +578,215 @@ def resolve_output_directory(value: Any) -> tuple[Path, str]:
         field_name="outputDir", error_code="OUTPUT_DIR_INVALID",
     )
     return resolved.physical_path, resolved.logical_path
+
+
+def workspace_object_type(path: Path) -> str:
+    if path.is_file():
+        return "file"
+    if path.is_dir():
+        return "directory"
+    return "other"
+
+
+def workspace_modified_at(path: Path) -> str:
+    return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def workspace_list(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise AgentApiError("INVALID_REQUEST", "workspace_list requires a JSON object.")
+    path = payload.get("path", "")
+    limit = payload.get("limit", 100)
+    if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= MAX_WORKSPACE_LIST_ENTRIES:
+        raise AgentApiError("INVALID_REQUEST", f"limit must be an integer from 1 to {MAX_WORKSPACE_LIST_ENTRIES}.")
+    directory = WorkspacePathResolver().resolve_existing(path, field_name="path", expected_type="directory", allow_root=True)
+    try:
+        children = sorted(directory.physical_path.iterdir(), key=lambda item: (item.name.casefold(), item.name))[:limit]
+    except OSError as error:
+        raise AgentApiError("PERMISSION_DENIED", "The workspace directory could not be listed.") from error
+    entries: list[dict[str, Any]] = []
+    for child in children:
+        # Never follow a redirect while producing directory metadata.
+        if child.is_symlink() or getattr(child, "is_junction", lambda: False)():
+            entry_type, size = "other", None
+        else:
+            entry_type = workspace_object_type(child)
+            try:
+                size = child.stat().st_size if entry_type == "file" else None
+            except OSError:
+                entry_type, size = "other", None
+        logical_path = f"{directory.logical_path}/{child.name}" if directory.logical_path else child.name
+        entries.append({"name": child.name, "path": logical_path, "type": entry_type, "size": size})
+    log(f"workspace_list path={directory.logical_path or '<root>'} -> ok")
+    return {"path": directory.logical_path, "entries": entries, "returned": len(entries), "limit": limit}
+
+
+def workspace_stat(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise AgentApiError("INVALID_REQUEST", "workspace_stat requires a JSON object.")
+    item = WorkspacePathResolver().resolve_existing(payload.get("path"), field_name="path")
+    item_type = workspace_object_type(item.physical_path)
+    if item_type == "other":
+        raise AgentApiError("WORKSPACE_NOT_FOUND", "The requested workspace path is not a regular file or directory.")
+    try:
+        size = item.physical_path.stat().st_size if item_type == "file" else None
+        modified_at = workspace_modified_at(item.physical_path)
+    except OSError as error:
+        raise AgentApiError("PERMISSION_DENIED", "The requested workspace path could not be inspected.") from error
+    log(f"workspace_stat path={item.logical_path} -> ok")
+    return {"path": item.logical_path, "type": item_type, "size": size, "modifiedAt": modified_at}
+
+
+def workspace_mkdir(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise AgentApiError("INVALID_REQUEST", "workspace_mkdir requires a JSON object.")
+    directory = WorkspacePathResolver().resolve_destination(payload.get("path"), field_name="path", error_code="WORKSPACE_PATH_INVALID")
+    try:
+        already_exists = directory.physical_path.exists()
+        if already_exists and not directory.physical_path.is_dir():
+            raise AgentApiError("DESTINATION_EXISTS", "A non-directory workspace object already exists at path.")
+        directory.physical_path.mkdir(parents=True, exist_ok=True)
+    except AgentApiError:
+        raise
+    except PermissionError as error:
+        raise AgentApiError("PERMISSION_DENIED", "The workspace directory could not be created.") from error
+    except OSError as error:
+        raise AgentApiError("WORKSPACE_OPERATION_FAILED", "The workspace directory could not be created.") from error
+    log(f"workspace_mkdir path={directory.logical_path} -> ok")
+    return {"path": directory.logical_path, "type": "directory", "created": not already_exists}
+
+
+def workspace_move(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise AgentApiError("INVALID_REQUEST", "workspace_move requires a JSON object.")
+    resolver = WorkspacePathResolver()
+    source = resolver.resolve_existing(payload.get("source"), field_name="source")
+    source_type = workspace_object_type(source.physical_path)
+    if source_type == "other":
+        raise AgentApiError("WORKSPACE_NOT_FOUND", "source is not a regular file or directory.")
+    destination = resolver.resolve_destination(payload.get("destination"), field_name="destination", error_code="WORKSPACE_PATH_INVALID")
+    if destination.physical_path.exists() or destination.physical_path.is_symlink():
+        raise AgentApiError("DESTINATION_EXISTS", "destination already exists; workspace_move never overwrites files.")
+    if not destination.physical_path.parent.is_dir():
+        raise AgentApiError("DIRECTORY_NOT_FOUND", "The destination parent directory does not exist.")
+    try:
+        source.physical_path.rename(destination.physical_path)
+    except PermissionError as error:
+        raise AgentApiError("PERMISSION_DENIED", "The workspace item could not be moved.") from error
+    except OSError as error:
+        raise AgentApiError("WORKSPACE_OPERATION_FAILED", "The workspace item could not be moved.") from error
+    log(f"workspace_move {source.logical_path} -> {destination.logical_path} -> ok")
+    return {"source": source.logical_path, "destination": destination.logical_path, "type": source_type}
+
+
+def workspace_delete(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise AgentApiError("INVALID_REQUEST", "workspace_delete requires a JSON object.")
+    item = WorkspacePathResolver().resolve_existing(payload.get("path"), field_name="path")
+    item_type = workspace_object_type(item.physical_path)
+    try:
+        if item_type == "file":
+            item.physical_path.unlink()
+        elif item_type == "directory":
+            item.physical_path.rmdir()
+        else:
+            raise AgentApiError("WORKSPACE_NOT_FOUND", "The requested workspace path is not a regular file or directory.")
+    except AgentApiError:
+        raise
+    except OSError as error:
+        if item_type == "directory" and item.physical_path.exists():
+            raise AgentApiError("DIRECTORY_NOT_EMPTY", "workspace_delete only removes empty directories.") from error
+        raise AgentApiError("PERMISSION_DENIED", "The workspace item could not be deleted.") from error
+    log(f"workspace_delete path={item.logical_path} -> ok")
+    return {"path": item.logical_path, "type": item_type, "deleted": True}
+
+
+def ffprobe_number(value: Any, *, integer: bool = False) -> int | float | None:
+    try:
+        number = int(value) if integer else float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number >= 0 else None
+
+
+def ffprobe_fps(value: Any) -> float | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        numerator, denominator = value.split("/", 1)
+        parsed = float(numerator) / float(denominator)
+    except (ValueError, ZeroDivisionError):
+        return None
+    return parsed if parsed >= 0 else None
+
+
+def first_ffprobe_stream(streams: Any, stream_type: str) -> dict[str, Any] | None:
+    if not isinstance(streams, list):
+        return None
+    for stream in streams:
+        if isinstance(stream, dict) and stream.get("codec_type") == stream_type:
+            return stream
+    return None
+
+
+async def media_probe(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise AgentApiError("INVALID_REQUEST", "media_probe requires a JSON object.")
+    item = WorkspacePathResolver().resolve_existing(payload.get("path"), field_name="path", expected_type="file")
+    ffprobe = find_component("ffprobe", COMPONENTS["ffprobe"][0])
+    if ffprobe.error:
+        raise AgentApiError("FFPROBE_DISCOVERY_ERROR", "ffprobe discovery is ambiguous.", ffprobe.error)
+    if not ffprobe.executable:
+        raise AgentApiError("FFPROBE_NOT_AVAILABLE", "ffprobe is not available. Extract it under tools/ffmpeg or install it on PATH.")
+    command = [
+        ffprobe.executable, "-v", "error",
+        "-show_entries", "format=duration,format_name,bit_rate:stream=codec_type,codec_name,width,height,avg_frame_rate,r_frame_rate,sample_rate,channels,bit_rate",
+        "-of", "json", str(item.physical_path),
+    ]
+    try:
+        process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        stdout, _stderr = await asyncio.wait_for(process.communicate(), timeout=MEDIA_PROBE_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError as error:
+        process.kill()
+        await process.communicate()
+        raise AgentApiError("MEDIA_PROBE_FAILED", "ffprobe timed out while inspecting the media file.") from error
+    except OSError as error:
+        raise AgentApiError("MEDIA_PROBE_FAILED", "ffprobe could not be started.") from error
+    if process.returncode != 0:
+        raise AgentApiError("MEDIA_PROBE_FAILED", "ffprobe could not inspect the media file.")
+    try:
+        document = json.loads(stdout.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise AgentApiError("MEDIA_PROBE_FAILED", "ffprobe returned invalid media metadata.") from error
+    format_data = document.get("format") if isinstance(document, dict) and isinstance(document.get("format"), dict) else {}
+    streams = document.get("streams") if isinstance(document, dict) else []
+    video_stream, audio_stream = first_ffprobe_stream(streams, "video"), first_ffprobe_stream(streams, "audio")
+    container_names = format_data.get("format_name") if isinstance(format_data.get("format_name"), str) else ""
+    container = "mp4" if "mp4" in container_names.split(",") else (container_names.split(",", 1)[0] or None)
+    video = None if video_stream is None else {
+        "codec": video_stream.get("codec_name") if isinstance(video_stream.get("codec_name"), str) else None,
+        "width": ffprobe_number(video_stream.get("width"), integer=True),
+        "height": ffprobe_number(video_stream.get("height"), integer=True),
+        "fps": ffprobe_fps(video_stream.get("avg_frame_rate")) or ffprobe_fps(video_stream.get("r_frame_rate")),
+    }
+    audio = None if audio_stream is None else {
+        "codec": audio_stream.get("codec_name") if isinstance(audio_stream.get("codec_name"), str) else None,
+        "sampleRate": ffprobe_number(audio_stream.get("sample_rate"), integer=True),
+        "channels": ffprobe_number(audio_stream.get("channels"), integer=True),
+        "bitrateBps": ffprobe_number(audio_stream.get("bit_rate"), integer=True),
+    }
+    try:
+        size = item.physical_path.stat().st_size
+    except OSError as error:
+        raise AgentApiError("MEDIA_PROBE_FAILED", "The media file could not be inspected.") from error
+    log(f"media_probe path={item.logical_path} -> ok")
+    return {
+        "path": item.logical_path, "size": size,
+        "duration": ffprobe_number(format_data.get("duration")), "container": container,
+        "bitrateBps": ffprobe_number(format_data.get("bit_rate"), integer=True),
+        "streamCount": len(streams) if isinstance(streams, list) else 0,
+        "video": video, "audio": audio,
+    }
 
 
 def bounded_line(value: str) -> str:
@@ -964,6 +1206,18 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
                 "downloadFormats": formats,
                 "debug": debug_output,
             }
+        elif method == "POST" and path == "/workspace/list":
+            response_status, response_body = "200 OK", workspace_list(parse_json_body(body))
+        elif method == "POST" and path == "/workspace/stat":
+            response_status, response_body = "200 OK", workspace_stat(parse_json_body(body))
+        elif method == "POST" and path == "/workspace/mkdir":
+            response_status, response_body = "200 OK", workspace_mkdir(parse_json_body(body))
+        elif method == "POST" and path == "/workspace/move":
+            response_status, response_body = "200 OK", workspace_move(parse_json_body(body))
+        elif method == "POST" and path == "/workspace/delete":
+            response_status, response_body = "200 OK", workspace_delete(parse_json_body(body))
+        elif method == "POST" and path == "/media/probe":
+            response_status, response_body = "200 OK", await media_probe(parse_json_body(body))
         elif method == "POST" and path == "/tasks/youtube-download":
             response_status, response_body = "201 Created", await TASKS.create_download(parse_json_body(body))
         elif method == "GET" and path.startswith("/tasks/"):

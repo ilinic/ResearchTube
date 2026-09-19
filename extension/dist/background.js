@@ -16,8 +16,8 @@ var DEFAULTS = {
   youtubeSearchCooldownUntil: 0,
   youtubeSearchCooldownLevel: 0
 };
-var EXTENSION_VERSION = "1.8.9";
-var REQUIRED_AGENT_INTERFACE_VERSION = 6;
+var EXTENSION_VERSION = "1.9.0";
+var REQUIRED_AGENT_INTERFACE_VERSION = 7;
 var AGENT_HEALTH_TIMEOUT_MS = 5e3;
 var AGENT_TASK_TIMEOUT_MS = 1e4;
 var AGENT_FORMAT_PROBE_TIMEOUT_MS = 55e3;
@@ -333,11 +333,93 @@ var cancelDownloadTaskSchema = {
   properties: { taskId: { type: "string" }, accepted: { type: "boolean" }, message: { type: "string" } },
   required: ["taskId", "accepted", "message"]
 };
+var workspaceEntrySchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    name: { type: "string", description: "One name within the listed workspace directory, never a host path." },
+    path: { type: "string", description: "Logical POSIX-style path relative to the ResearchTube workspace." },
+    type: { type: "string", enum: ["file", "directory", "other"] },
+    size: { ...nullableInteger, minimum: 0, description: "Byte length for a regular file; null for directories and other objects." }
+  },
+  required: ["name", "path", "type", "size"]
+};
+var workspaceListSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    path: { type: "string", description: "The listed logical workspace directory; an empty string represents the workspace root." },
+    entries: { type: "array", maxItems: 500, items: workspaceEntrySchema },
+    returned: { type: "integer", minimum: 0 },
+    limit: { type: "integer", minimum: 1, maximum: 500 }
+  },
+  required: ["path", "entries", "returned", "limit"]
+};
+var workspaceStatSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    path: { type: "string", description: "Logical POSIX-style path relative to the ResearchTube workspace." },
+    type: { type: "string", enum: ["file", "directory"] },
+    size: { ...nullableInteger, minimum: 0 },
+    modifiedAt: { type: "string", format: "date-time" }
+  },
+  required: ["path", "type", "size", "modifiedAt"]
+};
+var workspaceMkdirSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: { path: { type: "string" }, type: { type: "string", const: "directory" }, created: { type: "boolean" } },
+  required: ["path", "type", "created"]
+};
+var workspaceMoveSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: { source: { type: "string" }, destination: { type: "string" }, type: { type: "string", enum: ["file", "directory"] } },
+  required: ["source", "destination", "type"]
+};
+var workspaceDeleteSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: { path: { type: "string" }, type: { type: "string", enum: ["file", "directory"] }, deleted: { type: "boolean", const: true } },
+  required: ["path", "type", "deleted"]
+};
+var mediaProbeStreamSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    codec: nullableString,
+    width: { ...nullableInteger, minimum: 0 },
+    height: { ...nullableInteger, minimum: 0 },
+    fps: { ...nullableNumber, minimum: 0 },
+    sampleRate: { ...nullableInteger, minimum: 0 },
+    channels: { ...nullableInteger, minimum: 0 },
+    bitrateBps: { ...nullableInteger, minimum: 0 }
+  },
+  required: ["codec", "width", "height", "fps", "sampleRate", "channels", "bitrateBps"]
+};
+var mediaProbeSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    path: { type: "string", description: "Logical POSIX-style media-file path relative to the ResearchTube workspace." },
+    size: { type: "integer", minimum: 0 },
+    duration: { ...nullableNumber, minimum: 0 },
+    container: nullableString,
+    bitrateBps: { ...nullableInteger, minimum: 0 },
+    streamCount: { type: "integer", minimum: 0 },
+    video: { anyOf: [mediaProbeStreamSchema, { type: "null" }] },
+    audio: { anyOf: [mediaProbeStreamSchema, { type: "null" }] }
+  },
+  required: ["path", "size", "duration", "container", "bitrateBps", "streamCount", "video", "audio"]
+};
 var pureReadAnnotations = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true };
 var localAgentReadAnnotations = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 var pageReadAnnotations = { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true };
 var localDownloadAnnotations = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false };
 var localDownloadReadAnnotations = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
+var localWorkspaceWriteAnnotations = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false };
+var localWorkspaceDeleteAnnotations = { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false };
 function toolDefinitions() {
   return [
     {
@@ -347,6 +429,54 @@ function toolDefinitions() {
       annotations: localAgentReadAnnotations,
       inputSchema: { type: "object", additionalProperties: false, properties: {} },
       outputSchema: agentStatusSchema
+    },
+    {
+      name: "workspace_list",
+      title: "List a ResearchTube workspace directory",
+      description: "List one directory inside the Local Agent's ResearchTube workspace. path uses only logical POSIX-style workspace-relative paths; pass an empty string to list the workspace root. Results are bounded by limit and never reveal a host filesystem path. This tool cannot read outside the workspace.",
+      annotations: localAgentReadAnnotations,
+      inputSchema: { type: "object", additionalProperties: false, properties: { path: { type: "string", default: "", description: "Logical workspace directory path. Use an empty string only for the workspace root; otherwise use / separators and no . or .. components." }, limit: { type: "integer", minimum: 1, maximum: 500, default: 100 } }, required: [] },
+      outputSchema: workspaceListSchema
+    },
+    {
+      name: "workspace_stat",
+      title: "Inspect a ResearchTube workspace file or directory",
+      description: "Return bounded metadata for one existing file or directory inside the Local Agent workspace. path is a logical POSIX-style workspace-relative path, never an operating-system path. It returns type, file size when applicable, and modification time; it never reads file contents.",
+      annotations: localAgentReadAnnotations,
+      inputSchema: { type: "object", additionalProperties: false, properties: { path: { type: "string", minLength: 1, description: "Logical workspace-relative POSIX path. Do not use absolute paths, backslashes, . or .. components." } }, required: ["path"] },
+      outputSchema: workspaceStatSchema
+    },
+    {
+      name: "workspace_mkdir",
+      title: "Create a ResearchTube workspace directory",
+      description: "Create a directory inside the Local Agent workspace. Missing parent directories are created. path is a logical POSIX-style workspace-relative path only; the built-in workspace sandbox rejects host paths, traversal, and filesystem redirects.",
+      annotations: { ...localWorkspaceWriteAnnotations, idempotentHint: true },
+      inputSchema: { type: "object", additionalProperties: false, properties: { path: { type: "string", minLength: 1, description: "Logical workspace-relative POSIX directory path." } }, required: ["path"] },
+      outputSchema: workspaceMkdirSchema
+    },
+    {
+      name: "workspace_move",
+      title: "Move or rename a ResearchTube workspace item",
+      description: "Move or rename one regular file or directory entirely inside the Local Agent workspace. Both source and destination are independently validated logical POSIX-style workspace-relative paths. The destination parent must already exist and this operation never overwrites an existing item.",
+      annotations: localWorkspaceWriteAnnotations,
+      inputSchema: { type: "object", additionalProperties: false, properties: { source: { type: "string", minLength: 1 }, destination: { type: "string", minLength: 1 } }, required: ["source", "destination"] },
+      outputSchema: workspaceMoveSchema
+    },
+    {
+      name: "workspace_delete",
+      title: "Delete a ResearchTube workspace item",
+      description: "Delete one regular file or one empty directory inside the Local Agent workspace. path is a logical POSIX-style workspace-relative path. Non-empty directories are refused; this tool never performs recursive deletion or accesses outside the workspace.",
+      annotations: localWorkspaceDeleteAnnotations,
+      inputSchema: { type: "object", additionalProperties: false, properties: { path: { type: "string", minLength: 1 } }, required: ["path"] },
+      outputSchema: workspaceDeleteSchema
+    },
+    {
+      name: "media_probe",
+      title: "Inspect a workspace media file",
+      description: "Use the Local Agent's ffprobe to inspect one existing media file inside the ResearchTube workspace. Returns a compact, normalized summary: size, duration, container, stream count, and first video/audio stream metadata. It never returns raw ffprobe JSON, host paths, media URLs, credentials, or tags.",
+      annotations: localAgentReadAnnotations,
+      inputSchema: { type: "object", additionalProperties: false, properties: { path: { type: "string", minLength: 1, description: "Logical workspace-relative POSIX path of a media file." } }, required: ["path"] },
+      outputSchema: mediaProbeSchema
     },
     {
       name: "youtube_download",
@@ -858,6 +988,116 @@ async function cancelYouTubeDownloadTask(taskId) {
   await agentJsonRequest(`/tasks/${encodeURIComponent(taskId)}/cancel`, { method: "POST", body: {} });
   return { taskId, accepted: true, message: "Cancellation request accepted. Poll youtube_get_download_task for the terminal status." };
 }
+function normalizeWorkspacePath(value, fieldName, { allowRoot = false } = {}) {
+  if (allowRoot && value === "") return "";
+  if (typeof value !== "string" || !value || value !== value.trim() || value.length > 1024 || value.includes("\0") || value.includes("\\") || value.startsWith("/") || /^[A-Za-z]:/.test(value)) {
+    throw localAgentError("WORKSPACE_PATH_INVALID", `${fieldName} must be a safe workspace-relative POSIX path.`);
+  }
+  const parts = value.split("/");
+  if (parts.some((part) => !part || part === "." || part === "..")) {
+    throw localAgentError("WORKSPACE_PATH_INVALID", `${fieldName} contains an invalid workspace path component.`);
+  }
+  return value;
+}
+function normalizeWorkspaceType(value, allowed) {
+  if (typeof value !== "string" || !allowed.includes(value)) {
+    throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid workspace item.");
+  }
+  return value;
+}
+function normalizeWorkspaceEntry(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value) || typeof value.name !== "string" || !value.name || value.name.includes("/") || value.name.includes("\\")) {
+    throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid workspace directory entry.");
+  }
+  return {
+    name: value.name,
+    path: normalizeWorkspacePath(value.path, "entry.path"),
+    type: normalizeWorkspaceType(value.type, ["file", "directory", "other"]),
+    size: nullableAgentNumber(value.size, true)
+  };
+}
+function normalizeWorkspaceStat(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value) || typeof value.modifiedAt !== "string") {
+    throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid workspace metadata.");
+  }
+  return {
+    path: normalizeWorkspacePath(value.path, "path"),
+    type: normalizeWorkspaceType(value.type, ["file", "directory"]),
+    size: nullableAgentNumber(value.size, true),
+    modifiedAt: value.modifiedAt
+  };
+}
+async function workspaceList(path = "", limit = 100) {
+  const normalizedPath = normalizeWorkspacePath(path, "path", { allowRoot: true });
+  const document = await agentJsonRequest("/workspace/list", { method: "POST", body: { path: normalizedPath, limit } });
+  if (!document || typeof document !== "object" || !Array.isArray(document.entries) || document.entries.length > 500 || !Number.isInteger(document.returned) || !Number.isInteger(document.limit)) {
+    throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid workspace listing.");
+  }
+  const entries = document.entries.map(normalizeWorkspaceEntry);
+  if (document.returned !== entries.length || document.limit !== limit) {
+    throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid workspace listing.");
+  }
+  return { path: normalizeWorkspacePath(document.path, "path", { allowRoot: true }), entries, returned: entries.length, limit };
+}
+async function workspaceStat(path) {
+  const document = await agentJsonRequest("/workspace/stat", { method: "POST", body: { path: normalizeWorkspacePath(path, "path") } });
+  return normalizeWorkspaceStat(document);
+}
+async function workspaceMkdir(path) {
+  const document = await agentJsonRequest("/workspace/mkdir", { method: "POST", body: { path: normalizeWorkspacePath(path, "path") } });
+  if (!document || typeof document !== "object" || document.type !== "directory" || typeof document.created !== "boolean") {
+    throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid mkdir result.");
+  }
+  return { path: normalizeWorkspacePath(document.path, "path"), type: "directory", created: document.created };
+}
+async function workspaceMove(source, destination) {
+  const input = { source: normalizeWorkspacePath(source, "source"), destination: normalizeWorkspacePath(destination, "destination") };
+  const document = await agentJsonRequest("/workspace/move", { method: "POST", body: input });
+  if (!document || typeof document !== "object" || document.source !== input.source || document.destination !== input.destination) {
+    throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid move result.");
+  }
+  return { source: input.source, destination: input.destination, type: normalizeWorkspaceType(document.type, ["file", "directory"]) };
+}
+async function workspaceDelete(path) {
+  const logicalPath = normalizeWorkspacePath(path, "path");
+  const document = await agentJsonRequest("/workspace/delete", { method: "POST", body: { path: logicalPath } });
+  if (!document || typeof document !== "object" || document.path !== logicalPath || document.deleted !== true) {
+    throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid delete result.");
+  }
+  return { path: logicalPath, type: normalizeWorkspaceType(document.type, ["file", "directory"]), deleted: true };
+}
+function normalizeMediaProbeStream(value) {
+  if (value === null) return null;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid media stream metadata.");
+  }
+  return {
+    codec: nullableAgentString(value.codec),
+    width: nullableAgentNumber(value.width, true),
+    height: nullableAgentNumber(value.height, true),
+    fps: nullableAgentNumber(value.fps),
+    sampleRate: nullableAgentNumber(value.sampleRate, true),
+    channels: nullableAgentNumber(value.channels, true),
+    bitrateBps: nullableAgentNumber(value.bitrateBps, true)
+  };
+}
+async function mediaProbe(path) {
+  const logicalPath = normalizeWorkspacePath(path, "path");
+  const document = await agentJsonRequest("/media/probe", { method: "POST", body: { path: logicalPath }, timeoutMs: AGENT_TASK_TIMEOUT_MS });
+  if (!document || typeof document !== "object" || document.path !== logicalPath || !Number.isInteger(document.size) || document.size < 0 || !Number.isInteger(document.streamCount) || document.streamCount < 0) {
+    throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid media metadata.");
+  }
+  return {
+    path: logicalPath,
+    size: document.size,
+    duration: nullableAgentNumber(document.duration),
+    container: nullableAgentString(document.container),
+    bitrateBps: nullableAgentNumber(document.bitrateBps, true),
+    streamCount: document.streamCount,
+    video: normalizeMediaProbeStream(document.video),
+    audio: normalizeMediaProbeStream(document.audio)
+  };
+}
 async function saveConnection(payload = {}) {
   const tunnelId = String(payload.tunnelId ?? "").trim();
   const apiKey = typeof payload.apiKey === "string" ? payload.apiKey.trim() : "";
@@ -1068,6 +1308,35 @@ async function handleMcpRequest(request) {
   }
   if (request?.method === "tools/call" && request.params?.name === "researchtube_agent_status") {
     return executeToolCall(request.id, "researchtube_agent_status", {}, () => getAgentStatus());
+  }
+  if (request?.method === "tools/call" && request.params?.name === "workspace_list") {
+    const args = request.params.arguments ?? {};
+    const path = args.path === void 0 ? "" : args.path;
+    const limit = args.limit === void 0 ? 100 : args.limit;
+    if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
+      return { jsonrpc: "2.0", id: request.id, error: { code: -32602, message: "limit must be an integer from 1 to 500" } };
+    }
+    return executeToolCall(request.id, "workspace_list", { path, limit }, () => workspaceList(path, limit));
+  }
+  if (request?.method === "tools/call" && request.params?.name === "workspace_stat") {
+    const path = request.params.arguments?.path;
+    return executeToolCall(request.id, "workspace_stat", { path }, () => workspaceStat(path));
+  }
+  if (request?.method === "tools/call" && request.params?.name === "workspace_mkdir") {
+    const path = request.params.arguments?.path;
+    return executeToolCall(request.id, "workspace_mkdir", { path }, () => workspaceMkdir(path));
+  }
+  if (request?.method === "tools/call" && request.params?.name === "workspace_move") {
+    const args = request.params.arguments ?? {};
+    return executeToolCall(request.id, "workspace_move", { source: args.source, destination: args.destination }, () => workspaceMove(args.source, args.destination));
+  }
+  if (request?.method === "tools/call" && request.params?.name === "workspace_delete") {
+    const path = request.params.arguments?.path;
+    return executeToolCall(request.id, "workspace_delete", { path }, () => workspaceDelete(path));
+  }
+  if (request?.method === "tools/call" && request.params?.name === "media_probe") {
+    const path = request.params.arguments?.path;
+    return executeToolCall(request.id, "media_probe", { path }, () => mediaProbe(path));
   }
   if (request?.method === "tools/call" && request.params?.name === "youtube_search") {
     const query = String(request.params.arguments?.query ?? "").trim();

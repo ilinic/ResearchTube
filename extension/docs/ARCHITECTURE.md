@@ -44,7 +44,7 @@ The extension is the local tunnel client and the MCP server. The OpenAI tunnel p
 | MAIN-world bridge | `youtube-page-bridge.src.js` → `youtube-page-bridge.js` | Runs in a `youtube.com` document and performs search, transcript, comment, and reply operations in the normal YouTube page origin without navigating the user's tab. |
 | Settings and popup | `onboarding.*`, `popup.*` | Provide the single local Settings page, status, connection-test UI, and toolbar status. The Tunnel ID and restricted OpenAI API key are stored in `chrome.storage.local`; the control-plane address is fixed in the service worker. |
 | Bundled dependency | `youtubei.js` | Used only in the MAIN-world bridge for comments and reply continuations. |
-| Optional Local Agent | `../agent/researchtube_agent.py` | Standard-library Python asyncio service that creates/checks its workspace and serves `GET /health` on `127.0.0.1`. It has no media or Task operations in Iteration 1. |
+| Optional Local Agent | `../agent/researchtube_agent.py` | Standard-library Python asyncio service on `127.0.0.1` that owns local executable discovery, downloads, built-in sandboxed workspace operations, and media probing. |
 
 ## Request lifecycle
 
@@ -79,31 +79,34 @@ The worker implements these MCP methods:
 
 - `initialize` returns server information `researchtube` and the tools capability.
 - `notifications/initialized` is acknowledged without a response payload.
-- `tools/list` returns the YouTube research tools plus `researchtube_agent_status`.
+- `tools/list` returns the YouTube research tools, Local Agent status, Local Agent download tools, sandboxed workspace tools, and `media_probe`.
 - `tools/call` validates arguments, executes the selected handler, and returns either a structured success result or a tool execution error.
 
 Successful calls include both `content` (JSON text for compatibility) and `structuredContent` (machine-readable output). Expected execution failures return `isError: true`; malformed JSON-RPC requests use JSON-RPC errors. Normal successful outputs contain research data only: they never expose selected tab IDs, page-bridge transport, client profile, session mode, or other execution diagnostics.
 
 Each tool definition has a title, an LLM-facing description, strict input and output JSON schemas (`additionalProperties: false`), and MCP annotations. Video metadata is read-only. Search, channel catalogues, playlists, transcript, comments, and replies are non-destructive but not strictly read-only because they may create an inactive local YouTube tab.
 
-### Optional Local Agent contract — Iteration 1
+### Optional Local Agent contract
 
-The Agent reads its optional `agent-config.json` `{ "port": 17843 }` and otherwise uses port `17843`. It binds only to `127.0.0.1`, creates/checks `agent/workspace/`, and uses the directory containing its script or executable as its installation root. Each component is resolved in a fixed order: local installation directory, then system `PATH`, then missing. It returns the following shape from `GET /health`:
+The Agent reads its optional `agent-config.json` `{ "port": 17843 }` and otherwise uses port `17843`. It binds only to `127.0.0.1`, creates/checks `agent/workspace/`, and uses the directory containing its script as its installation root. Components are resolved in a fixed order: their designated local `tools/` directory, then system `PATH`, then missing. Extension and Agent component versions are independent; the Extension uses the positive integer `interfaceVersion` to decide compatibility and refuses Agent-backed MCP tools unless it exactly equals its required interface version.
+
+`GET /health` returns only non-sensitive component metadata:
 
 ```json
 {
   "status": "ok",
-  "agentVersion": "0.1.0",
-  "workspace": { "status": "available", "path": ".../workspace", "message": null },
+  "agentVersion": "0.9.0",
+  "interfaceVersion": 7,
+  "workspace": { "status": "available" },
   "components": {
-    "ytDlp": { "status": "available|missing|error", "version": "...|null", "source": "local|path|null", "path": "...|null" },
-    "ffmpeg": { "status": "available|missing|error", "version": "...|null", "source": "local|path|null", "path": "...|null" },
-    "ffprobe": { "status": "available|missing|error", "version": "...|null", "source": "local|path|null", "path": "...|null" }
+    "ytDlp": { "status": "available|missing|error", "version": "...|null", "source": "local|path|null" },
+    "ffmpeg": { "status": "available|missing|error", "version": "...|null", "source": "local|path|null" },
+    "ffprobe": { "status": "available|missing|error", "version": "...|null", "source": "local|path|null" }
   }
 }
 ```
 
-`researchtube_agent_status` has no input. The extension normalizes the health response into a strict MCP output contract. If the Agent cannot be reached, it remains a successful tool result rather than an MCP error:
+`researchtube_agent_status` has no input. The Extension normalizes health into a strict MCP output contract. A missing or unreadable interface version is represented as `null` and is incompatible. If the Agent cannot be reached, the status call remains a successful tool result rather than an MCP error:
 
 ```json
 {
@@ -117,7 +120,7 @@ The Agent reads its optional `agent-config.json` `{ "port": 17843 }` and otherwi
 }
 ```
 
-This intentionally has no ping tool or Agent capability-list tool. The Settings page and popup use the same health request; Settings shows the resolved component source/path in the standard success or error result panel. The Agent writes compact `[HH:MM:SS]` startup and top-level-request messages to its console, without raw JSON packets. The Agent sets permissive CORS only for its non-secret loopback health data so the extension can read it; the extension never accepts a configurable Agent host.
+Physical workspace and executable paths are never returned through health or normal MCP calls. They may appear only in the local Agent console. The Agent writes compact `[HH:MM:SS]` startup and request messages to that console, and the Extension never accepts a configurable Agent host.
 
 ## Tool data paths
 
@@ -125,13 +128,13 @@ This intentionally has no ping tool or Agent capability-list tool. The Settings 
 
 The worker routes search through the MAIN-world bridge in an already open YouTube document. The bridge anonymously fetches `/results?search_query=...`, extracts `ytInitialData`, and normalises `videoRenderer` entries. If the first page is not enough, it follows the search continuation through `youtubei/v1/search` using public client data extracted from the response. The bridge never changes the selected tab's URL, playback, or DOM.
 
-Output is a compact result list with ID, title, channel, URL, duration and publication text, normalized integer views plus YouTube's display text, and a snippet when available.
+Output is a compact result list with ID, title, channel, duration and publication text, normalized integer views plus YouTube's display text, and a snippet when available. Canonical video URLs are not exposed.
 
 ### Channel catalogue: `youtube_get_channel_videos`
 
 The bridge anonymously fetches the selected channel's `/videos` page. It accepts an `@handle`, complete YouTube channel URL, or `UC...` channel ID, extracts the channel identity and compact video cards from `ytInitialData`, and follows an explicitly supplied opaque continuation through `/youtubei/v1/browse` when needed. Both legacy `gridVideoRenderer` / `videoRenderer` cards and current `lockupViewModel` cards are normalized to the same stable output.
 
-Each item contains the video ID, title, watch URL, duration and duration in seconds, publication display text, normalized integer views plus display text, and Shorts/live flags. Catalogue pages do not reliably include like or comment counts, so callers use `youtube_get_video` only for selected videos that need those details. The optional `includeShorts` and `includeStreams` filters are applied to YouTube's own renderer labels.
+Each item contains the video ID, title, duration and duration in seconds, publication display text, normalized integer views plus display text, and Shorts/live flags. Catalogue pages do not reliably include like or comment counts, so callers use `youtube_get_video` only for selected videos that need those details. The optional `includeShorts` and `includeStreams` filters are applied to YouTube's own renderer labels.
 
 ### Channel playlists: `youtube_get_channel_playlists`
 
@@ -177,6 +180,25 @@ Each thread is normalised to a stable, compact public representation: explicit Y
 ### Replies: `youtube_get_comment_replies`
 
 The tool first loads the comment area for the supplied video, finds the selected top-level `commentId`, obtains its thread, and follows reply continuations until the requested limit. It returns a compact parent summary, ranked replies, and `totalReplies` alongside `returned`, so a caller can distinguish the loaded sample from the whole discussion. It returns only that branch; it does not re-enumerate all top-level comments.
+
+### Built-in workspace tools and media probe
+
+The following Local Agent tools form the built-in filesystem layer:
+
+- `workspace_list(path = "", limit = 100)` lists one directory. The empty string is the only representation of the workspace root; results are bounded to 500 entries.
+- `workspace_stat(path)` returns type, file size when applicable, and modification time for one existing object.
+- `workspace_mkdir(path)` creates a directory and any missing parents. It reports whether the final directory was newly created.
+- `workspace_move(source, destination)` moves or renames one regular file or directory. Its destination parent must exist and it never overwrites.
+- `workspace_delete(path)` deletes one regular file or one empty directory. It deliberately has no recursive mode.
+- `media_probe(path)` invokes the locally resolved `ffprobe` with a fixed argument vector and returns only normalized container, duration, stream count, and first video/audio-stream metadata.
+
+All built-in paths are **ResearchTube logical paths**, not operating-system paths. They are workspace-relative, use `/` on every platform, and never reveal the physical location of `agent/workspace/`. Except for the explicit empty root path accepted by `workspace_list`, a path is non-empty and consists of safe components only. The built-in grammar rejects absolute paths, drive and UNC paths, backslashes, NUL, empty components, and `.` or `..` components. New path components also reject Windows-reserved or non-portable filename forms.
+
+`WorkspacePathResolver` is the single path-validation layer used by download output directories and all built-in filesystem/media operations. It validates logical components, constructs a native path from those components, resolves it relative to the canonical workspace root, checks path-aware containment, and refuses symbolic links and supported junction/reparse-point redirects in traversed components. Raw MCP path text is therefore never passed directly to filesystem mutators, `ffprobe`, `ffmpeg`, or `yt-dlp`.
+
+The Extension independently validates logical inputs and allowlists every Agent response field before publishing it to MCP. Expected failures use structured codes such as `WORKSPACE_PATH_INVALID`, `WORKSPACE_PATH_OUTSIDE_SANDBOX`, `FILE_NOT_FOUND`, `DIRECTORY_NOT_FOUND`, `DESTINATION_EXISTS`, `DIRECTORY_NOT_EMPTY`, `FFPROBE_NOT_AVAILABLE`, and `MEDIA_PROBE_FAILED`. Error text does not contain physical host paths.
+
+This sandbox applies only to **built-in ResearchTube filesystem and media tools**. Future external ResearchTube modules are trusted arbitrary local programs: they run with the current operating-system user's permissions and are not sandboxed by ResearchTube. The built-in workspace restriction must never be presented as a restriction on such modules.
 
 ## Page-context bridge
 
