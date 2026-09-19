@@ -12,14 +12,49 @@ function escapeHtml(value) { const element = document.createElement("span"); ele
 function renderResult(result) { const box = $("test-result"); box.hidden = false; box.className = result.ok ? "ok" : "error"; if (result.ok) box.innerHTML = "<strong>Connection successful.</strong><br>✓ API key accepted<br>✓ Tunnel found<br>✓ ResearchTube can access the tunnel"; else { const message = messages[result.errorCode] || result.message || "Connection test failed."; box.innerHTML = `<strong>${escapeHtml(message)}</strong>${result.detail ? `<details><summary>Technical details</summary>${escapeHtml(result.detail)}</details>` : ""}`; } }
 function formatStatus(state) { const test = state.lastConnectionTest; if (!test) return state.configured ? "Connection configured. No connection test has been run yet." : "Connection is not configured."; const when = new Date(test.timestamp).toLocaleString(); return test.success ? `Last connection test: Successful — ${when}` : `Last connection test: Failed — ${when}`; }
 async function refreshStatus() { const state = await call({ type: "status" }); $("status").textContent = formatStatus(state); return state; }
+function componentLabel(name) { return name === "ytDlp" ? "yt-dlp" : name; }
+function componentDetail(component) {
+  const version = component.version ? ` — ${component.version}` : "";
+  const resolved = component.source && component.path ? ` (${component.source === "path" ? "PATH" : "local"}: ${component.path})` : "";
+  return `${component.status}${version}${resolved}`;
+}
+function appendTextLine(parent, text) { const line = document.createElement("div"); line.textContent = text; parent.append(line); }
+function renderAgentResult(result) {
+  const box = $("agent-result");
+  box.hidden = false;
+  box.replaceChildren();
+  box.className = result?.ok ? "ok" : "error";
+  const title = document.createElement("strong");
+  title.textContent = result?.ok ? `Local Agent connected — version ${result.agentVersion || "unknown"}.` : (result?.message || "ResearchTube Local Agent is unavailable.");
+  box.append(title);
+  if (!result?.ok) return;
+  const details = document.createElement("div");
+  details.className = "health-lines";
+  const workspace = result.workspace;
+  appendTextLine(details, `Workspace: ${workspace?.status || "unknown"}${workspace?.path ? ` — ${workspace.path}` : ""}`);
+  for (const [name, component] of Object.entries(result.components || {})) appendTextLine(details, `${componentLabel(name)}: ${componentDetail(component)}`);
+  box.append(details);
+}
+async function testAgentConnection() {
+  const button = $("test-agent");
+  button.disabled = true;
+  button.textContent = "Testing…";
+  try {
+    renderAgentResult(await call({ type: "test-agent-connection", payload: { port: $("agent-port").value } }));
+  } finally {
+    button.disabled = false;
+    button.textContent = "Test connection";
+  }
+}
 async function refreshDiagnostics() { const result = await call({ type: "get-diagnostics" }); const summary = $("diagnostics-summary"); if (!result?.ok) { summary.textContent = "Diagnostics are unavailable."; return result; } const count = Number(result.commandEntryCount || 0) + Number(result.searchEntryCount || 0); summary.textContent = count ? `${count} local event${count === 1 ? "" : "s"} captured (${result.commandEntryCount || 0} tool, ${result.searchEntryCount || 0} search). Copy the log after reproducing the problem.` : "No diagnostic events captured yet."; return result; }
 async function saveAndTest() { $("test-connection").disabled = true; $("test-connection").textContent = "Testing…"; const saved = await call({ type: "save-connection", payload: { tunnelId: $("tunnel-id").value, apiKey: $("api-key").value } }); const result = saved.ok ? await call({ type: "test-connection" }) : saved; renderResult(result); if (result.ok) { await call({ type: "save-connection", payload: { tunnelId: $("tunnel-id").value, onboardingCompleted: true } }); $("api-key").value = ""; $("api-key").placeholder = "••••••••••••••••"; } await refreshStatus(); $("test-connection").disabled = false; $("test-connection").textContent = "Save and test connection"; }
 $("test-connection").addEventListener("click", saveAndTest);
+$("test-agent").addEventListener("click", testAgentConnection);
 document.querySelectorAll("[data-open]").forEach((link) => link.addEventListener("click", (event) => { event.preventDefault(); call({ type: "open-external", target: link.dataset.open }); }));
 $("copy-tunnel").addEventListener("click", async () => { await navigator.clipboard.writeText($("tunnel-id").value.trim()); $("copy-tunnel").textContent = "Copied"; setTimeout(() => { $("copy-tunnel").textContent = "Copy Tunnel ID"; }, 1400); });
 $("copy-app-name").addEventListener("click", async () => { await navigator.clipboard.writeText("ResearchTube"); $("copy-app-name").textContent = "Copied"; setTimeout(() => { $("copy-app-name").textContent = "Copy name"; }, 1400); });
 $("copy-prompt").addEventListener("click", async () => { await navigator.clipboard.writeText($("example-prompt").textContent.trim()); $("copy-prompt").textContent = "Copied"; setTimeout(() => { $("copy-prompt").textContent = "Copy example prompt"; }, 1400); });
 $("copy-diagnostics").addEventListener("click", async () => { const button = $("copy-diagnostics"); const result = await call({ type: "get-diagnostics" }); if (!result?.ok) { $("diagnostics-summary").textContent = "Could not export diagnostics."; return; } await navigator.clipboard.writeText(result.text); button.textContent = "Copied"; setTimeout(() => { button.textContent = "Copy diagnostics log"; }, 1400); });
 $("clear-diagnostics").addEventListener("click", async () => { const result = await call({ type: "clear-diagnostics" }); if (result?.ok) { $("diagnostics-summary").textContent = "No diagnostic events captured yet."; } else { $("diagnostics-summary").textContent = "Could not clear diagnostics."; } });
-async function init() { const state = await refreshStatus(); $("tunnel-id").value = state.tunnelId || ""; if (state.apiKeyPresent) $("api-key").placeholder = "••••••••••••••••"; await refreshDiagnostics(); }
+async function init() { const state = await refreshStatus(); $("tunnel-id").value = state.tunnelId || ""; $("agent-port").value = state.agentPort || 17843; if (state.apiKeyPresent) $("api-key").placeholder = "••••••••••••••••"; await refreshDiagnostics(); }
 init();

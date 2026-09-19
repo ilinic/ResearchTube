@@ -23,7 +23,7 @@
 
       <label for="tunnel-id">Tunnel ID <span class="required" aria-label="required">*</span></label>
       <div class="copy-row"><input id="tunnel-id" type="text" autocomplete="off" spellcheck="false" placeholder="tunnel_…" required><button id="copy-tunnel" class="secondary" type="button">Copy Tunnel ID</button></div>
-      <p class="field-help">Paste the Tunnel ID, e.g. <code>tunnel_abc123…</code>. Open <a href="#" data-open="tunnels">OpenAI Tunnels <svg class="external-link-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7M21 3l-9 9M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg></a></p>
+      <p class="field-help">Use the Tunnel ID from <a href="#" data-open="tunnels">OpenAI Tunnels <svg class="external-link-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7M21 3l-9 9M21 14v5a2 2 0 0 1-2-2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg></a></p>
 
       <div class="actions"><button id="test-connection">Save and test connection</button></div>
       <div id="test-result" hidden role="status"></div>
@@ -45,6 +45,14 @@
       <h2>3. Try ResearchTube</h2>
       <div class="example-row"><blockquote id="example-prompt">@ResearchTube Search YouTube for recent videos about quantum computing. Read the relevant transcripts and summarize the main ideas.</blockquote><button id="copy-prompt" class="secondary" type="button">Copy example prompt</button></div>
       <p class="field-help">Open a new <a href="#" data-open="chatgptNewChat">ChatGPT chat <svg class="external-link-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7M21 3l-9 9M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg></a> and paste the example prompt.</p>
+    </section>
+
+    <section>
+      <h2>Local Agent (optional)</h2>
+      <p class="intro">The Local Agent prepares a private workspace for future local media features. It listens only on <code>127.0.0.1</code>; YouTube research works normally when it is stopped.</p>
+      <label for="agent-port">Port</label>
+      <div class="copy-row"><input id="agent-port" type="number" min="1" max="65535" inputmode="numeric" value="17843" required><button id="test-agent" class="secondary" type="button">Test connection</button></div>
+      <div id="agent-result" hidden role="status"></div>
     </section>
 
     <section>

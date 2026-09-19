@@ -32,7 +32,7 @@ sequenceDiagram
     T-->>C: Tool result
 ```
 
-The extension is the local tunnel client and the MCP server. The OpenAI tunnel provides the private, outbound-only transport; it does not expose a listener on the user's computer.
+The extension is the local tunnel client and the MCP server. The OpenAI tunnel provides the private, outbound-only transport; it does not expose a listener on the user's computer. The optional Local Agent is a separate loopback-only helper; it is not part of the public MCP transport.
 
 ## Components
 
@@ -44,6 +44,7 @@ The extension is the local tunnel client and the MCP server. The OpenAI tunnel p
 | MAIN-world bridge | `youtube-page-bridge.src.js` → `youtube-page-bridge.js` | Runs in a `youtube.com` document and performs search, transcript, comment, and reply operations in the normal YouTube page origin without navigating the user's tab. |
 | Settings and popup | `onboarding.*`, `popup.*` | Provide the single local Settings page, status, connection-test UI, and toolbar status. The Tunnel ID and restricted OpenAI API key are stored in `chrome.storage.local`; the control-plane address is fixed in the service worker. |
 | Bundled dependency | `youtubei.js` | Used only in the MAIN-world bridge for comments and reply continuations. |
+| Optional Local Agent | `../agent/researchtube_agent.py` | Standard-library Python asyncio service that creates/checks its workspace and serves `GET /health` on `127.0.0.1`. It has no media or Task operations in Iteration 1. |
 
 ## Request lifecycle
 
@@ -78,12 +79,45 @@ The worker implements these MCP methods:
 
 - `initialize` returns server information `researchtube` and the tools capability.
 - `notifications/initialized` is acknowledged without a response payload.
-- `tools/list` returns the eight production tool definitions.
+- `tools/list` returns the YouTube research tools plus `researchtube_agent_status`.
 - `tools/call` validates arguments, executes the selected handler, and returns either a structured success result or a tool execution error.
 
 Successful calls include both `content` (JSON text for compatibility) and `structuredContent` (machine-readable output). Expected execution failures return `isError: true`; malformed JSON-RPC requests use JSON-RPC errors. Normal successful outputs contain research data only: they never expose selected tab IDs, page-bridge transport, client profile, session mode, or other execution diagnostics.
 
 Each tool definition has a title, an LLM-facing description, strict input and output JSON schemas (`additionalProperties: false`), and MCP annotations. Video metadata is read-only. Search, channel catalogues, playlists, transcript, comments, and replies are non-destructive but not strictly read-only because they may create an inactive local YouTube tab.
+
+### Optional Local Agent contract — Iteration 1
+
+The Agent reads its optional `agent-config.json` `{ "port": 17843 }` and otherwise uses port `17843`. It binds only to `127.0.0.1`, creates/checks `agent/workspace/`, and uses the directory containing its script or executable as its installation root. Each component is resolved in a fixed order: local installation directory, then system `PATH`, then missing. It returns the following shape from `GET /health`:
+
+```json
+{
+  "status": "ok",
+  "agentVersion": "0.1.0",
+  "workspace": { "status": "available", "path": ".../workspace", "message": null },
+  "components": {
+    "ytDlp": { "status": "available|missing|error", "version": "...|null", "source": "local|path|null", "path": "...|null" },
+    "ffmpeg": { "status": "available|missing|error", "version": "...|null", "source": "local|path|null", "path": "...|null" },
+    "ffprobe": { "status": "available|missing|error", "version": "...|null", "source": "local|path|null", "path": "...|null" }
+  }
+}
+```
+
+`researchtube_agent_status` has no input. The extension normalizes the health response into a strict MCP output contract. If the Agent cannot be reached, it remains a successful tool result rather than an MCP error:
+
+```json
+{
+  "available": false,
+  "error": "AGENT_UNAVAILABLE",
+  "message": "ResearchTube Local Agent is not available on port 17843.",
+  "status": null,
+  "agentVersion": null,
+  "workspace": null,
+  "components": null
+}
+```
+
+This intentionally has no ping tool or Agent capability-list tool. The Settings page and popup use the same health request; Settings shows the resolved component source/path in the standard success or error result panel. The Agent writes compact `[HH:MM:SS]` startup and top-level-request messages to its console, without raw JSON packets. The Agent sets permissive CORS only for its non-secret loopback health data so the extension can read it; the extension never accepts a configurable Agent host.
 
 ## Tool data paths
 
@@ -183,6 +217,7 @@ Use a dedicated key with only `Tunnels: Read + Use`. Creating or changing a tunn
 | `scripting` | Inject local bridge scripts into a pre-existing YouTube tab when necessary. |
 | `https://api.openai.com/*` | Tunnel control-plane polling and responses. |
 | `https://www.youtube.com/*` | Public YouTube pages and MAIN-world bridge injection. |
+| `http://127.0.0.1/*` | Read the optional Local Agent's loopback-only `/health` endpoint. |
 
 ## Build and verification
 

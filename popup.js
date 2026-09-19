@@ -1,9 +1,0 @@
-const $ = (id) => document.getElementById(id);
-async function call(message) { return chrome.runtime.sendMessage(message); }
-function shortTunnel(id) { return id && id.length > 14 ? `${id.slice(0, 9)}…${id.slice(-4)}` : id || "Not configured"; }
-function setResult(result) { const box = $("result"); box.hidden = false; box.className = result.ok ? "ok" : "error"; box.textContent = result.ok ? "Connection successful." : (result.message || "Connection test failed."); }
-async function load() { const state = await call({ type: "status" }); const tested = state.lastConnectionTest; const configured = state.configured; const youtubeSearch = state.youtubeSearch; const searchLimited = Boolean(youtubeSearch?.rateLimited); $("state").textContent = searchLimited ? "YouTube search temporarily limited" : (configured ? "Local tunnel connection" : "Settings required"); $("tunnel-status").textContent = shortTunnel(state.tunnelId); $("tunnel-status").className = configured ? "good" : "bad"; $("youtube-status").textContent = searchLimited ? `Search paused — retry in ${youtubeSearch.retryAfterSeconds}s` : "Ready"; $("youtube-status").className = searchLimited ? "warn" : "good"; $("test-status").textContent = tested ? (tested.success ? "Successful" : "Failed") : "Not run"; $("test-status").className = tested?.success ? "good" : (tested ? "bad" : ""); }
-$("test").addEventListener("click", async () => { $("test").disabled = true; $("test").textContent = "Testing…"; const result = await call({ type: "test-connection" }); setResult(result); await load(); $("test").disabled = false; $("test").textContent = "Test connection"; });
-$("chatgpt").addEventListener("click", () => call({ type: "open-external", target: "chatgptNewChat" }));
-$("settings").addEventListener("click", () => chrome.runtime.openOptionsPage());
-load();

@@ -12,10 +12,15 @@ var DEFAULTS = {
   runtimeApiKey: "",
   onboardingCompleted: false,
   lastConnectionTest: null,
+  agentPort: 17843,
   youtubeSearchCooldownUntil: 0,
   youtubeSearchCooldownLevel: 0
 };
-var PAGE_BRIDGE_VERSION = "1.4.3";
+var EXTENSION_VERSION = "1.8.7";
+var REQUIRED_AGENT_INTERFACE_VERSION = 6;
+var AGENT_HEALTH_TIMEOUT_MS = 5e3;
+var AGENT_TASK_TIMEOUT_MS = 1e4;
+var AGENT_FORMAT_PROBE_TIMEOUT_MS = 55e3;
 var POLL_RETRY_DELAY_MS = 250;
 var SEARCH_MIN_START_INTERVAL_MS = 500;
 var SEARCH_CACHE_TTL_MS = 5 * 6e4;
@@ -36,6 +41,59 @@ var commandDiagnosticWrite = Promise.resolve();
 var searchCache = /* @__PURE__ */ new Map();
 var nullableString = { type: ["string", "null"] };
 var nullableInteger = { type: ["integer", "null"] };
+var nullableNumber = { type: ["number", "null"] };
+var downloadFormatSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    formatId: { type: "string", description: "YouTube stream identifier (itag) for this exact format snapshot. Pass it unchanged only when explicitly selecting this stream for download." },
+    kind: { type: "string", enum: ["combined", "video", "audio"], description: "combined contains video and audio; video and audio are separate tracks." },
+    container: { ...nullableString, description: "Media container announced by YouTube, for example mp4, webm, or m4a; null only if absent." },
+    videoCodec: { ...nullableString, description: "Video codec identifier announced by YouTube, for example avc1, vp9, or av01; null for audio-only tracks." },
+    audioCodec: { ...nullableString, description: "Audio codec identifier announced by YouTube, for example mp4a or opus; null for video-only tracks." },
+    width: { ...nullableInteger, minimum: 0, description: "Encoded video width in pixels; null for audio-only tracks or when YouTube omits it." },
+    height: { ...nullableInteger, minimum: 0, description: "Encoded video height in pixels; null for audio-only tracks or when YouTube omits it." },
+    fps: { ...nullableNumber, minimum: 0, description: "Encoded video frames per second; null for audio-only tracks or when YouTube omits it." },
+    bitrateBps: { ...nullableInteger, minimum: 0, description: "Advertised average or nominal stream bitrate in bits per second; null when YouTube omits it." },
+    audioSampleRateHz: { ...nullableInteger, minimum: 0, description: "Audio sample rate in hertz; null when YouTube omits it or the track has no audio." },
+    audioChannels: { ...nullableInteger, minimum: 0, description: "Number of audio channels; null when YouTube omits it or the track has no audio." },
+    qualityLabel: { ...nullableString, description: "YouTube's human-readable quality label, for example 1080p; null when unavailable." },
+    sizeBytes: { ...nullableInteger, minimum: 0, description: "Exact byte length of this individual source track when YouTube provides contentLength; otherwise null. For two manually selected tracks, their sum is a near-final output-size estimate before container overhead." }
+  },
+  required: ["formatId", "kind", "container", "videoCodec", "audioCodec", "width", "height", "fps", "bitrateBps", "audioSampleRateHz", "audioChannels", "qualityLabel", "sizeBytes"]
+};
+var downloadFormatsSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    available: { type: "boolean", description: "True when the current public YouTube player response exposed at least one usable media stream." },
+    source: { type: "string", enum: ["youtube", "unavailable"], description: "youtube means the list came directly from the YouTube player response used for this video card. unavailable means YouTube did not expose a usable stream list." },
+    message: { ...nullableString, description: "Why formats are unavailable, if known. It never contains media URLs, credentials, or local paths." },
+    combined: { type: "array", items: downloadFormatSchema, description: "YouTube streams that already contain both video and audio and therefore do not need merging." },
+    video: { type: "array", items: downloadFormatSchema, description: "YouTube video-only tracks. Pair one with an audio track to download and merge through ffmpeg." },
+    audio: { type: "array", items: downloadFormatSchema, description: "YouTube audio-only tracks. They can be downloaded alone or paired with one video track." }
+  },
+  required: ["available", "source", "message", "combined", "video", "audio"]
+};
+var ytDlpDownloadFormatsSchema = {
+  ...downloadFormatsSchema,
+  properties: {
+    ...downloadFormatsSchema.properties,
+    source: { type: "string", const: "ytDlp", description: "This diagnostic list was resolved by the currently configured local yt-dlp with the same Deno runtime and automatic YouTube client selection used by downloads." },
+    message: { ...nullableString, description: "Explanation when yt-dlp could not return a comparable format list. It never exposes media URLs, credentials, command lines, or local paths." }
+  }
+};
+var ytDlpFormatProbeDebugSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    command: { type: "array", items: { type: "string" }, description: "Exact local argv passed to yt-dlp. In debug mode it may include local executable paths." },
+    exitCode: { type: ["integer", "null"], description: "yt-dlp process exit code; null only when the process could not start." },
+    stdout: { type: "string", description: "Complete unmodified yt-dlp standard output for this one probe. It may include temporary media URLs and other local diagnostic data." },
+    stderr: { type: "string", description: "Complete unmodified yt-dlp standard error for this one probe. It may include temporary media URLs and other local diagnostic data." }
+  },
+  required: ["command", "exitCode", "stdout", "stderr"]
+};
 var videoSearchItemSchema = {
   type: "object",
   additionalProperties: false,
@@ -43,14 +101,13 @@ var videoSearchItemSchema = {
     videoId: { type: "string" },
     title: { type: "string" },
     channel: { type: "string" },
-    url: { type: "string" },
     durationText: nullableString,
     publishedText: nullableString,
     views: nullableInteger,
     viewsText: nullableString,
     snippet: nullableString
   },
-  required: ["videoId", "title", "channel", "url", "durationText", "publishedText", "views", "viewsText", "snippet"]
+  required: ["videoId", "title", "channel", "durationText", "publishedText", "views", "viewsText", "snippet"]
 };
 var channelIdentitySchema = {
   type: "object",
@@ -65,7 +122,6 @@ var channelVideoItemSchema = {
     videoId: { type: "string", description: "YouTube video ID for youtube_get_video, youtube_get_transcript, or youtube_get_comments." },
     title: { type: "string", description: "Public video title as displayed by YouTube." },
     channel: { ...nullableString, description: "Video owner name when present on the card; otherwise the known parent channel or playlist owner; null only if YouTube supplied neither." },
-    url: { type: "string", description: "Canonical public watch URL constructed from videoId." },
     position: { ...nullableInteger, minimum: 0, description: "Zero-based playlist item index supplied by YouTube; null for channel catalogues or when YouTube does not expose an index." },
     durationSeconds: { ...nullableInteger, minimum: 0, description: "Normalized duration derived from durationText; null for live, upcoming, or undisclosed-duration items." },
     durationText: { ...nullableString, description: "YouTube's displayed duration, normally H:MM:SS or M:SS; null when absent." },
@@ -76,7 +132,7 @@ var channelVideoItemSchema = {
     isShort: { type: "boolean", description: "True only when the card is identified as a YouTube Short." },
     isLive: { type: "boolean", description: "True for live, upcoming, streamed, or premiered items indicated by YouTube." }
   },
-  required: ["videoId", "title", "channel", "url", "position", "durationSeconds", "durationText", "publishedAt", "publishedText", "views", "viewsText", "isShort", "isLive"]
+  required: ["videoId", "title", "channel", "position", "durationSeconds", "durationText", "publishedAt", "publishedText", "views", "viewsText", "isShort", "isLive"]
 };
 var playlistItemSchema = {
   type: "object",
@@ -160,14 +216,175 @@ var commentParentSchema = {
   },
   required: ["commentId", "text", "likes", "likesText", "replyCount", "replyCountText"]
 };
+var agentWorkspaceSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: { status: { type: "string", enum: ["available", "error"] } },
+  required: ["status"]
+};
+var agentComponentSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    status: { type: "string", enum: ["available", "missing", "error"] },
+    version: nullableString,
+    source: { anyOf: [{ type: "string", enum: ["local", "path"] }, { type: "null" }] },
+    message: nullableString
+  },
+  required: ["status", "version", "source", "message"]
+};
+var agentStatusSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    available: { type: "boolean", description: "Whether the optional Local Agent responded on the configured loopback port." },
+    error: nullableString,
+    message: { type: "string" },
+    status: nullableString,
+    extensionVersion: { type: "string", description: "ResearchTube Chrome Extension implementation version that is serving this MCP response." },
+    extensionInterfaceVersion: { type: "integer", minimum: 1, description: "Extension \u2194 Agent interface version required by this Extension." },
+    agentVersion: nullableString,
+    interfaceVersion: { ...nullableInteger, minimum: 1, description: "Local Agent interface version. null means the response did not contain a readable positive integer, so the Agent is not accepted for Agent tools." },
+    workspace: { anyOf: [agentWorkspaceSchema, { type: "null" }] },
+    components: {
+      anyOf: [{
+        type: "object",
+        additionalProperties: false,
+        properties: { ytDlp: agentComponentSchema, deno: agentComponentSchema, ffmpeg: agentComponentSchema, ffprobe: agentComponentSchema },
+        required: ["ytDlp", "deno", "ffmpeg", "ffprobe"]
+      }, { type: "null" }]
+    }
+  },
+  required: ["available", "error", "message", "status", "extensionVersion", "extensionInterfaceVersion", "agentVersion", "interfaceVersion", "workspace", "components"]
+};
+var youtubeDownloadResultSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    videoId: { type: "string", description: "YouTube video ID requested for download." },
+    filePath: { type: "string", description: "Path relative to the Local Agent workspace; it never exposes an arbitrary system path." },
+    fileName: { type: "string", description: "Sanitized downloaded filename, including [yt_<videoId>] and the task ID." },
+    outputDir: { type: "string", description: "Workspace-relative output directory used for this download." }
+  },
+  required: ["videoId", "filePath", "fileName", "outputDir"]
+};
+var downloadSelectionValueSchema = {
+  anyOf: [
+    { type: "string", enum: ["best"] },
+    { type: "string", pattern: "^[0-9]+$" },
+    { type: "null" }
+  ]
+};
+var downloadSelectionSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    combined: { ...downloadSelectionValueSchema, description: "One ready-made audio+video track: 'best' or a numeric formatId from downloadFormats.combined. Do not set video or audio at the same time." },
+    video: { ...downloadSelectionValueSchema, description: "One video-only track: 'best' or a numeric formatId from downloadFormats.video." },
+    audio: { ...downloadSelectionValueSchema, description: "One audio-only track: 'best' or a numeric formatId from downloadFormats.audio." }
+  },
+  description: "Select exactly one mode: combined alone; video alone; audio alone; or video plus audio. With video plus audio the Agent merges the exact tracks into MP4 without re-encoding."
+};
+var downloadPhaseSchema = {
+  type: "string",
+  enum: ["preparing", "downloadingCombined", "downloadingVideo", "downloadingAudio", "merging", "completed", "failed", "cancelled"]
+};
+var downloadTaskErrorSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: { code: { type: "string" }, message: { type: "string" }, detail: nullableString },
+  required: ["code", "message", "detail"]
+};
+var youtubeDownloadStartSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    taskId: { type: "string", description: "Opaque Local Agent download task ID. Pass it unchanged to youtube_get_download_task or youtube_cancel_download_task." },
+    status: { type: "string", enum: ["working"], description: "The download has been created and is running asynchronously." },
+    statusMessage: { type: "string" },
+    phase: { ...downloadPhaseSchema, description: "Current yt-dlp operation phase. A new task begins in preparing." },
+    createdAt: { type: "string", format: "date-time" },
+    lastUpdatedAt: { type: "string", format: "date-time", description: "The time of the most recent progress, lifecycle, or liveness-heartbeat update." },
+    pollIntervalMs: { type: "integer", minimum: 100, description: "Suggested minimum interval before calling youtube_get_download_task again." },
+    progressPercent: { type: ["number", "null"], minimum: 0, maximum: 100, description: "Percent of the current phase; null while preparing. It is 100 once the task is completed." }
+  },
+  required: ["taskId", "status", "statusMessage", "phase", "createdAt", "lastUpdatedAt", "pollIntervalMs", "progressPercent"]
+};
+var youtubeDownloadTaskSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    taskId: { type: "string" },
+    status: { type: "string", enum: ["working", "completed", "failed", "cancelled"] },
+    statusMessage: { type: "string" },
+    phase: { ...downloadPhaseSchema, description: "Current task operation. A video+audio download normally advances downloadingVideo \u2192 downloadingAudio \u2192 merging \u2192 completed." },
+    createdAt: { type: "string", format: "date-time" },
+    lastUpdatedAt: { type: "string", format: "date-time", description: "Updated on a yt-dlp progress event, a lifecycle transition, or at least every few seconds while the child process is alive." },
+    pollIntervalMs: { type: "integer", minimum: 100 },
+    progressPercent: { type: ["number", "null"], minimum: 0, maximum: 100, description: "yt-dlp percentage for the current phase, not an invented whole-task percentage. It resets when a selected video+audio task advances from video to audio, is null while merging, and is 100 only after completed." },
+    result: { anyOf: [youtubeDownloadResultSchema, { type: "null" }] },
+    error: { anyOf: [downloadTaskErrorSchema, { type: "null" }] }
+  },
+  required: ["taskId", "status", "statusMessage", "phase", "createdAt", "lastUpdatedAt", "pollIntervalMs", "progressPercent", "result", "error"]
+};
+var cancelDownloadTaskSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: { taskId: { type: "string" }, accepted: { type: "boolean" }, message: { type: "string" } },
+  required: ["taskId", "accepted", "message"]
+};
 var pureReadAnnotations = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true };
+var localAgentReadAnnotations = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 var pageReadAnnotations = { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true };
+var localDownloadAnnotations = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false };
+var localDownloadReadAnnotations = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 function toolDefinitions() {
   return [
     {
+      name: "researchtube_agent_status",
+      title: "Get ResearchTube Local Agent status",
+      description: "Check the optional ResearchTube Local Agent on the configured localhost port. Returns the serving Chrome Extension implementation version and its required Extension \u2194 Agent interface version, plus the Agent implementation version, Agent interface version, workspace health, and status, version, discovery source, and diagnostic message for yt-dlp, Deno, ffmpeg, and ffprobe. Deno is an optional local JavaScript runtime passed explicitly to yt-dlp when available. Physical host paths are intentionally never exposed through MCP. A missing or mismatched Agent interfaceVersion prevents the Extension from using Agent tools, but does not affect ordinary YouTube research tools.",
+      annotations: localAgentReadAnnotations,
+      inputSchema: { type: "object", additionalProperties: false, properties: {} },
+      outputSchema: agentStatusSchema
+    },
+    {
+      name: "youtube_download",
+      title: "Download a public YouTube video",
+      description: "Start an asynchronous download of one public YouTube video through the optional ResearchTube Local Agent and its locally resolved yt-dlp, Deno, and ffmpeg executables. First call youtube_get_video(videoId) and choose exact numeric formatId values from its direct YouTube downloadFormats snapshot, or use 'best' for a component. selection must be either combined alone, video alone, audio alone, or video plus audio; never mix combined with video/audio. The Agent passes the exact selected IDs to yt-dlp with its local Deno runtime and lets yt-dlp select its working YouTube client automatically. A video+audio pair is remuxed into MP4 without re-encoding and therefore requires ffmpeg. The Agent accepts no arbitrary yt-dlp selector or arguments, no credentials, and no playlist. Returns a start handle only. Poll youtube_get_download_task no faster than pollIntervalMs; phase identifies the real yt-dlp operation and progressPercent is the percent within that phase, not a fabricated whole-task percentage. outputDir, when supplied, must be a safe workspace-relative directory.",
+      annotations: localDownloadAnnotations,
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          videoId: { type: "string", pattern: "^[A-Za-z0-9_-]{6,}$", description: "Public YouTube video ID returned by youtube_search, a channel or playlist catalogue, or youtube_get_video." },
+          selection: downloadSelectionSchema,
+          outputDir: { type: "string", minLength: 1, description: "Optional directory relative to the Local Agent workspace. Defaults to downloads. Do not use an absolute path or .. segments." }
+        },
+        required: ["videoId", "selection"]
+      },
+      outputSchema: youtubeDownloadStartSchema
+    },
+    {
+      name: "youtube_get_download_task",
+      title: "Get YouTube download status",
+      description: "Read the current status of an asynchronous youtube_download task. Pass taskId unchanged and poll no faster than pollIntervalMs while status is working. phase identifies the actual yt-dlp operation. progressPercent is the native 0\u2013100 percent for that phase: selected video and audio tracks each have their own percentage, merging has null, and completed has 100. lastUpdatedAt advances on progress, lifecycle changes, and liveness heartbeats. The terminal result contains only a workspace-relative filePath; its extension reflects the selected track or remuxed pair.",
+      annotations: localDownloadReadAnnotations,
+      inputSchema: { type: "object", additionalProperties: false, properties: { taskId: { type: "string", minLength: 1, description: "Opaque taskId returned by youtube_download." } }, required: ["taskId"] },
+      outputSchema: youtubeDownloadTaskSchema
+    },
+    {
+      name: "youtube_cancel_download_task",
+      title: "Cancel YouTube download",
+      description: "Request cancellation of a currently running youtube_download task. Pass taskId unchanged. Cancellation is cooperative: after an accepted request, call youtube_get_download_task to observe the terminal state.",
+      annotations: localDownloadAnnotations,
+      inputSchema: { type: "object", additionalProperties: false, properties: { taskId: { type: "string", minLength: 1, description: "Opaque taskId returned by youtube_download." } }, required: ["taskId"] },
+      outputSchema: cancelDownloadTaskSchema
+    },
+    {
       name: "youtube_search",
       title: "Search public YouTube videos",
-      description: "Discovery tool for public YouTube videos. Search by keywords and return a compact list of matching videos with video ID, title, channel, URL, duration, publication text, normalized view counts plus YouTube display text, and a short snippet when available. Use this first to find video IDs. The search request runs anonymously through an existing YouTube page context and never changes that page's URL or playback. It does not return transcripts, comments, channel pages, playlists, or personalised results.",
+      description: "Discovery tool for public YouTube videos. Search by keywords and return a compact list of matching videos with video ID, title, channel, duration, publication text, normalized view counts plus YouTube display text, and a short snippet when available. Use this first to find video IDs. The search request runs anonymously through an existing YouTube page context and never changes that page's URL or playback. It does not return canonical or media URLs, transcripts, comments, channel pages, playlists, or personalised results.",
       // Search may create one inactive YouTube tab if the browser has none,
       // just like the other page-context reads.
       annotations: pageReadAnnotations,
@@ -177,10 +394,18 @@ function toolDefinitions() {
     {
       name: "youtube_get_video",
       title: "Get public YouTube video details",
-      description: "Inspect one public YouTube video by video ID. Returns research metadata including title, description, channel, duration, absolute publication date when available, normalized views, likes, and comment count plus YouTube display text, category, tags, thumbnail, and all public caption tracks. Each caption track has a trackIndex for youtube_get_transcript. Use it to assess a search result before retrieving transcript or comments. It does not return caption text, comment text, replies, account-only, private, member-only, or age-restricted content.",
+      description: "Inspect one public YouTube video by video ID. Returns research metadata including title, description, channel, duration, absolute publication date when available, normalized views, likes, and comment count plus YouTube display text, category, tags, thumbnail, all public caption tracks, and a downloadFormats snapshot extracted directly from this video's YouTube player response. The snapshot separates ready-made combined files from video-only and audio-only tracks and contains no media URLs or credentials. Each caption track has a trackIndex for youtube_get_transcript. It does not return canonical video URLs, caption text, comment text, replies, account-only, private, member-only, or age-restricted content.",
       annotations: pureReadAnnotations,
-      inputSchema: { type: "object", additionalProperties: false, properties: { videoId: { type: "string", minLength: 6, description: "YouTube video ID obtained from a watch URL or youtube_search." } }, required: ["videoId"] },
-      outputSchema: { type: "object", additionalProperties: false, properties: { videoId: { type: "string" }, url: { type: "string" }, title: { type: "string" }, description: { type: "string" }, channel: commentAuthorSchema, publishedAt: nullableString, durationSeconds: { type: ["number", "null"] }, views: nullableInteger, viewsText: nullableString, likes: nullableInteger, likesText: nullableString, commentCount: nullableInteger, commentCountText: nullableString, category: nullableString, tags: { type: "array", items: { type: "string" } }, thumbnailUrl: nullableString, captions: { type: "object", additionalProperties: false, properties: { available: { type: "boolean" }, tracks: { type: "array", items: captionTrackSchema } }, required: ["available", "tracks"] } }, required: ["videoId", "url", "title", "description", "channel", "publishedAt", "durationSeconds", "views", "viewsText", "likes", "likesText", "commentCount", "commentCountText", "category", "tags", "thumbnailUrl", "captions"] }
+      inputSchema: { type: "object", additionalProperties: false, properties: { videoId: { type: "string", minLength: 6, description: "YouTube video ID obtained from youtube_search, a channel or playlist catalogue, or a prior youtube_get_video response." } }, required: ["videoId"] },
+      outputSchema: { type: "object", additionalProperties: false, properties: { videoId: { type: "string" }, title: { type: "string" }, description: { type: "string" }, channel: commentAuthorSchema, publishedAt: nullableString, durationSeconds: { type: ["number", "null"] }, views: nullableInteger, viewsText: nullableString, likes: nullableInteger, likesText: nullableString, commentCount: nullableInteger, commentCountText: nullableString, category: nullableString, tags: { type: "array", items: { type: "string" } }, thumbnailUrl: nullableString, captions: { type: "object", additionalProperties: false, properties: { available: { type: "boolean" }, tracks: { type: "array", items: captionTrackSchema } }, required: ["available", "tracks"] }, downloadFormats: downloadFormatsSchema }, required: ["videoId", "title", "description", "channel", "publishedAt", "durationSeconds", "views", "viewsText", "likes", "likesText", "commentCount", "commentCountText", "category", "tags", "thumbnailUrl", "captions", "downloadFormats"] }
+    },
+    {
+      name: "youtube_get_yt_dlp_formats",
+      title: "Diagnose formats available to local yt-dlp",
+      description: "Diagnostic read for resolving a download-format mismatch. For one public YouTube video ID, asks the configured ResearchTube Local Agent to run yt-dlp in metadata-only mode with the same local Deno runtime and automatic YouTube client selection used by youtube_download. It returns a separate, normalized yt-dlp format snapshot; compare its numeric formatId values with youtube_get_video(videoId).downloadFormats. It never downloads media, changes youtube_get_video, accepts a URL, or accepts arbitrary yt-dlp arguments. By default debug is false and the response is URL-free. Set debug to true only for troubleshooting a local installation: the response then deliberately includes the complete local command, stdout, and stderr, which can contain host paths and temporary media URLs.",
+      annotations: localAgentReadAnnotations,
+      inputSchema: { type: "object", additionalProperties: false, properties: { videoId: { type: "string", pattern: "^[A-Za-z0-9_-]{6,}$", description: "Public YouTube video ID to inspect with the local yt-dlp diagnostic." }, debug: { type: "boolean", default: false, description: "False by default. Set true only when diagnosing this local installation; it returns raw command, stdout, and stderr to the LLM." } }, required: ["videoId"] },
+      outputSchema: { type: "object", additionalProperties: false, properties: { videoId: { type: "string" }, downloadFormats: ytDlpDownloadFormatsSchema, debug: { anyOf: [ytDlpFormatProbeDebugSchema, { type: "null" }], description: "Null unless the request explicitly set debug=true." } }, required: ["videoId", "downloadFormats", "debug"] }
     },
     {
       name: "youtube_get_channel_videos",
@@ -284,6 +509,14 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     testConnection().then(sendResponse).catch((error) => sendResponse(connectionFailure("UNKNOWN_ERROR", "Connection test failed.", error)));
     return true;
   }
+  if (message?.type === "save-agent-port") {
+    saveAgentPort(message.payload).then(sendResponse).catch((error) => sendResponse({ ok: false, error: safeErrorMessage(error) }));
+    return true;
+  }
+  if (message?.type === "test-agent-connection") {
+    testAgentConnection(message.payload).then(sendResponse).catch(() => sendResponse(agentUnavailableStatus(DEFAULTS.agentPort)));
+    return true;
+  }
   if (message?.type === "get-diagnostics") {
     getDiagnosticsExport().then(sendResponse).catch((error) => sendResponse({ ok: false, error: safeErrorMessage(error) }));
     return true;
@@ -308,6 +541,8 @@ async function getConfig() {
 }
 async function getPublicConnectionState() {
   const config = await getConfig();
+  const agentPort = normalizeAgentPort(config.agentPort);
+  const agent = await getAgentStatus(agentPort);
   const remainingMs = Math.max(0, Number(config.youtubeSearchCooldownUntil || 0) - Date.now());
   return {
     configured: Boolean(config.tunnelId && config.runtimeApiKey),
@@ -316,6 +551,9 @@ async function getPublicConnectionState() {
     polling,
     lastStatus: config.lastStatus || "",
     lastConnectionTest: config.lastConnectionTest || null,
+    agentPort,
+    agent,
+    requiredAgentInterfaceVersion: REQUIRED_AGENT_INTERFACE_VERSION,
     onboardingCompleted: Boolean(config.onboardingCompleted),
     youtubeSearch: {
       rateLimited: remainingMs > 0,
@@ -323,6 +561,302 @@ async function getPublicConnectionState() {
       cooldownUntil: remainingMs > 0 ? new Date(Number(config.youtubeSearchCooldownUntil)).toISOString() : null
     }
   };
+}
+function normalizeAgentPort(value) {
+  const port = Number(value);
+  return Number.isInteger(port) && port >= 1 && port <= 65535 ? port : DEFAULTS.agentPort;
+}
+async function saveAgentPort(payload = {}) {
+  const supplied = Number(payload.port);
+  if (!Number.isInteger(supplied) || supplied < 1 || supplied > 65535) {
+    return { ok: false, errorCode: "AGENT_PORT_INVALID", message: "Enter a port from 1 to 65535." };
+  }
+  await chrome.storage.local.set({ agentPort: supplied });
+  return { ok: true, port: supplied };
+}
+function agentUnavailableStatus(port) {
+  return {
+    available: false,
+    error: "AGENT_UNAVAILABLE",
+    message: `ResearchTube Local Agent is not available on port ${port}.`,
+    status: null,
+    extensionVersion: EXTENSION_VERSION,
+    extensionInterfaceVersion: REQUIRED_AGENT_INTERFACE_VERSION,
+    agentVersion: null,
+    interfaceVersion: null,
+    workspace: null,
+    components: null
+  };
+}
+function normalizeAgentInterfaceVersion(value) {
+  return Number.isInteger(value) && value >= 1 ? value : null;
+}
+function agentInterfaceIsCompatible(status) {
+  return Boolean(status?.available) && status.interfaceVersion === REQUIRED_AGENT_INTERFACE_VERSION;
+}
+function normalizeAgentWorkspace(workspace) {
+  if (!workspace || typeof workspace !== "object") return null;
+  const status = workspace.status === "available" || workspace.status === "error" ? workspace.status : "error";
+  return { status };
+}
+function normalizeAgentComponent(value) {
+  const status = value?.status;
+  return {
+    status: status === "available" || status === "missing" || status === "error" ? status : "error",
+    version: typeof value?.version === "string" ? value.version : null,
+    source: value?.source === "local" || value?.source === "path" ? value.source : null,
+    message: typeof value?.message === "string" ? value.message : null
+  };
+}
+function normalizeAgentComponents(components) {
+  if (!components || typeof components !== "object") return null;
+  return {
+    ytDlp: normalizeAgentComponent(components.ytDlp ?? components["yt-dlp"]),
+    deno: normalizeAgentComponent(components.deno),
+    ffmpeg: normalizeAgentComponent(components.ffmpeg),
+    ffprobe: normalizeAgentComponent(components.ffprobe)
+  };
+}
+async function getAgentStatus(port = null) {
+  const config = await getConfig();
+  const resolvedPort = normalizeAgentPort(port ?? config.agentPort);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), AGENT_HEALTH_TIMEOUT_MS);
+  try {
+    const response = await fetch(`http://127.0.0.1:${resolvedPort}/health`, {
+      method: "GET",
+      headers: { Accept: "application/json" },
+      signal: controller.signal
+    });
+    if (!response.ok) return agentUnavailableStatus(resolvedPort);
+    const health = await response.json();
+    if (!health || typeof health !== "object") return agentUnavailableStatus(resolvedPort);
+    const interfaceVersion = normalizeAgentInterfaceVersion(health.interfaceVersion);
+    const interfaceCompatible = interfaceVersion === REQUIRED_AGENT_INTERFACE_VERSION;
+    return {
+      available: true,
+      error: interfaceCompatible ? null : "AGENT_INTERFACE_INCOMPATIBLE",
+      message: interfaceCompatible ? "ResearchTube Local Agent is available." : "ResearchTube Local Agent interface is incompatible.",
+      status: typeof health.status === "string" ? health.status : "ok",
+      extensionVersion: EXTENSION_VERSION,
+      extensionInterfaceVersion: REQUIRED_AGENT_INTERFACE_VERSION,
+      agentVersion: typeof health.agentVersion === "string" ? health.agentVersion : null,
+      interfaceVersion,
+      workspace: normalizeAgentWorkspace(health.workspace),
+      components: normalizeAgentComponents(health.components)
+    };
+  } catch (_error) {
+    return agentUnavailableStatus(resolvedPort);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+async function testAgentConnection(payload = {}) {
+  const saved = await saveAgentPort(payload);
+  if (!saved.ok) return saved;
+  const status = await getAgentStatus(saved.port);
+  return { ok: agentInterfaceIsCompatible(status), ...status };
+}
+function localAgentError(code, message, detail = null) {
+  const error = new Error(message);
+  error.code = code;
+  error.detail = detail;
+  return error;
+}
+async function requireCompatibleAgent(port) {
+  const status = await getAgentStatus(port);
+  if (!status.available) {
+    throw localAgentError("AGENT_UNAVAILABLE", status.message);
+  }
+  if (!agentInterfaceIsCompatible(status)) {
+    throw localAgentError("AGENT_INTERFACE_INCOMPATIBLE", "ResearchTube Local Agent interface is incompatible.");
+  }
+}
+async function agentJsonRequest(path, { method = "GET", body = null, port = null, timeoutMs = AGENT_TASK_TIMEOUT_MS } = {}) {
+  const config = await getConfig();
+  const resolvedPort = normalizeAgentPort(port ?? config.agentPort);
+  await requireCompatibleAgent(resolvedPort);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(`http://127.0.0.1:${resolvedPort}${path}`, {
+      method,
+      headers: { Accept: "application/json", ...body === null ? {} : { "Content-Type": "application/json" } },
+      body: body === null ? void 0 : JSON.stringify(body),
+      signal: controller.signal
+    });
+    let document = null;
+    try {
+      document = await response.json();
+    } catch (_error) {
+    }
+    if (!response.ok) {
+      const remote = document?.error;
+      throw localAgentError(
+        typeof remote?.code === "string" ? remote.code : "AGENT_REQUEST_FAILED",
+        typeof remote?.message === "string" ? remote.message : `Local Agent request failed (${response.status}).`,
+        typeof remote?.detail === "string" ? remote.detail : null
+      );
+    }
+    if (!document || typeof document !== "object") throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid JSON.");
+    return document;
+  } catch (error) {
+    if (error?.code) throw error;
+    throw localAgentError("AGENT_UNAVAILABLE", `ResearchTube Local Agent is not available on port ${resolvedPort}.`);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+function normalizeAgentTask(value) {
+  const status = value?.status;
+  const phase = value?.phase;
+  if (!value || typeof value !== "object" || typeof value.taskId !== "string" || !["working", "completed", "failed", "cancelled"].includes(status) || !["preparing", "downloadingCombined", "downloadingVideo", "downloadingAudio", "merging", "completed", "failed", "cancelled"].includes(phase) || typeof value.statusMessage !== "string" || typeof value.createdAt !== "string" || typeof value.lastUpdatedAt !== "string") {
+    throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid task record.");
+  }
+  return value;
+}
+function publicDownloadTask(task) {
+  const result = task.result && typeof task.result === "object" ? task.result : null;
+  const failure = task.error && typeof task.error === "object" ? task.error : null;
+  return {
+    taskId: task.taskId,
+    status: task.status,
+    statusMessage: task.statusMessage,
+    phase: task.phase,
+    createdAt: task.createdAt,
+    lastUpdatedAt: task.lastUpdatedAt,
+    pollIntervalMs: Number.isInteger(task.pollIntervalMs) && task.pollIntervalMs > 0 ? task.pollIntervalMs : 1e3,
+    progressPercent: typeof task.progressPercent === "number" && task.progressPercent >= 0 && task.progressPercent <= 100 ? task.progressPercent : null,
+    result,
+    error: failure ? {
+      code: typeof failure.code === "string" ? failure.code : "DOWNLOAD_FAILED",
+      message: typeof failure.message === "string" ? failure.message : "The download task failed.",
+      detail: typeof failure.detail === "string" ? failure.detail : null
+    } : null
+  };
+}
+function publicDownloadStartTask(task) {
+  return {
+    taskId: task.taskId,
+    status: task.status,
+    statusMessage: task.statusMessage,
+    phase: task.phase,
+    createdAt: task.createdAt,
+    lastUpdatedAt: task.lastUpdatedAt,
+    pollIntervalMs: Number.isInteger(task.pollIntervalMs) && task.pollIntervalMs > 0 ? task.pollIntervalMs : 1e3,
+    progressPercent: typeof task.progressPercent === "number" && task.progressPercent >= 0 && task.progressPercent <= 100 ? task.progressPercent : null
+  };
+}
+function normalizeDownloadSelection(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw localAgentError("FORMAT_SELECTION_INVALID", "selection is required.");
+  }
+  const allowed = /* @__PURE__ */ new Set(["combined", "video", "audio"]);
+  if (Object.keys(value).some((key) => !allowed.has(key))) {
+    throw localAgentError("FORMAT_SELECTION_INVALID", "selection contains an unsupported field.");
+  }
+  const selection = {};
+  for (const key of allowed) {
+    if (!(key in value) || value[key] === null) continue;
+    if (typeof value[key] !== "string" || !/^(?:best|[0-9]+)$/.test(value[key])) {
+      throw localAgentError("FORMAT_SELECTION_INVALID", `selection.${key} must be 'best' or a numeric formatId.`);
+    }
+    selection[key] = value[key];
+  }
+  if (selection.combined && (selection.video || selection.audio)) {
+    throw localAgentError("FORMAT_SELECTION_INVALID", "Select either combined or video/audio tracks, not both.");
+  }
+  if (!selection.combined && !selection.video && !selection.audio) {
+    throw localAgentError("FORMAT_SELECTION_INVALID", "Select a combined, video, or audio track.");
+  }
+  return selection;
+}
+async function startYouTubeDownload(args = {}) {
+  const videoId = typeof args.videoId === "string" ? args.videoId.trim() : "";
+  if (!/^[A-Za-z0-9_-]{6,}$/.test(videoId)) throw localAgentError("INVALID_VIDEO_ID", "videoId is required.");
+  const selection = normalizeDownloadSelection(args.selection);
+  const outputDir = args.outputDir;
+  if (outputDir !== void 0 && (typeof outputDir !== "string" || !outputDir.trim())) {
+    throw localAgentError("OUTPUT_DIR_INVALID", "outputDir must be a non-empty workspace-relative directory string.");
+  }
+  return publicDownloadStartTask(normalizeAgentTask(await agentJsonRequest("/tasks/youtube-download", { method: "POST", body: { videoId, selection, ...outputDir === void 0 ? {} : { outputDir: outputDir.trim() } } })));
+}
+function nullableAgentString(value) {
+  return typeof value === "string" ? value : null;
+}
+function nullableAgentNumber(value, integer = false) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && (!integer || Number.isInteger(value)) ? value : null;
+}
+function normalizeYtDlpFormat(value, expectedKind) {
+  if (!value || typeof value !== "object" || Array.isArray(value) || typeof value.formatId !== "string" || !/^\d+$/.test(value.formatId) || value.kind !== expectedKind) {
+    throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid yt-dlp format record.");
+  }
+  return {
+    formatId: value.formatId,
+    kind: expectedKind,
+    container: nullableAgentString(value.container),
+    videoCodec: nullableAgentString(value.videoCodec),
+    audioCodec: nullableAgentString(value.audioCodec),
+    width: nullableAgentNumber(value.width, true),
+    height: nullableAgentNumber(value.height, true),
+    fps: nullableAgentNumber(value.fps),
+    bitrateBps: nullableAgentNumber(value.bitrateBps, true),
+    audioSampleRateHz: nullableAgentNumber(value.audioSampleRateHz, true),
+    audioChannels: nullableAgentNumber(value.audioChannels, true),
+    qualityLabel: nullableAgentString(value.qualityLabel),
+    sizeBytes: nullableAgentNumber(value.sizeBytes, true)
+  };
+}
+function normalizeYtDlpFormats(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value) || value.source !== "ytDlp" || typeof value.available !== "boolean") {
+    throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid yt-dlp format diagnostic.");
+  }
+  const output = {
+    available: value.available,
+    source: "ytDlp",
+    message: nullableAgentString(value.message),
+    combined: [],
+    video: [],
+    audio: []
+  };
+  for (const kind of ["combined", "video", "audio"]) {
+    if (!Array.isArray(value[kind]) || value[kind].length > 100) {
+      throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid yt-dlp format diagnostic.");
+    }
+    output[kind] = value[kind].map((item) => normalizeYtDlpFormat(item, kind));
+  }
+  return output;
+}
+function normalizeYtDlpProbeDebug(value, enabled) {
+  if (!enabled) {
+    if (value !== null && value !== void 0) {
+      throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned debug output without an explicit debug request.");
+    }
+    return null;
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value) || !Array.isArray(value.command) || value.command.some((item) => typeof item !== "string") || !(value.exitCode === null || Number.isInteger(value.exitCode)) || typeof value.stdout !== "string" || typeof value.stderr !== "string") {
+    throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid raw yt-dlp diagnostic.");
+  }
+  return { command: value.command, exitCode: value.exitCode, stdout: value.stdout, stderr: value.stderr };
+}
+async function getYtDlpFormats(videoId, debug = false) {
+  if (!/^[A-Za-z0-9_-]{6,}$/.test(videoId)) throw localAgentError("INVALID_VIDEO_ID", "videoId is required.");
+  const document = await agentJsonRequest("/diagnostics/yt-dlp-formats", {
+    method: "POST",
+    body: { videoId, debug },
+    timeoutMs: AGENT_FORMAT_PROBE_TIMEOUT_MS
+  });
+  if (document.videoId !== videoId) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned a format diagnostic for another video.");
+  return { videoId, downloadFormats: normalizeYtDlpFormats(document.downloadFormats), debug: normalizeYtDlpProbeDebug(document.debug, debug) };
+}
+async function getYouTubeDownloadTask(taskId) {
+  if (typeof taskId !== "string" || !taskId) throw localAgentError("TASK_NOT_FOUND", "taskId is required.");
+  return publicDownloadTask(normalizeAgentTask(await agentJsonRequest(`/tasks/${encodeURIComponent(taskId)}`)));
+}
+async function cancelYouTubeDownloadTask(taskId) {
+  if (typeof taskId !== "string" || !taskId) throw localAgentError("TASK_NOT_FOUND", "taskId is required.");
+  await agentJsonRequest(`/tasks/${encodeURIComponent(taskId)}/cancel`, { method: "POST", body: {} });
+  return { taskId, accepted: true, message: "Cancellation request accepted. Poll youtube_get_download_task for the terminal status." };
 }
 async function saveConnection(payload = {}) {
   const tunnelId = String(payload.tunnelId ?? "").trim();
@@ -378,7 +912,7 @@ async function pollOnceInternal() {
         "Authorization": `Bearer ${config.runtimeApiKey}`,
         "Accept": "application/json",
         "X-Tunnel-Client-Name": "researchtube-extension",
-        "X-Tunnel-Client-Version": "1.4.3",
+        "X-Tunnel-Client-Version": EXTENSION_VERSION,
         "X-Tunnel-Client-Wire-Protocol-Version": "2026-08-25",
         "X-Tunnel-MCP-Server-Info": JSON.stringify({ version: 1, channels: [{ name: "main" }] })
       }
@@ -507,12 +1041,33 @@ async function handleMcpRequest(request) {
     return {
       jsonrpc: "2.0",
       id: request.id,
-      result: { protocolVersion: "2025-06-18", capabilities: { tools: { listChanged: false } }, serverInfo: { name: "researchtube", version: "1.4.3" } }
+      result: {
+        protocolVersion: "2025-06-18",
+        capabilities: { tools: { listChanged: false } },
+        serverInfo: { name: "researchtube", version: EXTENSION_VERSION }
+      }
     };
   }
   if (request?.method === "notifications/initialized") return null;
   if (request?.method === "tools/list") {
     return { jsonrpc: "2.0", id: request.id, result: { tools: toolDefinitions() } };
+  }
+  if (request?.method === "tools/call" && request.params?.name === "youtube_download") {
+    const input = request.params.arguments ?? {};
+    return executeToolCall(request.id, "youtube_download", input, () => startYouTubeDownload(input));
+  }
+  if (request?.method === "tools/call" && request.params?.name === "youtube_get_download_task") {
+    const taskId = String(request.params.arguments?.taskId ?? "").trim();
+    if (!taskId) return { jsonrpc: "2.0", id: request.id, error: { code: -32602, message: "taskId is required" } };
+    return executeToolCall(request.id, "youtube_get_download_task", { taskId }, () => getYouTubeDownloadTask(taskId));
+  }
+  if (request?.method === "tools/call" && request.params?.name === "youtube_cancel_download_task") {
+    const taskId = String(request.params.arguments?.taskId ?? "").trim();
+    if (!taskId) return { jsonrpc: "2.0", id: request.id, error: { code: -32602, message: "taskId is required" } };
+    return executeToolCall(request.id, "youtube_cancel_download_task", { taskId }, () => cancelYouTubeDownloadTask(taskId));
+  }
+  if (request?.method === "tools/call" && request.params?.name === "researchtube_agent_status") {
+    return executeToolCall(request.id, "researchtube_agent_status", {}, () => getAgentStatus());
   }
   if (request?.method === "tools/call" && request.params?.name === "youtube_search") {
     const query = String(request.params.arguments?.query ?? "").trim();
@@ -525,6 +1080,15 @@ async function handleMcpRequest(request) {
   if (request?.method === "tools/call" && request.params?.name === "youtube_get_video") {
     const videoId = requireVideoId(request.params.arguments);
     return executeToolCall(request.id, "youtube_get_video", { videoId }, () => youtubeGetVideo(videoId));
+  }
+  if (request?.method === "tools/call" && request.params?.name === "youtube_get_yt_dlp_formats") {
+    const args = request.params.arguments ?? {};
+    const videoId = requireVideoId(args);
+    if (args.debug !== void 0 && typeof args.debug !== "boolean") {
+      return { jsonrpc: "2.0", id: request.id, error: { code: -32602, message: "debug must be a boolean" } };
+    }
+    const debug = args.debug === true;
+    return executeToolCall(request.id, "youtube_get_yt_dlp_formats", { videoId, debug }, () => getYtDlpFormats(videoId, debug));
   }
   if (request?.method === "tools/call" && request.params?.name === "youtube_get_channel_videos") {
     const args = request.params.arguments ?? {};
@@ -602,6 +1166,7 @@ async function executeToolCall(id, tool, input, work, operation = null) {
   }
 }
 function summarizeCommandInput(tool, input) {
+  if (tool === "youtube_download") return { videoId: typeof input.videoId === "string" ? input.videoId : null, selection: input.selection ?? null, outputDir: typeof input.outputDir === "string" ? input.outputDir.slice(0, 300) : null };
   if (tool === "youtube_search") return { query: searchDiagnosticQuery(input.query), limit: input.limit };
   if (tool === "youtube_get_comment_replies") return { videoId: input.videoId, commentId: input.commentId, limit: input.limit };
   if (tool === "youtube_get_channel_videos") return { channel: input.channel, limit: input.limit, includeShorts: input.includeShorts, includeStreams: input.includeStreams, continuationProvided: Boolean(input.continuation) };
@@ -620,8 +1185,9 @@ function summarizeCommandOutput(value) {
 function toolError(id, error) {
   const code = error?.code;
   const message = String(error?.message ?? error);
-  const text = code === "YOUTUBE_SEARCH_RATE_LIMITED" ? `[${code}] ${message}` : message;
-  return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text }], isError: true } };
+  const text = typeof code === "string" ? `[${code}] ${message}` : message;
+  const structuredError = { error: { code: typeof code === "string" ? code : "TOOL_ERROR", message, ...typeof error?.detail === "string" ? { detail: error.detail } : {} } };
+  return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text }], structuredContent: structuredError, isError: true } };
 }
 function boundedInt(value, fallback, min, max) {
   const parsed = Number(value ?? fallback);
@@ -909,7 +1475,6 @@ async function youtubeGetVideo(videoId) {
   const commentCountText = findCommentCountText(initial);
   return {
     videoId,
-    url: `https://www.youtube.com/watch?v=${videoId}`,
     title: details.title,
     description: details.shortDescription || "",
     channel: { name: details.author || null, channelId: details.channelId || null },
@@ -924,8 +1489,84 @@ async function youtubeGetVideo(videoId) {
     category: microformat.category || null,
     tags: microformat.tags || [],
     thumbnailUrl: details.thumbnail?.thumbnails?.at(-1)?.url || null,
-    captions: { available: tracks.length > 0, tracks }
+    captions: { available: tracks.length > 0, tracks },
+    downloadFormats: normalizeDownloadFormats(player?.streamingData)
   };
+}
+function normalizeDownloadFormats(streamingData) {
+  const grouped = { available: false, source: "unavailable", message: "YouTube did not expose downloadable media formats for this video.", combined: [], video: [], audio: [] };
+  const seen = /* @__PURE__ */ new Set();
+  const candidates = [
+    ...Array.isArray(streamingData?.formats) ? streamingData.formats : [],
+    ...Array.isArray(streamingData?.adaptiveFormats) ? streamingData.adaptiveFormats : []
+  ];
+  for (const format of candidates) {
+    const item = normalizeDownloadFormat(format);
+    if (!item || seen.has(item.formatId)) continue;
+    seen.add(item.formatId);
+    grouped[item.kind].push(item);
+  }
+  for (const group of [grouped.combined, grouped.video, grouped.audio]) {
+    group.sort(compareDownloadFormats);
+  }
+  grouped.available = candidates.length > 0 && seen.size > 0;
+  if (grouped.available) {
+    grouped.source = "youtube";
+    grouped.message = null;
+  }
+  return grouped;
+}
+function normalizeDownloadFormat(format) {
+  const formatId = String(format?.itag ?? "").trim();
+  const mime = parseYouTubeMimeType(format?.mimeType);
+  if (!formatId || !mime.mediaType || mime.mediaType !== "video" && mime.mediaType !== "audio") return null;
+  const videoCodec = mime.codecs.find((codec) => !isAudioCodec(codec)) || null;
+  const audioCodec = mime.codecs.find(isAudioCodec) || null;
+  const kind = mime.mediaType === "audio" ? "audio" : audioCodec ? "combined" : "video";
+  return {
+    formatId,
+    kind,
+    container: mime.container,
+    videoCodec,
+    audioCodec,
+    width: finiteNonNegativeInteger(format?.width),
+    height: finiteNonNegativeInteger(format?.height),
+    fps: finiteNonNegativeNumber(format?.fps),
+    bitrateBps: finiteNonNegativeInteger(format?.averageBitrate ?? format?.bitrate),
+    audioSampleRateHz: finiteNonNegativeInteger(format?.audioSampleRate),
+    audioChannels: finiteNonNegativeInteger(format?.audioChannels),
+    qualityLabel: typeof format?.qualityLabel === "string" && format.qualityLabel.trim() ? format.qualityLabel.trim() : null,
+    sizeBytes: finiteSafeInteger(format?.contentLength)
+  };
+}
+function parseYouTubeMimeType(value) {
+  const source = typeof value === "string" ? value : "";
+  const match = source.match(/^\s*(video|audio)\/([^;\s]+)(?:\s*;\s*codecs="([^"]*)")?/i);
+  return {
+    mediaType: match?.[1]?.toLowerCase() || null,
+    container: match?.[2]?.toLowerCase() || null,
+    codecs: match?.[3] ? match[3].split(",").map((codec) => codec.trim()).filter(Boolean) : []
+  };
+}
+function isAudioCodec(codec) {
+  return /^(mp4a|aac|opus|vorbis|ac-3|ec-3|flac)/i.test(codec);
+}
+function finiteNonNegativeNumber(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+}
+function finiteNonNegativeInteger(value) {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
+}
+function finiteSafeInteger(value) {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
+}
+function compareDownloadFormats(left, right) {
+  const leftPixels = (left.width || 0) * (left.height || 0);
+  const rightPixels = (right.width || 0) * (right.height || 0);
+  return rightPixels - leftPixels || (right.fps || 0) - (left.fps || 0) || (right.bitrateBps || 0) - (left.bitrateBps || 0) || left.formatId.localeCompare(right.formatId, void 0, { numeric: true });
 }
 async function youtubeGetTranscript(videoId, limit, trackIndex) {
   return runYouTubePageTool("transcript", videoId, { limit, trackIndex });
@@ -962,7 +1603,7 @@ async function runYouTubePageTool(action, videoId, args) {
   } catch (error) {
     if (!isRecoverablePageContextError(error)) throw error;
     try {
-      return await runYouTubePageToolAttempt(action, videoId, args, { forceFreshTab: true });
+      return await runYouTubePageToolAttempt(action, videoId, args);
     } catch (retryError) {
       if (isRecoverablePageContextError(retryError)) {
         throw new Error("ResearchTube could not restore its YouTube page context after one automatic retry. Please repeat the request.");
@@ -971,12 +1612,8 @@ async function runYouTubePageTool(action, videoId, args) {
     }
   }
 }
-async function runYouTubePageToolAttempt(action, videoId, args, { forceFreshTab = false } = {}) {
-  let { tab, created } = forceFreshTab ? { tab: await createYouTubeTab(), created: true } : await getOrCreateYouTubeTab();
-  if (await getYouTubePageBridgeVersion(tab.id) !== PAGE_BRIDGE_VERSION) {
-    tab = await createYouTubeTab();
-    created = true;
-  }
+async function runYouTubePageToolAttempt(action, videoId, args) {
+  const { tab } = await getOrCreateYouTubeTab();
   const startedAt = Date.now();
   const response = await sendYouTubePageTool(tab.id, {
     type: "youtube-ui-tool",
@@ -1038,17 +1675,6 @@ async function createYouTubeTab() {
     throw new Error("Chrome could not create a YouTube tab for the request");
   }
   return waitForYouTubeTab(createdTab.id);
-}
-async function getYouTubePageBridgeVersion(tabId) {
-  try {
-    const response = await sendYouTubePageTool(tabId, {
-      type: "youtube-ui-tool",
-      action: "bridge-version"
-    });
-    return response?.ok ? response.data?.version ?? null : null;
-  } catch {
-    return null;
-  }
 }
 async function waitForYouTubeTab(tabId, timeoutMs = 45e3) {
   const current = await chrome.tabs.get(tabId);
