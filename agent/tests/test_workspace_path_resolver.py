@@ -282,6 +282,7 @@ class CaptureFrameTests(unittest.IsolatedAsyncioTestCase):
             "workspacePath": result["image"]["workspacePath"], "saveToLibrary": False,
         })
         self.assertRegex(result["image"]["workspacePath"], r"^captures/sample \[t_12\.500\] \[cap_[A-Za-z0-9_-]+\]\.png$")
+        self.assertTrue((agent.WORKSPACE_PATH / "captures").is_dir())
         self.assertEqual((agent.WORKSPACE_PATH / result["image"]["workspacePath"]).read_bytes(), b"image-bytes")
         self.assertNotIn("inlineImageBase64", result)
         self.assertNotIn(str(self.root), json.dumps(result))

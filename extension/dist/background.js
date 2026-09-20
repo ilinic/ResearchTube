@@ -16,9 +16,9 @@ var DEFAULTS = {
   youtubeSearchCooldownUntil: 0,
   youtubeSearchCooldownLevel: 0
 };
-var EXTENSION_VERSION = "1.13.12";
+var EXTENSION_VERSION = "1.14.0";
 var REQUIRED_AGENT_INTERFACE_VERSION = 12;
-var CAPTURE_FRAME_WIDGET_URI = "ui://researchtube/capture-frame-v12.html";
+var CAPTURE_FRAME_WIDGET_URI = "ui://researchtube/capture-frame-v18.html";
 var CAPTURE_FRAME_OFFSCREEN_DOCUMENT = "capture-frame-offscreen.html";
 var AGENT_HEALTH_TIMEOUT_MS = 5e3;
 var AGENT_TASK_TIMEOUT_MS = 1e4;
@@ -508,8 +508,8 @@ var captureFrameDeliveryInputSchema = {
   type: "object",
   additionalProperties: false,
   properties: {
-    workspacePath: { type: "string", minLength: 1, description: "Optional logical workspace-relative output image path. If omitted, the Agent creates a unique file under captures/. capture_frame never overwrites an existing file." },
-    saveToLibrary: { type: "boolean", default: false, description: "When true, the ChatGPT widget uploads the captured workspace image to the user's ChatGPT Library and makes its file ID available to the model on later turns. The local workspace image is always retained." }
+    workspacePath: { type: "string", minLength: 1, description: "Optional logical workspace-relative output image path. If omitted, the Agent automatically creates the lowercase captures/ directory when needed and writes a unique image named from the source video title, its [yt_<videoId>] when available, [t_<timestamp>], and [cap_<captureId>]. capture_frame never overwrites an existing file." },
+    saveToLibrary: { type: "boolean", default: false, description: "When true, request that the ChatGPT widget convert the displayed capture to PNG, upload it to the user's ChatGPT Library, and persist its file ID for later model turns. The local workspace image is always retained. If the user's ChatGPT host does not provide its File Library, the widget reports that specific failure instead of claiming success." }
   }
 };
 var captureFrameSchema = {
@@ -533,7 +533,7 @@ var captureFrameSchema = {
         imageSizeBytes: { type: "integer", minimum: 0 },
         delivery: captureFrameDeliveryModeSchema,
         workspacePath: { type: "string", minLength: 1, description: "Logical workspace-relative path of the captured image. capture_frame always creates this file." },
-        saveToLibrary: { type: "boolean", description: "Whether the widget should upload this capture to ChatGPT Library after displaying it." }
+        saveToLibrary: { type: "boolean", description: "Whether the widget must upload a PNG copy of this capture to ChatGPT Library after displaying it. A successful tool call creates the local workspace image; the subsequent Library upload is performed by the ChatGPT widget." }
       },
       required: ["format", "mimeType", "width", "height", "imageSizeBytes", "delivery", "workspacePath", "saveToLibrary"]
     }
@@ -545,7 +545,7 @@ var captureFrameWidgetActionSchema = {
   additionalProperties: false,
   properties: {
     path: { type: "string", minLength: 1, description: "The same logical workspace-relative captured-image path supplied to the widget." },
-    action: { type: "string", enum: ["copiedPath", "copiedImage", "downloadStarted"] }
+    action: { type: "string", enum: ["copiedPath"] }
   },
   required: ["path", "action"]
 };
@@ -625,7 +625,7 @@ function toolDefinitions() {
     {
       name: "capture_frame",
       title: "Extract one frame from a workspace video",
-      description: "Extract one frame from an existing workspace media file with the Local Agent's ffmpeg. timestampSeconds is required. videoStreamIndex, when supplied, is the exact streams[].index returned by media_probe; otherwise the first video stream is used. accurate seek decodes to the requested time; fast seek prioritizes speed. Cropping and resizing are optional; resizing may upscale. contain preserves proportions and pads, cover preserves proportions and crops, and stretch forces exact dimensions. Every capture is saved as a normal workspace image file and returned with its logical workspacePath. The accompanying widget retrieves that same file through the Local Agent for display and can optionally save it to ChatGPT Library. No host paths are exposed.",
+      description: "Extract one frame from an existing workspace media file with the Local Agent's ffmpeg. timestampSeconds is required. videoStreamIndex, when supplied, is the exact streams[].index returned by media_probe; otherwise the first video stream is used. accurate seek decodes to the requested time; fast seek prioritizes speed. Cropping and resizing are optional; resizing may upscale. contain preserves proportions and pads, cover preserves proportions and crops, and stretch forces exact dimensions. Every capture is saved as a normal workspace image file and returned with its logical workspacePath. delivery.workspacePath is optional: when omitted, the Agent creates lowercase captures/ automatically and writes a uniquely named image derived from the source video title and stable YouTube ID. The accompanying widget retrieves that same file through the Local Agent for display and can optionally save it to ChatGPT Library. No host paths are exposed.",
       annotations: localWorkspaceWriteAnnotations,
       inputSchema: {
         type: "object",
@@ -673,24 +673,6 @@ function toolDefinitions() {
       name: "researchtube_copy_capture_frame_path",
       title: "Copy a captured-frame workspace path",
       description: "Widget-only action. Copies one logical ResearchTube workspace image path to the local system clipboard through the installed Chrome Extension. It is not available to the model.",
-      annotations: localWorkspaceWriteAnnotations,
-      inputSchema: { type: "object", additionalProperties: false, properties: { path: { type: "string", minLength: 1 } }, required: ["path"] },
-      outputSchema: captureFrameWidgetActionSchema,
-      _meta: { ui: { visibility: ["app"] }, "openai/visibility": "private", "openai/widgetAccessible": true }
-    },
-    {
-      name: "researchtube_copy_capture_frame_image",
-      title: "Copy a captured frame",
-      description: "Widget-only action. Copies one captured workspace image to the local system clipboard through the installed Chrome Extension. It is not available to the model.",
-      annotations: localWorkspaceWriteAnnotations,
-      inputSchema: { type: "object", additionalProperties: false, properties: { path: { type: "string", minLength: 1 } }, required: ["path"] },
-      outputSchema: captureFrameWidgetActionSchema,
-      _meta: { ui: { visibility: ["app"] }, "openai/visibility": "private", "openai/widgetAccessible": true }
-    },
-    {
-      name: "researchtube_download_capture_frame",
-      title: "Download a captured frame",
-      description: "Widget-only action. Opens Chrome's native Save dialog for one captured workspace image. The image stays local: the installed Chrome Extension reads it from the Local Agent and starts the download. It is not available to the model.",
       annotations: localWorkspaceWriteAnnotations,
       inputSchema: { type: "object", additionalProperties: false, properties: { path: { type: "string", minLength: 1 } }, required: ["path"] },
       outputSchema: captureFrameWidgetActionSchema,
@@ -909,6 +891,7 @@ async function getPublicConnectionState() {
     lastConnectionTest: config.lastConnectionTest || null,
     agentPort,
     agent,
+    extensionVersion: EXTENSION_VERSION,
     requiredAgentInterfaceVersion: REQUIRED_AGENT_INTERFACE_VERSION,
     onboardingCompleted: Boolean(config.onboardingCompleted),
     youtubeSearch: {
@@ -1502,10 +1485,6 @@ async function getCaptureFrameImage(path) {
   }
   return { metadata: { path: logicalPath, mimeType: document.mimeType, imageSizeBytes: document.imageSizeBytes }, inlineImageBase64: document.inlineImageBase64 };
 }
-function captureFrameDownloadName(path) {
-  const fileName = String(path).split("/").pop() || "ResearchTube frame.png";
-  return fileName.replace(/[<>:"/\\|?*\u0000-\u001F]/g, "_").trim() || "ResearchTube frame.png";
-}
 async function ensureCaptureFrameOffscreenDocument() {
   if (captureFrameOffscreenPromise) return captureFrameOffscreenPromise;
   captureFrameOffscreenPromise = (async () => {
@@ -1518,7 +1497,7 @@ async function ensureCaptureFrameOffscreenDocument() {
       await chrome.offscreen.createDocument({
         url: CAPTURE_FRAME_OFFSCREEN_DOCUMENT,
         reasons: ["CLIPBOARD"],
-        justification: "Copy a user-requested ResearchTube workspace path or captured image to the local clipboard."
+        justification: "Copy a user-requested ResearchTube workspace path to the local clipboard."
       });
     }
   })();
@@ -1553,31 +1532,6 @@ async function copyCaptureFramePath(path) {
   console.info("[ResearchTube] Copying captured-frame workspace path through the Chrome clipboard helper.");
   await copyCaptureFrameToClipboard({ kind: "path", text: logicalPath });
   return { path: logicalPath, action: "copiedPath" };
-}
-async function copyCaptureFrameImage(path) {
-  const image = await getCaptureFrameImage(path);
-  console.info("[ResearchTube] Copying captured-frame image as PNG through the Chrome clipboard helper.");
-  await copyCaptureFrameToClipboard({ kind: "image", base64: image.inlineImageBase64, mimeType: image.metadata.mimeType });
-  return { path: image.metadata.path, action: "copiedImage" };
-}
-async function downloadCaptureFrame(path) {
-  const image = await getCaptureFrameImage(path);
-  if (!chrome.downloads?.download) {
-    throw localAgentError("DOWNLOAD_UNAVAILABLE", "Chrome Downloads is unavailable in this Extension.");
-  }
-  try {
-    console.info("[ResearchTube] Starting a local Chrome download for a captured frame.");
-    await chrome.downloads.download({
-      url: `data:${image.metadata.mimeType};base64,${image.inlineImageBase64}`,
-      filename: captureFrameDownloadName(image.metadata.path),
-      saveAs: true,
-      conflictAction: "uniquify"
-    });
-  } catch (error) {
-    console.error("[ResearchTube] Chrome could not start the captured-frame download.", error);
-    throw localAgentError("DOWNLOAD_UNAVAILABLE", "Chrome could not start the image download.");
-  }
-  return { path: image.metadata.path, action: "downloadStarted" };
 }
 async function saveConnection(payload = {}) {
   const tunnelId = String(payload.tunnelId ?? "").trim();
@@ -1758,7 +1712,7 @@ function safeErrorMessage(error) {
   return String(error?.message || error || "Unknown error").replace(/sk-[A-Za-z0-9_-]+/g, "[redacted]");
 }
 async function readCaptureFrameWidgetHtml() {
-  const response = await fetch(chrome.runtime.getURL("ui/capture-frame-widget-v12.html"));
+  const response = await fetch(chrome.runtime.getURL("ui/capture-frame-widget-v18.html"));
   if (!response.ok) throw new Error("The bundled capture-frame widget could not be read.");
   return response.text();
 }
@@ -1884,12 +1838,6 @@ async function handleMcpRequest(request) {
   }
   if (request?.method === "tools/call" && request.params?.name === "researchtube_copy_capture_frame_path") {
     return executeCaptureFrameWidgetActionToolCall(request.id, "researchtube_copy_capture_frame_path", request.params.arguments?.path, copyCaptureFramePath);
-  }
-  if (request?.method === "tools/call" && request.params?.name === "researchtube_copy_capture_frame_image") {
-    return executeCaptureFrameWidgetActionToolCall(request.id, "researchtube_copy_capture_frame_image", request.params.arguments?.path, copyCaptureFrameImage);
-  }
-  if (request?.method === "tools/call" && request.params?.name === "researchtube_download_capture_frame") {
-    return executeCaptureFrameWidgetActionToolCall(request.id, "researchtube_download_capture_frame", request.params.arguments?.path, downloadCaptureFrame);
   }
   if (request?.method === "tools/call" && request.params?.name === "youtube_search") {
     const query = String(request.params.arguments?.query ?? "").trim();

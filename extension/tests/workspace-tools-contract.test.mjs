@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 
 const background = await readFile(new URL("../background.js", import.meta.url), "utf8");
 
-for (const tool of ["workspace_list", "workspace_stat", "workspace_mkdir", "workspace_move", "workspace_delete", "media_probe", "capture_frame", "researchtube_get_capture_frame_image", "researchtube_copy_capture_frame_path", "researchtube_copy_capture_frame_image", "researchtube_download_capture_frame"]) {
+for (const tool of ["workspace_list", "workspace_stat", "workspace_mkdir", "workspace_move", "workspace_delete", "media_probe", "capture_frame", "researchtube_get_capture_frame_image", "researchtube_copy_capture_frame_path"]) {
   assert.match(background, new RegExp(`name: "${tool}"`), `${tool} must be published in tools/list`);
 }
 assert.match(background, /"\/media\/capture-frame"/);
@@ -26,7 +26,9 @@ assert.match(background, /CAPTURE_FRAME_WIDGET_URI/);
 assert.match(background, /resources\/read/);
 assert.match(background, /text\/html;profile=mcp-app/);
 assert.match(background, /captureFrameImageBase64/);
-assert.match(background, /chrome\.downloads\.download/);
+assert.doesNotMatch(background, /researchtube_copy_capture_frame_image/);
+assert.doesNotMatch(background, /researchtube_download_capture_frame/);
+assert.doesNotMatch(background, /chrome\.downloads\.download/);
 assert.match(background, /chrome\.offscreen\.createDocument/);
 assert.match(background, /capture-frame-offscreen\.html/);
 assert.match(background, /Every capture is saved as a normal workspace image file/);

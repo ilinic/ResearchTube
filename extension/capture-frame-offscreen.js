@@ -1,45 +1,29 @@
-function base64ToBlob(base64, mimeType) {
-  const binary = atob(base64);
-  const bytes = new Uint8Array(binary.length);
-  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
-  return new Blob([bytes], { type: mimeType });
-}
-
-async function pngClipboardBlob(base64, mimeType) {
-  const source = base64ToBlob(base64, mimeType);
-  if (mimeType === "image/png") return source;
-  const bitmap = await createImageBitmap(source);
+function copyTextWithExecCommand(text) {
+  const textEl = document.createElement("textarea");
+  textEl.value = text;
+  textEl.setAttribute("readonly", "");
+  textEl.style.cssText = "position:fixed;left:-10000px;top:0;opacity:0;";
+  document.body.append(textEl);
   try {
-    const canvas = document.createElement("canvas");
-    canvas.width = bitmap.width;
-    canvas.height = bitmap.height;
-    const context = canvas.getContext("2d");
-    if (!context) throw new Error("Canvas is unavailable.");
-    context.drawImage(bitmap, 0, 0);
-    const png = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
-    if (!png) throw new Error("PNG conversion failed.");
-    return png;
+    textEl.select();
+    if (!document.execCommand("copy")) throw new Error("Chrome rejected the clipboard copy command.");
   } finally {
-    bitmap.close?.();
+    textEl.remove();
   }
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type !== "researchtube_copy_capture_frame") return undefined;
-  (async () => {
-    if (message.kind === "path") {
-      if (typeof message.text !== "string" || !message.text) throw new Error("A workspace path is required.");
-      await navigator.clipboard.writeText(message.text);
-    } else if (message.kind === "image") {
-      if (typeof message.base64 !== "string" || !message.base64 || !["image/png", "image/jpeg", "image/webp"].includes(message.mimeType)) {
-        throw new Error("A supported captured image is required.");
-      }
-      const png = await pngClipboardBlob(message.base64, message.mimeType);
-      await navigator.clipboard.write([new ClipboardItem({ "image/png": png })]);
-    } else {
-      throw new Error("Unsupported clipboard request.");
+  try {
+    if (message.kind !== "path" || typeof message.text !== "string" || !message.text) {
+      throw new Error("A workspace path is required.");
     }
+    // Offscreen documents cannot receive focus, so navigator.clipboard is not
+    // reliable here. This Chrome extension route copies text using DOM selection.
+    copyTextWithExecCommand(message.text);
     sendResponse({ ok: true });
-  })().catch((error) => sendResponse({ ok: false, message: String(error?.message || error || "Clipboard request failed.") }));
+  } catch (error) {
+    sendResponse({ ok: false, message: String(error?.message || error || "Clipboard request failed.") });
+  }
   return true;
 });

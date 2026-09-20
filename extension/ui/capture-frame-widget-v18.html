@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    :root { color-scheme: light dark; font-family: ui-sans-serif, system-ui, sans-serif; }
+    * { box-sizing: border-box; }
+    html, body { width: 100%; min-width: 0; overflow: hidden; }
+    body { margin: 0; color: CanvasText; background: transparent; }
+    .capture { width: 100%; min-width: 0; padding: 26px 32px 34px; display: grid; gap: 12px; }
+    .brand, .path-row, .info-row { display: flex; align-items: center; min-width: 0; }
+    .brand { justify-content: space-between; gap: 12px; }
+    .brand-identity { display: flex; align-items: center; gap: 10px; min-width: 0; }
+    .brand-mark { display: grid; width: 30px; height: 30px; flex: 0 0 auto; place-items: center; border-radius: 9px; background: linear-gradient(135deg, #ef4444, #b91c1c); box-shadow: 0 1px 3px rgb(0 0 0 / 28%); }
+    .brand-mark svg { width: 18px; height: 18px; fill: white; }
+    .brand-copy { min-width: 0; font-size: 14px; line-height: 1.3; overflow-wrap: anywhere; }
+    .brand-name { font-weight: 750; }
+    .brand-context { color: color-mix(in srgb, CanvasText 66%, Canvas); }
+    .icon-button { position: relative; display: inline-grid; width: 31px; height: 31px; flex: 0 0 auto; padding: 0; place-items: center; border: 1px solid color-mix(in srgb, CanvasText 20%, Canvas); border-radius: 8px; color: CanvasText; background: color-mix(in srgb, CanvasText 5%, Canvas); cursor: pointer; }
+    .icon-button:hover { background: color-mix(in srgb, CanvasText 12%, Canvas); }
+    .icon-button:focus-visible { outline: 2px solid #3b82f6; outline-offset: 2px; }
+    .icon-button:disabled { cursor: wait; opacity: .62; }
+    .icon-button svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; }
+    .header-action svg { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); }
+    .copy-button.action-success { color: #16a34a; border-color: color-mix(in srgb, #16a34a 66%, Canvas); }
+    .action-badge { position: absolute; right: -5px; bottom: -5px; display: grid; width: 14px; height: 14px; place-items: center; border: 1px solid Canvas; border-radius: 999px; color: white; background: #16a34a; font-size: 10px; font-weight: 800; line-height: 1; }
+    .details { display: none; min-width: 0; }
+    .details.visible { display: block; }
+    .path-row { gap: 8px; }
+    .path { min-width: 0; flex: 1 1 auto; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; word-break: break-word; }
+    .youtube-video-link { color: #3b82f6; font: inherit; text-decoration: underline; text-underline-offset: 2px; }
+    .path-row .icon-button { width: 29px; height: 29px; }
+    .info-row { align-items: flex-start; flex-wrap: wrap; gap: 8px 10px; min-height: 1.35em; }
+    .status { min-width: 0; color: color-mix(in srgb, CanvasText 68%, Canvas); font-size: 13px; line-height: 1.4; }
+    .status.error { width: 100%; color: #d92d20; }
+    .status-title { font-weight: 650; }
+    .status-detail { margin-top: 2px; }
+    .metadata { display: flex; flex: 1 1 auto; flex-wrap: wrap; gap: 7px; }
+    .chip { padding: 3px 7px; border: 1px solid color-mix(in srgb, CanvasText 17%, Canvas); border-radius: 999px; color: color-mix(in srgb, CanvasText 76%, Canvas); font-size: 11px; line-height: 1.25; }
+    .media { min-width: 0; }
+    canvas { display: none; max-width: 100%; max-height: 560px; width: auto; height: auto; border: 1px solid color-mix(in srgb, CanvasText 16%, Canvas); border-radius: 10px; background: color-mix(in srgb, CanvasText 8%, Canvas); box-shadow: 0 1px 3px rgb(0 0 0 / 18%); }
+    canvas[draggable="true"] { cursor: grab; }
+    canvas[draggable="true"]:active { cursor: grabbing; }
+  </style>
+</head>
+<body>
+  <main class="capture">
+    <header class="brand">
+      <div class="brand-identity"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M8 5.4v13.2c0 .8.9 1.3 1.6.8l10-6.6a1 1 0 0 0 0-1.6l-10-6.6A1 1 0 0 0 8 5.4Z"/></svg></span><div class="brand-copy"><span class="brand-name">ResearchTube</span><span class="brand-context"> — captured video frame in workspace</span></div></div>
+      <button id="refresh-frame" class="icon-button header-action" type="button" title="Refresh frame" aria-label="Refresh frame"><svg viewBox="0 0 24 24" aria-hidden="true"><g transform="translate(-2.2 -2.26)"><path d="M20 11a8 8 0 1 0 2.2 5.5"/><path d="M20 4v7h-7"/></g></svg></button>
+    </header>
+    <section id="details" class="details" aria-label="Captured frame workspace path"><div class="path-row"><div id="path" class="path"></div><button id="copy-path" class="icon-button copy-button" type="button" title="Copy workspace path through ResearchTube" aria-label="Copy workspace path through ResearchTube"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="10" height="10" rx="1"/><path d="M15 9V6a1 1 0 0 0-1-1H6a1 1 0 0 0-1 1v8a1 1 0 0 0 1 1h3"/></svg></button></div></section>
+    <div class="info-row"><div id="status" class="status" role="status"><div id="status-title" class="status-title">Loading captured frame…</div><div id="status-detail" class="status-detail" hidden></div></div><div id="metadata" class="metadata" aria-label="Captured frame metadata"></div></div>
+    <div class="media"><canvas id="image" aria-label="Captured video frame" draggable="false"></canvas></div>
+  </main>
+  <script>
+    (() => {
+      const status = document.getElementById("status"); const statusTitle = document.getElementById("status-title"); const statusDetail = document.getElementById("status-detail"); const image = document.getElementById("image"); const refreshFrameButton = document.getElementById("refresh-frame"); const details = document.getElementById("details"); const pathElement = document.getElementById("path"); const copyPathButton = document.getElementById("copy-path"); const metadataElement = document.getElementById("metadata");
+      let lastWorkspacePath = null; let loadedImage = null; const copyFeedbackTimers = new WeakMap();
+      const openai = () => window.openai;
+      function reportIntrinsicHeight() { requestAnimationFrame(() => { const height = Math.ceil(document.documentElement.scrollHeight); const notify = openai()?.notifyIntrinsicHeight; if (typeof notify !== "function") return; try { notify(); } catch (_error) {} try { notify({ height }); } catch (_error) {} }); }
+      function displayStatus(title, isError = false, detail = null) { statusTitle.textContent = title; statusDetail.textContent = detail || ""; statusDetail.hidden = !detail; status.classList.toggle("error", isError); reportIntrinsicHeight(); }
+      function baseName(path) { return String(path || "ResearchTube frame.png").split("/").pop() || "ResearchTube frame.png"; }
+      function base64ToBlob(base64, mimeType) { const binary = atob(base64); const bytes = new Uint8Array(binary.length); for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index); return new Blob([bytes], { type: mimeType }); }
+      function dragFileName(path) { return `${baseName(path).replace(/\.[^.]+$/, "") || "ResearchTube frame"}.png`; }
+      function makeDragFile(path) { return new Promise((resolve, reject) => image.toBlob((blob) => blob ? resolve(new File([blob], dragFileName(path), { type: "image/png" })) : reject(new Error("Could not prepare the PNG drag file.")), "image/png")); }
+      function callWidgetAction(toolName, workspacePath) { if (typeof openai()?.callTool !== "function") throw new Error("This ChatGPT host does not expose the MCP Apps tool-call bridge."); return openai().callTool(toolName, { path: workspacePath }); }
+      async function copyPathThroughResearchTube() { const workspacePath = loadedImage?.workspacePath ?? lastWorkspacePath; if (!workspacePath) throw new Error("No workspace path is available to copy."); await callWidgetAction("researchtube_copy_capture_frame_path", workspacePath); displayStatus("Workspace path copied to the local clipboard."); }
+      function showCopyBadge(button) { const oldTimer = copyFeedbackTimers.get(button); if (oldTimer) clearTimeout(oldTimer); let badge = button.querySelector(".action-badge"); if (!badge) { badge = document.createElement("span"); badge.className = "action-badge"; badge.textContent = "✓"; button.append(badge); } button.classList.add("action-success"); const timer = setTimeout(() => { button.classList.remove("action-success"); badge?.remove(); copyFeedbackTimers.delete(button); }, 1800); copyFeedbackTimers.set(button, timer); }
+      async function runWidgetAction(action, failureTitle, button) { button.disabled = true; try { await action(); showCopyBadge(button); } catch (error) { console.warn("[ResearchTube] captured-frame widget action failed", error); displayStatus(failureTitle, true, "The Local Agent could not update the local clipboard."); } finally { button.disabled = false; } }
+      function findCaptureBase64(value, visited = new Set()) { if (!value || typeof value !== "object" || visited.has(value)) return null; visited.add(value); if (typeof value.captureFrameImageBase64 === "string") return value.captureFrameImageBase64; for (const nested of Object.values(value)) { const found = findCaptureBase64(nested, visited); if (found) return found; } return null; }
+      async function callImageTool(workspacePath) { if (typeof openai()?.callTool === "function") return openai().callTool("researchtube_get_capture_frame_image", { path: workspacePath }); throw new Error("This ChatGPT host does not expose the MCP Apps tool-call bridge."); }
+      function widgetToolMetadata() { return openai()?.toolResponseMetadata ?? null; } function normalizedOutput(value) { return value?.structuredContent || (value && typeof value === "object" ? value : null); }
+      function formatBytes(value) { if (!Number.isFinite(value) || value < 0) return null; if (value < 1024) return `${value} B`; if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`; return `${(value / (1024 * 1024)).toFixed(1)} MB`; }
+      function addChip(text) { if (text) { const chip = document.createElement("span"); chip.className = "chip"; chip.textContent = text; metadataElement.append(chip); } }
+      function renderWorkspacePath(workspacePath) { const pattern = /\[yt_([A-Za-z0-9_-]{6,})\]/g; const fragment = document.createDocumentFragment(); let cursor = 0; for (const match of workspacePath.matchAll(pattern)) { fragment.append(document.createTextNode(workspacePath.slice(cursor, match.index))); const videoId = match[1]; const href = `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`; const link = document.createElement("a"); link.className = "youtube-video-link"; link.href = href; link.target = "_blank"; link.rel = "noopener noreferrer"; link.textContent = match[0]; link.title = "Open this source video on YouTube"; link.addEventListener("click", (event) => { if (typeof openai()?.openExternal !== "function") return; event.preventDefault(); void openai().openExternal({ href, redirectUrl: false }); }); fragment.append(link); cursor = match.index + match[0].length; } fragment.append(document.createTextNode(workspacePath.slice(cursor))); pathElement.replaceChildren(fragment); }
+      function showDetails(frame, fallbackPath, fallbackMimeType) { const frameImage = frame?.image ?? {}; const workspacePath = frameImage.workspacePath ?? fallbackPath; if (typeof workspacePath !== "string") return; renderWorkspacePath(workspacePath); metadataElement.replaceChildren(); if (Number.isFinite(frame?.requestedTimestampSeconds)) addChip(`t = ${frame.requestedTimestampSeconds.toFixed(3)} s`); if (Number.isInteger(frameImage.width) && Number.isInteger(frameImage.height)) addChip(`${frameImage.width} × ${frameImage.height}`); const format = typeof frameImage.format === "string" ? frameImage.format.toUpperCase() : String(fallbackMimeType || "").replace("image/", "").toUpperCase(); addChip(format || null); addChip(formatBytes(frameImage.imageSizeBytes)); if (typeof frame?.seekMode === "string") addChip(`${frame.seekMode} seek`); details.classList.add("visible"); reportIntrinsicHeight(); }
+      function friendlyLoadError(error) { const raw = String(error?.message || error || ""); console.warn("[ResearchTube] captured-frame widget load failed", error); if (/FILE_NOT_FOUND|requested workspace file does not exist|does not exist/i.test(raw)) return { title: "Captured frame unavailable", detail: "The workspace image is no longer available. It may have been moved or deleted." }; if (/AGENT_UNAVAILABLE|ECONNREFUSED|Failed to fetch|NetworkError|network/i.test(raw)) return { title: "Captured frame unavailable", detail: "The Local Agent is unavailable. Start it and refresh this frame." }; return { title: "Captured frame unavailable", detail: "Check the Local Agent and workspace image file." }; }
+      async function maybeSaveToLibrary(frame, imageFile) { if (!frame.image.saveToLibrary) return null; const bridge = openai(); if (typeof bridge?.uploadFile !== "function" || typeof bridge?.setWidgetState !== "function") throw new Error("ChatGPT File Library is unavailable in this widget host."); const current = bridge.widgetState; const saved = current?.privateContent; if (saved?.workspacePath === frame.image.workspacePath && typeof saved.libraryFileId === "string") return saved.libraryFileId; const uploaded = await bridge.uploadFile(imageFile, { library: true }); const fileId = uploaded?.fileId ?? uploaded?.file_id; if (typeof fileId !== "string" || !fileId) throw new Error("ChatGPT Library did not return a file ID."); await bridge.setWidgetState({ modelContent: { sourcePath: frame.sourcePath, workspacePath: frame.image.workspacePath, libraryFileName: imageFile.name, libraryFileId: fileId, imageAvailableToModel: true }, privateContent: { workspacePath: frame.image.workspacePath, libraryFileId: fileId, mimeType: imageFile.type }, imageIds: [fileId] }); return fileId; }
+      async function paintFrame(base64, mimeType) { if (typeof createImageBitmap !== "function") throw new Error("This ChatGPT widget host cannot decode an image bitmap."); const bitmap = await createImageBitmap(base64ToBlob(base64, mimeType)); try { image.width = bitmap.width; image.height = bitmap.height; const context = image.getContext("2d"); if (!context) throw new Error("This ChatGPT widget host cannot create a canvas context."); context.drawImage(bitmap, 0, 0); image.style.display = "block"; } finally { bitmap.close?.(); } }
+      async function render(frame) { const workspacePath = frame?.image?.workspacePath; const mimeType = frame?.image?.mimeType; if (typeof workspacePath !== "string" || typeof mimeType !== "string") return; if (workspacePath === lastWorkspacePath && image.width > 0) return; lastWorkspacePath = workspacePath; loadedImage = null; image.draggable = false; image.style.display = "none"; displayStatus("Loading captured frame…"); showDetails(frame, workspacePath, mimeType); try { const response = await callImageTool(workspacePath); const base64 = findCaptureBase64(widgetToolMetadata()) ?? findCaptureBase64(response); const metadata = normalizedOutput(response); if (!base64) throw new Error("The Local Agent did not return image data to the widget."); const actualMimeType = metadata?.mimeType || mimeType; await paintFrame(base64, actualMimeType); const dragFile = await makeDragFile(workspacePath); loadedImage = { mimeType: actualMimeType, workspacePath, dragFile }; image.draggable = true; let libraryFileId = null; try { libraryFileId = await maybeSaveToLibrary(frame, dragFile); } catch (error) { console.warn("[ResearchTube] captured-frame Library upload failed", error); displayStatus("Could not save to ChatGPT Library.", true, "The captured frame remains available in the workspace."); return; } if (!libraryFileId) await openai()?.setWidgetState?.({ privateContent: { workspacePath, mimeType: actualMimeType }, modelContent: { sourcePath: frame.sourcePath, workspacePath, imageAvailableToModel: false }, imageIds: [] }); displayStatus(libraryFileId ? "Saved to ChatGPT Library." : "Frame loaded."); } catch (error) { const message = friendlyLoadError(error); displayStatus(message.title, true, message.detail); } }
+      function renderCurrent() { const state = openai()?.widgetState; const output = openai()?.toolOutput ?? state?.modelContent; if (output?.image?.workspacePath) return render(output); if (state?.privateContent?.workspacePath) return render({ sourcePath: state?.modelContent?.sourcePath ?? null, image: { workspacePath: state.privateContent.workspacePath, mimeType: state.privateContent.mimeType ?? "image/png", width: null, height: null, saveToLibrary: false } }); }
+      async function refreshCurrent() { lastWorkspacePath = null; loadedImage = null; image.style.display = "none"; const state = openai()?.widgetState; const output = openai()?.toolOutput ?? state?.modelContent; if (output?.image?.workspacePath) return render(output); if (state?.privateContent?.workspacePath) return render({ sourcePath: state?.modelContent?.sourcePath ?? null, image: { workspacePath: state.privateContent.workspacePath, mimeType: state.privateContent.mimeType ?? "image/png", width: null, height: null, saveToLibrary: false } }); displayStatus("Captured frame unavailable", true, "Check the Local Agent and workspace image file."); }
+      window.addEventListener("message", (event) => { if (event.source === window.parent && event.data?.jsonrpc === "2.0" && event.data?.method === "ui/notifications/tool-result") void render(event.data.params?.structuredContent); }, { passive: true });
+      window.addEventListener("openai:set_globals", (event) => { const output = event?.detail?.globals?.toolOutput; if (output?.image?.workspacePath) void render(output); else void renderCurrent(); }, { passive: true });
+      if (typeof ResizeObserver === "function") new ResizeObserver(() => reportIntrinsicHeight()).observe(document.body);
+      image.addEventListener("dragstart", (event) => { const file = loadedImage?.dragFile; if (!file || !event.dataTransfer) { event.preventDefault(); return; } event.dataTransfer.items.add(file); event.dataTransfer.effectAllowed = "copy"; });
+      copyPathButton.addEventListener("click", () => { void runWidgetAction(copyPathThroughResearchTube, "Could not copy workspace path.", copyPathButton); });
+      refreshFrameButton.addEventListener("click", () => { void refreshCurrent(); }); renderCurrent();
+    })();
+  </script>
+</body>
+</html>
