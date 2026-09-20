@@ -15,7 +15,7 @@ const DEFAULTS = {
   youtubeSearchCooldownUntil: 0,
   youtubeSearchCooldownLevel: 0
 };
-const EXTENSION_VERSION = "1.15.2";
+const EXTENSION_VERSION = "1.15.3";
 const REQUIRED_AGENT_INTERFACE_VERSION = 13;
 // A UI resource URI is a cache key in MCP Apps. Increment it whenever the
 // rendered template changes so ChatGPT does not reuse a stale iframe bundle.
