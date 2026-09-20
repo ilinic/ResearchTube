@@ -16,7 +16,7 @@ var DEFAULTS = {
   youtubeSearchCooldownUntil: 0,
   youtubeSearchCooldownLevel: 0
 };
-var EXTENSION_VERSION = "1.15.0";
+var EXTENSION_VERSION = "1.15.2";
 var REQUIRED_AGENT_INTERFACE_VERSION = 13;
 var CAPTURE_FRAME_WIDGET_URI = "ui://researchtube/capture-frame-v21.html";
 var CAPTURE_FRAME_OFFSCREEN_DOCUMENT = "capture-frame-offscreen.html";
