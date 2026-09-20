@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-AGENT_VERSION = "0.13.2"
+AGENT_VERSION = "0.13.4"
 INTERFACE_VERSION = 12
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
@@ -1616,6 +1616,17 @@ def parse_json_body(body: bytes) -> Any:
         raise AgentApiError("INVALID_JSON", "The request body must be valid UTF-8 JSON.") from error
 
 
+def task_response_log_suffix(path: str, body: dict[str, Any] | None) -> str:
+    """Add the available native download percentage to the HTTP console line."""
+    if not path.startswith("/tasks/") or not isinstance(body, dict) or "taskId" not in body:
+        return ""
+    progress = body.get("progressPercent")
+    if isinstance(progress, (int, float)) and not isinstance(progress, bool) and 0 <= progress <= 100:
+        percentage = f"{progress:.1f}".rstrip("0").rstrip(".")
+        return f" ({percentage}%)"
+    return ""
+
+
 async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
     method, path = "", ""
     try:
@@ -1659,7 +1670,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             response_status, response_body = "404 Not Found", error_document(AgentApiError("NOT_FOUND", "Unknown local Agent endpoint."))
         writer.write(http_response(response_status, response_body))
         await writer.drain()
-        log(f"{method or 'INVALID'} {path or '/'} -> {response_status.split()[0]}")
+        log(f"{method or 'INVALID'} {path or '/'} -> {response_status.split()[0]}{task_response_log_suffix(path, response_body)}")
     except AgentApiError as error:
         status = "404 Not Found" if error.code == "TASK_NOT_FOUND" else "400 Bad Request"
         writer.write(http_response(status, error_document(error)))

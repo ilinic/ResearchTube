@@ -16,9 +16,9 @@ var DEFAULTS = {
   youtubeSearchCooldownUntil: 0,
   youtubeSearchCooldownLevel: 0
 };
-var EXTENSION_VERSION = "1.14.0";
+var EXTENSION_VERSION = "1.14.2";
 var REQUIRED_AGENT_INTERFACE_VERSION = 12;
-var CAPTURE_FRAME_WIDGET_URI = "ui://researchtube/capture-frame-v18.html";
+var CAPTURE_FRAME_WIDGET_URI = "ui://researchtube/capture-frame-v20.html";
 var CAPTURE_FRAME_OFFSCREEN_DOCUMENT = "capture-frame-offscreen.html";
 var AGENT_HEALTH_TIMEOUT_MS = 5e3;
 var AGENT_TASK_TIMEOUT_MS = 1e4;
@@ -1712,7 +1712,7 @@ function safeErrorMessage(error) {
   return String(error?.message || error || "Unknown error").replace(/sk-[A-Za-z0-9_-]+/g, "[redacted]");
 }
 async function readCaptureFrameWidgetHtml() {
-  const response = await fetch(chrome.runtime.getURL("ui/capture-frame-widget-v18.html"));
+  const response = await fetch(chrome.runtime.getURL("ui/capture-frame-widget-v20.html"));
   if (!response.ok) throw new Error("The bundled capture-frame widget could not be read.");
   return response.text();
 }

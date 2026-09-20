@@ -15,11 +15,11 @@ const DEFAULTS = {
   youtubeSearchCooldownUntil: 0,
   youtubeSearchCooldownLevel: 0
 };
-const EXTENSION_VERSION = "1.14.0";
+const EXTENSION_VERSION = "1.14.2";
 const REQUIRED_AGENT_INTERFACE_VERSION = 12;
 // A UI resource URI is a cache key in MCP Apps. Increment it whenever the
 // rendered template changes so ChatGPT does not reuse a stale iframe bundle.
-const CAPTURE_FRAME_WIDGET_URI = "ui://researchtube/capture-frame-v18.html";
+const CAPTURE_FRAME_WIDGET_URI = "ui://researchtube/capture-frame-v20.html";
 const CAPTURE_FRAME_OFFSCREEN_DOCUMENT = "capture-frame-offscreen.html";
 const AGENT_HEALTH_TIMEOUT_MS = 5_000;
 const AGENT_TASK_TIMEOUT_MS = 10_000;
@@ -1707,7 +1707,7 @@ function safeErrorMessage(error) {
 }
 
 async function readCaptureFrameWidgetHtml() {
-  const response = await fetch(chrome.runtime.getURL("ui/capture-frame-widget-v18.html"));
+  const response = await fetch(chrome.runtime.getURL("ui/capture-frame-widget-v20.html"));
   if (!response.ok) throw new Error("The bundled capture-frame widget could not be read.");
   return response.text();
 }

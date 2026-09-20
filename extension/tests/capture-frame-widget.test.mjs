@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
-const widget = await readFile(new URL("../ui/capture-frame-widget-v18.html", import.meta.url), "utf8");
+const widget = await readFile(new URL("../ui/capture-frame-widget-v20.html", import.meta.url), "utf8");
 
 assert.match(widget, /researchtube_get_capture_frame_image/);
 assert.match(widget, /workspacePath/);
@@ -33,9 +33,12 @@ assert.match(widget, /dataTransfer\.items\.add\(file\)/);
 assert.match(widget, /effectAllowed = "copy"/);
 assert.match(widget, /makeDragFile/);
 assert.match(widget, /new File\(\[blob\], dragFileName/);
+assert.match(widget, /requestedLibrarySave/);
+assert.match(widget, /toolInput\?\.delivery/);
+assert.match(widget, /uploaded\?\.id/);
 assert.match(widget, /const pattern = \/\\\[yt_/);
 assert.match(widget, /youtube-video-link/);
-assert.match(widget, /openExternal\(\{ href, redirectUrl: false \}\)/);
+assert.match(widget, /external\(\{ href, redirectUrl: false \}\)/);
 assert.match(widget, /requestedTimestampSeconds\.toFixed\(3\)/);
 assert.match(widget, /t = \$\{frame\.requestedTimestampSeconds/);
 assert.doesNotMatch(widget, /researchtube_copy_capture_frame_image/);
@@ -46,9 +49,9 @@ assert.doesNotMatch(widget, /id="copy-path-direct"/);
 assert.doesNotMatch(widget, /navigator\.clipboard/);
 assert.doesNotMatch(widget, /ClipboardItem/);
 assert.doesNotMatch(widget, /callLocalExtensionAction/);
-assert.doesNotMatch(widget, /URL\.createObjectURL/);
 assert.doesNotMatch(widget, /getFileDownloadUrl/);
 assert.doesNotMatch(widget, /library: false/);
+assert.doesNotMatch(widget, /URL\.createObjectURL/);
 assert.doesNotMatch(widget, /image\.src\s*=/);
 assert.match(widget, /https:\/\/www\.youtube\.com\/watch\?v=/);
 console.log("capture frame widget: ok");
