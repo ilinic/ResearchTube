@@ -25,8 +25,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-AGENT_VERSION = "0.13.4"
-INTERFACE_VERSION = 12
+AGENT_VERSION = "0.14.0"
+INTERFACE_VERSION = 13
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
 TASK_POLL_INTERVAL_MS = 1_000
@@ -46,6 +46,9 @@ MAX_LOGICAL_COMPONENT_LENGTH = 240
 MAX_WORKSPACE_LIST_ENTRIES = 500
 MEDIA_PROBE_TIMEOUT_SECONDS = 15
 CAPTURE_FRAME_TIMEOUT_SECONDS = 60
+YOUTUBE_CAPTURE_FRAME_TIMEOUT_SECONDS = 90
+YOUTUBE_CAPTURE_PRE_ROLL_SECONDS = 12.0
+YOUTUBE_CAPTURE_POST_ROLL_SECONDS = 3.0
 MEDIA_PROBE_SECTIONS = {
     "format": ("-show_format", "format"),
     "streams": ("-show_streams", "streams"),
@@ -834,14 +837,29 @@ def capture_delivery(value: Any, source_path: str, timestamp_seconds: float, ima
         raise AgentApiError("CAPTURE_FRAME_INVALID", "delivery.saveToLibrary must be a boolean.")
     return {
         "workspacePath": workspace_path or capture_default_workspace_path(source_path, timestamp_seconds, image_format),
+        "workspacePathProvided": workspace_path is not None,
         "saveToLibrary": save_to_library,
     }
 
 
 def capture_frame_options(payload: Any) -> dict[str, Any]:
-    if not isinstance(payload, dict) or set(payload) - {"path", "timestampSeconds", "videoStreamIndex", "seekMode", "applyDisplayRotation", "crop", "resize", "image", "delivery"}:
+    if not isinstance(payload, dict) or set(payload) - {"path", "youtube", "timestampSeconds", "videoStreamIndex", "seekMode", "applyDisplayRotation", "crop", "resize", "image", "delivery"}:
         raise AgentApiError("CAPTURE_FRAME_INVALID", "capture_frame requires only documented fields.")
     path = payload.get("path")
+    youtube_value = payload.get("youtube")
+    if (path is None) == (youtube_value is None):
+        raise AgentApiError("CAPTURE_FRAME_INVALID", "capture_frame requires exactly one source: path or youtube.")
+    youtube: dict[str, str] | None = None
+    if youtube_value is not None:
+        youtube_item = capture_object(youtube_value, field_name="youtube", allowed={"videoId", "formatId"})
+        if set(youtube_item) != {"videoId", "formatId"}:
+            raise AgentApiError("CAPTURE_FRAME_INVALID", "youtube requires videoId and formatId.")
+        youtube = {
+            "videoId": validate_video_id(youtube_item["videoId"]),
+            "formatId": parse_download_selection({"video": youtube_item["formatId"]}).video or "",
+        }
+        if not re.fullmatch(r"[0-9]+", youtube["formatId"]):
+            raise AgentApiError("CAPTURE_FRAME_INVALID", "youtube.formatId must be a numeric ID returned by youtube_get_download_formats.")
     timestamp = finite_number(payload.get("timestampSeconds"), field_name="timestampSeconds", minimum=0)
     stream_index = payload.get("videoStreamIndex")
     if stream_index is not None:
@@ -854,7 +872,7 @@ def capture_frame_options(payload: Any) -> dict[str, Any]:
         raise AgentApiError("CAPTURE_FRAME_INVALID", "applyDisplayRotation must be a boolean.")
     image = capture_image(payload.get("image"))
     return {
-        "path": path, "timestampSeconds": timestamp, "videoStreamIndex": stream_index, "seekMode": seek_mode,
+        "path": path, "youtube": youtube, "timestampSeconds": timestamp, "videoStreamIndex": stream_index, "seekMode": seek_mode,
         "applyDisplayRotation": rotation, "crop": capture_crop(payload.get("crop")), "resize": capture_resize(payload.get("resize")),
         "image": image, "delivery": capture_delivery(payload.get("delivery"), path if isinstance(path, str) else "", timestamp, image["format"]),
     }
@@ -964,8 +982,7 @@ def showinfo_timestamp(stderr: bytes) -> float | None:
     return result if math.isfinite(result) else None
 
 
-async def capture_frame(payload: Any) -> dict[str, Any]:
-    options = capture_frame_options(payload)
+async def capture_frame_from_workspace_options(options: dict[str, Any]) -> dict[str, Any]:
     item = WorkspacePathResolver().resolve_existing(options["path"], field_name="path", expected_type="file")
     ffmpeg = find_component("ffmpeg", COMPONENTS["ffmpeg"][0])
     ffprobe = find_component("ffprobe", COMPONENTS["ffprobe"][0])
@@ -1062,6 +1079,143 @@ async def capture_frame(payload: Any) -> dict[str, Any]:
             except OSError:
                 pass
         raise
+
+
+def safe_capture_title(value: str) -> str:
+    """Make a human-readable, cross-platform-safe filename component."""
+    title = re.sub(r'[\x00-\x1f<>:"/\\|?*]+', " ", value)
+    title = re.sub(r"\s+", " ", title).strip(" .")
+    if not title:
+        return "YouTube frame"
+    if title.split(".", 1)[0].upper() in WINDOWS_RESERVED_BASENAMES:
+        title = f"YouTube {title}"
+    return title[:160].rstrip(" .") or "YouTube frame"
+
+
+def youtube_capture_default_workspace_path(title: str, video_id: str, timestamp_seconds: float, image_format: str) -> str:
+    timestamp_part = f"{timestamp_seconds:.3f}".replace("-", "_")
+    capture_id = secrets.token_urlsafe(6)
+    return f"captures/{safe_capture_title(title)} [yt_{video_id}] [t_{timestamp_part}] [cap_{capture_id}].{image_format}"
+
+
+def youtube_capture_stdout(stdout: bytes) -> tuple[str | None, Path | None]:
+    title: str | None = None
+    partial_path: Path | None = None
+    for raw_line in stdout.decode("utf-8", errors="replace").splitlines():
+        if raw_line.startswith("__RESEARCHTUBE_CAPTURE_TITLE__:"):
+            title = raw_line.removeprefix("__RESEARCHTUBE_CAPTURE_TITLE__:").strip()
+        elif raw_line.startswith("__RESEARCHTUBE_CAPTURE_PARTIAL__:"):
+            candidate = raw_line.removeprefix("__RESEARCHTUBE_CAPTURE_PARTIAL__:").strip()
+            if candidate:
+                partial_path = Path(candidate)
+    return title, partial_path
+
+
+async def capture_youtube_frame(options: dict[str, Any]) -> dict[str, Any]:
+    """Download only a small yt-dlp/ffmpeg time section, then extract one frame.
+
+    The signed YouTube media URL and yt-dlp diagnostics stay entirely inside the
+    Agent.  The temporary media section is deleted in every outcome.
+    """
+    youtube = options["youtube"]
+    assert isinstance(youtube, dict)
+    yt_dlp = find_component("ytDlp", COMPONENTS["ytDlp"][0])
+    ffmpeg = find_component("ffmpeg", COMPONENTS["ffmpeg"][0])
+    if yt_dlp.error:
+        raise AgentApiError("YTDLP_DISCOVERY_ERROR", "yt-dlp discovery is ambiguous.", yt_dlp.error)
+    if ffmpeg.error:
+        raise AgentApiError("FFMPEG_DISCOVERY_ERROR", "ffmpeg discovery is ambiguous.", ffmpeg.error)
+    if not yt_dlp.executable:
+        raise AgentApiError("YTDLP_NOT_AVAILABLE", "yt-dlp is not available. Place it in tools/yt-dlp or install it on PATH.")
+    if not ffmpeg.executable:
+        raise AgentApiError("FFMPEG_NOT_AVAILABLE", "ffmpeg is required for partial YouTube frame capture. Extract it under tools/ffmpeg or install it on PATH.")
+
+    # The browser's player card can advertise a different format set from this
+    # local yt-dlp invocation. Confirm the exact numeric ID here, and reject
+    # audio-only IDs before starting the partial download.
+    local_formats = (await youtube_download_formats({"videoId": youtube["videoId"]}))["downloadFormats"]
+    selectable_video_ids = {
+        entry["formatId"] for kind in ("combined", "video") for entry in local_formats.get(kind, [])
+        if isinstance(entry, dict) and isinstance(entry.get("formatId"), str)
+    }
+    if youtube["formatId"] not in selectable_video_ids:
+        raise AgentApiError("CAPTURE_VIDEO_FORMAT_NOT_AVAILABLE", "youtube.formatId must be a currently available video or combined format from youtube_get_download_formats.")
+
+    timestamp = options["timestampSeconds"]
+    section_start = max(0.0, timestamp - YOUTUBE_CAPTURE_PRE_ROLL_SECONDS)
+    section_end = timestamp + YOUTUBE_CAPTURE_POST_ROLL_SECONDS
+    capture_token = secrets.token_urlsafe(8)
+    resolver = WorkspacePathResolver()
+    temporary_directory = resolver.resolve_destination(".researchtube-capture-tmp", field_name="temporary directory", error_code="WORKSPACE_PATH_INVALID")
+    temporary_directory.physical_path.mkdir(parents=True, exist_ok=True)
+    temporary_directory = resolver.resolve_destination(temporary_directory.logical_path, field_name="temporary directory", error_code="WORKSPACE_PATH_INVALID")
+    output_template = f"partial [yt_%(id)s] [cap_{capture_token}].%(ext)s"
+    command = [
+        yt_dlp.executable, *yt_dlp_js_runtime_arguments(resolve_deno_runtime()), "--ignore-config", "--no-playlist", "--no-part",
+        "--windows-filenames", "--download-sections", f"*{section_start:.3f}-{section_end:.3f}", "--downloader", "ffmpeg",
+        "--ffmpeg-location", str(Path(ffmpeg.executable).parent), "--format", youtube["formatId"],
+        "--paths", str(temporary_directory.physical_path), "--output", output_template,
+        "--print", "before_dl:__RESEARCHTUBE_CAPTURE_TITLE__:%(title)s",
+        "--print", "after_move:__RESEARCHTUBE_CAPTURE_PARTIAL__:%(filepath)s",
+        f"https://www.youtube.com/watch?v={youtube['videoId']}",
+    ]
+    partial_item: ResolvedWorkspacePath | None = None
+    try:
+        try:
+            process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=YOUTUBE_CAPTURE_FRAME_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError as error:
+            process.kill()
+            await process.communicate()
+            raise AgentApiError("YOUTUBE_CAPTURE_FRAME_FAILED", "yt-dlp timed out while downloading the short frame section.") from error
+        except OSError as error:
+            raise AgentApiError("YOUTUBE_CAPTURE_FRAME_FAILED", "yt-dlp could not be started for partial frame capture.") from error
+        if process.returncode != 0:
+            if b"requested format is not available" in stderr.lower():
+                raise AgentApiError("FORMAT_NOT_AVAILABLE", "The selected YouTube format is not available to local yt-dlp.")
+            raise AgentApiError("YOUTUBE_CAPTURE_FRAME_FAILED", "yt-dlp could not download the short video section needed for this frame.")
+        title, partial_path = youtube_capture_stdout(stdout)
+        if partial_path is None:
+            raise AgentApiError("YOUTUBE_CAPTURE_FRAME_FAILED", "yt-dlp completed without reporting the temporary video section.")
+        if not partial_path.is_absolute():
+            partial_path = temporary_directory.physical_path / partial_path
+        partial_item = resolver.resolve_existing(resolver.logical_existing_file(partial_path, error_code="YOUTUBE_CAPTURE_FRAME_FAILED"), field_name="path", expected_type="file")
+        local_options = dict(options)
+        local_options["path"] = partial_item.logical_path
+        local_options["youtube"] = None
+        local_options["timestampSeconds"] = timestamp - section_start
+        local_options["videoStreamIndex"] = None
+        if not options["delivery"]["workspacePathProvided"]:
+            local_options["delivery"] = dict(options["delivery"])
+            local_options["delivery"]["workspacePath"] = youtube_capture_default_workspace_path(title or "YouTube frame", youtube["videoId"], timestamp, options["image"]["format"])
+        result = await capture_frame_from_workspace_options(local_options)
+        result["sourcePath"] = f"youtube:{youtube['videoId']}"
+        result["sourceVideoId"] = youtube["videoId"]
+        result["sourceVideoFormatId"] = youtube["formatId"]
+        result["sourceTitle"] = title or "YouTube video"
+        result["requestedTimestampSeconds"] = timestamp
+        actual = result.get("actualTimestampSeconds")
+        result["actualTimestampSeconds"] = section_start + actual if isinstance(actual, (int, float)) else None
+        result["partialDownload"] = {"startSeconds": section_start, "endSeconds": section_end}
+        log(f"capture_frame youtube={youtube['videoId']} format={youtube['formatId']} timestamp={timestamp:.3f} -> {result['image']['workspacePath']}")
+        return result
+    finally:
+        if partial_item is not None:
+            try:
+                partial_item.physical_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        try:
+            temporary_directory.physical_path.rmdir()
+        except OSError:
+            pass
+
+
+async def capture_frame(payload: Any) -> dict[str, Any]:
+    options = capture_frame_options(payload)
+    if options["youtube"] is not None:
+        return await capture_youtube_frame(options)
+    return await capture_frame_from_workspace_options(options)
 
 
 IMAGE_MIME_TYPES = {

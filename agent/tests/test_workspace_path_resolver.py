@@ -242,6 +242,10 @@ class CaptureFrameTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("tsk_JD8tamsp3A", path)
 
+    def test_youtube_capture_name_sanitizes_the_ytdlp_title(self) -> None:
+        path = agent.youtube_capture_default_workspace_path('A: title / with * invalid?', "aqz-KE-bpKQ", 2.0, "png")
+        self.assertRegex(path, r"^captures/A title with invalid \[yt_aqz-KE-bpKQ\] \[t_2\.000\] \[cap_[A-Za-z0-9_-]+\]\.png$")
+
     def discovery(self, name, _candidates):
         return agent.ComponentDiscovery("local", f"/private/{name}")
 
@@ -299,6 +303,33 @@ class CaptureFrameTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["image"]["saveToLibrary"])
         self.assertNotIn("inlineImageBase64", result)
         self.assertEqual((agent.WORKSPACE_PATH / "captures" / "custom.webp").read_bytes(), b"image-bytes")
+
+    async def test_capture_frame_can_download_only_a_youtube_time_section(self) -> None:
+        async def youtube_subprocess(*command, **kwargs):
+            if command[0] != "/private/ytDlp":
+                return await self.subprocess(*command, **kwargs)
+            if "--dump-single-json" in command:
+                formats = {"formats": [{"format_id": "136", "vcodec": "avc1", "acodec": "none", "ext": "mp4", "width": 1280, "height": 720}]}
+                return type("Process", (), {"returncode": 0, "communicate": staticmethod(lambda: _bytes_result(json.dumps(formats).encode(), b""))})()
+            directory = Path(command[command.index("--paths") + 1])
+            partial = directory / "partial [yt_aqz-KE-bpKQ] [cap_test].mp4"
+            directory.mkdir(parents=True, exist_ok=True)
+            partial.write_bytes(b"partial-media")
+            stdout = f"__RESEARCHTUBE_CAPTURE_TITLE__:Correct: YouTube / title\n__RESEARCHTUBE_CAPTURE_PARTIAL__:{partial}\n".encode()
+            return type("Process", (), {"returncode": 0, "communicate": staticmethod(lambda: _bytes_result(stdout, b""))})()
+
+        with patch.object(agent, "find_component", side_effect=self.discovery), patch.object(asyncio, "create_subprocess_exec", side_effect=youtube_subprocess):
+            result = await agent.capture_frame({
+                "youtube": {"videoId": "aqz-KE-bpKQ", "formatId": "136"}, "timestampSeconds": 24.0,
+                "image": {"format": "png"},
+            })
+        self.assertEqual(result["sourcePath"], "youtube:aqz-KE-bpKQ")
+        self.assertEqual(result["sourceVideoFormatId"], "136")
+        self.assertEqual(result["sourceTitle"], "Correct: YouTube / title")
+        self.assertEqual(result["partialDownload"], {"startSeconds": 12.0, "endSeconds": 27.0})
+        self.assertEqual(result["actualTimestampSeconds"], 24.5)
+        self.assertRegex(result["image"]["workspacePath"], r"^captures/Correct YouTube title \[yt_aqz-KE-bpKQ\] \[t_24\.000\] \[cap_[A-Za-z0-9_-]+\]\.png$")
+        self.assertFalse((agent.WORKSPACE_PATH / ".researchtube-capture-tmp").exists())
 
     async def test_workspace_image_returns_encoded_bytes_without_host_path(self) -> None:
         image = agent.WORKSPACE_PATH / "captures" / "frame.png"

@@ -14,7 +14,7 @@ for (const tool of ["youtube_get_download_formats", "youtube_get_download_task_d
 assert.match(background, /youtubeFormats: youtubeFormatsSchema/);
 assert.match(background, /youtube_get_download_formats\.downloadFormats/);
 assert.match(background, /afterEventId/);
-assert.match(background, /const REQUIRED_AGENT_INTERFACE_VERSION = 12;/);
+assert.match(background, /const REQUIRED_AGENT_INTERFACE_VERSION = 13;/);
 assert.match(background, /availableBytes/);
 assert.match(background, /operatingSystem.*release.*version.*architecture/s);
 assert.match(background, /function normalizeWorkspacePath\(/);
@@ -31,6 +31,8 @@ assert.doesNotMatch(background, /researchtube_download_capture_frame/);
 assert.doesNotMatch(background, /chrome\.downloads\.download/);
 assert.match(background, /chrome\.offscreen\.createDocument/);
 assert.match(background, /capture-frame-offscreen\.html/);
-assert.match(background, /Every capture is saved as a normal workspace image file/);
+assert.match(background, /saves only the image in the workspace/);
 assert.match(background, /saveToLibrary/);
+assert.match(background, /--download-sections/);
+assert.match(background, /youtube_get_download_formats/);
 console.log("workspace tools contract: ok");

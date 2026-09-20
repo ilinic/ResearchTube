@@ -15,11 +15,11 @@ const DEFAULTS = {
   youtubeSearchCooldownUntil: 0,
   youtubeSearchCooldownLevel: 0
 };
-const EXTENSION_VERSION = "1.14.2";
-const REQUIRED_AGENT_INTERFACE_VERSION = 12;
+const EXTENSION_VERSION = "1.15.0";
+const REQUIRED_AGENT_INTERFACE_VERSION = 13;
 // A UI resource URI is a cache key in MCP Apps. Increment it whenever the
 // rendered template changes so ChatGPT does not reuse a stale iframe bundle.
-const CAPTURE_FRAME_WIDGET_URI = "ui://researchtube/capture-frame-v20.html";
+const CAPTURE_FRAME_WIDGET_URI = "ui://researchtube/capture-frame-v21.html";
 const CAPTURE_FRAME_OFFSCREEN_DOCUMENT = "capture-frame-offscreen.html";
 const AGENT_HEALTH_TIMEOUT_MS = 5_000;
 const AGENT_TASK_TIMEOUT_MS = 10_000;
@@ -433,6 +433,14 @@ const captureFrameImageInputSchema = {
     compressionLevel: { type: "integer", minimum: 0, maximum: 9, description: "PNG compression level. It is invalid for JPEG/WebP." }
   }
 };
+const captureFrameYoutubeInputSchema = {
+  type: "object", additionalProperties: false,
+  properties: {
+    videoId: { type: "string", minLength: 6, description: "YouTube video ID." },
+    formatId: { type: "string", pattern: "^[0-9]+$", description: "Exact numeric video formatId returned immediately beforehand by youtube_get_download_formats. Do not use youtube_get_video.youtubeFormats here." }
+  },
+  required: ["videoId", "formatId"]
+};
 const captureFrameDeliveryInputSchema = {
   type: "object", additionalProperties: false,
   properties: {
@@ -443,7 +451,11 @@ const captureFrameDeliveryInputSchema = {
 const captureFrameSchema = {
   type: "object", additionalProperties: false,
   properties: {
-    sourcePath: { type: "string", description: "Logical workspace-relative source media-file path." },
+    sourcePath: { type: "string", description: "Logical workspace-relative source media-file path, or youtube:<videoId> for partial YouTube capture." },
+    sourceVideoId: { type: "string", description: "Present for a partial YouTube capture." },
+    sourceVideoFormatId: { type: "string", description: "yt-dlp-confirmed numeric format ID used for a partial YouTube capture." },
+    sourceTitle: { type: "string", description: "Title obtained by the same yt-dlp operation for a partial YouTube capture." },
+    partialDownload: { type: "object", additionalProperties: false, properties: { startSeconds: { type: "number", minimum: 0 }, endSeconds: { type: "number", minimum: 0 } }, required: ["startSeconds", "endSeconds"] },
     requestedTimestampSeconds: { type: "number", minimum: 0 },
     actualTimestampSeconds: { ...nullableNumber, minimum: 0, description: "Decoded-frame timestamp reported by ffmpeg when available; null only when ffmpeg did not report it." },
     selectedVideoStreamIndex: { type: "integer", minimum: 0, description: "ffprobe streams[].index of the video stream used." },
@@ -552,13 +564,14 @@ function toolDefinitions() {
     },
     {
       name: "capture_frame",
-      title: "Extract one frame from a workspace video",
-      description: "Extract one frame from an existing workspace media file with the Local Agent's ffmpeg. timestampSeconds is required. videoStreamIndex, when supplied, is the exact streams[].index returned by media_probe; otherwise the first video stream is used. accurate seek decodes to the requested time; fast seek prioritizes speed. Cropping and resizing are optional; resizing may upscale. contain preserves proportions and pads, cover preserves proportions and crops, and stretch forces exact dimensions. Every capture is saved as a normal workspace image file and returned with its logical workspacePath. delivery.workspacePath is optional: when omitted, the Agent creates lowercase captures/ automatically and writes a uniquely named image derived from the source video title and stable YouTube ID. The accompanying widget retrieves that same file through the Local Agent for display and can optionally save it to ChatGPT Library. No host paths are exposed.",
+      title: "Extract one frame from workspace or YouTube",
+      description: "Extract one frame either from an existing workspace media path, or directly from YouTube without downloading the full video. For direct YouTube capture, first call youtube_get_download_formats and pass its exact numeric video formatId as youtube.formatId; the browser-side youtubeFormats list is not accepted because it can differ from local yt-dlp. The Local Agent uses yt-dlp --download-sections with ffmpeg to download only a short window around timestampSeconds, deletes that temporary section, and saves only the image in the workspace. The image filename uses the title returned by that same yt-dlp operation plus [yt_<videoId>], timestamp, and unique capture ID. path and youtube are mutually exclusive. videoStreamIndex is only for path sources. No media URLs or host paths are exposed.",
       annotations: localWorkspaceWriteAnnotations,
       inputSchema: {
         type: "object", additionalProperties: false,
         properties: {
           path: { type: "string", minLength: 1, description: "Logical workspace-relative path of the source media file." },
+          youtube: captureFrameYoutubeInputSchema,
           timestampSeconds: { type: "number", minimum: 0, description: "Required media timestamp, in seconds." },
           videoStreamIndex: { type: "integer", minimum: 0, description: "Optional ffprobe streams[].index of the video stream to capture." },
           seekMode: { type: "string", enum: ["accurate", "fast"], default: "accurate" },
@@ -568,7 +581,8 @@ function toolDefinitions() {
           image: captureFrameImageInputSchema,
           delivery: captureFrameDeliveryInputSchema
         },
-        required: ["path", "timestampSeconds"]
+        required: ["timestampSeconds"],
+        oneOf: [{ required: ["path"] }, { required: ["youtube"] }]
       },
       outputSchema: captureFrameSchema,
       _meta: {
@@ -1343,8 +1357,17 @@ function captureFrameObject(value, field, allowed) {
 }
 
 function normalizeCaptureFrameInput(argumentsValue = {}) {
-  const args = captureFrameObject(argumentsValue, "capture_frame", new Set(["path", "timestampSeconds", "videoStreamIndex", "seekMode", "applyDisplayRotation", "crop", "resize", "image", "delivery"]));
-  const path = normalizeWorkspacePath(args.path, "path");
+  const args = captureFrameObject(argumentsValue, "capture_frame", new Set(["path", "youtube", "timestampSeconds", "videoStreamIndex", "seekMode", "applyDisplayRotation", "crop", "resize", "image", "delivery"]));
+  if ((args.path === undefined) === (args.youtube === undefined)) throw localAgentError("CAPTURE_FRAME_INVALID", "capture_frame requires exactly one source: path or youtube.");
+  const path = args.path === undefined ? undefined : normalizeWorkspacePath(args.path, "path");
+  let youtube;
+  if (args.youtube !== undefined) {
+    const value = captureFrameObject(args.youtube, "youtube", new Set(["videoId", "formatId"]));
+    if (!Object.hasOwn(value, "videoId") || !Object.hasOwn(value, "formatId") || Object.keys(value).length !== 2) throw localAgentError("CAPTURE_FRAME_INVALID", "youtube requires videoId and formatId.");
+    const videoId = requireVideoId({ videoId: value.videoId });
+    if (typeof value.formatId !== "string" || !/^[0-9]+$/.test(value.formatId)) throw localAgentError("CAPTURE_FRAME_INVALID", "youtube.formatId must be a numeric ID returned by youtube_get_download_formats.");
+    youtube = { videoId, formatId: value.formatId };
+  }
   const timestampSeconds = captureFrameFiniteNumber(args.timestampSeconds, "timestampSeconds", { minimum: 0 });
   const videoStreamIndex = args.videoStreamIndex === undefined ? undefined : captureFrameInteger(args.videoStreamIndex, "videoStreamIndex");
   const seekMode = args.seekMode === undefined ? "accurate" : args.seekMode;
@@ -1393,8 +1416,9 @@ function normalizeCaptureFrameInput(argumentsValue = {}) {
   const saveToLibrary = deliveryValue.saveToLibrary === undefined ? false : deliveryValue.saveToLibrary;
   if (typeof saveToLibrary !== "boolean") throw localAgentError("CAPTURE_FRAME_INVALID", "delivery.saveToLibrary must be a boolean.");
 
+  if (youtube && videoStreamIndex !== undefined) throw localAgentError("CAPTURE_FRAME_INVALID", "videoStreamIndex is available only with a workspace path source.");
   return {
-    path, timestampSeconds, ...(videoStreamIndex === undefined ? {} : { videoStreamIndex }), seekMode, applyDisplayRotation,
+    ...(path === undefined ? {} : { path }), ...(youtube === undefined ? {} : { youtube }), timestampSeconds, ...(videoStreamIndex === undefined ? {} : { videoStreamIndex }), seekMode, applyDisplayRotation,
     ...(crop === undefined ? {} : { crop }), ...(resize === undefined ? {} : { resize }),
     image: { format: imageFormat, ...(quality === undefined ? {} : { quality }), ...(compressionLevel === undefined ? {} : { compressionLevel }) },
     delivery: { ...(workspacePath === undefined ? {} : { workspacePath }), saveToLibrary }
@@ -1402,7 +1426,8 @@ function normalizeCaptureFrameInput(argumentsValue = {}) {
 }
 
 function normalizeCaptureFrameResult(document, input) {
-  if (!document || typeof document !== "object" || Array.isArray(document) || document.sourcePath !== input.path || document.seekMode !== input.seekMode
+  const expectedSource = input.path ?? `youtube:${input.youtube.videoId}`;
+  if (!document || typeof document !== "object" || Array.isArray(document) || document.sourcePath !== expectedSource || document.seekMode !== input.seekMode
     || document.displayRotationApplied !== true && document.displayRotationApplied !== false) {
     throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid captured-frame result.");
   }
@@ -1424,10 +1449,18 @@ function normalizeCaptureFrameResult(document, input) {
   if (image.saveToLibrary !== input.delivery.saveToLibrary) {
     throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an unexpected library-save instruction.");
   }
+  const remote = input.youtube === undefined ? {} : {
+    sourceVideoId: document.sourceVideoId, sourceVideoFormatId: document.sourceVideoFormatId, sourceTitle: document.sourceTitle,
+    partialDownload: document.partialDownload
+  };
+  if (input.youtube !== undefined && (document.sourceVideoId !== input.youtube.videoId || document.sourceVideoFormatId !== input.youtube.formatId || typeof document.sourceTitle !== "string" || !document.sourceTitle || !document.partialDownload || typeof document.partialDownload !== "object" || !Number.isFinite(document.partialDownload.startSeconds) || !Number.isFinite(document.partialDownload.endSeconds))) {
+    throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid partial YouTube capture metadata.");
+  }
   return {
     metadata: {
-      sourcePath: input.path, requestedTimestampSeconds, actualTimestampSeconds, selectedVideoStreamIndex,
+      sourcePath: document.sourcePath, requestedTimestampSeconds, actualTimestampSeconds, selectedVideoStreamIndex,
       seekMode: input.seekMode, displayRotationApplied: document.displayRotationApplied,
+      ...remote,
       image: {
         format: image.format, mimeType: image.mimeType, width: image.width, height: image.height, imageSizeBytes: image.imageSizeBytes,
         delivery: image.delivery, workspacePath: normalizeWorkspacePath(image.workspacePath, "image.workspacePath"), saveToLibrary: image.saveToLibrary
@@ -1707,7 +1740,7 @@ function safeErrorMessage(error) {
 }
 
 async function readCaptureFrameWidgetHtml() {
-  const response = await fetch(chrome.runtime.getURL("ui/capture-frame-widget-v20.html"));
+  const response = await fetch(chrome.runtime.getURL("ui/capture-frame-widget-v21.html"));
   if (!response.ok) throw new Error("The bundled capture-frame widget could not be read.");
   return response.text();
 }
@@ -1988,7 +2021,7 @@ async function executeToolCall(id, tool, input, work, operation = null) {
 }
 
 function summarizeCommandInput(tool, input) {
-  if (tool === "capture_frame") return { path: typeof input.path === "string" ? input.path : null, timestampSeconds: input.timestampSeconds ?? null, videoStreamIndex: input.videoStreamIndex ?? null, seekMode: input.seekMode ?? null, delivery: input.delivery?.mode ?? null };
+  if (tool === "capture_frame") return { path: typeof input.path === "string" ? input.path : null, youtube: input.youtube && typeof input.youtube === "object" ? { videoId: input.youtube.videoId ?? null, formatId: input.youtube.formatId ?? null } : null, timestampSeconds: input.timestampSeconds ?? null, videoStreamIndex: input.videoStreamIndex ?? null, seekMode: input.seekMode ?? null, delivery: input.delivery?.mode ?? null };
   if (tool === "youtube_download") return { videoId: typeof input.videoId === "string" ? input.videoId : null, selection: input.selection ?? null, outputDir: typeof input.outputDir === "string" ? input.outputDir.slice(0, 300) : null };
   if (tool === "youtube_search") return { query: searchDiagnosticQuery(input.query), limit: input.limit };
   if (tool === "youtube_get_comment_replies") return { videoId: input.videoId, commentId: input.commentId, limit: input.limit };
