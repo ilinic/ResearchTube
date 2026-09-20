@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import json
+import math
 import os
 import platform
 import re
@@ -23,14 +25,17 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-AGENT_VERSION = "0.9.1"
-INTERFACE_VERSION = 8
+AGENT_VERSION = "0.13.2"
+INTERFACE_VERSION = 12
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
 TASK_POLL_INTERVAL_MS = 1_000
 TASK_HEARTBEAT_SECONDS = 5
 MAX_DIAGNOSTIC_LINES = 20
 MAX_DIAGNOSTIC_LINE_LENGTH = 240
+MAX_TASK_EVENTS = 250
+MAX_TASK_EVENT_MESSAGE_LENGTH = 240
+YTDLP_FORMATS_TIMEOUT_SECONDS = 30
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "agent-config.json"
 WORKSPACE_PATH = ROOT / "workspace"
@@ -40,6 +45,13 @@ MAX_LOGICAL_PATH_LENGTH = 1_024
 MAX_LOGICAL_COMPONENT_LENGTH = 240
 MAX_WORKSPACE_LIST_ENTRIES = 500
 MEDIA_PROBE_TIMEOUT_SECONDS = 15
+CAPTURE_FRAME_TIMEOUT_SECONDS = 60
+MEDIA_PROBE_SECTIONS = {
+    "format": ("-show_format", "format"),
+    "streams": ("-show_streams", "streams"),
+    "chapters": ("-show_chapters", "chapters"),
+    "programs": ("-show_programs", "programs"),
+}
 WINDOWS_INVALID_FILENAME_CHARACTERS = frozenset('<>:"|?*')
 WINDOWS_RESERVED_BASENAMES = frozenset({
     "CON", "PRN", "AUX", "NUL", *(f"COM{index}" for index in range(1, 10)), *(f"LPT{index}" for index in range(1, 10)),
@@ -74,6 +86,16 @@ class ComponentDiscovery:
 def log(message: str, *, error: bool = False) -> None:
     prefix = datetime.now().strftime("[%H:%M:%S]")
     print(f"{prefix} {'ERROR ' if error else ''}{message}", file=sys.stderr if error else sys.stdout, flush=True)
+
+
+def clear_console() -> None:
+    """Clear an interactive terminal before the Agent prints its startup health."""
+    if not sys.stdout.isatty():
+        return
+    try:
+        os.system("cls" if os.name == "nt" else "clear")
+    except OSError:
+        pass
 
 
 def utc_now() -> str:
@@ -278,8 +300,9 @@ def validate_video_id(value: Any) -> str:
 class DownloadSelection:
     """A deliberately small, safe subset of yt-dlp's format-selector syntax.
 
-    The Extension publishes format IDs obtained from YouTube.  The Agent never
-    accepts an arbitrary yt-dlp selector or command-line fragment.
+    The Agent never accepts an arbitrary yt-dlp selector or command-line
+    fragment. Exact numeric IDs are expected to come from the Local Agent's
+    youtube_get_download_formats workflow, not the advisory YouTube snapshot.
     """
 
     combined: str | None = None
@@ -322,6 +345,125 @@ def parse_download_selection(value: Any) -> DownloadSelection:
     if selection.combined is None and selection.video is None and selection.audio is None:
         raise AgentApiError("FORMAT_SELECTION_INVALID", "Select a combined, video, or audio track.")
     return selection
+
+
+def nullable_nonnegative_number(value: Any) -> float | int | None:
+    """Return one finite non-negative JSON number, otherwise None."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+        return None
+    return value
+
+
+def nullable_nonnegative_integer(value: Any) -> int | None:
+    number = nullable_nonnegative_number(value)
+    return int(number) if number is not None and float(number).is_integer() else None
+
+
+def normalize_yt_dlp_format(format_data: Any) -> dict[str, Any] | None:
+    """Publish a non-sensitive, selectable yt-dlp format record.
+
+    The source document contains signed media URLs and other ephemeral player
+    details.  This projection intentionally keeps only stable technical
+    properties and the exact format ID accepted by the same local yt-dlp.
+    """
+    if not isinstance(format_data, dict):
+        return None
+    format_id = format_data.get("format_id")
+    if not isinstance(format_id, str) or not re.fullmatch(r"[0-9]+", format_id):
+        return None
+    video_codec = format_data.get("vcodec")
+    audio_codec = format_data.get("acodec")
+    has_video = isinstance(video_codec, str) and video_codec != "none"
+    has_audio = isinstance(audio_codec, str) and audio_codec != "none"
+    if not has_video and not has_audio:
+        return None
+    kind = "combined" if has_video and has_audio else "video" if has_video else "audio"
+    size = nullable_nonnegative_integer(format_data.get("filesize"))
+    if size is None:
+        size = nullable_nonnegative_integer(format_data.get("filesize_approx"))
+    bitrate_kbps = nullable_nonnegative_number(format_data.get("tbr"))
+    if bitrate_kbps is None:
+        bitrate_kbps = nullable_nonnegative_number(format_data.get("vbr" if has_video else "abr"))
+    quality = format_data.get("format_note")
+    if not isinstance(quality, str) or not quality:
+        quality = format_data.get("resolution") if has_video else None
+    return {
+        "formatId": format_id,
+        "kind": kind,
+        "container": format_data.get("ext") if isinstance(format_data.get("ext"), str) else None,
+        "videoCodec": video_codec if has_video else None,
+        "audioCodec": audio_codec if has_audio else None,
+        "width": nullable_nonnegative_integer(format_data.get("width")) if has_video else None,
+        "height": nullable_nonnegative_integer(format_data.get("height")) if has_video else None,
+        "fps": nullable_nonnegative_number(format_data.get("fps")) if has_video else None,
+        "bitrateBps": int(bitrate_kbps * 1000) if bitrate_kbps is not None else None,
+        "audioSampleRateHz": nullable_nonnegative_integer(format_data.get("asr")) if has_audio else None,
+        "audioChannels": nullable_nonnegative_integer(format_data.get("audio_channels")) if has_audio else None,
+        "qualityLabel": quality,
+        "sizeBytes": size,
+    }
+
+
+def normalize_yt_dlp_formats(document: Any) -> dict[str, Any]:
+    grouped: dict[str, Any] = {
+        "available": False, "source": "unavailable",
+        "message": "yt-dlp did not expose downloadable media formats for this video.",
+        "combined": [], "video": [], "audio": [],
+    }
+    formats = document.get("formats") if isinstance(document, dict) else None
+    if not isinstance(formats, list):
+        return grouped
+    seen: set[str] = set()
+    for raw_format in formats:
+        item = normalize_yt_dlp_format(raw_format)
+        if item is None or item["formatId"] in seen:
+            continue
+        seen.add(item["formatId"])
+        grouped[item["kind"]].append(item)
+    for entries in (grouped["combined"], grouped["video"], grouped["audio"]):
+        entries.sort(key=lambda item: (item["height"] or 0, item["fps"] or 0, item["bitrateBps"] or 0, item["formatId"]))
+    if seen:
+        grouped["available"] = True
+        grouped["source"] = "ytDlp"
+        grouped["message"] = None
+    return grouped
+
+
+async def youtube_download_formats(payload: Any) -> dict[str, Any]:
+    """Read formats from the exact local yt-dlp installation used for downloads."""
+    if not isinstance(payload, dict):
+        raise AgentApiError("INVALID_REQUEST", "youtube_get_download_formats requires a JSON object.")
+    video_id = validate_video_id(payload.get("videoId"))
+    yt_dlp = find_component("ytDlp", COMPONENTS["ytDlp"][0])
+    if yt_dlp.error:
+        raise AgentApiError("YTDLP_DISCOVERY_ERROR", "yt-dlp discovery is ambiguous.", yt_dlp.error)
+    if not yt_dlp.executable:
+        raise AgentApiError("YTDLP_NOT_AVAILABLE", "yt-dlp is not available. Place it in tools/yt-dlp or install it on PATH.")
+    deno_executable = resolve_deno_runtime()
+    command = [
+        yt_dlp.executable, *yt_dlp_js_runtime_arguments(deno_executable),
+        "--no-playlist", "--skip-download", "--no-warnings", "--dump-single-json",
+        f"https://www.youtube.com/watch?v={video_id}",
+    ]
+    try:
+        process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        stdout, _stderr = await asyncio.wait_for(process.communicate(), timeout=YTDLP_FORMATS_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        process.kill()
+        await process.communicate()
+        return {"videoId": video_id, "downloadFormats": normalize_yt_dlp_formats(None)}
+    except OSError as error:
+        log(f"yt-dlp format discovery could not start: {error.__class__.__name__}", error=True)
+        return {"videoId": video_id, "downloadFormats": normalize_yt_dlp_formats(None)}
+    if process.returncode != 0:
+        log(f"yt-dlp format discovery for {video_id} exited {process.returncode}", error=True)
+        return {"videoId": video_id, "downloadFormats": normalize_yt_dlp_formats(None)}
+    try:
+        document = json.loads(stdout.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        log(f"yt-dlp format discovery for {video_id} returned invalid JSON", error=True)
+        return {"videoId": video_id, "downloadFormats": normalize_yt_dlp_formats(None)}
+    return {"videoId": video_id, "downloadFormats": normalize_yt_dlp_formats(document)}
 
 
 @dataclass(frozen=True)
@@ -551,46 +693,455 @@ def workspace_delete(payload: Any) -> dict[str, Any]:
     return {"path": item.logical_path, "type": item_type, "deleted": True}
 
 
-def ffprobe_number(value: Any, *, integer: bool = False) -> int | float | None:
+def ffprobe_integer(value: Any) -> int | None:
     try:
-        number = int(value) if integer else float(value)
+        number = int(value)
     except (TypeError, ValueError):
         return None
     return number if number >= 0 else None
 
 
-def ffprobe_fps(value: Any) -> float | None:
-    if not isinstance(value, str) or not value:
+def finite_number(value: Any, *, field_name: str, minimum: float | None = None, maximum: float | None = None) -> float:
+    """Validate a JSON number without accepting booleans or NaN/Infinity."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise AgentApiError("CAPTURE_FRAME_INVALID", f"{field_name} must be a finite number.")
+    number = float(value)
+    if minimum is not None and number < minimum or maximum is not None and number > maximum:
+        raise AgentApiError("CAPTURE_FRAME_INVALID", f"{field_name} is outside its supported range.")
+    return number
+
+
+def nonnegative_integer(value: Any, *, field_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise AgentApiError("CAPTURE_FRAME_INVALID", f"{field_name} must be a non-negative integer.")
+    return value
+
+
+def positive_integer(value: Any, *, field_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise AgentApiError("CAPTURE_FRAME_INVALID", f"{field_name} must be a positive integer.")
+    return value
+
+
+def capture_object(value: Any, *, field_name: str, allowed: set[str]) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict) or set(value) - allowed:
+        raise AgentApiError("CAPTURE_FRAME_INVALID", f"{field_name} contains an unsupported field.")
+    return value
+
+
+def capture_crop(value: Any) -> dict[str, int] | None:
+    if value is None:
+        return None
+    item = capture_object(value, field_name="crop", allowed={"x", "y", "width", "height"})
+    if set(item) != {"x", "y", "width", "height"}:
+        raise AgentApiError("CAPTURE_FRAME_INVALID", "crop requires x, y, width, and height.")
+    return {
+        "x": nonnegative_integer(item["x"], field_name="crop.x"),
+        "y": nonnegative_integer(item["y"], field_name="crop.y"),
+        "width": positive_integer(item["width"], field_name="crop.width"),
+        "height": positive_integer(item["height"], field_name="crop.height"),
+    }
+
+
+def capture_hex_color(value: Any) -> str:
+    if not isinstance(value, str) or not re.fullmatch(r"#[0-9A-Fa-f]{6}(?:[0-9A-Fa-f]{2})?", value):
+        raise AgentApiError("CAPTURE_FRAME_INVALID", "resize.padColor must be #RRGGBB or #RRGGBBAA.")
+    # ffmpeg accepts this unambiguously in a filter expression.
+    return f"0x{value[1:]}"
+
+
+def capture_resize(value: Any) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    item = capture_object(value, field_name="resize", allowed={"width", "height", "mode", "anchor", "padColor"})
+    width = item.get("width")
+    height = item.get("height")
+    if width is None and height is None:
+        raise AgentApiError("CAPTURE_FRAME_INVALID", "resize requires width, height, or both.")
+    if width is not None:
+        width = positive_integer(width, field_name="resize.width")
+    if height is not None:
+        height = positive_integer(height, field_name="resize.height")
+    mode = item.get("mode", "contain")
+    if mode not in {"contain", "cover", "stretch"}:
+        raise AgentApiError("CAPTURE_FRAME_INVALID", "resize.mode must be contain, cover, or stretch.")
+    anchor_item = capture_object(item.get("anchor"), field_name="resize.anchor", allowed={"x", "y"})
+    if anchor_item and set(anchor_item) != {"x", "y"}:
+        raise AgentApiError("CAPTURE_FRAME_INVALID", "resize.anchor requires x and y.")
+    anchor = {
+        "x": finite_number(anchor_item.get("x", 0.5), field_name="resize.anchor.x", minimum=0, maximum=1),
+        "y": finite_number(anchor_item.get("y", 0.5), field_name="resize.anchor.y", minimum=0, maximum=1),
+    }
+    return {
+        "width": width, "height": height, "mode": mode, "anchor": anchor,
+        "padColor": capture_hex_color(item.get("padColor", "#000000")),
+    }
+
+
+def capture_image(value: Any) -> dict[str, Any]:
+    item = capture_object(value, field_name="image", allowed={"format", "quality", "compressionLevel"})
+    image_format = item.get("format", "png")
+    if image_format not in {"png", "jpeg", "webp"}:
+        raise AgentApiError("CAPTURE_FRAME_INVALID", "image.format must be png, jpeg, or webp.")
+    quality = item.get("quality")
+    compression = item.get("compressionLevel")
+    if quality is not None:
+        quality = positive_integer(quality, field_name="image.quality")
+        if quality > 100:
+            raise AgentApiError("CAPTURE_FRAME_INVALID", "image.quality must be from 1 to 100.")
+    if compression is not None:
+        compression = nonnegative_integer(compression, field_name="image.compressionLevel")
+        if compression > 9:
+            raise AgentApiError("CAPTURE_FRAME_INVALID", "image.compressionLevel must be from 0 to 9.")
+    if image_format == "png" and quality is not None:
+        raise AgentApiError("CAPTURE_FRAME_INVALID", "image.quality is available only for jpeg and webp output.")
+    if image_format != "png" and compression is not None:
+        raise AgentApiError("CAPTURE_FRAME_INVALID", "image.compressionLevel is available only for png output.")
+    return {
+        "format": image_format,
+        "quality": quality if quality is not None else (90 if image_format in {"jpeg", "webp"} else None),
+        "compressionLevel": compression if compression is not None else (6 if image_format == "png" else None),
+    }
+
+
+def capture_default_workspace_path(source_path: str, timestamp_seconds: float, image_format: str) -> str:
+    """Name an automatically created capture as a normal workspace artifact.
+
+    Use the source filename's human-readable title and stable yt ID when
+    available.  The download task ID is intentionally not propagated: it
+    identifies one download operation, whereas a capture needs to identify
+    the video it depicts.  Its own random capture ID prevents collisions.
+    """
+    source_stem = Path(source_path).stem.strip()
+    match = re.search(r"\s+\[yt_([A-Za-z0-9_-]+)\]", source_stem)
+    title = source_stem[:match.start()].strip() if match else source_stem
+    title = title or "ResearchTube frame"
+    video_part = f" [yt_{match.group(1)}]" if match else ""
+    timestamp_part = f"{timestamp_seconds:.3f}".replace("-", "_")
+    capture_id = secrets.token_urlsafe(6)
+    return f"captures/{title}{video_part} [t_{timestamp_part}] [cap_{capture_id}].{image_format}"
+
+
+def capture_delivery(value: Any, source_path: str, timestamp_seconds: float, image_format: str) -> dict[str, Any]:
+    item = capture_object(value, field_name="delivery", allowed={"workspacePath", "saveToLibrary"})
+    workspace_path = item.get("workspacePath")
+    if workspace_path is not None and (not isinstance(workspace_path, str) or not workspace_path):
+        raise AgentApiError("CAPTURE_FRAME_INVALID", "delivery.workspacePath must be a non-empty logical workspace path.")
+    save_to_library = item.get("saveToLibrary", False)
+    if not isinstance(save_to_library, bool):
+        raise AgentApiError("CAPTURE_FRAME_INVALID", "delivery.saveToLibrary must be a boolean.")
+    return {
+        "workspacePath": workspace_path or capture_default_workspace_path(source_path, timestamp_seconds, image_format),
+        "saveToLibrary": save_to_library,
+    }
+
+
+def capture_frame_options(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict) or set(payload) - {"path", "timestampSeconds", "videoStreamIndex", "seekMode", "applyDisplayRotation", "crop", "resize", "image", "delivery"}:
+        raise AgentApiError("CAPTURE_FRAME_INVALID", "capture_frame requires only documented fields.")
+    path = payload.get("path")
+    timestamp = finite_number(payload.get("timestampSeconds"), field_name="timestampSeconds", minimum=0)
+    stream_index = payload.get("videoStreamIndex")
+    if stream_index is not None:
+        stream_index = nonnegative_integer(stream_index, field_name="videoStreamIndex")
+    seek_mode = payload.get("seekMode", "accurate")
+    if seek_mode not in {"accurate", "fast"}:
+        raise AgentApiError("CAPTURE_FRAME_INVALID", "seekMode must be accurate or fast.")
+    rotation = payload.get("applyDisplayRotation", True)
+    if not isinstance(rotation, bool):
+        raise AgentApiError("CAPTURE_FRAME_INVALID", "applyDisplayRotation must be a boolean.")
+    image = capture_image(payload.get("image"))
+    return {
+        "path": path, "timestampSeconds": timestamp, "videoStreamIndex": stream_index, "seekMode": seek_mode,
+        "applyDisplayRotation": rotation, "crop": capture_crop(payload.get("crop")), "resize": capture_resize(payload.get("resize")),
+        "image": image, "delivery": capture_delivery(payload.get("delivery"), path if isinstance(path, str) else "", timestamp, image["format"]),
+    }
+
+
+async def ffprobe_streams_for_file(physical_path: Path, executable: str) -> list[dict[str, Any]]:
+    command = [executable, "-v", "error", "-show_streams", "-of", "json", str(physical_path)]
+    try:
+        process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        stdout, _stderr = await asyncio.wait_for(process.communicate(), timeout=MEDIA_PROBE_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError as error:
+        process.kill()
+        await process.communicate()
+        raise AgentApiError("CAPTURE_FRAME_FAILED", "ffprobe timed out while reading video streams.") from error
+    except OSError as error:
+        raise AgentApiError("CAPTURE_FRAME_FAILED", "ffprobe could not be started.") from error
+    if process.returncode != 0:
+        raise AgentApiError("CAPTURE_FRAME_FAILED", "ffprobe could not inspect video streams.")
+    try:
+        result = json.loads(stdout.decode("utf-8"))
+        streams = result.get("streams")
+    except (UnicodeDecodeError, json.JSONDecodeError, AttributeError) as error:
+        raise AgentApiError("CAPTURE_FRAME_FAILED", "ffprobe returned invalid video stream metadata.") from error
+    if not isinstance(streams, list):
+        raise AgentApiError("CAPTURE_FRAME_FAILED", "ffprobe returned invalid video stream metadata.")
+    return [stream for stream in streams if isinstance(stream, dict)]
+
+
+async def ffprobe_streams(item: ResolvedWorkspacePath, executable: str) -> list[dict[str, Any]]:
+    return await ffprobe_streams_for_file(item.physical_path, executable)
+
+
+def video_stream_rotation(stream: dict[str, Any]) -> float:
+    candidates: list[Any] = [stream.get("tags", {}).get("rotate") if isinstance(stream.get("tags"), dict) else None]
+    side_data = stream.get("side_data_list")
+    if isinstance(side_data, list):
+        candidates.extend(item.get("rotation") for item in side_data if isinstance(item, dict))
+    for value in candidates:
+        try:
+            rotation = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(rotation):
+            normalized = rotation % 360
+            return 0.0 if math.isclose(normalized, 0.0, abs_tol=0.001) else normalized
+    return 0.0
+
+
+def capture_filter(options: dict[str, Any]) -> str:
+    filters: list[str] = []
+    if options["seekMode"] == "accurate":
+        # Unlike output-side -ss, select gives us both a deterministic frame
+        # (the first decoded PTS at or after the request) and a truthful PTS
+        # in the following showinfo filter.
+        filters.append(f"select=gte(t\\,{options['timestampSeconds']:.9f})")
+    crop = options["crop"]
+    if crop is not None:
+        filters.append(f"crop={crop['width']}:{crop['height']}:{crop['x']}:{crop['y']}")
+    resize = options["resize"]
+    if resize is not None:
+        width, height = resize["width"], resize["height"]
+        if width is None:
+            filters.append(f"scale=-2:{height}")
+        elif height is None:
+            filters.append(f"scale={width}:-2")
+        elif resize["mode"] == "stretch":
+            filters.append(f"scale={width}:{height}")
+        elif resize["mode"] == "contain":
+            x, y = resize["anchor"]["x"], resize["anchor"]["y"]
+            filters.extend([
+                f"scale={width}:{height}:force_original_aspect_ratio=decrease",
+                f"pad={width}:{height}:(ow-iw)*{x:.8f}:(oh-ih)*{y:.8f}:color={resize['padColor']}",
+            ])
+        else:
+            x, y = resize["anchor"]["x"], resize["anchor"]["y"]
+            filters.extend([
+                f"scale={width}:{height}:force_original_aspect_ratio=increase",
+                f"crop={width}:{height}:(iw-ow)*{x:.8f}:(ih-oh)*{y:.8f}",
+            ])
+    # showinfo reports the decoded frame PTS to stderr, without adding any pixels.
+    filters.append("showinfo")
+    return ",".join(filters)
+
+
+def capture_encoder_arguments(image: dict[str, Any]) -> tuple[list[str], str]:
+    image_format = image["format"]
+    if image_format == "png":
+        return ["-c:v", "png", "-compression_level", str(image["compressionLevel"])], "image/png"
+    if image_format == "jpeg":
+        # ffmpeg's mjpeg qscale is inverse: 2 is highest quality and 31 lowest.
+        qscale = round(31 - ((image["quality"] - 1) * 29 / 99))
+        return ["-c:v", "mjpeg", "-q:v", str(max(2, min(31, qscale)))], "image/jpeg"
+    return ["-c:v", "libwebp", "-q:v", str(image["quality"])], "image/webp"
+
+
+def showinfo_timestamp(stderr: bytes) -> float | None:
+    matches = re.findall(rb"pts_time:([+-]?(?:\d+(?:\.\d*)?|\.\d+))", stderr)
+    if not matches:
         return None
     try:
-        numerator, denominator = value.split("/", 1)
-        parsed = float(numerator) / float(denominator)
-    except (ValueError, ZeroDivisionError):
+        # The filter graph can process a few extra frames before ffmpeg stops
+        # the single-image output. The first showinfo entry is the frame that
+        # the select filter admitted to the encoder.
+        result = float(matches[0])
+    except ValueError:
         return None
-    return parsed if parsed >= 0 else None
+    return result if math.isfinite(result) else None
 
 
-def first_ffprobe_stream(streams: Any, stream_type: str) -> dict[str, Any] | None:
-    if not isinstance(streams, list):
-        return None
-    for stream in streams:
-        if isinstance(stream, dict) and stream.get("codec_type") == stream_type:
-            return stream
-    return None
+async def capture_frame(payload: Any) -> dict[str, Any]:
+    options = capture_frame_options(payload)
+    item = WorkspacePathResolver().resolve_existing(options["path"], field_name="path", expected_type="file")
+    ffmpeg = find_component("ffmpeg", COMPONENTS["ffmpeg"][0])
+    ffprobe = find_component("ffprobe", COMPONENTS["ffprobe"][0])
+    if ffmpeg.error:
+        raise AgentApiError("FFMPEG_DISCOVERY_ERROR", "ffmpeg discovery is ambiguous.", ffmpeg.error)
+    if ffprobe.error:
+        raise AgentApiError("FFPROBE_DISCOVERY_ERROR", "ffprobe discovery is ambiguous.", ffprobe.error)
+    if not ffmpeg.executable:
+        raise AgentApiError("FFMPEG_NOT_AVAILABLE", "ffmpeg is not available. Extract it under tools/ffmpeg or install it on PATH.")
+    if not ffprobe.executable:
+        raise AgentApiError("FFPROBE_NOT_AVAILABLE", "ffprobe is not available. Extract it under tools/ffmpeg or install it on PATH.")
+
+    streams = await ffprobe_streams(item, ffprobe.executable)
+    video_streams = [stream for stream in streams if stream.get("codec_type") == "video" and isinstance(stream.get("index"), int)]
+    if not video_streams:
+        raise AgentApiError("VIDEO_STREAM_NOT_FOUND", "The workspace media file has no video stream.")
+    selected_index = options["videoStreamIndex"]
+    if selected_index is None:
+        selected_stream = video_streams[0]
+    else:
+        selected_stream = next((stream for stream in video_streams if stream["index"] == selected_index), None)
+        if selected_stream is None:
+            raise AgentApiError("VIDEO_STREAM_NOT_FOUND", "videoStreamIndex does not identify a video stream in this file.")
+    selected_index = selected_stream["index"]
+
+    delivery = options["delivery"]
+    destination_path: Path | None = None
+    try:
+        # A capture is always a normal workspace file.  The widget may display
+        # it immediately, but it never owns the only copy of the image.
+        resolver = WorkspacePathResolver()
+        destination = resolver.resolve_destination(delivery["workspacePath"], field_name="delivery.workspacePath", error_code="WORKSPACE_PATH_INVALID")
+        destination.physical_path.parent.mkdir(parents=True, exist_ok=True)
+        # Re-run the resolver after creating parents so redirects cannot be introduced by the parent creation.
+        destination = resolver.resolve_destination(destination.logical_path, field_name="delivery.workspacePath", error_code="WORKSPACE_PATH_INVALID")
+        if destination.physical_path.exists() or destination.physical_path.is_symlink():
+            raise AgentApiError("CAPTURE_FRAME_DESTINATION_EXISTS", "delivery.workspacePath already exists; capture_frame never overwrites a workspace file.")
+        destination_path = destination.physical_path
+        logical_output_path = destination.logical_path
+
+        command = [ffmpeg.executable, "-hide_banner", "-nostdin", "-v", "info"]
+        if not options["applyDisplayRotation"]:
+            command.append("-noautorotate")
+        if options["seekMode"] == "fast":
+            command.extend(["-ss", f"{options['timestampSeconds']:.9f}"])
+        command.extend(["-i", str(item.physical_path)])
+        encoder_args, mime_type = capture_encoder_arguments(options["image"])
+        command.extend(["-map", f"0:{selected_index}", "-an", "-frames:v", "1", "-vf", capture_filter(options), *encoder_args, "-y", str(destination_path)])
+        try:
+            process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+            _stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=CAPTURE_FRAME_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError as error:
+            process.kill()
+            await process.communicate()
+            raise AgentApiError("CAPTURE_FRAME_FAILED", "ffmpeg timed out while extracting the frame.") from error
+        except OSError as error:
+            raise AgentApiError("CAPTURE_FRAME_FAILED", "ffmpeg could not be started.") from error
+        if process.returncode != 0 or not destination_path.is_file():
+            raise AgentApiError("CAPTURE_FRAME_FAILED", "ffmpeg could not extract a frame at the requested timestamp.")
+        try:
+            image_size = destination_path.stat().st_size
+        except OSError as error:
+            raise AgentApiError("CAPTURE_FRAME_FAILED", "The extracted image is unavailable.") from error
+        output_streams = await ffprobe_streams_for_file(destination_path, ffprobe.executable)
+        output_stream = next((stream for stream in output_streams if stream.get("codec_type") == "video"), None)
+        width = output_stream.get("width") if isinstance(output_stream, dict) else None
+        height = output_stream.get("height") if isinstance(output_stream, dict) else None
+        if not isinstance(width, int) or not isinstance(height, int):
+            raise AgentApiError("CAPTURE_FRAME_FAILED", "ffprobe did not report usable dimensions for the extracted image.")
+        rotation_degrees = video_stream_rotation(selected_stream)
+        rotation_applied = options["applyDisplayRotation"] and not math.isclose(rotation_degrees % 180, 0.0, abs_tol=0.001)
+        result: dict[str, Any] = {
+            "sourcePath": item.logical_path,
+            "requestedTimestampSeconds": options["timestampSeconds"],
+            # Input-side fast seeking normally re-bases timestamps. Its frame
+            # is intentionally approximate, so do not report a false absolute PTS.
+            "actualTimestampSeconds": showinfo_timestamp(stderr) if options["seekMode"] == "accurate" else None,
+            "selectedVideoStreamIndex": selected_index,
+            "seekMode": options["seekMode"],
+            "displayRotationApplied": rotation_applied,
+            "image": {
+                "format": options["image"]["format"], "mimeType": mime_type,
+                "width": width, "height": height, "imageSizeBytes": image_size,
+                "delivery": "workspace", "workspacePath": logical_output_path,
+                "saveToLibrary": delivery["saveToLibrary"],
+            },
+        }
+        log(f"capture_frame path={item.logical_path} timestamp={options['timestampSeconds']:.3f} -> {logical_output_path}")
+        return result
+    except AgentApiError:
+        if destination_path is not None:
+            try:
+                destination_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
+
+
+IMAGE_MIME_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+}
+
+
+def workspace_image(payload: Any) -> dict[str, Any]:
+    """Read one workspace image for the capture-frame MCP App only.
+
+    The Agent remains the sole filesystem owner.  This endpoint deliberately
+    returns a logical path plus encoded bytes, never a host path; the
+    Extension places the bytes in widget-only MCP metadata.
+    """
+    if not isinstance(payload, dict) or set(payload) != {"path"}:
+        raise AgentApiError("WORKSPACE_IMAGE_INVALID", "workspace image retrieval requires only path.")
+    item = WorkspacePathResolver().resolve_existing(payload.get("path"), field_name="path", expected_type="file")
+    mime_type = IMAGE_MIME_TYPES.get(item.physical_path.suffix.lower())
+    if mime_type is None:
+        raise AgentApiError("WORKSPACE_IMAGE_INVALID", "path must identify a PNG, JPEG, or WebP image in the workspace.")
+    try:
+        image_bytes = item.physical_path.read_bytes()
+    except OSError as error:
+        raise AgentApiError("WORKSPACE_IMAGE_UNAVAILABLE", "The workspace image could not be read.") from error
+    return {
+        "path": item.logical_path,
+        "mimeType": mime_type,
+        "imageSizeBytes": len(image_bytes),
+        "inlineImageBase64": base64.b64encode(image_bytes).decode("ascii"),
+    }
+
+
+def media_probe_sections(payload: dict[str, Any]) -> list[str]:
+    value = payload.get("sections")
+    if value is None:
+        return list(MEDIA_PROBE_SECTIONS)
+    if not isinstance(value, list) or not value or len(value) > len(MEDIA_PROBE_SECTIONS):
+        raise AgentApiError("MEDIA_PROBE_SECTIONS_INVALID", "sections must be a non-empty array of supported ffprobe metadata sections.")
+    if any(not isinstance(section, str) or section not in MEDIA_PROBE_SECTIONS for section in value) or len(set(value)) != len(value):
+        raise AgentApiError("MEDIA_PROBE_SECTIONS_INVALID", "sections must contain unique supported ffprobe metadata section names.")
+    return value
+
+
+def public_ffprobe_document(document: Any, sections: list[str]) -> tuple[dict[str, Any], int | None]:
+    if not isinstance(document, dict):
+        raise AgentApiError("MEDIA_PROBE_FAILED", "ffprobe returned invalid media metadata.")
+    probe: dict[str, Any] = {}
+    ffprobe_file_size_bytes: int | None = None
+    for section in sections:
+        json_key = MEDIA_PROBE_SECTIONS[section][1]
+        value = document.get(json_key)
+        if section == "format":
+            if not isinstance(value, dict):
+                continue
+            public_format = dict(value)
+            # ffprobe's native format.filename is the physical host path.
+            public_format.pop("filename", None)
+            ffprobe_file_size_bytes = ffprobe_integer(public_format.pop("size", None))
+            probe[json_key] = public_format
+        elif section in {"streams", "chapters", "programs"}:
+            if isinstance(value, list):
+                probe[json_key] = value
+    return probe, ffprobe_file_size_bytes
 
 
 async def media_probe(payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise AgentApiError("INVALID_REQUEST", "media_probe requires a JSON object.")
     item = WorkspacePathResolver().resolve_existing(payload.get("path"), field_name="path", expected_type="file")
+    sections = media_probe_sections(payload)
     ffprobe = find_component("ffprobe", COMPONENTS["ffprobe"][0])
     if ffprobe.error:
         raise AgentApiError("FFPROBE_DISCOVERY_ERROR", "ffprobe discovery is ambiguous.", ffprobe.error)
     if not ffprobe.executable:
         raise AgentApiError("FFPROBE_NOT_AVAILABLE", "ffprobe is not available. Extract it under tools/ffmpeg or install it on PATH.")
     command = [
-        ffprobe.executable, "-v", "error",
-        "-show_entries", "format=duration,format_name,bit_rate:stream=codec_type,codec_name,width,height,avg_frame_rate,r_frame_rate,sample_rate,channels,bit_rate",
+        ffprobe.executable, "-v", "error", *(MEDIA_PROBE_SECTIONS[section][0] for section in sections),
         "-of", "json", str(item.physical_path),
     ]
     try:
@@ -608,34 +1159,16 @@ async def media_probe(payload: Any) -> dict[str, Any]:
         document = json.loads(stdout.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise AgentApiError("MEDIA_PROBE_FAILED", "ffprobe returned invalid media metadata.") from error
-    format_data = document.get("format") if isinstance(document, dict) and isinstance(document.get("format"), dict) else {}
-    streams = document.get("streams") if isinstance(document, dict) else []
-    video_stream, audio_stream = first_ffprobe_stream(streams, "video"), first_ffprobe_stream(streams, "audio")
-    container_names = format_data.get("format_name") if isinstance(format_data.get("format_name"), str) else ""
-    container = "mp4" if "mp4" in container_names.split(",") else (container_names.split(",", 1)[0] or None)
-    video = None if video_stream is None else {
-        "codec": video_stream.get("codec_name") if isinstance(video_stream.get("codec_name"), str) else None,
-        "width": ffprobe_number(video_stream.get("width"), integer=True),
-        "height": ffprobe_number(video_stream.get("height"), integer=True),
-        "fps": ffprobe_fps(video_stream.get("avg_frame_rate")) or ffprobe_fps(video_stream.get("r_frame_rate")),
-    }
-    audio = None if audio_stream is None else {
-        "codec": audio_stream.get("codec_name") if isinstance(audio_stream.get("codec_name"), str) else None,
-        "sampleRate": ffprobe_number(audio_stream.get("sample_rate"), integer=True),
-        "channels": ffprobe_number(audio_stream.get("channels"), integer=True),
-        "bitrateBps": ffprobe_number(audio_stream.get("bit_rate"), integer=True),
-    }
+    probe, ffprobe_file_size_bytes = public_ffprobe_document(document, sections)
     try:
         size = item.physical_path.stat().st_size
     except OSError as error:
         raise AgentApiError("MEDIA_PROBE_FAILED", "The media file could not be inspected.") from error
     log(f"media_probe path={item.logical_path} -> ok")
     return {
-        "path": item.logical_path, "size": size,
-        "duration": ffprobe_number(format_data.get("duration")), "container": container,
-        "bitrateBps": ffprobe_number(format_data.get("bit_rate"), integer=True),
-        "streamCount": len(streams) if isinstance(streams, list) else 0,
-        "video": video, "audio": audio,
+        "path": item.logical_path, "fileSizeBytes": size,
+        "ffprobeFileSizeBytes": ffprobe_file_size_bytes,
+        "sections": sections, "probe": probe,
     }
 
 
@@ -664,6 +1197,11 @@ class DownloadTask:
     cancel_requested: bool = False
     diagnostics: list[str] = field(default_factory=list)
     output_file: Path | None = None
+    events: list[dict[str, Any]] = field(default_factory=list)
+    next_event_id: int = 1
+    yt_dlp_exit_code: int | None = None
+    final_output_state: str = "notReported"
+    cleanup_removed_count: int = 0
 
     def touch(self, message: str | None = None) -> None:
         self.last_updated_at = utc_now()
@@ -676,6 +1214,38 @@ class DownloadTaskManager:
 
     def __init__(self) -> None:
         self.tasks: dict[str, DownloadTask] = {}
+
+    def record_event(
+        self, task: DownloadTask, kind: str, *, message: str | None = None,
+        process: str | None = None, exit_code: int | None = None,
+        error_code: str | None = None, workspace_path: str | None = None,
+        removed_workspace_paths: list[str] | None = None,
+    ) -> None:
+        """Keep a bounded, public-safe lifecycle record for post-mortem use."""
+        event = {
+            "eventId": task.next_event_id, "at": utc_now(), "kind": kind,
+            "phase": task.phase, "message": (message or "")[:MAX_TASK_EVENT_MESSAGE_LENGTH] or None,
+            "process": process, "exitCode": exit_code, "errorCode": error_code,
+            "workspacePath": workspace_path,
+            "removedWorkspacePaths": removed_workspace_paths or [],
+        }
+        task.next_event_id += 1
+        task.events.append(event)
+        if len(task.events) > MAX_TASK_EVENTS:
+            del task.events[:-MAX_TASK_EVENTS]
+
+    def set_phase(self, task: DownloadTask, phase: str, message: str) -> None:
+        changed = task.phase != phase
+        task.phase = phase
+        task.touch(message)
+        if changed:
+            self.record_event(task, "phaseChanged", message=message)
+
+    def fail_task(self, task: DownloadTask, code: str, message: str) -> None:
+        task.status = "failed"
+        self.set_phase(task, "failed", "Download failed.")
+        task.error = {"code": code, "message": message}
+        self.record_event(task, "taskFailed", message=message, error_code=code)
 
     async def create_download(self, payload: Any) -> dict[str, Any]:
         if not isinstance(payload, dict):
@@ -706,6 +1276,7 @@ class DownloadTaskManager:
         task = DownloadTask(self.new_task_id(), url, video_id, selection, output_directory, output_directory_relative, now, now)
         # Store before responding: returned IDs are immediately pollable.
         self.tasks[task.task_id] = task
+        self.record_event(task, "taskCreated", message="Download task created.")
         task.runner = asyncio.create_task(
             self.run_download(task, yt_dlp.executable, ffmpeg_executable, deno_executable),
             name=f"researchtube-download-{task.task_id}",
@@ -736,18 +1307,40 @@ class DownloadTaskManager:
             document["error"] = task.error
         return document
 
+    def diagnostics_snapshot(self, task_id: str, payload: Any) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            raise AgentApiError("INVALID_REQUEST", "Diagnostics input must be a JSON object.")
+        after_event_id = payload.get("afterEventId", 0)
+        limit = payload.get("limit", 100)
+        if isinstance(after_event_id, bool) or not isinstance(after_event_id, int) or after_event_id < 0:
+            raise AgentApiError("INVALID_REQUEST", "afterEventId must be a non-negative integer.")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+            raise AgentApiError("INVALID_REQUEST", "limit must be an integer from 1 to 100.")
+        task = self.get(task_id)
+        events = [event for event in task.events if event["eventId"] > after_event_id][:limit]
+        return {
+            "taskId": task.task_id, "status": task.status, "phase": task.phase,
+            "error": task.error, "process": {
+                "ytDlpExitCode": task.yt_dlp_exit_code,
+                "finalOutput": task.final_output_state,
+                "cleanupRemovedCount": task.cleanup_removed_count,
+            },
+            "events": events, "returned": len(events), "nextEventId": task.next_event_id - 1,
+        }
+
     async def cancel(self, task_id: str) -> None:
         task = self.get(task_id)
         if task.status in {"completed", "failed", "cancelled"}:
             return
         task.cancel_requested = True
         task.touch("Cancellation requested.")
+        self.record_event(task, "cancellationRequested", message="Cancellation requested.")
         if task.process is None:
             if task.runner and not task.runner.done():
                 task.runner.cancel()
             task.status = "cancelled"
-            task.phase = "cancelled"
-            task.touch("Download cancelled.")
+            self.set_phase(task, "cancelled", "Download cancelled.")
+            self.record_event(task, "taskCancelled", message="Download cancelled.")
             return
         await self.terminate_process(task, task.process)
 
@@ -766,16 +1359,16 @@ class DownloadTaskManager:
                     pass
                 await process.wait()
         task.status = "cancelled"
-        task.phase = "cancelled"
-        task.touch("Download cancelled.")
+        self.set_phase(task, "cancelled", "Download cancelled.")
+        self.record_event(task, "taskCancelled", message="Download cancelled.")
 
     async def run_download(self, task: DownloadTask, executable: str, ffmpeg: str | None, deno: str | None) -> None:
         heartbeat: asyncio.Task[None] | None = None
         try:
             if task.cancel_requested:
                 task.status = "cancelled"
-                task.phase = "cancelled"
-                task.touch("Download cancelled.")
+                self.set_phase(task, "cancelled", "Download cancelled.")
+                self.record_event(task, "taskCancelled", message="Download cancelled.")
                 return
             task.output_directory.mkdir(parents=True, exist_ok=True)
             output_template = f"%(title)s [yt_%(id)s] [{task.task_id}].%(ext)s"
@@ -793,69 +1386,56 @@ class DownloadTaskManager:
             command.extend([
                 "--progress-template", "download:researchtube_progress:%(progress._percent_str)s",
                 "--progress-template", "postprocess:researchtube_postprocess:%(progress.status)s",
-                "--print", "after_move:researchtube_file:%(filepath)s", "--paths", str(task.output_directory),
+                "--print", "after_move:__RESEARCHTUBE_FINAL_FILE__:%(filepath)s", "--paths", str(task.output_directory),
                 "--output", output_template, task.url,
             ])
             task.touch("Preparing yt-dlp download.")
             task.process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            self.record_event(task, "processStarted", message="yt-dlp process started.", process="ytDlp")
             stdout_task = asyncio.create_task(self.consume_stream(task, task.process.stdout, source="stdout"))
             stderr_task = asyncio.create_task(self.consume_stream(task, task.process.stderr, source="stderr"))
             heartbeat = asyncio.create_task(self.heartbeat(task))
             await asyncio.gather(stdout_task, stderr_task, task.process.wait())
+            task.yt_dlp_exit_code = task.process.returncode
+            self.record_event(task, "processExited", message="yt-dlp process exited.", process="ytDlp", exit_code=task.process.returncode)
             if task.cancel_requested:
                 task.status = "cancelled"
-                task.phase = "cancelled"
-                task.touch("Download cancelled.")
+                self.set_phase(task, "cancelled", "Download cancelled.")
+                self.record_event(task, "taskCancelled", message="Download cancelled.")
                 return
             if task.process.returncode != 0:
-                detail = " | ".join(task.diagnostics[-5:]) or None
-                task.status = "failed"
-                task.phase = "failed"
                 if any("requested format is not available" in line.lower() for line in task.diagnostics):
-                    task.error = {
-                        "code": "FORMAT_NOT_AVAILABLE",
-                        "message": "The selected YouTube format is no longer available to yt-dlp.",
-                    }
+                    self.fail_task(task, "FORMAT_NOT_AVAILABLE", "The selected YouTube format is not available to local yt-dlp.")
                 else:
-                    task.error = {"code": "DOWNLOAD_FAILED", "message": "yt-dlp could not download this video."}
-                if detail and task.error["code"] == "DOWNLOAD_FAILED":
-                    task.error["detail"] = detail
-                task.touch("Download failed.")
+                    self.fail_task(task, "DOWNLOAD_FAILED", "yt-dlp could not download this video.")
                 return
             output_file = self.valid_output_file(task)
             if output_file is None:
-                task.status = "failed"
-                task.phase = "failed"
-                task.error = {"code": "OUTPUT_FILE_NOT_FOUND", "message": "yt-dlp completed without reporting a workspace output file."}
-                task.touch("Download failed.")
+                if task.final_output_state == "reportedButMissing":
+                    self.fail_task(task, "YTDLP_FINAL_OUTPUT_MISSING", "yt-dlp reported a final output file, but it was not present in the workspace.")
+                else:
+                    self.fail_task(task, "YTDLP_FINAL_PATH_NOT_REPORTED", "yt-dlp completed without reporting its final output path.")
                 return
             relative_file = WorkspacePathResolver().logical_existing_file(output_file, error_code="OUTPUT_FILE_NOT_FOUND")
+            task.final_output_state = "verified"
+            self.record_event(task, "finalOutputVerified", message="yt-dlp final output verified in workspace.", workspace_path=relative_file)
             task.result = {"videoId": task.video_id, "filePath": relative_file, "fileName": output_file.name, "outputDir": task.output_directory_relative}
             task.status = "completed"
-            task.phase = "completed"
+            self.set_phase(task, "completed", "Download completed.")
             task.progress_percent = 100.0
-            task.touch("Download completed.")
+            self.record_event(task, "taskCompleted", message="Download completed.", workspace_path=relative_file)
         except asyncio.CancelledError:
             task.status = "cancelled"
-            task.phase = "cancelled"
-            task.touch("Download cancelled.")
-            self.remove_task_artifacts(task)
+            self.set_phase(task, "cancelled", "Download cancelled.")
+            self.record_event(task, "taskCancelled", message="Download cancelled.")
         except FileNotFoundError:
-            task.status = "failed"
-            task.phase = "failed"
-            task.error = {"code": "YTDLP_NOT_AVAILABLE", "message": "yt-dlp is no longer available."}
-            task.touch("Download failed.")
+            self.fail_task(task, "YTDLP_NOT_AVAILABLE", "yt-dlp is no longer available.")
         except OSError as error:
-            task.status = "failed"
-            task.phase = "failed"
-            task.error = {"code": "DOWNLOAD_START_FAILED", "message": "yt-dlp could not be started.", "detail": bounded_line(str(error))}
-            task.touch("Download failed.")
+            log(f"yt-dlp start failed for {task.task_id}: {error.__class__.__name__}", error=True)
+            self.fail_task(task, "DOWNLOAD_START_FAILED", "yt-dlp could not be started.")
         except Exception as error:
             log(f"download task {task.task_id} failed unexpectedly: {error.__class__.__name__}", error=True)
-            task.status = "failed"
-            task.phase = "failed"
-            task.error = {"code": "DOWNLOAD_INTERNAL_ERROR", "message": "The download task encountered an unexpected error."}
-            task.touch("Download failed.")
+            self.fail_task(task, "DOWNLOAD_INTERNAL_ERROR", "The download task encountered an unexpected error.")
         finally:
             if heartbeat is not None:
                 heartbeat.cancel()
@@ -893,7 +1473,8 @@ class DownloadTaskManager:
             self.consume_output_line(task, buffered, source=source)
 
     def consume_output_line(self, task: DownloadTask, line: str, *, source: str = "manual") -> None:
-        text = bounded_line(re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", line))
+        raw_text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", line).strip().replace("\x00", "")
+        text = bounded_line(raw_text)
         if not text:
             return
         # New yt-dlp releases and wrappers may preserve the custom template or
@@ -903,7 +1484,7 @@ class DownloadTaskManager:
             percentage = min(100.0, max(0.0, float(progress.group(1).replace(",", "."))))
             next_phase = self.download_phase(task, percentage)
             if next_phase != task.phase:
-                task.phase = next_phase
+                self.set_phase(task, next_phase, "yt-dlp changed download phase.")
                 task.progress_percent = None
             task.progress_percent = percentage
             label = {
@@ -912,13 +1493,14 @@ class DownloadTaskManager:
                 "downloadingAudio": "Downloading audio track",
             }[task.phase]
             task.touch(f"{label}: {round(task.progress_percent)}%.")
-        elif text.startswith("researchtube_file:"):
-            candidate = Path(text.removeprefix("researchtube_file:").strip())
+        elif raw_text.startswith("__RESEARCHTUBE_FINAL_FILE__:"):
+            candidate = Path(raw_text.removeprefix("__RESEARCHTUBE_FINAL_FILE__:").strip())
             task.output_file = candidate if candidate.is_absolute() else task.output_directory / candidate
+            task.final_output_state = "reportedButMissing"
+            self.record_event(task, "finalOutputReported", message="yt-dlp reported its final output path.")
         elif text.startswith("researchtube_postprocess:") or "[Merger]" in text:
-            task.phase = "merging"
+            self.set_phase(task, "merging", "Merging selected video and audio tracks.")
             task.progress_percent = None
-            task.touch("Merging selected video and audio tracks.")
         else:
             task.diagnostics.append(text)
             if len(task.diagnostics) > MAX_DIAGNOSTIC_LINES:
@@ -950,9 +1532,18 @@ class DownloadTaskManager:
         """Do not leave separate A/V tracks or partial files after a failed task."""
         try:
             marker = f" [{task.task_id}]"
+            removed: list[str] = []
             for item in task.output_directory.iterdir():
                 if item.is_file() and marker in item.name:
+                    try:
+                        logical_path = WorkspacePathResolver().logical_existing_file(item, error_code="OUTPUT_FILE_NOT_FOUND")
+                    except AgentApiError:
+                        logical_path = None
                     item.unlink(missing_ok=True)
+                    if logical_path is not None:
+                        removed.append(logical_path)
+            task.cleanup_removed_count += len(removed)
+            self.record_event(task, "cleanupCompleted", message="Task-specific partial artifacts removed.", removed_workspace_paths=removed)
         except OSError as error:
             log(f"could not clean partial files for task {task.task_id}: {error.__class__.__name__}", error=True)
 
@@ -965,17 +1556,6 @@ class DownloadTaskManager:
                     return resolved
             except OSError:
                 pass
-        try:
-            matches = sorted(task.output_directory.glob(f"* [{task.task_id}].*"), key=lambda item: item.stat().st_mtime, reverse=True)
-        except OSError:
-            return None
-        for match in matches:
-            try:
-                resolved = match.resolve()
-                if resolved.is_file() and path_is_within(resolved, workspace):
-                    return resolved
-            except OSError:
-                continue
         return None
 
     async def shutdown(self) -> None:
@@ -1056,14 +1636,23 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             response_status, response_body = "200 OK", workspace_delete(parse_json_body(body))
         elif method == "POST" and path == "/media/probe":
             response_status, response_body = "200 OK", await media_probe(parse_json_body(body))
+        elif method == "POST" and path == "/media/capture-frame":
+            response_status, response_body = "200 OK", await capture_frame(parse_json_body(body))
+        elif method == "POST" and path == "/media/workspace-image":
+            response_status, response_body = "200 OK", workspace_image(parse_json_body(body))
+        elif method == "POST" and path == "/youtube/download-formats":
+            response_status, response_body = "200 OK", await youtube_download_formats(parse_json_body(body))
         elif method == "POST" and path == "/tasks/youtube-download":
             response_status, response_body = "201 Created", await TASKS.create_download(parse_json_body(body))
-        elif method == "GET" and path.startswith("/tasks/"):
-            response_status, response_body = "200 OK", TASKS.snapshot(TASKS.get(path.removeprefix("/tasks/")))
+        elif method == "POST" and path.startswith("/tasks/") and path.endswith("/diagnostics"):
+            task_id = path.removeprefix("/tasks/").removesuffix("/diagnostics").rstrip("/")
+            response_status, response_body = "200 OK", TASKS.diagnostics_snapshot(task_id, parse_json_body(body))
         elif method == "POST" and path.startswith("/tasks/") and path.endswith("/cancel"):
             task_id = path.removeprefix("/tasks/").removesuffix("/cancel").rstrip("/")
             await TASKS.cancel(task_id)
             response_status, response_body = "202 Accepted", {"accepted": True}
+        elif method == "GET" and path.startswith("/tasks/"):
+            response_status, response_body = "200 OK", TASKS.snapshot(TASKS.get(path.removeprefix("/tasks/")))
         elif not method:
             response_status, response_body = "400 Bad Request", error_document(AgentApiError("BAD_REQUEST", "Invalid HTTP request."))
         else:
@@ -1108,6 +1697,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    clear_console()
     try:
         asyncio.run(serve(args.port if args.port is not None else configured_port()))
     except KeyboardInterrupt:

@@ -47,7 +47,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 });
 
 async function runUiTool({ action, videoId, args }) {
-  if (action === "bridge-version") return { version: "1.9.1" };
+  if (action === "bridge-version") return { version: "1.11.0" };
   if (action === "page-state") return waitForPageData();
   if (action === "search") return callMainWorld("search", args, 45_000);
   if (action === "channel-videos") return callMainWorld("channel-videos", args, 60_000);

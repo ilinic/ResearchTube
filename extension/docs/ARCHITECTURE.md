@@ -79,7 +79,7 @@ The worker implements these MCP methods:
 
 - `initialize` returns server information `researchtube` and the tools capability.
 - `notifications/initialized` is acknowledged without a response payload.
-- `tools/list` returns the YouTube research tools, Local Agent status, Local Agent download tools, sandboxed workspace tools, and `media_probe`.
+- `tools/list` returns the YouTube research tools, Local Agent status, Local Agent download tools, sandboxed workspace tools, `media_probe`, and `capture_frame`.
 - `tools/call` validates arguments, executes the selected handler, and returns either a structured success result or a tool execution error.
 
 Successful calls include both `content` (JSON text for compatibility) and `structuredContent` (machine-readable output). Expected execution failures return `isError: true`; malformed JSON-RPC requests use JSON-RPC errors. Normal successful outputs contain research data only: they never expose selected tab IDs, page-bridge transport, client profile, session mode, or other execution diagnostics.
@@ -95,8 +95,8 @@ The Agent reads its optional `agent-config.json` `{ "port": 17843 }` and otherwi
 ```json
 {
   "status": "ok",
-  "agentVersion": "0.9.1",
-  "interfaceVersion": 8,
+  "agentVersion": "0.11.0",
+  "interfaceVersion": 10,
   "platform": { "operatingSystem": "Windows", "release": "11", "version": "10.0.26100", "architecture": "AMD64" },
   "workspace": { "status": "available", "availableBytes": 1234567890 },
   "components": {
@@ -115,8 +115,8 @@ The Agent reads its optional `agent-config.json` `{ "port": 17843 }` and otherwi
   "error": "AGENT_UNAVAILABLE",
   "message": "ResearchTube Local Agent is not available on port 17843.",
   "status": null,
-  "extensionVersion": "1.9.1",
-  "extensionInterfaceVersion": 8,
+  "extensionVersion": "1.11.0",
+  "extensionInterfaceVersion": 10,
   "agentVersion": null,
   "interfaceVersion": null,
   "platform": null,
@@ -195,7 +195,8 @@ The following Local Agent tools form the built-in filesystem layer:
 - `workspace_mkdir(path)` creates a directory and any missing parents. It reports whether the final directory was newly created.
 - `workspace_move(source, destination)` moves or renames one regular file or directory. Its destination parent must exist and it never overwrites.
 - `workspace_delete(path)` deletes one regular file or one empty directory. It deliberately has no recursive mode.
-- `media_probe(path)` invokes the locally resolved `ffprobe` with a fixed argument vector and returns only normalized container, duration, stream count, and first video/audio-stream metadata.
+- `media_probe(path, sections?)` invokes the locally resolved `ffprobe` with a fixed argument vector. `sections` can select `format`, `streams`, `chapters`, and `programs`; omitting it returns all four. The result preserves the selected native ffprobe metadata, including tags, author, location/GPS, codec details, stream disposition, and chapters. It removes only the physical host-path field `format.filename`. `fileSizeBytes` is the actual workspace-file size; `ffprobeFileSizeBytes` is the independent byte size reported by ffprobe's native `format.size` field.
+- `capture_frame(path, timestampSeconds, …)` extracts one selected video frame with locally resolved `ffmpeg` and `ffprobe`. `accurate` seeking decodes to the first frame with a presentation timestamp at or after the requested time and returns that actual timestamp; `fast` seeking is approximate and reports no false timestamp. It can apply display rotation, crop, resize with `contain`/`cover`/`stretch`, including upscale, and encode PNG, JPEG, or WebP. Default `delivery.mode = "inline"` returns standard MCP image content; `workspace` stores the image at an explicit or generated logical workspace path for large results. The metadata always reports actual encoded image dimensions and byte size, but never a host path.
 
 All built-in paths are **ResearchTube logical paths**, not operating-system paths. They are workspace-relative, use `/` on every platform, and never reveal the physical location of `agent/workspace/`. Except for the explicit empty root path accepted by `workspace_list`, a path is non-empty and consists of safe components only. The built-in grammar rejects absolute paths, drive and UNC paths, backslashes, NUL, empty components, and `.` or `..` components. New path components also reject Windows-reserved or non-portable filename forms.
 

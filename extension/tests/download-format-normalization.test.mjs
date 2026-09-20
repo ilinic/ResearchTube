@@ -2,11 +2,11 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
 const background = await readFile(new URL("../background.js", import.meta.url), "utf8");
-const first = background.indexOf("function normalizeDownloadFormats(");
+const first = background.indexOf("function normalizeYouTubeFormats(");
 const last = background.indexOf("\nasync function youtubeGetTranscript", first);
 assert.ok(first >= 0 && last > first, "download format normalization helpers must exist");
 
-const normalizeDownloadFormats = new Function(`${background.slice(first, last)}\nreturn normalizeDownloadFormats;`)();
+const normalizeDownloadFormats = new Function(`${background.slice(first, last)}\nreturn normalizeYouTubeFormats;`)();
 
 const formats = normalizeDownloadFormats({
   formats: [{

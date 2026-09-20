@@ -1,4 +1,4 @@
-import { Innertube } from "youtubei.js";
+import { Innertube, Parser } from "youtubei.js";
 
 // Runs in YouTube's MAIN JavaScript world. It deliberately never reads or
 // exports cookies. It observes the same JSON responses used by the page and
@@ -6,6 +6,19 @@ import { Innertube } from "youtubei.js";
 (() => {
   if (window.__youtubeResearchPageBridgeInstalled) return;
   window.__youtubeResearchPageBridgeInstalled = true;
+
+  // YouTube occasionally adds an otherwise harmless renderer to comment
+  // responses before youtubei.js has a compiled parser for it. The library
+  // JIT-generates this exact class and continues normally, so its default
+  // "report this bug" console warning is not actionable for an extension
+  // user. Use the library's parser hook rather than replacing console.warn,
+  // and keep every other parser diagnostic visible.
+  Parser.setParserErrorHandler((error) => {
+    if (error?.error_type === "class_not_found" && error.classname === "CommentFilterContextView") {
+      return;
+    }
+    console.warn("[ResearchTube][YouTube.js parser]", error);
+  });
 
   const SOURCE = "researchtube-page-bridge";
   const COMMAND_SOURCE = "researchtube-extension-content";

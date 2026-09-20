@@ -14,6 +14,21 @@ from pathlib import Path
 from agent import researchtube_agent as agent
 
 
+class YtDlpFormatNormalizationTests(unittest.TestCase):
+    def test_only_selectable_media_formats_are_published(self) -> None:
+        formats = agent.normalize_yt_dlp_formats({"formats": [
+            {"format_id": "sb0", "vcodec": "none", "acodec": "none", "ext": "mhtml"},
+            {"format_id": "18", "vcodec": "avc1", "acodec": "mp4a", "ext": "mp4", "width": 640, "height": 360, "fps": 30, "filesize": 1234},
+            {"format_id": "136", "vcodec": "avc1", "acodec": "none", "ext": "mp4", "width": 1280, "height": 720, "tbr": 2000},
+            {"format_id": "140", "vcodec": "none", "acodec": "mp4a", "ext": "m4a", "asr": 44100, "audio_channels": 2, "filesize_approx": 300},
+        ]})
+        self.assertEqual(formats["source"], "ytDlp")
+        self.assertEqual([item["formatId"] for item in formats["combined"]], ["18"])
+        self.assertEqual([item["formatId"] for item in formats["video"]], ["136"])
+        self.assertEqual([item["formatId"] for item in formats["audio"]], ["140"])
+        self.assertEqual(formats["video"][0]["bitrateBps"], 2_000_000)
+
+
 @unittest.skipIf(os.name == "nt", "The fake yt-dlp fixture is a POSIX script.")
 class DownloadTaskTests(unittest.IsolatedAsyncioTestCase):
     def test_generated_task_id_is_readable_and_compact(self) -> None:
@@ -35,7 +50,8 @@ class DownloadTaskTests(unittest.IsolatedAsyncioTestCase):
             """#!/usr/bin/env python3
 import pathlib, re, sys, time
 args = sys.argv[1:]
-if args[args.index('--format') + 1] == '999':
+selector = args[args.index('--format') + 1]
+if selector == '999':
     print('ERROR: [youtube] Requested format is not available. Use --list-formats for a list of available formats', file=sys.stderr, flush=True)
     raise SystemExit(1)
 directory = pathlib.Path(args[args.index('--paths') + 1])
@@ -49,7 +65,9 @@ time.sleep(0.12)
 print('[download]  80.0% of 1.00GiB at 10.00MiB/s ETA 00:20', flush=True)
 print('[Merger] Merging formats into "test.mp4"', flush=True)
 output.write_bytes(b'test mp4')
-print(f'researchtube_file:{output}', flush=True)
+if selector == '998':
+    raise SystemExit(0)
+print(f'__RESEARCHTUBE_FINAL_FILE__:{output}', flush=True)
 """,
             encoding="utf-8",
         )
@@ -99,6 +117,11 @@ print(f'researchtube_file:{output}', flush=True)
         self.assertNotIn("--extractor-args", self.command)
         ffmpeg_location_index = self.command.index("--ffmpeg-location")
         self.assertEqual(self.command[ffmpeg_location_index + 1], str(self.executable.parent))
+        self.assertIn("after_move:__RESEARCHTUBE_FINAL_FILE__:%(filepath)s", self.command)
+        diagnostics = manager.diagnostics_snapshot(task.task_id, {})
+        self.assertEqual(diagnostics["process"]["ytDlpExitCode"], 0)
+        self.assertEqual(diagnostics["process"]["finalOutput"], "verified")
+        self.assertTrue(any(event["kind"] == "finalOutputVerified" for event in diagnostics["events"]))
 
     async def test_custom_progress_marker_still_updates_percentage(self) -> None:
         task = agent.DownloadTask(
@@ -136,8 +159,24 @@ print(f'researchtube_file:{output}', flush=True)
         self.assertEqual(task.status, "failed")
         self.assertEqual(task.error, {
             "code": "FORMAT_NOT_AVAILABLE",
-            "message": "The selected YouTube format is no longer available to yt-dlp.",
+            "message": "The selected YouTube format is not available to local yt-dlp.",
         })
+        diagnostics = manager.diagnostics_snapshot(task.task_id, {"afterEventId": 0, "limit": 100})
+        self.assertEqual(diagnostics["process"]["ytDlpExitCode"], 1)
+        self.assertEqual(diagnostics["error"]["code"], "FORMAT_NOT_AVAILABLE")
+        self.assertTrue(any(event["kind"] == "taskFailed" for event in diagnostics["events"]))
+
+    async def test_final_output_is_not_guessed_from_a_task_named_file(self) -> None:
+        manager = agent.DownloadTaskManager()
+        started = await manager.create_download({"videoId": "abc123", "selection": {"combined": "998"}})
+        task = manager.get(started["taskId"])
+        await task.runner
+        self.assertEqual(task.status, "failed")
+        self.assertEqual(task.error["code"], "YTDLP_FINAL_PATH_NOT_REPORTED")
+        diagnostics = manager.diagnostics_snapshot(task.task_id, {})
+        self.assertEqual(diagnostics["process"]["finalOutput"], "notReported")
+        self.assertGreaterEqual(diagnostics["process"]["cleanupRemovedCount"], 1)
+        self.assertTrue(any(event["kind"] == "cleanupCompleted" and event["removedWorkspacePaths"] for event in diagnostics["events"]))
 
     def test_format_selection_rejects_mixed_combined_and_tracks(self) -> None:
         with self.assertRaisesRegex(agent.AgentApiError, "do not mix"):
