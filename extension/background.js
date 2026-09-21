@@ -15,8 +15,8 @@ const DEFAULTS = {
   youtubeSearchCooldownUntil: 0,
   youtubeSearchCooldownLevel: 0
 };
-const EXTENSION_VERSION = "1.18.0";
-const REQUIRED_AGENT_INTERFACE_VERSION = 16;
+const EXTENSION_VERSION = "1.20.0";
+const REQUIRED_AGENT_INTERFACE_VERSION = 17;
 // A UI resource URI is a cache key in MCP Apps. Increment it whenever the
 // rendered template changes so ChatGPT does not reuse a stale iframe bundle.
 const CAPTURE_FRAME_WIDGET_URI = "ui://researchtube/capture-frame-v25.html";
@@ -28,6 +28,11 @@ const POLL_RETRY_DELAY_MS = 250;
 const SEARCH_MIN_START_INTERVAL_MS = 500;
 const SEARCH_CACHE_TTL_MS = 5 * 60_000;
 const SEARCH_COOLDOWN_STEPS_MS = [2_000, 5_000, 10_000, 20_000, 40_000, 60_000];
+// Deliberately isolated prototype: this is not an MCP tool and does not use
+// the Local Agent, capture_frame, drag-and-drop, or a ChatGPT widget API.
+const CDP_SERVICE_TAB_STORAGE_KEY = "researchtubeCdpServiceTabId";
+const CDP_SERVICE_TAB_FAVICON_URL = chrome.runtime.getURL("icons/chatgpt-service-tab.png");
+const CDP_PROTOCOL_VERSION = "1.3";
 const SEARCH_DIAGNOSTIC_MAX_ENTRIES = 250;
 const SEARCH_DIAGNOSTIC_MAX_QUERY_LENGTH = 360;
 const COMMAND_DIAGNOSTIC_MAX_ENTRIES = 300;
@@ -500,6 +505,24 @@ const localDownloadAnnotations = { readOnlyHint: false, destructiveHint: false, 
 const localDownloadReadAnnotations = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false };
 const localWorkspaceWriteAnnotations = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false };
 const localWorkspaceDeleteAnnotations = { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false };
+const debugBannerConfigurationSchema = {
+  type: "string",
+  enum: ["banner_suppressed", "banner_enabled", "mixed", "unknown"]
+};
+const debugBannerResultSchema = {
+  type: "object", additionalProperties: false,
+  properties: {
+    bannerExpected: { type: ["boolean", "null"], description: "False when every detected Chrome browser instance suppresses the banner; true when it may appear; null when the Agent could not determine the state." },
+    chromeRunning: { type: ["boolean", "null"], description: "Whether the Local Agent detected Chrome. Null means inspection failed." },
+    windows: { type: "integer", minimum: 0, description: "Normal Chrome windows currently visible to the ResearchTube Extension." },
+    tabs: { type: "integer", minimum: 0, description: "Tabs in normal Chrome windows currently visible to the ResearchTube Extension." },
+    browserInstances: { type: "integer", minimum: 0, description: "Independent Chrome browser instances detected by the Local Agent; no process details are returned." },
+    configuration: debugBannerConfigurationSchema,
+    requiredSwitch: { type: "string", const: "--silent-debugger-extension-api", description: "Chrome startup switch that suppresses the debugger banner for ResearchTube debugger operations." },
+    message: { type: "string", minLength: 1, description: "Self-contained explanation of the banner state and, when relevant, the required Chrome startup switch." }
+  },
+  required: ["bannerExpected", "chromeRunning", "windows", "tabs", "browserInstances", "configuration", "requiredSwitch", "message"]
+};
 
 function toolDefinitions() {
   return [
@@ -510,6 +533,14 @@ function toolDefinitions() {
       annotations: localAgentReadAnnotations,
       inputSchema: { type: "object", additionalProperties: false, properties: {} },
       outputSchema: agentStatusSchema
+    },
+    {
+      name: "researchtube_check_debug_banner",
+      title: "Check whether Chrome may show the ResearchTube debugger banner",
+      description: "Check the current Chrome startup configuration for ResearchTube automatic file attachment. ResearchTube uses chrome.debugger to place a local file into ChatGPT, and Chrome may show a debugger banner during that operation. The required Chrome command-line switch to suppress that banner is --silent-debugger-extension-api. This tool checks every currently detected Chrome browser instance through the Local Agent and reports whether the banner is suppressed everywhere, enabled everywhere, mixed, or could not be determined. It also counts normal Chrome windows and tabs visible to the Extension. It never returns process IDs, command lines, profiles, local paths, or renderer-process data. Run it again whenever the current Chrome configuration may have changed.",
+      annotations: localAgentReadAnnotations,
+      inputSchema: { type: "object", additionalProperties: false, properties: {} },
+      outputSchema: debugBannerResultSchema
     },
     {
       name: "workspace_list",
@@ -763,6 +794,205 @@ function toolDefinitions() {
   ];
 }
 
+function sleep(milliseconds) { return new Promise((resolve) => setTimeout(resolve, milliseconds)); }
+
+function cdpError(message, cause = null) {
+  const error = new Error(message);
+  error.code = "RESEARCHTUBE_CDP_TEST_FAILED";
+  if (cause) error.cause = cause;
+  return error;
+}
+
+function cdpLog(step, details = undefined) {
+  const prefix = "[ResearchTube CDP]";
+  if (details === undefined) console.info(`${prefix} ${step}`);
+  else console.info(`${prefix} ${step}`, details);
+}
+
+function cdpErrorLog(step, error) {
+  console.error(`[ResearchTube CDP] ${step}`, error instanceof Error ? error.message : error);
+}
+
+async function cdpAttach(tabId) {
+  cdpLog("Debugger attach requested", { tabId, protocolVersion: CDP_PROTOCOL_VERSION });
+  await chrome.debugger.attach({ tabId }, CDP_PROTOCOL_VERSION);
+  cdpLog("Debugger attached", { tabId });
+}
+
+async function cdpDetach(tabId) {
+  try {
+    await chrome.debugger.detach({ tabId });
+    cdpLog("Debugger detached", { tabId });
+  } catch (error) {
+    cdpLog("Debugger already detached or service tab closed", { tabId, error: safeErrorMessage(error) });
+  }
+}
+
+async function cdpCommand(tabId, method, params = {}) {
+  try {
+    return await chrome.debugger.sendCommand({ tabId }, method, params);
+  } catch (error) {
+    cdpErrorLog(`CDP command failed: ${method}`, { tabId, params, error: safeErrorMessage(error) });
+    throw error;
+  }
+}
+
+async function cdpEvaluate(tabId, expression, { returnByValue = true } = {}) {
+  const response = await cdpCommand(tabId, "Runtime.evaluate", { expression, returnByValue, awaitPromise: true, userGesture: true });
+  if (response?.result?.subtype === "error" || response?.exceptionDetails) throw cdpError("The ChatGPT page rejected a CDP evaluation.");
+  return response?.result;
+}
+
+async function waitForChatGPTTab(tabId, timeoutMs = 45_000) {
+  const current = await chrome.tabs.get(tabId);
+  if (current.status === "complete" && /^https:\/\/chatgpt\.com\//.test(current.url || "")) {
+    cdpLog("Service tab is already loaded", { tabId, url: current.url });
+    return current;
+  }
+  cdpLog("Waiting for service tab navigation", { tabId, status: current.status, url: current.url });
+  return new Promise((resolve, reject) => {
+    const finish = (callback) => { clearTimeout(timeout); chrome.tabs.onUpdated.removeListener(onUpdated); chrome.tabs.onRemoved.removeListener(onRemoved); callback(); };
+    const timeout = setTimeout(() => finish(() => reject(cdpError("The background ChatGPT service tab did not finish loading within 45 seconds."))), timeoutMs);
+    const onUpdated = (updatedTabId, changeInfo, tab) => {
+      if (updatedTabId !== tabId || changeInfo.status !== "complete") return;
+      if (!/^https:\/\/chatgpt\.com\//.test(tab.url || "")) return finish(() => reject(cdpError("The service tab did not load chatgpt.com.")));
+      finish(() => { cdpLog("Service tab loaded", { tabId, url: tab.url }); resolve(tab); });
+    };
+    const onRemoved = (removedTabId) => { if (removedTabId === tabId) finish(() => reject(cdpError("The ChatGPT service tab was closed before loading."))); };
+    chrome.tabs.onUpdated.addListener(onUpdated); chrome.tabs.onRemoved.addListener(onRemoved);
+  });
+}
+
+async function setServiceTabFavicon(tabId) {
+  await cdpCommand(tabId, "Page.enable");
+  const href = JSON.stringify(CDP_SERVICE_TAB_FAVICON_URL);
+  await cdpEvaluate(tabId, `(() => {
+    let link = document.querySelector('link[data-researchtube-service-favicon]');
+    if (!link) { link = document.createElement('link'); link.rel = 'icon'; link.dataset.researchtubeServiceFavicon = 'true'; document.head.append(link); }
+    link.href = ${href};
+  })()`);
+}
+
+async function storedServiceTab() {
+  const { [CDP_SERVICE_TAB_STORAGE_KEY]: tabId = null } = await chrome.storage.local.get({ [CDP_SERVICE_TAB_STORAGE_KEY]: null });
+  if (!Number.isInteger(tabId)) { cdpLog("No stored service-tab ID"); return null; }
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    const valid = /^https:\/\/chatgpt\.com\//.test(tab.url || "");
+    cdpLog("Stored service-tab lookup", { tabId, valid, url: tab.url });
+    return valid ? tab : null;
+  } catch (_error) {
+    cdpLog("Stored service tab no longer exists", { tabId });
+    await chrome.storage.local.remove(CDP_SERVICE_TAB_STORAGE_KEY);
+    return null;
+  }
+}
+
+async function findOrCreateServiceTab() {
+  const stored = await storedServiceTab();
+  if (stored?.id) { cdpLog("Using stored service tab", { tabId: stored.id }); return { tab: stored, created: false }; }
+  const existing = (await chrome.tabs.query({ url: ["https://chatgpt.com/*"] })).find((tab) => tab.favIconUrl === CDP_SERVICE_TAB_FAVICON_URL);
+  if (existing?.id) {
+    cdpLog("Using existing favicon-marked service tab", { tabId: existing.id });
+    await chrome.storage.local.set({ [CDP_SERVICE_TAB_STORAGE_KEY]: existing.id });
+    return { tab: existing, created: false };
+  }
+  const created = await chrome.tabs.create({ url: "https://chatgpt.com/", active: false });
+  if (!created?.id) throw cdpError("Chrome could not create the background ChatGPT service tab.");
+  cdpLog("Created background service tab", { tabId: created.id, active: false });
+  const tab = await waitForChatGPTTab(created.id);
+  let attached = false;
+  try { await cdpAttach(tab.id); attached = true; await setServiceTabFavicon(tab.id); } finally { if (attached) await cdpDetach(tab.id); }
+  await chrome.storage.local.set({ [CDP_SERVICE_TAB_STORAGE_KEY]: tab.id });
+  return { tab, created: true };
+}
+
+function waitForDebuggerEvent(tabId, method, timeoutMs = 15_000) {
+  return new Promise((resolve, reject) => {
+    const finish = (callback) => { clearTimeout(timeout); chrome.debugger.onEvent.removeListener(onEvent); callback(); };
+    cdpLog("Waiting for debugger event", { tabId, method, timeoutMs });
+    const timeout = setTimeout(() => finish(() => reject(cdpError(`${method} was not received within ${Math.ceil(timeoutMs / 1000)} seconds.`))), timeoutMs);
+    const onEvent = (source, eventMethod, params) => {
+      if (source.tabId === tabId && eventMethod === method) finish(() => { cdpLog("Debugger event received", { tabId, method, params }); resolve(params); });
+    };
+    chrome.debugger.onEvent.addListener(onEvent);
+  });
+}
+
+async function cdpOpenFileChooser(tabId) {
+  // This mirrors OpenCLI's extension-side fix for crbug 928255.  Chrome
+  // accepts DOM.setFileInputFiles only for the backendNodeId emitted by this
+  // intercepted chooser event; a node obtained through DOM.querySelector is
+  // not equivalent when the caller is chrome.debugger.
+  const inputs = await cdpEvaluate(tabId, `(() => [...document.querySelectorAll('input[type="file"]')].map((input, index) => ({
+    index, disabled: input.disabled, accept: input.accept, multiple: input.multiple,
+    hidden: input.hidden, display: getComputedStyle(input).display, visibility: getComputedStyle(input).visibility
+  })))()`);
+  const inputDetails = inputs?.value || [];
+  cdpLog("Composer file-input inspection", { tabId, inputs: inputDetails });
+  if (!inputDetails.some((input) => !input.disabled)) throw cdpError("The ChatGPT Composer file input was not found.");
+  const opened = waitForDebuggerEvent(tabId, "Page.fileChooserOpened");
+  cdpLog("Opening Composer file chooser", { tabId });
+  await cdpCommand(tabId, "Runtime.evaluate", {
+    expression: `(() => {
+      const input = [...document.querySelectorAll('input[type="file"]')].find((item) => !item.disabled);
+      if (!input) throw new Error("ChatGPT Composer file input disappeared.");
+      input.click();
+    })()`,
+    userGesture: true
+  });
+  cdpLog("Composer input.click() command completed", { tabId });
+  return opened;
+}
+
+async function cdpWaitFor(tabId, expression, description, timeoutMs = 45_000) {
+  const deadline = Date.now() + timeoutMs;
+  let attempts = 0;
+  cdpLog("Waiting for page condition", { tabId, description, timeoutMs });
+  while (Date.now() < deadline) {
+    attempts += 1;
+    if (await cdpEvaluate(tabId, expression)) { cdpLog("Page condition satisfied", { tabId, description, attempts }); return; }
+    await sleep(250);
+  }
+  cdpLog("Page condition timed out", { tabId, description, attempts });
+  throw cdpError(`Timed out waiting for ${description}.`);
+}
+
+function cdpAbsoluteFilePath(value) {
+  if (typeof value !== "string" || !value.trim()) throw cdpError("Enter an absolute local image-file path.");
+  const filePath = value.trim();
+  if (!/^(?:[A-Za-z]:[\\/]|\\\\)/.test(filePath)) throw cdpError("The image-file path must be absolute, for example C:\\Pictures\\frame.png.");
+  return filePath;
+}
+
+async function cdpAttachImage(filePathValue) {
+  const filePath = cdpAbsoluteFilePath(filePathValue);
+  cdpLog("Image attachment started", { filePath, fileName: filePath.split(/[/\\\\]/).pop() });
+  const { tab } = await findOrCreateServiceTab();
+  if (!tab.id) throw cdpError("The ChatGPT service tab has no tab ID.");
+  let attached = false;
+  try {
+    await cdpAttach(tab.id); attached = true;
+    await cdpCommand(tab.id, "Page.enable"); await cdpCommand(tab.id, "DOM.enable"); await cdpCommand(tab.id, "Runtime.enable");
+    cdpLog("Required CDP domains enabled", { tabId: tab.id, domains: ["Page", "DOM", "Runtime"] });
+    await setServiceTabFavicon(tab.id);
+    await cdpCommand(tab.id, "Page.setInterceptFileChooserDialog", { enabled: true });
+    cdpLog("File-chooser interception enabled", { tabId: tab.id });
+    const chooser = await cdpOpenFileChooser(tab.id);
+    if (!Number.isInteger(chooser?.backendNodeId)) throw cdpError("ChatGPT opened a file chooser without a file-input node.");
+    cdpLog("Supplying file to chooser", { tabId: tab.id, backendNodeId: chooser.backendNodeId, filePath });
+    await cdpCommand(tab.id, "DOM.setFileInputFiles", { files: [filePath], backendNodeId: chooser.backendNodeId });
+    cdpLog("DOM.setFileInputFiles completed", { tabId: tab.id, backendNodeId: chooser.backendNodeId });
+    const filename = JSON.stringify(filePath.split(/[/\\\\]/).pop());
+    await cdpWaitFor(tab.id, `document.body?.innerText?.includes(${filename})`, "the uploaded-image attachment preview");
+    cdpLog("Image attachment completed: Composer preview detected", { tabId: tab.id });
+    return { ok: true, tabId: tab.id };
+  } finally {
+    if (attached) await cdpCommand(tab.id, "Page.setInterceptFileChooserDialog", { enabled: false }).then(() => cdpLog("File-chooser interception disabled", { tabId: tab.id })).catch((error) => cdpErrorLog("Could not disable file-chooser interception", error));
+    if (attached) await cdpDetach(tab.id);
+  }
+}
+
 chrome.runtime.onInstalled.addListener(({ reason }) => {
   // Do not overwrite chrome.storage.local here. Reloading or updating an
   // unpacked extension fires onInstalled and previously erased the tunnel
@@ -807,6 +1037,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
   if (message?.type === "status") {
     getPublicConnectionState().then(sendResponse);
+    return true;
+  }
+  if (message?.type === "cdp-attach-image") {
+    cdpAttachImage(message.filePath).then(sendResponse).catch((error) => sendResponse({ ok: false, error: safeErrorMessage(error) }));
     return true;
   }
   if (message?.type === "save-connection") {
@@ -1051,6 +1285,57 @@ async function agentJsonRequest(path, { method = "GET", body = null, port = null
     throw localAgentError("AGENT_UNAVAILABLE", `ResearchTube Local Agent is not available on port ${resolvedPort}.`);
   } finally {
     clearTimeout(timeout);
+  }
+}
+
+async function extensionChromeWindowCounts() {
+  try {
+    const windows = await chrome.windows.getAll({ populate: true, windowTypes: ["normal"] });
+    const normalWindows = windows.filter((window) => window.type === "normal");
+    return {
+      windows: normalWindows.length,
+      tabs: normalWindows.reduce((count, window) => count + (Array.isArray(window.tabs) ? window.tabs.length : 0), 0)
+    };
+  } catch (_error) {
+    // The banner diagnosis is still useful if Chrome temporarily refuses a UI count.
+    return { windows: 0, tabs: 0 };
+  }
+}
+
+function normalizeDebugBannerAgentResult(value) {
+  const configuration = value?.configuration;
+  const chromeRunning = value?.chromeRunning;
+  const browserInstances = value?.browserInstances;
+  const requiredSwitch = value?.requiredSwitch;
+  const message = value?.message;
+  if (!value || typeof value !== "object" || !["banner_suppressed", "banner_enabled", "mixed", "unknown"].includes(configuration)
+    || !(typeof chromeRunning === "boolean" || chromeRunning === null)
+    || !Number.isInteger(browserInstances) || browserInstances < 0
+    || requiredSwitch !== "--silent-debugger-extension-api" || typeof message !== "string" || !message.trim()) {
+    throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid Chrome debugger-banner diagnosis.");
+  }
+  return { chromeRunning, browserInstances, configuration, requiredSwitch, message: message.trim() };
+}
+
+async function getDebugBannerStatus() {
+  const counts = await extensionChromeWindowCounts();
+  try {
+    const report = normalizeDebugBannerAgentResult(await agentJsonRequest("/chrome/debug-banner", { method: "POST", body: {} }));
+    return {
+      bannerExpected: report.configuration === "banner_suppressed" ? false : report.configuration === "unknown" ? null : true,
+      ...counts,
+      ...report
+    };
+  } catch (_error) {
+    return {
+      bannerExpected: null,
+      chromeRunning: null,
+      ...counts,
+      browserInstances: 0,
+      configuration: "unknown",
+      requiredSwitch: "--silent-debugger-extension-api",
+      message: "ResearchTube could not inspect Chrome startup parameters. It uses chrome.debugger for automatic file attachment; Chrome may show a debugger banner unless it was started with --silent-debugger-extension-api."
+    };
   }
 }
 
@@ -1889,6 +2174,9 @@ async function handleMcpRequest(request) {
   }
   if (request?.method === "tools/call" && request.params?.name === "researchtube_agent_status") {
     return executeToolCall(request.id, "researchtube_agent_status", {}, () => getAgentStatus());
+  }
+  if (request?.method === "tools/call" && request.params?.name === "researchtube_check_debug_banner") {
+    return executeToolCall(request.id, "researchtube_check_debug_banner", {}, getDebugBannerStatus);
   }
   if (request?.method === "tools/call" && request.params?.name === "workspace_list") {
     const args = request.params.arguments ?? {};

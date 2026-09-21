@@ -14,7 +14,7 @@ for (const tool of ["youtube_get_download_formats", "youtube_get_download_task_d
 assert.match(background, /youtubeFormats: youtubeFormatsSchema/);
 assert.match(background, /youtube_get_download_formats\.downloadFormats/);
 assert.match(background, /afterEventId/);
-assert.match(background, /const REQUIRED_AGENT_INTERFACE_VERSION = 16;/);
+assert.match(background, /const REQUIRED_AGENT_INTERFACE_VERSION = 17;/);
 assert.match(background, /availableBytes/);
 assert.match(background, /operatingSystem.*release.*version.*architecture/s);
 assert.match(background, /function normalizeWorkspacePath\(/);

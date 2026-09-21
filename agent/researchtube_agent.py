@@ -26,8 +26,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote, unquote, urlparse
 
-AGENT_VERSION = "0.17.0"
-INTERFACE_VERSION = 16
+AGENT_VERSION = "0.18.0"
+INTERFACE_VERSION = 17
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
 TASK_POLL_INTERVAL_MS = 1_000
@@ -50,6 +50,7 @@ CAPTURE_FRAME_TIMEOUT_SECONDS = 60
 YOUTUBE_CAPTURE_FRAME_TIMEOUT_SECONDS = 90
 YOUTUBE_CAPTURE_PRE_ROLL_SECONDS = 12.0
 YOUTUBE_CAPTURE_POST_ROLL_SECONDS = 3.0
+DEBUG_BANNER_SWITCH = "--silent-debugger-extension-api"
 MEDIA_PROBE_SECTIONS = {
     "format": ("-show_format", "format"),
     "streams": ("-show_streams", "streams"),
@@ -262,6 +263,88 @@ def public_platform_metadata() -> dict[str, str]:
         "version": platform.version() or "Unknown",
         "architecture": platform.machine() or "Unknown",
     }
+
+
+def debug_banner_unknown(message: str, *, chrome_running: bool | None = None) -> dict[str, Any]:
+    """Return a privacy-preserving result when Chrome launch flags are unavailable."""
+    return {
+        "chromeRunning": chrome_running,
+        "browserInstances": 0,
+        "configuration": "unknown",
+        "requiredSwitch": DEBUG_BANNER_SWITCH,
+        "message": message,
+    }
+
+
+def summarize_debug_banner_process_report(report: Any) -> dict[str, Any]:
+    """Validate the deliberately aggregate-only Windows process query result."""
+    if not isinstance(report, dict):
+        return debug_banner_unknown("Chrome process information could not be read.")
+    chrome_running = report.get("chromeRunning")
+    browser_instances = report.get("browserInstances")
+    enabled_instances = report.get("enabledInstances")
+    if not isinstance(chrome_running, bool) or not isinstance(browser_instances, int) or isinstance(browser_instances, bool) \
+            or not isinstance(enabled_instances, int) or isinstance(enabled_instances, bool) \
+            or browser_instances < 0 or enabled_instances < 0 or enabled_instances > browser_instances:
+        return debug_banner_unknown("Chrome process information could not be read.")
+    if not chrome_running:
+        return debug_banner_unknown("Chrome is not currently running.", chrome_running=False)
+    if browser_instances == 0:
+        return debug_banner_unknown("Chrome is running, but its browser instances could not be identified.", chrome_running=True)
+    if enabled_instances == browser_instances:
+        configuration = "banner_suppressed"
+        message = f"All running Chrome browser instances use {DEBUG_BANNER_SWITCH}. ResearchTube debugger operations should not show the Chrome debugging banner."
+    elif enabled_instances == 0:
+        configuration = "banner_enabled"
+        message = f"Chrome is running without {DEBUG_BANNER_SWITCH}. ResearchTube debugger operations may show the Chrome debugging banner."
+    else:
+        configuration = "mixed"
+        message = f"Some running Chrome browser instances use {DEBUG_BANNER_SWITCH} and some do not. The Chrome debugging banner may appear depending on the instance used by ResearchTube."
+    return {
+        "chromeRunning": True,
+        "browserInstances": browser_instances,
+        "configuration": configuration,
+        "requiredSwitch": DEBUG_BANNER_SWITCH,
+        "message": message,
+    }
+
+
+async def debug_banner_status() -> dict[str, Any]:
+    """Inspect only aggregate Chrome launch-flag state for the current request.
+
+    The PowerShell side deliberately emits counts only. Raw command lines, PIDs,
+    profiles and paths never cross into the Agent result or its loopback API.
+    """
+    if os.name != "nt":
+        return debug_banner_unknown("Chrome startup switches can be checked by this ResearchTube Agent only on Windows.")
+    script = r'''
+$ErrorActionPreference = 'Stop'
+$chrome = @(Get-CimInstance -ClassName Win32_Process -Filter "Name = 'chrome.exe'")
+$browser = @($chrome | Where-Object {
+  $commandLine = [string]$_.CommandLine
+  $commandLine -notmatch '(?i)(?:^|\s)--type(?:=|\s)'
+})
+$enabled = @($browser | Where-Object {
+  ([string]$_.CommandLine) -match '(?i)(?:^|\s)--silent-debugger-extension-api(?:\s|$)'
+})
+[pscustomobject]@{
+  chromeRunning = ($chrome.Count -gt 0)
+  browserInstances = $browser.Count
+  enabledInstances = $enabled.Count
+} | ConvertTo-Json -Compress
+'''
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _stderr = await asyncio.wait_for(process.communicate(), timeout=5)
+        if process.returncode != 0:
+            return debug_banner_unknown("Chrome process information could not be read.")
+        report = json.loads(stdout.decode("utf-8-sig", errors="replace"))
+        return summarize_debug_banner_process_report(report)
+    except (OSError, asyncio.TimeoutError, json.JSONDecodeError):
+        return debug_banner_unknown("Chrome process information could not be read.")
 
 
 def public_health_document(snapshot: dict[str, Any]) -> dict[str, Any]:
@@ -2027,6 +2110,8 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             response_status, response_body = "204 No Content", None
         elif method == "GET" and path == "/health":
             response_status, response_body = "200 OK", public_health_document(await health_snapshot())
+        elif method == "POST" and path == "/chrome/debug-banner":
+            response_status, response_body = "200 OK", await debug_banner_status()
         elif method == "POST" and path == "/workspace/list":
             response_status, response_body = "200 OK", workspace_list(parse_json_body(body))
         elif method == "POST" and path == "/workspace/stat":
