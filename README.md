@@ -1,4 +1,3 @@
-<img width="1335" height="2000" alt="2149244088" src="https://github.com/user-attachments/assets/cc471cf1-636c-4bcf-836d-25326292a085" />
 # ResearchTube v1.5.1 — Local Agent refinements
 
 This release contains two independent local components:
