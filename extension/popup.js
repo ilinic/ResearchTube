@@ -25,16 +25,5 @@ async function load() {
   $("agent-status").className = agent.className;
 }
 $("chatgpt").addEventListener("click", () => call({ type: "open-external", target: "chatgptNewChat" }));
-$("attach-image").addEventListener("click", async () => {
-  const button = $("attach-image"); const result = $("test-image-result"); const filePath = $("cdp-image-path").value;
-  button.disabled = true; result.hidden = false; result.className = ""; result.textContent = "Attaching image…";
-  try {
-    const response = await call({ type: "cdp-attach-image", filePath });
-    if (!response?.ok) throw new Error(response?.error || "The image could not be attached.");
-    result.className = "ok"; result.textContent = "Image attached. Open the service tab to inspect the Composer preview.";
-  } catch (error) {
-    result.className = "error"; result.textContent = String(error?.message || error);
-  } finally { button.disabled = false; }
-});
 $("settings").addEventListener("click", () => chrome.runtime.openOptionsPage());
 load();

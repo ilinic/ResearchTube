@@ -138,6 +138,18 @@ class WorkspacePathResolverTests(unittest.TestCase):
             messages,
         )
 
+    def test_library_store_files_resolves_workspace_images_only(self) -> None:
+        captures = agent.WORKSPACE_PATH / "captures"
+        captures.mkdir(parents=True)
+        image = captures / "frame.png"
+        image.write_bytes(b"png")
+        resolved = agent.library_store_files({"files": [{"workspacePath": "captures/frame.png"}]})
+        self.assertEqual(resolved["files"][0]["workspacePath"], "captures/frame.png")
+        self.assertEqual(Path(resolved["files"][0]["localPath"]), image.resolve())
+        with self.assertRaises(agent.AgentApiError) as raised:
+            agent.library_store_files({"files": [{"workspacePath": "captures/missing.png"}]})
+        self.assertEqual(raised.exception.code, "FILE_NOT_FOUND")
+
 
 class MediaProbeTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
@@ -216,6 +228,12 @@ class MediaProbeTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CaptureFrameTests(unittest.IsolatedAsyncioTestCase):
+    def test_capture_title_preserves_cyrillic_while_replacing_windows_invalid_characters(self) -> None:
+        self.assertEqual(
+            agent.safe_capture_title('Народу было много,строили долго."(С)Официальные историки'),
+            "Народу было много,строили долго. (С)Официальные историки",
+        )
+
     async def asyncSetUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
@@ -303,17 +321,20 @@ class CaptureFrameTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((agent.WORKSPACE_PATH / "captures" / "custom.webp").read_bytes(), b"image-bytes")
 
     async def test_capture_frame_can_download_only_a_youtube_time_section(self) -> None:
+        capture_commands: list[tuple[str, ...]] = []
+
         async def youtube_subprocess(*command, **kwargs):
             if command[0] != "/private/ytDlp":
                 return await self.subprocess(*command, **kwargs)
             if "--dump-single-json" in command:
                 formats = {"formats": [{"format_id": "136", "vcodec": "avc1", "acodec": "none", "ext": "mp4", "width": 1280, "height": 720}]}
                 return type("Process", (), {"returncode": 0, "communicate": staticmethod(lambda: _bytes_result(json.dumps(formats).encode(), b""))})()
+            capture_commands.append(command)
             directory = Path(command[command.index("--paths") + 1])
             partial = directory / "partial [yt_aqz-KE-bpKQ] [cap_test].mp4"
             directory.mkdir(parents=True, exist_ok=True)
             partial.write_bytes(b"partial-media")
-            stdout = f"__RESEARCHTUBE_CAPTURE_TITLE__:Correct: YouTube / title\n__RESEARCHTUBE_CAPTURE_PARTIAL__:{partial}\n".encode()
+            stdout = f'__RESEARCHTUBE_CAPTURE_TITLE__:Народу было много,строили долго."(С)Официальные историки\n__RESEARCHTUBE_CAPTURE_PARTIAL__:{partial}\n'.encode()
             return type("Process", (), {"returncode": 0, "communicate": staticmethod(lambda: _bytes_result(stdout, b""))})()
 
         with patch.object(agent, "PUBLIC_TUNNEL_URL", "https://example.trycloudflare.com"), patch.object(agent, "find_component", side_effect=self.discovery), patch.object(asyncio, "create_subprocess_exec", side_effect=youtube_subprocess):
@@ -323,10 +344,11 @@ class CaptureFrameTests(unittest.IsolatedAsyncioTestCase):
             })
         self.assertEqual(result["sourcePath"], "youtube:aqz-KE-bpKQ")
         self.assertEqual(result["sourceVideoFormatId"], "136")
-        self.assertEqual(result["sourceTitle"], "Correct: YouTube / title")
+        self.assertEqual(result["sourceTitle"], 'Народу было много,строили долго."(С)Официальные историки')
         self.assertEqual(result["partialDownload"], {"startSeconds": 12.0, "endSeconds": 27.0})
         self.assertEqual(result["actualTimestampSeconds"], 24.5)
-        self.assertRegex(result["image"]["workspacePath"], r"^captures/Correct YouTube title \[yt_aqz-KE-bpKQ\] \[t_24\.000\] \[cap_[A-Za-z0-9_-]+\]\.png$")
+        self.assertTrue(result["image"]["workspacePath"].startswith("captures/Народу было много,строили долго. (С)Официальные историки [yt_aqz-KE-bpKQ] [t_24.000] [cap_"))
+        self.assertNotIn("--windows-filenames", capture_commands[0])
         self.assertFalse((agent.WORKSPACE_PATH / ".researchtube-capture-tmp").exists())
 
     async def test_workspace_image_returns_encoded_bytes_without_host_path(self) -> None:

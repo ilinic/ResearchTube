@@ -16,8 +16,8 @@ var DEFAULTS = {
   youtubeSearchCooldownUntil: 0,
   youtubeSearchCooldownLevel: 0
 };
-var EXTENSION_VERSION = "1.20.0";
-var REQUIRED_AGENT_INTERFACE_VERSION = 17;
+var EXTENSION_VERSION = "1.21.2";
+var REQUIRED_AGENT_INTERFACE_VERSION = 19;
 var CAPTURE_FRAME_WIDGET_URI = "ui://researchtube/capture-frame-v25.html";
 var CAPTURE_FRAME_OFFSCREEN_DOCUMENT = "capture-frame-offscreen.html";
 var AGENT_HEALTH_TIMEOUT_MS = 5e3;
@@ -28,8 +28,12 @@ var SEARCH_MIN_START_INTERVAL_MS = 500;
 var SEARCH_CACHE_TTL_MS = 5 * 6e4;
 var SEARCH_COOLDOWN_STEPS_MS = [2e3, 5e3, 1e4, 2e4, 4e4, 6e4];
 var CDP_SERVICE_TAB_STORAGE_KEY = "researchtubeCdpServiceTabId";
-var CDP_SERVICE_TAB_FAVICON_URL = chrome.runtime.getURL("icons/chatgpt-service-tab.png");
 var CDP_PROTOCOL_VERSION = "1.3";
+var CDP_COMPOSER_SETTLE_MS = 750;
+var CDP_FILE_CHOOSER_ATTEMPTS = 2;
+var CDP_IMAGE_BATCH_MAX_FILES = 5;
+var LIBRARY_STORE_TASK_STORAGE_KEY = "researchtubeLibraryStoreTasksV1";
+var LIBRARY_STORE_QUEUE_STORAGE_KEY = "researchtubeLibraryStoreQueueV1";
 var SEARCH_DIAGNOSTIC_MAX_ENTRIES = 250;
 var SEARCH_DIAGNOSTIC_MAX_QUERY_LENGTH = 360;
 var COMMAND_DIAGNOSTIC_MAX_ENTRIES = 300;
@@ -44,6 +48,11 @@ var searchRequestSequence = 0;
 var searchDiagnosticWrite = Promise.resolve();
 var commandDiagnosticWrite = Promise.resolve();
 var captureFrameOffscreenPromise = null;
+var libraryStoreTasks = /* @__PURE__ */ new Map();
+var libraryStoreQueue = [];
+var libraryStoreLoaded = false;
+var libraryStoreLoading = null;
+var libraryStoreDraining = false;
 var searchCache = /* @__PURE__ */ new Map();
 var nullableString = { type: ["string", "null"] };
 var nullableInteger = { type: ["integer", "null"] };
@@ -452,7 +461,7 @@ var workspaceShareStatusSchema = {
     state: { type: "string", enum: ["active", "inactive"] },
     folder: nullableString,
     fileTypes: { type: "array", uniqueItems: true, items: workspaceShareFileTypeSchema },
-    publicBaseUrl: { ...nullableString, pattern: "^https://" },
+    publicBaseUrl: { ...nullableString, pattern: "^https://", description: "Temporary URL for an external browser or HTTP client to download allowed files. ChatGPT may be unable to fetch a Quick Tunnel URL or use it as visual input, so do not rely on it for image inspection." },
     methods: { type: "array", items: { type: "string", enum: ["GET", "HEAD"] } }
   },
   required: ["state", "folder", "fileTypes", "publicBaseUrl", "methods"]
@@ -599,6 +608,34 @@ var debugBannerResultSchema = {
   },
   required: ["bannerExpected", "chromeRunning", "windows", "tabs", "browserInstances", "configuration", "requiredSwitch", "message"]
 };
+var libraryStoreFileSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: { workspacePath: { type: "string", minLength: 1, description: "Logical workspace-relative PNG, JPEG, or WebP file path. It is never an absolute host path." } },
+  required: ["workspacePath"]
+};
+var libraryStorePhaseSchema = { type: "string", enum: ["queued", "resolvingFiles", "attaching", "composerAccepted", "submitting", "submitted", "failed", "cancelled"] };
+var libraryStoreTaskSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    taskId: { type: "string", minLength: 1 },
+    status: { type: "string", enum: ["queued", "working", "completed", "failed", "cancelled"] },
+    phase: libraryStorePhaseSchema,
+    files: { type: "array", minItems: 1, maxItems: 5, items: libraryStoreFileSchema },
+    queuePosition: { ...nullableInteger, minimum: 1 },
+    createdAt: { type: "string", format: "date-time" },
+    updatedAt: { type: "string", format: "date-time" },
+    submittedAt: nullableString,
+    libraryAvailability: { type: "string", enum: ["not_requested", "not_verified"] },
+    message: { type: "string", minLength: 1 },
+    error: nullableString
+  },
+  required: ["taskId", "status", "phase", "files", "queuePosition", "createdAt", "updatedAt", "submittedAt", "libraryAvailability", "message", "error"]
+};
+var libraryStoreStartSchema = { type: "object", additionalProperties: false, properties: { task: libraryStoreTaskSchema }, required: ["task"] };
+var libraryStoreStatusSchema = libraryStoreTaskSchema;
+var libraryStoreCancelSchema = { type: "object", additionalProperties: false, properties: { task: libraryStoreTaskSchema, cancelled: { type: "boolean" } }, required: ["task", "cancelled"] };
 function toolDefinitions() {
   return [
     {
@@ -616,6 +653,30 @@ function toolDefinitions() {
       annotations: localAgentReadAnnotations,
       inputSchema: { type: "object", additionalProperties: false, properties: {} },
       outputSchema: debugBannerResultSchema
+    },
+    {
+      name: "library_store_start",
+      title: "Store a batch of workspace images in ChatGPT Library",
+      description: "Queue one indivisible batch of 1 to 5 PNG, JPEG, or WebP images from the ResearchTube workspace for ChatGPT Library storage. ResearchTube uses one dedicated background ChatGPT service tab and submits the batch with the appropriate Store this image/these images in the Library request. The returned taskId must be polled with library_store_status. A completed task means ResearchTube confirmed Composer acceptance and submitted the request to ChatGPT; it never claims that the later ChatGPT Library update is complete.",
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+      inputSchema: { type: "object", additionalProperties: false, properties: { files: { type: "array", minItems: 1, maxItems: 5, uniqueItems: true, items: libraryStoreFileSchema, description: "One immutable batch. Files are attached and submitted together, never split or mixed with another task." } }, required: ["files"] },
+      outputSchema: libraryStoreStartSchema
+    },
+    {
+      name: "library_store_status",
+      title: "Check a Library storage task",
+      description: "Return the current local status of one ResearchTube Library storage task. submitted means the request left the Composer for ChatGPT; libraryAvailability remains not_verified because ResearchTube cannot observe the later Library update.",
+      annotations: localAgentReadAnnotations,
+      inputSchema: { type: "object", additionalProperties: false, properties: { taskId: { type: "string", minLength: 1 } }, required: ["taskId"] },
+      outputSchema: libraryStoreStatusSchema
+    },
+    {
+      name: "library_store_cancel",
+      title: "Cancel a queued Library storage task",
+      description: "Cancel one Library storage task only while it is queued. A task that has started attaching files or has submitted a request to ChatGPT cannot be cancelled.",
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      inputSchema: { type: "object", additionalProperties: false, properties: { taskId: { type: "string", minLength: 1 } }, required: ["taskId"] },
+      outputSchema: libraryStoreCancelSchema
     },
     {
       name: "workspace_list",
@@ -659,16 +720,16 @@ function toolDefinitions() {
     },
     {
       name: "workspace_share_start",
-      title: "Publish a selected workspace folder temporarily",
-      description: "Explicitly start a temporary public HTTPS share for one existing Local Agent workspace folder through cloudflared. The public path repeats folder directly with no artificial intermediate segment: if folder is captures, a file captures/frame.png is served as https://<random>.trycloudflare.com/captures/frame.png. fileTypes is an allow-list; no directory listing is exposed, only GET and HEAD for regular non-redirect files beneath the selected folder. Starting a new share closes any prior share. Anyone with the returned URL can access allowed files until workspace_share_stop or Agent shutdown.",
+      title: "Publish a workspace folder for external download only",
+      description: "Explicitly start a temporary public HTTPS share for an external browser or HTTP client to download files from one existing Local Agent workspace folder through cloudflared. A Quick Tunnel URL can be useful for external file access, but ChatGPT may be unable to fetch it or use it as visual input; do not rely on this tool to inspect or analyze image pixels. For a workspace image that ChatGPT needs to receive reliably, use library_store_start instead. The public path repeats folder directly with no artificial intermediate segment: if folder is captures, a file captures/frame.png is served as https://<random>.trycloudflare.com/captures/frame.png. fileTypes is an allow-list; no directory listing is exposed, only GET and HEAD for regular non-redirect files beneath the selected folder. Starting a new share closes any prior share. Anyone with the returned URL can access allowed files until workspace_share_stop or Agent shutdown.",
       annotations: { ...localWorkspaceWriteAnnotations, openWorldHint: true },
       inputSchema: { type: "object", additionalProperties: false, properties: { folder: { type: "string", description: "Existing logical workspace-relative directory. Use an empty string only to publish the workspace root." }, fileTypes: { type: "array", minItems: 1, maxItems: 7, uniqueItems: true, items: workspaceShareFileTypeSchema, description: "Allowed categories. all cannot be combined with another category." } }, required: ["folder", "fileTypes"] },
       outputSchema: workspaceShareStatusSchema
     },
     {
       name: "workspace_share_status",
-      title: "Inspect the current public workspace share",
-      description: "Report whether a cloudflared workspace share is active, its selected logical folder, allowed file categories, public URL root, and supported download methods. This never exposes a host filesystem path.",
+      title: "Inspect the current external-download share",
+      description: "Report whether a cloudflared external-download share is active, its selected logical folder, allowed file categories, public URL root, and supported download methods. Active means the URL is being served to ordinary browsers or HTTP clients; it does not show that ChatGPT can fetch it or use it as visual input. This never exposes a host filesystem path.",
       annotations: localAgentReadAnnotations,
       inputSchema: { type: "object", additionalProperties: false, properties: {} },
       outputSchema: workspaceShareStatusSchema
@@ -915,6 +976,15 @@ async function cdpEvaluate(tabId, expression, { returnByValue = true } = {}) {
   if (response?.result?.subtype === "error" || response?.exceptionDetails) throw cdpError("The ChatGPT page rejected a CDP evaluation.");
   return response?.result;
 }
+var CDP_COMPOSER_INPUT_STATE_EXPRESSION = `(() => {
+  const inputs = [...document.querySelectorAll('input[type="file"]')]
+    .filter((input) => !input.disabled);
+  const input = inputs[0] || null;
+  return {
+    ready: document.readyState === 'complete' && Boolean(input),
+    signature: input ? [inputs.length, input.accept, input.multiple, input.hidden, getComputedStyle(input).display, getComputedStyle(input).visibility].join('|') : null
+  };
+})()`;
 async function waitForChatGPTTab(tabId, timeoutMs = 45e3) {
   const current = await chrome.tabs.get(tabId);
   if (current.status === "complete" && /^https:\/\/chatgpt\.com\//.test(current.url || "")) {
@@ -945,15 +1015,6 @@ async function waitForChatGPTTab(tabId, timeoutMs = 45e3) {
     chrome.tabs.onRemoved.addListener(onRemoved);
   });
 }
-async function setServiceTabFavicon(tabId) {
-  await cdpCommand(tabId, "Page.enable");
-  const href = JSON.stringify(CDP_SERVICE_TAB_FAVICON_URL);
-  await cdpEvaluate(tabId, `(() => {
-    let link = document.querySelector('link[data-researchtube-service-favicon]');
-    if (!link) { link = document.createElement('link'); link.rel = 'icon'; link.dataset.researchtubeServiceFavicon = 'true'; document.head.append(link); }
-    link.href = ${href};
-  })()`);
-}
 async function storedServiceTab() {
   const { [CDP_SERVICE_TAB_STORAGE_KEY]: tabId = null } = await chrome.storage.local.get({ [CDP_SERVICE_TAB_STORAGE_KEY]: null });
   if (!Number.isInteger(tabId)) {
@@ -977,24 +1038,10 @@ async function findOrCreateServiceTab() {
     cdpLog("Using stored service tab", { tabId: stored.id });
     return { tab: stored, created: false };
   }
-  const existing = (await chrome.tabs.query({ url: ["https://chatgpt.com/*"] })).find((tab2) => tab2.favIconUrl === CDP_SERVICE_TAB_FAVICON_URL);
-  if (existing?.id) {
-    cdpLog("Using existing favicon-marked service tab", { tabId: existing.id });
-    await chrome.storage.local.set({ [CDP_SERVICE_TAB_STORAGE_KEY]: existing.id });
-    return { tab: existing, created: false };
-  }
   const created = await chrome.tabs.create({ url: "https://chatgpt.com/", active: false });
   if (!created?.id) throw cdpError("Chrome could not create the background ChatGPT service tab.");
   cdpLog("Created background service tab", { tabId: created.id, active: false });
   const tab = await waitForChatGPTTab(created.id);
-  let attached = false;
-  try {
-    await cdpAttach(tab.id);
-    attached = true;
-    await setServiceTabFavicon(tab.id);
-  } finally {
-    if (attached) await cdpDetach(tab.id);
-  }
   await chrome.storage.local.set({ [CDP_SERVICE_TAB_STORAGE_KEY]: tab.id });
   return { tab, created: true };
 }
@@ -1043,7 +1090,8 @@ async function cdpWaitFor(tabId, expression, description, timeoutMs = 45e3) {
   cdpLog("Waiting for page condition", { tabId, description, timeoutMs });
   while (Date.now() < deadline) {
     attempts += 1;
-    if (await cdpEvaluate(tabId, expression)) {
+    const result = await cdpEvaluate(tabId, expression);
+    if (result?.value === true) {
       cdpLog("Page condition satisfied", { tabId, description, attempts });
       return;
     }
@@ -1052,15 +1100,149 @@ async function cdpWaitFor(tabId, expression, description, timeoutMs = 45e3) {
   cdpLog("Page condition timed out", { tabId, description, attempts });
   throw cdpError(`Timed out waiting for ${description}.`);
 }
+async function cdpWaitForStableComposer(tabId, timeoutMs = 45e3) {
+  const deadline = Date.now() + timeoutMs;
+  let attempts = 0;
+  cdpLog("Waiting for stable ChatGPT Composer", { tabId, timeoutMs, settleMs: CDP_COMPOSER_SETTLE_MS });
+  while (Date.now() < deadline) {
+    attempts += 1;
+    const first = (await cdpEvaluate(tabId, CDP_COMPOSER_INPUT_STATE_EXPRESSION))?.value;
+    if (first?.ready && first.signature) {
+      await sleep(CDP_COMPOSER_SETTLE_MS);
+      const second = (await cdpEvaluate(tabId, CDP_COMPOSER_INPUT_STATE_EXPRESSION))?.value;
+      if (second?.ready && second.signature === first.signature) {
+        cdpLog("ChatGPT Composer is stable", { tabId, attempts, signature: second.signature });
+        return;
+      }
+      cdpLog("ChatGPT Composer changed during settling", { tabId, attempts });
+    }
+    await sleep(250);
+  }
+  throw cdpError("Timed out waiting for a stable ChatGPT Composer.");
+}
+function cdpAttachmentStateExpression(fileNames) {
+  return `(() => {
+    const expectedNames = ${JSON.stringify(fileNames)};
+    const inputs = [...document.querySelectorAll('input[type="file"]')];
+    const selectedNames = new Set(inputs.flatMap((input) => [...(input.files || [])].map((file) => file.name)));
+    // ChatGPT does not consistently render an attachment filename as visible
+    // text (especially for image previews).  A selected FileList is the
+    // primary, browser-level confirmation; the DOM checks are useful fallback
+    // evidence after React replaces that input with a fresh one.
+    const visibleText = document.body?.innerText || '';
+    const labeledText = [...document.querySelectorAll('[aria-label], [title], [alt]')]
+      .map((element) => [element.getAttribute('aria-label'), element.getAttribute('title'), element.getAttribute('alt')].join(' ')).join(' ');
+    const acceptedNames = expectedNames.filter((fileName) =>
+      selectedNames.has(fileName) || visibleText.includes(fileName) || labeledText.includes(fileName)
+    );
+    return {
+      accepted: acceptedNames.length === expectedNames.length,
+      acceptedNames,
+      selectedNames: [...selectedNames]
+    };
+  })()`;
+}
+async function cdpWaitForAttachmentAccepted(tabId, fileNames, timeoutMs = 15e3) {
+  const deadline = Date.now() + timeoutMs;
+  let attempts = 0;
+  cdpLog("Waiting for Composer file acceptance", { tabId, fileNames, timeoutMs });
+  while (Date.now() < deadline) {
+    attempts += 1;
+    const state = (await cdpEvaluate(tabId, cdpAttachmentStateExpression(fileNames)))?.value;
+    if (state?.accepted) {
+      cdpLog("Composer accepted image attachment", { tabId, fileNames, attempts, state });
+      return;
+    }
+    await sleep(150);
+  }
+  throw cdpError("ChatGPT did not confirm that it accepted the selected image file.");
+}
+async function cdpOpenStableFileChooser(tabId) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= CDP_FILE_CHOOSER_ATTEMPTS; attempt += 1) {
+    await cdpWaitForStableComposer(tabId);
+    try {
+      cdpLog("File chooser attempt", { tabId, attempt, maximumAttempts: CDP_FILE_CHOOSER_ATTEMPTS });
+      return await cdpOpenFileChooser(tabId);
+    } catch (error) {
+      lastError = error;
+      const chooserWasMissed = String(error?.message || error).includes("Page.fileChooserOpened");
+      if (!chooserWasMissed || attempt === CDP_FILE_CHOOSER_ATTEMPTS) throw error;
+      cdpLog("File chooser event was missed; retrying after Composer re-check", { tabId, nextAttempt: attempt + 1 });
+    }
+  }
+  throw lastError || cdpError("The ChatGPT file chooser could not be opened.");
+}
 function cdpAbsoluteFilePath(value) {
   if (typeof value !== "string" || !value.trim()) throw cdpError("Enter an absolute local image-file path.");
   const filePath = value.trim();
   if (!/^(?:[A-Za-z]:[\\/]|\\\\)/.test(filePath)) throw cdpError("The image-file path must be absolute, for example C:\\Pictures\\frame.png.");
   return filePath;
 }
-async function cdpAttachImage(filePathValue) {
-  const filePath = cdpAbsoluteFilePath(filePathValue);
-  cdpLog("Image attachment started", { filePath, fileName: filePath.split(/[/\\\\]/).pop() });
+var CDP_COMPOSER_SELECTOR_EXPRESSION = `(() => {
+  const visible = (element) => {
+    const style = getComputedStyle(element);
+    return style.display !== 'none' && style.visibility !== 'hidden' && element.getClientRects().length > 0;
+  };
+  const candidates = [
+    ...document.querySelectorAll('textarea:not([disabled])'),
+    ...document.querySelectorAll('[contenteditable="true"][role="textbox"]:not([aria-disabled="true"])'),
+    ...document.querySelectorAll('[contenteditable="true"]:not([aria-disabled="true"])')
+  ].filter(visible);
+  const composer = candidates[0] || null;
+  if (!composer) return { found: false };
+  composer.focus();
+  if (typeof composer.select === 'function') composer.select();
+  else {
+    const range = document.createRange();
+    range.selectNodeContents(composer);
+    const selection = getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+  }
+  return { found: true, tagName: composer.tagName, contentEditable: composer.isContentEditable };
+})()`;
+function cdpComposerContainsTextExpression(text) {
+  return `(() => [...document.querySelectorAll('textarea, [contenteditable="true"]')]
+    .some((element) => (element.value || element.innerText || element.textContent || '').trim() === ${JSON.stringify(text)}))()`;
+}
+var CDP_ENABLED_SEND_BUTTON_EXPRESSION = `(() => [...document.querySelectorAll('button')]
+  .some((button) => !button.disabled && button.getAttribute('aria-disabled') !== 'true' && (
+    button.dataset.testid === 'send-button'
+    || /^(send|send prompt)$/i.test(button.getAttribute('aria-label') || '')
+  )))()`;
+var CDP_CLICK_SEND_BUTTON_EXPRESSION = `(() => {
+  const button = [...document.querySelectorAll('button')].find((candidate) => !candidate.disabled
+    && candidate.getAttribute('aria-disabled') !== 'true' && (
+      candidate.dataset.testid === 'send-button'
+      || /^(send|send prompt)$/i.test(candidate.getAttribute('aria-label') || '')
+    ));
+  if (!button) return false;
+  button.click();
+  return true;
+})()`;
+async function cdpStoreImagesInLibrary(tabId, fileCount) {
+  const prompt = fileCount === 1 ? "Store this image in the Library." : "Store these images in the Library.";
+  const composer = (await cdpEvaluate(tabId, CDP_COMPOSER_SELECTOR_EXPRESSION))?.value;
+  if (!composer?.found) throw cdpError("The ChatGPT Composer text field was not found.");
+  cdpLog("Writing Library storage request", { tabId, fileCount, prompt });
+  await cdpCommand(tabId, "Input.insertText", { text: prompt });
+  await cdpWaitFor(tabId, cdpComposerContainsTextExpression(prompt), "the Library storage request in the Composer");
+  await cdpWaitFor(tabId, CDP_ENABLED_SEND_BUTTON_EXPRESSION, "the enabled ChatGPT Send button", 9e4);
+  const clicked = (await cdpEvaluate(tabId, CDP_CLICK_SEND_BUTTON_EXPRESSION))?.value;
+  if (clicked !== true) throw cdpError("The ChatGPT Send button was not available.");
+  cdpLog("Library storage request submitted", { tabId, fileCount, prompt });
+  await cdpWaitFor(tabId, `!(${cdpComposerContainsTextExpression(prompt)})`, "the submitted Library request to leave the Composer", 15e3);
+  return prompt;
+}
+async function cdpAttachImagesNow(filePathValues, { onPhase = null } = {}) {
+  if (!Array.isArray(filePathValues) || !filePathValues.length || filePathValues.length > CDP_IMAGE_BATCH_MAX_FILES) {
+    throw cdpError(`An image batch must contain between 1 and ${CDP_IMAGE_BATCH_MAX_FILES} files.`);
+  }
+  const filePaths = filePathValues.map(cdpAbsoluteFilePath);
+  const fileNames = filePaths.map((filePath) => filePath.split(/[/\\\\]/).pop());
+  cdpLog("Image batch attachment started", { fileCount: filePaths.length, fileNames });
+  if (onPhase) await onPhase("attaching");
   const { tab } = await findOrCreateServiceTab();
   if (!tab.id) throw cdpError("The ChatGPT service tab has no tab ID.");
   let attached = false;
@@ -1071,31 +1253,185 @@ async function cdpAttachImage(filePathValue) {
     await cdpCommand(tab.id, "DOM.enable");
     await cdpCommand(tab.id, "Runtime.enable");
     cdpLog("Required CDP domains enabled", { tabId: tab.id, domains: ["Page", "DOM", "Runtime"] });
-    await setServiceTabFavicon(tab.id);
     await cdpCommand(tab.id, "Page.setInterceptFileChooserDialog", { enabled: true });
     cdpLog("File-chooser interception enabled", { tabId: tab.id });
-    const chooser = await cdpOpenFileChooser(tab.id);
+    const chooser = await cdpOpenStableFileChooser(tab.id);
     if (!Number.isInteger(chooser?.backendNodeId)) throw cdpError("ChatGPT opened a file chooser without a file-input node.");
-    cdpLog("Supplying file to chooser", { tabId: tab.id, backendNodeId: chooser.backendNodeId, filePath });
-    await cdpCommand(tab.id, "DOM.setFileInputFiles", { files: [filePath], backendNodeId: chooser.backendNodeId });
-    cdpLog("DOM.setFileInputFiles completed", { tabId: tab.id, backendNodeId: chooser.backendNodeId });
-    const filename = JSON.stringify(filePath.split(/[/\\\\]/).pop());
-    await cdpWaitFor(tab.id, `document.body?.innerText?.includes(${filename})`, "the uploaded-image attachment preview");
-    cdpLog("Image attachment completed: Composer preview detected", { tabId: tab.id });
-    return { ok: true, tabId: tab.id };
+    cdpLog("Supplying files to chooser", { tabId: tab.id, backendNodeId: chooser.backendNodeId, fileCount: filePaths.length, fileNames });
+    await cdpCommand(tab.id, "DOM.setFileInputFiles", { files: filePaths, backendNodeId: chooser.backendNodeId });
+    cdpLog("DOM.setFileInputFiles completed", { tabId: tab.id, backendNodeId: chooser.backendNodeId, fileCount: filePaths.length });
+    await cdpWaitForAttachmentAccepted(tab.id, fileNames);
+    if (onPhase) await onPhase("composerAccepted");
+    if (onPhase) await onPhase("submitting");
+    const prompt = await cdpStoreImagesInLibrary(tab.id, filePaths.length);
+    cdpLog("Image batch completed", { tabId: tab.id, fileCount: filePaths.length, prompt });
+    return { ok: true, tabId: tab.id, fileCount: filePaths.length, prompt };
   } finally {
     if (attached) await cdpCommand(tab.id, "Page.setInterceptFileChooserDialog", { enabled: false }).then(() => cdpLog("File-chooser interception disabled", { tabId: tab.id })).catch((error) => cdpErrorLog("Could not disable file-chooser interception", error));
     if (attached) await cdpDetach(tab.id);
   }
 }
+function libraryStoreNow() {
+  return (/* @__PURE__ */ new Date()).toISOString();
+}
+function libraryStoreQueuePosition(taskId) {
+  const index = libraryStoreQueue.indexOf(taskId);
+  return index < 0 ? null : index + 1;
+}
+function libraryStoreTaskDocument(task) {
+  return {
+    taskId: task.taskId,
+    status: task.status,
+    phase: task.phase,
+    files: task.files.map(({ workspacePath }) => ({ workspacePath })),
+    queuePosition: libraryStoreQueuePosition(task.taskId),
+    createdAt: task.createdAt,
+    updatedAt: task.updatedAt,
+    submittedAt: task.submittedAt,
+    libraryAvailability: task.libraryAvailability,
+    message: task.message,
+    error: task.error
+  };
+}
+async function persistLibraryStoreTasks() {
+  await chrome.storage.local.set({
+    [LIBRARY_STORE_TASK_STORAGE_KEY]: [...libraryStoreTasks.values()],
+    [LIBRARY_STORE_QUEUE_STORAGE_KEY]: libraryStoreQueue
+  });
+}
+async function ensureLibraryStoreLoaded() {
+  if (libraryStoreLoaded) return;
+  if (libraryStoreLoading) return libraryStoreLoading;
+  libraryStoreLoading = (async () => {
+    const stored = await chrome.storage.local.get({ [LIBRARY_STORE_TASK_STORAGE_KEY]: [], [LIBRARY_STORE_QUEUE_STORAGE_KEY]: [] });
+    const tasks = Array.isArray(stored[LIBRARY_STORE_TASK_STORAGE_KEY]) ? stored[LIBRARY_STORE_TASK_STORAGE_KEY] : [];
+    libraryStoreTasks = new Map(tasks.filter((task) => task && typeof task.taskId === "string").map((task) => [task.taskId, task]));
+    libraryStoreQueue = Array.isArray(stored[LIBRARY_STORE_QUEUE_STORAGE_KEY]) ? stored[LIBRARY_STORE_QUEUE_STORAGE_KEY].filter((taskId) => typeof taskId === "string" && libraryStoreTasks.get(taskId)?.status === "queued") : [];
+    for (const task of libraryStoreTasks.values()) {
+      if (task.status === "working") {
+        task.status = "failed";
+        task.phase = "failed";
+        task.updatedAt = libraryStoreNow();
+        task.error = "The Extension restarted before this Library task finished its local submission.";
+        task.message = task.error;
+      }
+    }
+    libraryStoreLoaded = true;
+    await persistLibraryStoreTasks();
+  })().finally(() => {
+    libraryStoreLoading = null;
+  });
+  return libraryStoreLoading;
+}
+async function updateLibraryStoreTask(task, phase, message, { status = "working", error = null, submittedAt = task.submittedAt } = {}) {
+  task.status = status;
+  task.phase = phase;
+  task.message = message;
+  task.error = error;
+  task.submittedAt = submittedAt;
+  task.updatedAt = libraryStoreNow();
+  await persistLibraryStoreTasks();
+}
+function normalizeLibraryStoreFiles(value) {
+  if (!Array.isArray(value) || value.length < 1 || value.length > CDP_IMAGE_BATCH_MAX_FILES) {
+    throw localAgentError("LIBRARY_STORE_INVALID", `files must contain between 1 and ${CDP_IMAGE_BATCH_MAX_FILES} items.`);
+  }
+  const paths = value.map((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry) || Object.keys(entry).length !== 1 || typeof entry.workspacePath !== "string") {
+      throw localAgentError("LIBRARY_STORE_INVALID", "Each files item must contain only workspacePath.");
+    }
+    return normalizeWorkspacePath(entry.workspacePath, "files.workspacePath");
+  });
+  if (new Set(paths).size !== paths.length) throw localAgentError("LIBRARY_STORE_INVALID", "files must not repeat the same workspacePath.");
+  return paths.map((workspacePath) => ({ workspacePath }));
+}
+async function resolveLibraryStoreFiles(files) {
+  const document = await agentJsonRequest("/internal/library-store-files", { method: "POST", body: { files } });
+  if (!document || typeof document !== "object" || !Array.isArray(document.files) || document.files.length !== files.length) {
+    throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid Library file resolution.");
+  }
+  return document.files.map((entry, index) => {
+    if (!entry || typeof entry !== "object" || entry.workspacePath !== files[index].workspacePath || typeof entry.localPath !== "string") {
+      throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid Library file resolution.");
+    }
+    return entry.localPath;
+  });
+}
+async function drainLibraryStoreQueue() {
+  if (libraryStoreDraining) return;
+  libraryStoreDraining = true;
+  try {
+    while (libraryStoreQueue.length) {
+      const taskId = libraryStoreQueue.shift();
+      const task = libraryStoreTasks.get(taskId);
+      if (!task || task.status !== "queued") continue;
+      await updateLibraryStoreTask(task, "resolvingFiles", "Resolving the workspace image batch.");
+      try {
+        const localPaths = await resolveLibraryStoreFiles(task.files);
+        await cdpAttachImagesNow(localPaths, { onPhase: async (phase) => {
+          const messages = { attaching: "Attaching the image batch to the background ChatGPT Composer.", composerAccepted: "The ChatGPT Composer accepted the image batch.", submitting: "Submitting the Library storage request to ChatGPT." };
+          await updateLibraryStoreTask(task, phase, messages[phase] || "Processing the Library storage request.");
+        } });
+        task.libraryAvailability = "not_verified";
+        await updateLibraryStoreTask(task, "submitted", "ResearchTube submitted the Library request to ChatGPT. Library completion cannot be verified.", {
+          status: "completed",
+          submittedAt: libraryStoreNow()
+        });
+      } catch (error) {
+        await updateLibraryStoreTask(task, "failed", "ResearchTube could not submit this Library request.", { status: "failed", error: safeErrorMessage(error) });
+      }
+    }
+  } finally {
+    libraryStoreDraining = false;
+  }
+}
+async function libraryStoreStart(filesValue) {
+  await ensureLibraryStoreLoaded();
+  const files = normalizeLibraryStoreFiles(filesValue);
+  const createdAt = libraryStoreNow();
+  const task = {
+    taskId: `library_${crypto.randomUUID()}`,
+    status: "queued",
+    phase: "queued",
+    files,
+    createdAt,
+    updatedAt: createdAt,
+    submittedAt: null,
+    libraryAvailability: "not_requested",
+    message: "Queued for the dedicated ChatGPT Library service tab.",
+    error: null
+  };
+  libraryStoreTasks.set(task.taskId, task);
+  libraryStoreQueue.push(task.taskId);
+  await persistLibraryStoreTasks();
+  void drainLibraryStoreQueue();
+  return { task: libraryStoreTaskDocument(task) };
+}
+async function libraryStoreStatus(taskId) {
+  await ensureLibraryStoreLoaded();
+  const task = libraryStoreTasks.get(taskId);
+  if (!task) throw localAgentError("LIBRARY_STORE_TASK_NOT_FOUND", "The Library storage task was not found.");
+  return libraryStoreTaskDocument(task);
+}
+async function libraryStoreCancel(taskId) {
+  await ensureLibraryStoreLoaded();
+  const task = libraryStoreTasks.get(taskId);
+  if (!task) throw localAgentError("LIBRARY_STORE_TASK_NOT_FOUND", "The Library storage task was not found.");
+  if (task.status !== "queued") return { task: libraryStoreTaskDocument(task), cancelled: false };
+  libraryStoreQueue = libraryStoreQueue.filter((queuedTaskId) => queuedTaskId !== taskId);
+  await updateLibraryStoreTask(task, "cancelled", "Cancelled before ChatGPT attachment began.", { status: "cancelled" });
+  return { task: libraryStoreTaskDocument(task), cancelled: true };
+}
 chrome.runtime.onInstalled.addListener(({ reason }) => {
   void bootstrapTunnel();
+  void ensureLibraryStoreLoaded().then(drainLibraryStoreQueue);
   if (reason === "install") {
     void chrome.tabs.create({ url: chrome.runtime.getURL("onboarding.html"), active: true });
   }
 });
 chrome.runtime.onStartup.addListener(() => {
   void bootstrapTunnel();
+  void ensureLibraryStoreLoaded().then(drainLibraryStoreQueue);
 });
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === "tunnel-poll") void startPolling();
@@ -1122,10 +1458,6 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
   if (message?.type === "status") {
     getPublicConnectionState().then(sendResponse);
-    return true;
-  }
-  if (message?.type === "cdp-attach-image") {
-    cdpAttachImage(message.filePath).then(sendResponse).catch((error) => sendResponse({ ok: false, error: safeErrorMessage(error) }));
     return true;
   }
   if (message?.type === "save-connection") {
@@ -1353,6 +1685,31 @@ async function agentJsonRequest(path, { method = "GET", body = null, port = null
     throw localAgentError("AGENT_UNAVAILABLE", `ResearchTube Local Agent is not available on port ${resolvedPort}.`);
   } finally {
     clearTimeout(timeout);
+  }
+}
+function mcpLogStatus(value, failed = false) {
+  const task = value && typeof value === "object" && value.task && typeof value.task === "object" ? value.task : null;
+  const candidate = task?.phase ?? value?.phase ?? task?.status ?? value?.status;
+  if (typeof candidate === "string" && /^[a-z0-9_-]{1,40}$/.test(candidate)) return candidate;
+  return failed ? "error" : "completed";
+}
+async function reportMcpToolToAgent(tool, value, failed = false) {
+  try {
+    const config = await getConfig();
+    const port = normalizeAgentPort(config.agentPort);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 1500);
+    try {
+      await fetch(`http://127.0.0.1:${port}/mcp/log/${tool}`, {
+        method: "POST",
+        headers: { Accept: "application/json", "Content-Type": "application/json" },
+        body: JSON.stringify({ status: mcpLogStatus(value, failed) }),
+        signal: controller.signal
+      });
+    } finally {
+      clearTimeout(timeout);
+    }
+  } catch (_error) {
   }
 }
 async function extensionChromeWindowCounts() {
@@ -2190,6 +2547,20 @@ async function handleMcpRequest(request) {
   if (request?.method === "tools/call" && request.params?.name === "researchtube_check_debug_banner") {
     return executeToolCall(request.id, "researchtube_check_debug_banner", {}, getDebugBannerStatus);
   }
+  if (request?.method === "tools/call" && request.params?.name === "library_store_start") {
+    const files = request.params.arguments?.files;
+    return executeToolCall(request.id, "library_store_start", { files }, () => libraryStoreStart(files));
+  }
+  if (request?.method === "tools/call" && request.params?.name === "library_store_status") {
+    const taskId = String(request.params.arguments?.taskId ?? "").trim();
+    if (!taskId) return { jsonrpc: "2.0", id: request.id, error: { code: -32602, message: "taskId is required" } };
+    return executeToolCall(request.id, "library_store_status", { taskId }, () => libraryStoreStatus(taskId));
+  }
+  if (request?.method === "tools/call" && request.params?.name === "library_store_cancel") {
+    const taskId = String(request.params.arguments?.taskId ?? "").trim();
+    if (!taskId) return { jsonrpc: "2.0", id: request.id, error: { code: -32602, message: "taskId is required" } };
+    return executeToolCall(request.id, "library_store_cancel", { taskId }, () => libraryStoreCancel(taskId));
+  }
   if (request?.method === "tools/call" && request.params?.name === "workspace_list") {
     const args = request.params.arguments ?? {};
     const path = args.path === void 0 ? "" : args.path;
@@ -2362,10 +2733,12 @@ async function executeCaptureFrameWidgetActionToolCall(id, tool, path, action) {
 }
 async function executeToolCall(id, tool, input, work, operation = null) {
   const startedAt = Date.now();
+  const reportsLongOperationStatus = tool === "library_store_status";
   void recordCommandDiagnostic("started", { tool, input: summarizeCommandInput(tool, input) });
   await setActionBadge("working");
   try {
     const value = await work();
+    if (reportsLongOperationStatus) await reportMcpToolToAgent(tool, value);
     await refreshActionBadge();
     void recordCommandDiagnostic("succeeded", {
       tool,
@@ -2374,6 +2747,7 @@ async function executeToolCall(id, tool, input, work, operation = null) {
     });
     return jsonToolResult(id, value);
   } catch (error) {
+    if (reportsLongOperationStatus) await reportMcpToolToAgent(tool, null, true);
     await refreshActionBadge();
     const contextualError = operation && !error?.code ? new Error(`${operation}: ${String(error?.message || error)}`, { cause: error }) : error;
     void recordCommandDiagnostic("failed", {

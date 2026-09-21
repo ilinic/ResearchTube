@@ -26,8 +26,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote, unquote, urlparse
 
-AGENT_VERSION = "0.18.0"
-INTERFACE_VERSION = 17
+AGENT_VERSION = "0.20.1"
+INTERFACE_VERSION = 19
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
 TASK_POLL_INTERVAL_MS = 1_000
@@ -1246,7 +1246,11 @@ async def capture_youtube_frame(options: dict[str, Any]) -> dict[str, Any]:
     output_template = f"partial [yt_%(id)s] [cap_{capture_token}].%(ext)s"
     command = [
         yt_dlp.executable, *yt_dlp_js_runtime_arguments(resolve_deno_runtime()), "--ignore-config", "--no-playlist", "--no-part",
-        "--windows-filenames", "--download-sections", f"*{section_start:.3f}-{section_end:.3f}", "--downloader", "ffmpeg",
+        # Do not use --windows-filenames here: yt-dlp also applies it to the
+        # %(title)s value printed below, which would discard Cyrillic before
+        # safe_capture_title can make the final Windows-safe filename. The
+        # temporary template is already ASCII-only.
+        "--download-sections", f"*{section_start:.3f}-{section_end:.3f}", "--downloader", "ffmpeg",
         "--ffmpeg-location", str(Path(ffmpeg.executable).parent), "--format", youtube["formatId"],
         "--paths", str(temporary_directory.physical_path), "--output", output_template,
         "--print", "before_dl:__RESEARCHTUBE_CAPTURE_TITLE__:%(title)s",
@@ -1343,6 +1347,34 @@ def workspace_image(payload: Any) -> dict[str, Any]:
         "imageSizeBytes": len(image_bytes),
         "inlineImageBase64": base64.b64encode(image_bytes).decode("ascii"),
     }
+
+
+def library_store_files(payload: Any) -> dict[str, Any]:
+    """Resolve a small image batch for the Extension's private CDP workflow.
+
+    This endpoint is deliberately not an MCP response.  The Extension needs
+    physical paths for DOM.setFileInputFiles, but the model receives only
+    logical workspace paths through library_store_* tools.
+    """
+    if not isinstance(payload, dict) or set(payload) != {"files"} or not isinstance(payload["files"], list):
+        raise AgentApiError("LIBRARY_STORE_INVALID", "library file resolution requires files.")
+    requested = payload["files"]
+    if not 1 <= len(requested) <= 5:
+        raise AgentApiError("LIBRARY_STORE_INVALID", "library file resolution accepts between 1 and 5 files.")
+    resolved_files: list[dict[str, str]] = []
+    seen_paths: set[str] = set()
+    resolver = WorkspacePathResolver()
+    for entry in requested:
+        if not isinstance(entry, dict) or set(entry) != {"workspacePath"} or not isinstance(entry["workspacePath"], str):
+            raise AgentApiError("LIBRARY_STORE_INVALID", "each library file requires workspacePath.")
+        item = resolver.resolve_existing(entry["workspacePath"], field_name="workspacePath", expected_type="file")
+        if item.logical_path in seen_paths:
+            raise AgentApiError("LIBRARY_STORE_INVALID", "library file paths must be unique within one batch.")
+        if item.physical_path.suffix.lower() not in IMAGE_MIME_TYPES:
+            raise AgentApiError("LIBRARY_STORE_INVALID", "library files must be PNG, JPEG, or WebP images.")
+        seen_paths.add(item.logical_path)
+        resolved_files.append({"workspacePath": item.logical_path, "localPath": str(item.physical_path)})
+    return {"files": resolved_files}
 
 
 def media_probe_sections(payload: dict[str, Any]) -> list[str]:
@@ -2091,15 +2123,30 @@ def parse_json_body(body: bytes) -> Any:
         raise AgentApiError("INVALID_JSON", "The request body must be valid UTF-8 JSON.") from error
 
 
-def task_response_log_suffix(path: str, body: dict[str, Any] | None) -> str:
-    """Add the available native download percentage to the HTTP console line."""
-    if not path.startswith("/tasks/") or not isinstance(body, dict) or "taskId" not in body:
+def response_log_suffix(path: str, body: dict[str, Any] | None) -> str:
+    """Add a compact, user-visible state to task and MCP log lines."""
+    if not isinstance(body, dict):
+        return ""
+    if path.startswith("/mcp/log/") and isinstance(body.get("status"), str):
+        return f" {body['status']}"
+    if not path.startswith("/tasks/") or "taskId" not in body:
         return ""
     progress = body.get("progressPercent")
     if isinstance(progress, (int, float)) and not isinstance(progress, bool) and 0 <= progress <= 100:
         percentage = f"{progress:.1f}".rstrip("0").rstrip(".")
-        return f" ({percentage}%)"
+        return f" {percentage}%"
     return ""
+
+
+def mcp_tool_log(tool: str, payload: Any) -> dict[str, Any]:
+    if not re.fullmatch(r"[a-z0-9_]{1,80}", tool):
+        raise AgentApiError("MCP_LOG_INVALID", "The MCP tool name is invalid.")
+    if not isinstance(payload, dict) or set(payload) != {"status"} or not isinstance(payload["status"], str):
+        raise AgentApiError("MCP_LOG_INVALID", "The MCP log request must contain only a status string.")
+    status = payload["status"].strip()
+    if not re.fullmatch(r"[a-z0-9_-]{1,40}", status):
+        raise AgentApiError("MCP_LOG_INVALID", "The MCP log status is invalid.")
+    return {"status": status}
 
 
 async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -2134,6 +2181,10 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             response_status, response_body = "200 OK", await capture_frame(parse_json_body(body))
         elif method == "POST" and path == "/media/workspace-image":
             response_status, response_body = "200 OK", workspace_image(parse_json_body(body))
+        elif method == "POST" and path == "/internal/library-store-files":
+            response_status, response_body = "200 OK", library_store_files(parse_json_body(body))
+        elif method == "POST" and path.startswith("/mcp/log/"):
+            response_status, response_body = "200 OK", mcp_tool_log(path.removeprefix("/mcp/log/"), parse_json_body(body))
         elif method == "POST" and path == "/youtube/download-formats":
             response_status, response_body = "200 OK", await youtube_download_formats(parse_json_body(body))
         elif method == "POST" and path == "/tasks/youtube-download":
@@ -2153,7 +2204,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             response_status, response_body = "404 Not Found", error_document(AgentApiError("NOT_FOUND", "Unknown local Agent endpoint."))
         writer.write(http_response(response_status, response_body))
         await writer.drain()
-        log(f"{method or 'INVALID'} {path or '/'} -> {response_status.split()[0]}{task_response_log_suffix(path, response_body)}")
+        log(f"{method or 'INVALID'} {path or '/'} -> {response_status.split()[0]}{response_log_suffix(path, response_body)}")
     except AgentApiError as error:
         status = "404 Not Found" if error.code == "TASK_NOT_FOUND" else "400 Bad Request"
         writer.write(http_response(status, error_document(error)))

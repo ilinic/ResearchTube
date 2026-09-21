@@ -28,15 +28,21 @@ class YtDlpFormatNormalizationTests(unittest.TestCase):
         self.assertEqual([item["formatId"] for item in formats["audio"]], ["140"])
         self.assertEqual(formats["video"][0]["bitrateBps"], 2_000_000)
 
-    def test_task_poll_console_suffix_includes_native_progress(self) -> None:
+    def test_response_log_suffix_includes_native_progress_without_brackets(self) -> None:
         self.assertEqual(
-            agent.task_response_log_suffix("/tasks/tsk_example", {"taskId": "tsk_example", "phase": "downloadingVideo", "progressPercent": 37.4}),
-            " (37.4%)",
+            agent.response_log_suffix("/tasks/tsk_example", {"taskId": "tsk_example", "phase": "downloadingVideo", "progressPercent": 37.4}),
+            " 37.4%",
         )
         self.assertEqual(
-            agent.task_response_log_suffix("/tasks/tsk_example", {"taskId": "tsk_example", "phase": "merging", "progressPercent": None}),
+            agent.response_log_suffix("/tasks/tsk_example", {"taskId": "tsk_example", "phase": "merging", "progressPercent": None}),
             "",
         )
+
+    def test_mcp_tool_log_uses_compact_status_without_request_data(self) -> None:
+        self.assertEqual(agent.mcp_tool_log("library_store_status", {"status": "submitted"}), {"status": "submitted"})
+        self.assertEqual(agent.response_log_suffix("/mcp/log/library_store_status", {"status": "submitted"}), " submitted")
+        with self.assertRaises(agent.AgentApiError):
+            agent.mcp_tool_log("library_store_status", {"status": "submitted", "taskId": "private"})
 
 
 @unittest.skipIf(os.name == "nt", "The fake yt-dlp fixture is a POSIX script.")
