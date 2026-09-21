@@ -16,9 +16,9 @@ var DEFAULTS = {
   youtubeSearchCooldownUntil: 0,
   youtubeSearchCooldownLevel: 0
 };
-var EXTENSION_VERSION = "1.15.3";
-var REQUIRED_AGENT_INTERFACE_VERSION = 13;
-var CAPTURE_FRAME_WIDGET_URI = "ui://researchtube/capture-frame-v21.html";
+var EXTENSION_VERSION = "1.17.1";
+var REQUIRED_AGENT_INTERFACE_VERSION = 15;
+var CAPTURE_FRAME_WIDGET_URI = "ui://researchtube/capture-frame-v24.html";
 var CAPTURE_FRAME_OFFSCREEN_DOCUMENT = "capture-frame-offscreen.html";
 var AGENT_HEALTH_TIMEOUT_MS = 5e3;
 var AGENT_TASK_TIMEOUT_MS = 1e4;
@@ -271,8 +271,8 @@ var agentStatusSchema = {
       anyOf: [{
         type: "object",
         additionalProperties: false,
-        properties: { ytDlp: agentComponentSchema, deno: agentComponentSchema, ffmpeg: agentComponentSchema, ffprobe: agentComponentSchema },
-        required: ["ytDlp", "deno", "ffmpeg", "ffprobe"]
+        properties: { ytDlp: agentComponentSchema, deno: agentComponentSchema, ffmpeg: agentComponentSchema, ffprobe: agentComponentSchema, cloudflared: agentComponentSchema },
+        required: ["ytDlp", "deno", "ffmpeg", "ffprobe", "cloudflared"]
       }, { type: "null" }]
     }
   },
@@ -465,7 +465,6 @@ var mediaProbeSchema = {
   required: ["path", "fileSizeBytes", "ffprobeFileSizeBytes", "sections", "probe"]
 };
 var captureFrameFormatSchema = { type: "string", enum: ["png", "jpeg", "webp"] };
-var captureFrameDeliveryModeSchema = { const: "workspace", description: "Every captured image is saved in the ResearchTube workspace." };
 var captureFrameCropSchema = {
   type: "object",
   additionalProperties: false,
@@ -513,14 +512,6 @@ var captureFrameYoutubeInputSchema = {
   },
   required: ["videoId", "formatId"]
 };
-var captureFrameDeliveryInputSchema = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    workspacePath: { type: "string", minLength: 1, description: "Optional logical workspace-relative output image path. If omitted, the Agent automatically creates the lowercase captures/ directory when needed and writes a unique image named from the source video title, its [yt_<videoId>] when available, [t_<timestamp>], and [cap_<captureId>]. capture_frame never overwrites an existing file." },
-    saveToLibrary: { type: "boolean", default: false, description: "When true, request that the ChatGPT widget convert the displayed capture to PNG, upload it to the user's ChatGPT Library, and persist its file ID for later model turns. The local workspace image is always retained. If the user's ChatGPT host does not provide its File Library, the widget reports that specific failure instead of claiming success." }
-  }
-};
 var captureFrameSchema = {
   type: "object",
   additionalProperties: false,
@@ -544,11 +535,10 @@ var captureFrameSchema = {
         width: { type: "integer", minimum: 1 },
         height: { type: "integer", minimum: 1 },
         imageSizeBytes: { type: "integer", minimum: 0 },
-        delivery: captureFrameDeliveryModeSchema,
         workspacePath: { type: "string", minLength: 1, description: "Logical workspace-relative path of the captured image. capture_frame always creates this file." },
-        saveToLibrary: { type: "boolean", description: "Whether the widget must upload a PNG copy of this capture to ChatGPT Library after displaying it. A successful tool call creates the local workspace image; the subsequent Library upload is performed by the ChatGPT widget." }
+        publicUrl: { type: "string", pattern: "^https://", description: "Public HTTPS URL served only by the Agent's image-only Cloudflare Quick Tunnel. It ends in the capture ID rather than the local filename; open it when visual inspection is useful." }
       },
-      required: ["format", "mimeType", "width", "height", "imageSizeBytes", "delivery", "workspacePath", "saveToLibrary"]
+      required: ["format", "mimeType", "width", "height", "imageSizeBytes", "workspacePath", "publicUrl"]
     }
   },
   required: ["sourcePath", "requestedTimestampSeconds", "actualTimestampSeconds", "selectedVideoStreamIndex", "seekMode", "displayRotationApplied", "image"]
@@ -653,7 +643,7 @@ function toolDefinitions() {
           crop: captureFrameCropSchema,
           resize: captureFrameResizeSchema,
           image: captureFrameImageInputSchema,
-          delivery: captureFrameDeliveryInputSchema
+          outputPath: { type: "string", minLength: 1, description: "Optional logical workspace-relative output image path. If omitted, capture_frame writes a uniquely named image to captures/. Use this only to choose a different workspace folder or filename; capture_frame never overwrites an existing file." }
         },
         required: ["timestampSeconds"],
         oneOf: [{ required: ["path"] }, { required: ["youtube"] }]
@@ -978,7 +968,8 @@ function normalizeAgentComponents(components) {
     ytDlp: normalizeAgentComponent(components.ytDlp ?? components["yt-dlp"]),
     deno: normalizeAgentComponent(components.deno),
     ffmpeg: normalizeAgentComponent(components.ffmpeg),
-    ffprobe: normalizeAgentComponent(components.ffprobe)
+    ffprobe: normalizeAgentComponent(components.ffprobe),
+    cloudflared: normalizeAgentComponent(components.cloudflared)
   };
 }
 async function getAgentStatus(port = null) {
@@ -1389,7 +1380,7 @@ function captureFrameObject(value, field, allowed) {
   return value;
 }
 function normalizeCaptureFrameInput(argumentsValue = {}) {
-  const args = captureFrameObject(argumentsValue, "capture_frame", /* @__PURE__ */ new Set(["path", "youtube", "timestampSeconds", "videoStreamIndex", "seekMode", "applyDisplayRotation", "crop", "resize", "image", "delivery"]));
+  const args = captureFrameObject(argumentsValue, "capture_frame", /* @__PURE__ */ new Set(["path", "youtube", "timestampSeconds", "videoStreamIndex", "seekMode", "applyDisplayRotation", "crop", "resize", "image", "outputPath"]));
   if (args.path === void 0 === (args.youtube === void 0)) throw localAgentError("CAPTURE_FRAME_INVALID", "capture_frame requires exactly one source: path or youtube.");
   const path = args.path === void 0 ? void 0 : normalizeWorkspacePath(args.path, "path");
   let youtube;
@@ -1439,10 +1430,7 @@ function normalizeCaptureFrameInput(argumentsValue = {}) {
   if (compressionLevel !== void 0 && compressionLevel > 9) throw localAgentError("CAPTURE_FRAME_INVALID", "image.compressionLevel must be from 0 to 9.");
   if (imageFormat === "png" && quality !== void 0) throw localAgentError("CAPTURE_FRAME_INVALID", "image.quality is available only for jpeg and webp output.");
   if (imageFormat !== "png" && compressionLevel !== void 0) throw localAgentError("CAPTURE_FRAME_INVALID", "image.compressionLevel is available only for png output.");
-  const deliveryValue = captureFrameObject(args.delivery, "delivery", /* @__PURE__ */ new Set(["workspacePath", "saveToLibrary"]));
-  const workspacePath = deliveryValue.workspacePath === void 0 ? void 0 : normalizeWorkspacePath(deliveryValue.workspacePath, "delivery.workspacePath");
-  const saveToLibrary = deliveryValue.saveToLibrary === void 0 ? false : deliveryValue.saveToLibrary;
-  if (typeof saveToLibrary !== "boolean") throw localAgentError("CAPTURE_FRAME_INVALID", "delivery.saveToLibrary must be a boolean.");
+  const outputPath = args.outputPath === void 0 ? void 0 : normalizeWorkspacePath(args.outputPath, "outputPath");
   if (youtube && videoStreamIndex !== void 0) throw localAgentError("CAPTURE_FRAME_INVALID", "videoStreamIndex is available only with a workspace path source.");
   return {
     ...path === void 0 ? {} : { path },
@@ -1454,7 +1442,7 @@ function normalizeCaptureFrameInput(argumentsValue = {}) {
     ...crop === void 0 ? {} : { crop },
     ...resize === void 0 ? {} : { resize },
     image: { format: imageFormat, ...quality === void 0 ? {} : { quality }, ...compressionLevel === void 0 ? {} : { compressionLevel } },
-    delivery: { ...workspacePath === void 0 ? {} : { workspacePath }, saveToLibrary }
+    ...outputPath === void 0 ? {} : { outputPath }
   };
 }
 function normalizeCaptureFrameResult(document, input) {
@@ -1467,16 +1455,13 @@ function normalizeCaptureFrameResult(document, input) {
   const actualTimestampSeconds = document.actualTimestampSeconds === null ? null : captureFrameFiniteNumber(document.actualTimestampSeconds, "actualTimestampSeconds", { minimum: 0 });
   const selectedVideoStreamIndex = captureFrameInteger(document.selectedVideoStreamIndex, "selectedVideoStreamIndex");
   const image = document.image;
-  if (!image || typeof image !== "object" || Array.isArray(image) || !(/* @__PURE__ */ new Set(["png", "jpeg", "webp"])).has(image.format) || !(/* @__PURE__ */ new Set(["image/png", "image/jpeg", "image/webp"])).has(image.mimeType) || image.delivery !== "workspace" || !Number.isInteger(image.width) || image.width < 1 || !Number.isInteger(image.height) || image.height < 1 || !Number.isInteger(image.imageSizeBytes) || image.imageSizeBytes < 0) {
+  if (!image || typeof image !== "object" || Array.isArray(image) || !(/* @__PURE__ */ new Set(["png", "jpeg", "webp"])).has(image.format) || !(/* @__PURE__ */ new Set(["image/png", "image/jpeg", "image/webp"])).has(image.mimeType) || !Number.isInteger(image.width) || image.width < 1 || !Number.isInteger(image.height) || image.height < 1 || !Number.isInteger(image.imageSizeBytes) || image.imageSizeBytes < 0) {
     throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid captured-image metadata.");
   }
   const expectedMimeType = { png: "image/png", jpeg: "image/jpeg", webp: "image/webp" }[image.format];
   if (image.mimeType !== expectedMimeType) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an inconsistent captured-image MIME type.");
-  if (typeof image.workspacePath !== "string" || Object.hasOwn(document, "inlineImageBase64") || typeof image.saveToLibrary !== "boolean") {
+  if (typeof image.workspacePath !== "string" || Object.hasOwn(document, "inlineImageBase64") || typeof image.publicUrl !== "string" || !/^https:\/\//.test(image.publicUrl)) {
     throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid workspace image result.");
-  }
-  if (image.saveToLibrary !== input.delivery.saveToLibrary) {
-    throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an unexpected library-save instruction.");
   }
   const remote = input.youtube === void 0 ? {} : {
     sourceVideoId: document.sourceVideoId,
@@ -1502,9 +1487,8 @@ function normalizeCaptureFrameResult(document, input) {
         width: image.width,
         height: image.height,
         imageSizeBytes: image.imageSizeBytes,
-        delivery: image.delivery,
         workspacePath: normalizeWorkspacePath(image.workspacePath, "image.workspacePath"),
-        saveToLibrary: image.saveToLibrary
+        publicUrl: image.publicUrl
       }
     }
   };
@@ -1749,7 +1733,7 @@ function safeErrorMessage(error) {
   return String(error?.message || error || "Unknown error").replace(/sk-[A-Za-z0-9_-]+/g, "[redacted]");
 }
 async function readCaptureFrameWidgetHtml() {
-  const response = await fetch(chrome.runtime.getURL("ui/capture-frame-widget-v21.html"));
+  const response = await fetch(chrome.runtime.getURL("ui/capture-frame-widget-v24.html"));
   if (!response.ok) throw new Error("The bundled capture-frame widget could not be read.");
   return response.text();
 }
@@ -2021,7 +2005,7 @@ async function executeToolCall(id, tool, input, work, operation = null) {
   }
 }
 function summarizeCommandInput(tool, input) {
-  if (tool === "capture_frame") return { path: typeof input.path === "string" ? input.path : null, youtube: input.youtube && typeof input.youtube === "object" ? { videoId: input.youtube.videoId ?? null, formatId: input.youtube.formatId ?? null } : null, timestampSeconds: input.timestampSeconds ?? null, videoStreamIndex: input.videoStreamIndex ?? null, seekMode: input.seekMode ?? null, delivery: input.delivery?.mode ?? null };
+  if (tool === "capture_frame") return { path: typeof input.path === "string" ? input.path : null, youtube: input.youtube && typeof input.youtube === "object" ? { videoId: input.youtube.videoId ?? null, formatId: input.youtube.formatId ?? null } : null, timestampSeconds: input.timestampSeconds ?? null, videoStreamIndex: input.videoStreamIndex ?? null, seekMode: input.seekMode ?? null, outputPath: typeof input.outputPath === "string" ? input.outputPath : null };
   if (tool === "youtube_download") return { videoId: typeof input.videoId === "string" ? input.videoId : null, selection: input.selection ?? null, outputDir: typeof input.outputDir === "string" ? input.outputDir.slice(0, 300) : null };
   if (tool === "youtube_search") return { query: searchDiagnosticQuery(input.query), limit: input.limit };
   if (tool === "youtube_get_comment_replies") return { videoId: input.videoId, commentId: input.commentId, limit: input.limit };

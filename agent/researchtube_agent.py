@@ -11,8 +11,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import hashlib
 import json
 import math
+import mimetypes
 import os
 import platform
 import re
@@ -23,10 +25,10 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, unquote, urlparse
 
-AGENT_VERSION = "0.14.0"
-INTERFACE_VERSION = 13
+AGENT_VERSION = "0.16.2"
+INTERFACE_VERSION = 15
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
 TASK_POLL_INTERVAL_MS = 1_000
@@ -74,9 +76,17 @@ COMPONENTS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "deno": (executable_names("deno"), ("--version",)),
     "ffmpeg": (executable_names("ffmpeg"), ("-version",)),
     "ffprobe": (executable_names("ffprobe"), ("-version",)),
+    "cloudflared": (executable_names("cloudflared"), ("--version",)),
 }
-COMPONENT_LABELS = {"ytDlp": "yt-dlp", "deno": "Deno", "ffmpeg": "ffmpeg", "ffprobe": "ffprobe"}
-COMPONENT_TOOL_DIRECTORIES = {"ytDlp": "yt-dlp", "deno": "deno", "ffmpeg": "ffmpeg", "ffprobe": "ffmpeg"}
+COMPONENT_LABELS = {"ytDlp": "yt-dlp", "deno": "Deno", "ffmpeg": "ffmpeg", "ffprobe": "ffprobe", "cloudflared": "cloudflared"}
+COMPONENT_TOOL_DIRECTORIES = {"ytDlp": "yt-dlp", "deno": "deno", "ffmpeg": "ffmpeg", "ffprobe": "ffmpeg", "cloudflared": "cloudflared"}
+PUBLIC_TUNNEL_URL: str | None = None
+PUBLIC_TUNNEL_PROCESS: asyncio.subprocess.Process | None = None
+PUBLIC_TUNNEL_READY = asyncio.Event()
+PUBLIC_TUNNEL_WATCHERS: list[asyncio.Task[None]] = []
+PUBLIC_IMAGE_ROUTE_PREFIX = "/image/"
+PUBLIC_IMAGE_CAPTURE_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{8,64}")
+PUBLIC_ROBOTS_TEXT = b"""# ResearchTube captured-frame endpoint: public access is intentional.\n# These groups are repeated after any Cloudflare-managed directives so the\n# origin explicitly grants the OpenAI crawlers and user-directed fetcher access.\n\nUser-agent: OAI-SearchBot\nContent-Signal: search=yes,ai-input=yes,ai-train=no,use=full\nAllow: /\n\nUser-agent: ChatGPT-User\nContent-Signal: search=yes,ai-input=yes,ai-train=no,use=full\nAllow: /\n\nUser-agent: GPTBot\nContent-Signal: search=yes,ai-input=yes,ai-train=no,use=full\nAllow: /\n\nUser-agent: *\nContent-Signal: search=yes,ai-input=yes,ai-train=no,use=full\nAllow: /\n"""
 
 
 @dataclass(frozen=True)
@@ -823,27 +833,47 @@ def capture_default_workspace_path(source_path: str, timestamp_seconds: float, i
     title = title or "ResearchTube frame"
     video_part = f" [yt_{match.group(1)}]" if match else ""
     timestamp_part = f"{timestamp_seconds:.3f}".replace("-", "_")
-    capture_id = secrets.token_urlsafe(6)
+    capture_id = secrets.token_urlsafe(12)
     return f"captures/{title}{video_part} [t_{timestamp_part}] [cap_{capture_id}].{image_format}"
 
 
-def capture_delivery(value: Any, source_path: str, timestamp_seconds: float, image_format: str) -> dict[str, Any]:
-    item = capture_object(value, field_name="delivery", allowed={"workspacePath", "saveToLibrary"})
-    workspace_path = item.get("workspacePath")
-    if workspace_path is not None and (not isinstance(workspace_path, str) or not workspace_path):
-        raise AgentApiError("CAPTURE_FRAME_INVALID", "delivery.workspacePath must be a non-empty logical workspace path.")
-    save_to_library = item.get("saveToLibrary", False)
-    if not isinstance(save_to_library, bool):
-        raise AgentApiError("CAPTURE_FRAME_INVALID", "delivery.saveToLibrary must be a boolean.")
+def capture_output_path(value: Any, source_path: str, timestamp_seconds: float, image_format: str) -> dict[str, Any]:
+    if value is not None and (not isinstance(value, str) or not value):
+        raise AgentApiError("CAPTURE_FRAME_INVALID", "outputPath must be a non-empty logical workspace path.")
     return {
-        "workspacePath": workspace_path or capture_default_workspace_path(source_path, timestamp_seconds, image_format),
-        "workspacePathProvided": workspace_path is not None,
-        "saveToLibrary": save_to_library,
+        "path": value or capture_default_workspace_path(source_path, timestamp_seconds, image_format),
+        "provided": value is not None,
     }
 
 
+def capture_public_id(logical_path: str) -> str:
+    """Return a stable opaque ID without retaining a path-to-ID table.
+
+    Automatically named captures already contain a random [cap_<id>] marker.
+    A caller may supply a custom workspace filename, though, so fall back to a
+    deterministic digest of the logical path.  The image server derives this
+    value again while scanning only the requested directory.
+    """
+    match = re.search(r"\[cap_([A-Za-z0-9_-]{8,64})\]", logical_path)
+    if match:
+        return match.group(1)
+    return hashlib.sha256(logical_path.encode("utf-8")).hexdigest()[:32]
+
+
+def public_image_url(logical_path: str) -> str:
+    if PUBLIC_TUNNEL_URL is None:
+        raise AgentApiError("PUBLIC_IMAGE_URL_UNAVAILABLE", "The public image tunnel is not ready. Confirm that cloudflared is available and wait for the Agent startup message.")
+    parts, _ = WorkspacePathResolver.logical_parts(logical_path, field_name="workspace output", error_code="CAPTURE_FRAME_FAILED")
+    if len(parts) < 2:
+        directory_parts: tuple[str, ...] = ()
+    else:
+        directory_parts = parts[:-1]
+    route = "/".join(quote(part, safe="") for part in (*directory_parts, capture_public_id(logical_path)))
+    return f"{PUBLIC_TUNNEL_URL}{PUBLIC_IMAGE_ROUTE_PREFIX}{route}"
+
+
 def capture_frame_options(payload: Any) -> dict[str, Any]:
-    if not isinstance(payload, dict) or set(payload) - {"path", "youtube", "timestampSeconds", "videoStreamIndex", "seekMode", "applyDisplayRotation", "crop", "resize", "image", "delivery"}:
+    if not isinstance(payload, dict) or set(payload) - {"path", "youtube", "timestampSeconds", "videoStreamIndex", "seekMode", "applyDisplayRotation", "crop", "resize", "image", "outputPath"}:
         raise AgentApiError("CAPTURE_FRAME_INVALID", "capture_frame requires only documented fields.")
     path = payload.get("path")
     youtube_value = payload.get("youtube")
@@ -874,7 +904,7 @@ def capture_frame_options(payload: Any) -> dict[str, Any]:
     return {
         "path": path, "youtube": youtube, "timestampSeconds": timestamp, "videoStreamIndex": stream_index, "seekMode": seek_mode,
         "applyDisplayRotation": rotation, "crop": capture_crop(payload.get("crop")), "resize": capture_resize(payload.get("resize")),
-        "image": image, "delivery": capture_delivery(payload.get("delivery"), path if isinstance(path, str) else "", timestamp, image["format"]),
+        "image": image, "outputPath": capture_output_path(payload.get("outputPath"), path if isinstance(path, str) else "", timestamp, image["format"]),
     }
 
 
@@ -1008,18 +1038,18 @@ async def capture_frame_from_workspace_options(options: dict[str, Any]) -> dict[
             raise AgentApiError("VIDEO_STREAM_NOT_FOUND", "videoStreamIndex does not identify a video stream in this file.")
     selected_index = selected_stream["index"]
 
-    delivery = options["delivery"]
+    output = options["outputPath"]
     destination_path: Path | None = None
     try:
         # A capture is always a normal workspace file.  The widget may display
         # it immediately, but it never owns the only copy of the image.
         resolver = WorkspacePathResolver()
-        destination = resolver.resolve_destination(delivery["workspacePath"], field_name="delivery.workspacePath", error_code="WORKSPACE_PATH_INVALID")
+        destination = resolver.resolve_destination(output["path"], field_name="outputPath", error_code="WORKSPACE_PATH_INVALID")
         destination.physical_path.parent.mkdir(parents=True, exist_ok=True)
         # Re-run the resolver after creating parents so redirects cannot be introduced by the parent creation.
-        destination = resolver.resolve_destination(destination.logical_path, field_name="delivery.workspacePath", error_code="WORKSPACE_PATH_INVALID")
+        destination = resolver.resolve_destination(destination.logical_path, field_name="outputPath", error_code="WORKSPACE_PATH_INVALID")
         if destination.physical_path.exists() or destination.physical_path.is_symlink():
-            raise AgentApiError("CAPTURE_FRAME_DESTINATION_EXISTS", "delivery.workspacePath already exists; capture_frame never overwrites a workspace file.")
+            raise AgentApiError("CAPTURE_FRAME_DESTINATION_EXISTS", "outputPath already exists; capture_frame never overwrites a workspace file.")
         destination_path = destination.physical_path
         logical_output_path = destination.logical_path
 
@@ -1066,8 +1096,8 @@ async def capture_frame_from_workspace_options(options: dict[str, Any]) -> dict[
             "image": {
                 "format": options["image"]["format"], "mimeType": mime_type,
                 "width": width, "height": height, "imageSizeBytes": image_size,
-                "delivery": "workspace", "workspacePath": logical_output_path,
-                "saveToLibrary": delivery["saveToLibrary"],
+                "workspacePath": logical_output_path,
+                "publicUrl": public_image_url(logical_output_path),
             },
         }
         log(f"capture_frame path={item.logical_path} timestamp={options['timestampSeconds']:.3f} -> {logical_output_path}")
@@ -1094,7 +1124,7 @@ def safe_capture_title(value: str) -> str:
 
 def youtube_capture_default_workspace_path(title: str, video_id: str, timestamp_seconds: float, image_format: str) -> str:
     timestamp_part = f"{timestamp_seconds:.3f}".replace("-", "_")
-    capture_id = secrets.token_urlsafe(6)
+    capture_id = secrets.token_urlsafe(12)
     return f"captures/{safe_capture_title(title)} [yt_{video_id}] [t_{timestamp_part}] [cap_{capture_id}].{image_format}"
 
 
@@ -1185,9 +1215,9 @@ async def capture_youtube_frame(options: dict[str, Any]) -> dict[str, Any]:
         local_options["youtube"] = None
         local_options["timestampSeconds"] = timestamp - section_start
         local_options["videoStreamIndex"] = None
-        if not options["delivery"]["workspacePathProvided"]:
-            local_options["delivery"] = dict(options["delivery"])
-            local_options["delivery"]["workspacePath"] = youtube_capture_default_workspace_path(title or "YouTube frame", youtube["videoId"], timestamp, options["image"]["format"])
+        if not options["outputPath"]["provided"]:
+            local_options["outputPath"] = dict(options["outputPath"])
+            local_options["outputPath"]["path"] = youtube_capture_default_workspace_path(title or "YouTube frame", youtube["videoId"], timestamp, options["image"]["format"])
         result = await capture_frame_from_workspace_options(local_options)
         result["sourcePath"] = f"youtube:{youtube['videoId']}"
         result["sourceVideoId"] = youtube["videoId"]
@@ -1736,6 +1766,14 @@ def http_response(status: str, body: dict[str, Any] | None = None) -> bytes:
     return "\r\n".join(headers).encode("ascii") + encoded
 
 
+def image_response(status: str, image_bytes: bytes = b"", mime_type: str = "text/plain; charset=utf-8") -> bytes:
+    headers = [
+        f"HTTP/1.1 {status}", f"Content-Type: {mime_type}", f"Content-Length: {len(image_bytes)}",
+        "X-Content-Type-Options: nosniff", "Cache-Control: no-store", "Connection: close", "", "",
+    ]
+    return "\r\n".join(headers).encode("ascii") + image_bytes
+
+
 async def read_request(reader: asyncio.StreamReader) -> tuple[str, str, bytes]:
     request_line = await asyncio.wait_for(reader.readline(), timeout=5)
     parts = request_line.decode("latin-1").strip().split()
@@ -1759,6 +1797,130 @@ async def read_request(reader: asyncio.StreamReader) -> tuple[str, str, bytes]:
         raise AgentApiError("REQUEST_TOO_LARGE", "Request body is too large.")
     body = await asyncio.wait_for(reader.readexactly(content_length), timeout=5) if content_length else b""
     return parts[0].upper(), urlparse(parts[1]).path, body
+
+
+def public_image_file(path: str) -> tuple[Path, str]:
+    """Resolve a single captured image from the intentionally narrow public route."""
+    if not path.startswith(PUBLIC_IMAGE_ROUTE_PREFIX):
+        raise AgentApiError("PUBLIC_IMAGE_NOT_FOUND", "Unknown public image path.")
+    encoded_segments = path.removeprefix(PUBLIC_IMAGE_ROUTE_PREFIX).split("/")
+    if not encoded_segments or any(not segment for segment in encoded_segments):
+        raise AgentApiError("PUBLIC_IMAGE_NOT_FOUND", "Invalid public image path.")
+    try:
+        segments = tuple(unquote(segment, encoding="utf-8", errors="strict") for segment in encoded_segments)
+    except UnicodeDecodeError as error:
+        raise AgentApiError("PUBLIC_IMAGE_NOT_FOUND", "Invalid public image path.") from error
+    if any("/" in segment or "\\" in segment for segment in segments):
+        raise AgentApiError("PUBLIC_IMAGE_NOT_FOUND", "Invalid public image path.")
+    capture_id = segments[-1]
+    if not PUBLIC_IMAGE_CAPTURE_ID_PATTERN.fullmatch(capture_id):
+        raise AgentApiError("PUBLIC_IMAGE_NOT_FOUND", "Invalid capture ID.")
+    directory_path = "/".join(segments[:-1])
+    resolver = WorkspacePathResolver()
+    try:
+        directory = resolver.resolve_existing(directory_path, field_name="public image directory", expected_type="directory", allow_root=True)
+    except AgentApiError as error:
+        raise AgentApiError("PUBLIC_IMAGE_NOT_FOUND", "Captured image was not found.") from error
+    candidates: list[Path] = []
+    try:
+        for candidate in directory.physical_path.iterdir():
+            if candidate.is_symlink() or not candidate.is_file() or candidate.suffix.lower() not in IMAGE_MIME_TYPES:
+                continue
+            logical_path = resolver.logical_existing_file(candidate, error_code="PUBLIC_IMAGE_NOT_FOUND")
+            if capture_public_id(logical_path) == capture_id:
+                candidates.append(candidate.resolve(strict=True))
+    except OSError as error:
+        raise AgentApiError("PUBLIC_IMAGE_NOT_FOUND", "Captured image is unavailable.") from error
+    if len(candidates) != 1:
+        raise AgentApiError("PUBLIC_IMAGE_NOT_FOUND", "Captured image was not found.")
+    image_file = candidates[0]
+    mime_type = IMAGE_MIME_TYPES.get(image_file.suffix.lower())
+    if mime_type is None:
+        raise AgentApiError("PUBLIC_IMAGE_NOT_FOUND", "Captured image was not found.")
+    return image_file, mime_type
+
+
+async def handle_public_image_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+    try:
+        method, path, body = await read_request(reader)
+        if method == "GET" and path == "/robots.txt" and not body:
+            writer.write(image_response("200 OK", PUBLIC_ROBOTS_TEXT, "text/plain; charset=utf-8"))
+        elif method != "GET" or body:
+            writer.write(image_response("404 Not Found"))
+        else:
+            image_file, mime_type = public_image_file(path)
+            writer.write(image_response("200 OK", image_file.read_bytes(), mime_type))
+        await writer.drain()
+    except (AgentApiError, OSError, UnicodeDecodeError, asyncio.TimeoutError, asyncio.IncompleteReadError):
+        try:
+            writer.write(image_response("404 Not Found"))
+            await writer.drain()
+        except ConnectionError:
+            pass
+    finally:
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except ConnectionError:
+            pass
+
+
+async def watch_cloudflared_stream(stream: asyncio.StreamReader | None) -> None:
+    global PUBLIC_TUNNEL_URL
+    if stream is None:
+        return
+    try:
+        while line := await stream.readline():
+            message = line.decode("utf-8", errors="replace").strip()
+            match = re.search(r"https://[A-Za-z0-9-]+\.trycloudflare\.com", message)
+            if match and PUBLIC_TUNNEL_URL is None:
+                PUBLIC_TUNNEL_URL = match.group(0)
+                PUBLIC_TUNNEL_READY.set()
+                log(f"Public image tunnel: {PUBLIC_TUNNEL_URL}")
+    except (OSError, asyncio.CancelledError):
+        return
+
+
+async def start_public_image_tunnel(port: int) -> None:
+    global PUBLIC_TUNNEL_PROCESS, PUBLIC_TUNNEL_WATCHERS
+    cloudflared = find_component("cloudflared", COMPONENTS["cloudflared"][0])
+    if cloudflared.error:
+        log("cloudflared discovery is ambiguous; public image URLs are unavailable.", error=True)
+        return
+    if not cloudflared.executable:
+        log("cloudflared is unavailable; public image URLs are unavailable.", error=True)
+        return
+    try:
+        PUBLIC_TUNNEL_PROCESS = await asyncio.create_subprocess_exec(
+            cloudflared.executable, "tunnel", "--url", f"http://127.0.0.1:{port}",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+    except OSError as error:
+        log(f"cloudflared could not start: {error.__class__.__name__}", error=True)
+        return
+    PUBLIC_TUNNEL_WATCHERS = [
+        asyncio.create_task(watch_cloudflared_stream(PUBLIC_TUNNEL_PROCESS.stdout)),
+        asyncio.create_task(watch_cloudflared_stream(PUBLIC_TUNNEL_PROCESS.stderr)),
+    ]
+
+
+async def stop_public_image_tunnel() -> None:
+    global PUBLIC_TUNNEL_PROCESS, PUBLIC_TUNNEL_URL, PUBLIC_TUNNEL_WATCHERS
+    for watcher in PUBLIC_TUNNEL_WATCHERS:
+        watcher.cancel()
+    if PUBLIC_TUNNEL_WATCHERS:
+        await asyncio.gather(*PUBLIC_TUNNEL_WATCHERS, return_exceptions=True)
+    PUBLIC_TUNNEL_WATCHERS = []
+    if PUBLIC_TUNNEL_PROCESS is not None and PUBLIC_TUNNEL_PROCESS.returncode is None:
+        PUBLIC_TUNNEL_PROCESS.terminate()
+        try:
+            await asyncio.wait_for(PUBLIC_TUNNEL_PROCESS.wait(), timeout=5)
+        except asyncio.TimeoutError:
+            PUBLIC_TUNNEL_PROCESS.kill()
+            await PUBLIC_TUNNEL_PROCESS.wait()
+    PUBLIC_TUNNEL_PROCESS = None
+    PUBLIC_TUNNEL_URL = None
+    PUBLIC_TUNNEL_READY.clear()
 
 
 def parse_json_body(body: bytes) -> Any:
@@ -1843,11 +2005,28 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
 async def serve(port: int) -> None:
     initial_health = await health_snapshot()
     server = await asyncio.start_server(handle_client, host="127.0.0.1", port=port)
+    image_server = await asyncio.start_server(handle_public_image_client, host="127.0.0.1", port=0)
+    image_socket = next(iter(image_server.sockets or ()), None)
+    if image_socket is None:
+        image_server.close()
+        await image_server.wait_closed()
+        server.close()
+        await server.wait_closed()
+        raise OSError("The public image server did not receive a local port.")
+    image_port = image_socket.getsockname()[1]
+    await start_public_image_tunnel(image_port)
+    if PUBLIC_TUNNEL_PROCESS is not None:
+        try:
+            await asyncio.wait_for(PUBLIC_TUNNEL_READY.wait(), timeout=15)
+        except asyncio.TimeoutError:
+            log("cloudflared did not provide a public URL within 15 seconds; capture_frame will report the tunnel as unavailable.", error=True)
     log_startup_health(initial_health, port)
+    log(f"Image-only server listening on 127.0.0.1:{image_port}")
     try:
-        async with server:
+        async with server, image_server:
             await server.serve_forever()
     finally:
+        await stop_public_image_tunnel()
         await TASKS.shutdown()
 
 
