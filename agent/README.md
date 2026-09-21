@@ -16,8 +16,6 @@ python researchtube_agent.py --port 17843
 
 The Agent creates `workspace/` beside the script. Health reports the Agent version, workspace state, and status, version, and discovery source for `yt-dlp`, `deno`, `ffmpeg`, `ffprobe`, and `cloudflared`. Discovery always checks `tools/<component>/` first, then system `PATH`; it never depends on the process working directory.
 
-For public captured-frame URLs, put the `cloudflared` binary in `tools/cloudflared/` (or install it on `PATH`). The Agent starts a separate image-only server on an automatically selected loopback port and exposes only that server through a Cloudflare Quick Tunnel. It never tunnels the Agent API. The hostname is random for each Agent run, and `capture_frame` returns an HTTPS URL whose path is the workspace directory plus an opaque capture ID.
-
-That public server also returns `/robots.txt` permitting `OAI-SearchBot` and other crawlers; apart from that file, it serves only approved captured-image URLs.
+`cloudflared` is optional and is never started with the Agent or by `capture_frame`. Put it in `tools/cloudflared/` (or install it on `PATH`) only when calling `workspace_share_start`. That explicit tool publishes one selected workspace folder through a Cloudflare Quick Tunnel. The URL path repeats the selected logical folder directly, without an artificial `/files/` segment: `captures/frame.png` is published as `/captures/frame.png`. It serves only allowed file categories and only `GET` or `HEAD`; directory listings, workspace escapes, and filesystem redirects are rejected. `workspace_share_status` reports the active share and `workspace_share_stop` closes it. The Agent API itself is never tunneled.
 
 The console emits compact timestamped startup information and one line for each top-level request, for example `GET /health -> 200`. The extension may be used with the Agent stopped; its YouTube tools remain independent.

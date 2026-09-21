@@ -270,7 +270,7 @@ class CaptureFrameTests(unittest.IsolatedAsyncioTestCase):
         raise AssertionError(command)
 
     async def test_capture_frame_always_materializes_a_workspace_image(self) -> None:
-        with patch.object(agent, "PUBLIC_TUNNEL_URL", "https://example.trycloudflare.com"), patch.object(agent, "find_component", side_effect=self.discovery), patch.object(asyncio, "create_subprocess_exec", side_effect=self.subprocess):
+        with patch.object(agent, "find_component", side_effect=self.discovery), patch.object(asyncio, "create_subprocess_exec", side_effect=self.subprocess):
             result = await agent.capture_frame({
                 "path": "downloads/sample.mp4", "timestampSeconds": 12.5, "videoStreamIndex": 2,
                 "crop": {"x": 4, "y": 2, "width": 200, "height": 100},
@@ -282,24 +282,23 @@ class CaptureFrameTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["displayRotationApplied"])
         self.assertEqual(result["image"], {
             "format": "png", "mimeType": "image/png", "width": 200, "height": 100,
-            "imageSizeBytes": 11, "workspacePath": result["image"]["workspacePath"], "publicUrl": result["image"]["publicUrl"],
+            "imageSizeBytes": 11, "workspacePath": result["image"]["workspacePath"],
         })
         self.assertRegex(result["image"]["workspacePath"], r"^captures/sample \[t_12\.500\] \[cap_[A-Za-z0-9_-]+\]\.png$")
-        self.assertRegex(result["image"]["publicUrl"], r"^https://example\.trycloudflare\.com/image/captures/[A-Za-z0-9_-]+$")
         self.assertTrue((agent.WORKSPACE_PATH / "captures").is_dir())
         self.assertEqual((agent.WORKSPACE_PATH / result["image"]["workspacePath"]).read_bytes(), b"image-bytes")
         self.assertNotIn("inlineImageBase64", result)
         self.assertNotIn(str(self.root), json.dumps(result))
 
-    async def test_capture_frame_honours_explicit_workspace_output_and_returns_public_url(self) -> None:
-        with patch.object(agent, "PUBLIC_TUNNEL_URL", "https://example.trycloudflare.com"), patch.object(agent, "find_component", side_effect=self.discovery), patch.object(asyncio, "create_subprocess_exec", side_effect=self.subprocess):
+    async def test_capture_frame_honours_explicit_workspace_output_without_public_url(self) -> None:
+        with patch.object(agent, "find_component", side_effect=self.discovery), patch.object(asyncio, "create_subprocess_exec", side_effect=self.subprocess):
             result = await agent.capture_frame({
                 "path": "downloads/sample.mp4", "timestampSeconds": 0,
                 "outputPath": "captures/custom.webp",
                 "image": {"format": "webp", "quality": 75},
             })
         self.assertEqual(result["image"]["workspacePath"], "captures/custom.webp")
-        self.assertEqual(result["image"]["publicUrl"], "https://example.trycloudflare.com/image/captures/" + agent.capture_public_id("captures/custom.webp"))
+        self.assertNotIn("publicUrl", result["image"])
         self.assertNotIn("inlineImageBase64", result)
         self.assertEqual((agent.WORKSPACE_PATH / "captures" / "custom.webp").read_bytes(), b"image-bytes")
 
@@ -350,38 +349,49 @@ class CaptureFrameTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.code, "CAPTURE_FRAME_INVALID")
 
 
-class PublicImageRouteTests(unittest.TestCase):
+class PublicWorkspaceShareTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         self.old_workspace = agent.WORKSPACE_PATH
         agent.WORKSPACE_PATH = self.root / "workspace"
-        image = agent.WORKSPACE_PATH / "captures" / "Bird [cap_safeCapture_123].webp"
+        image = agent.WORKSPACE_PATH / "captures" / "Bird.webp"
         image.parent.mkdir(parents=True)
         image.write_bytes(b"webp-bytes")
-        self.logical_path = image.relative_to(agent.WORKSPACE_PATH).as_posix()
-        self.capture_id = agent.capture_public_id(self.logical_path)
+        (image.parent / "notes.txt").write_text("notes", encoding="utf-8")
+        self.folder = agent.WorkspacePathResolver().resolve_existing("captures", field_name="folder", expected_type="directory")
+        self.old_folder = agent.PUBLIC_SHARE_FOLDER
+        self.old_file_types = agent.PUBLIC_SHARE_FILE_TYPES
+        self.old_tunnel_url = agent.PUBLIC_TUNNEL_URL
+        agent.PUBLIC_SHARE_FOLDER = self.folder
+        agent.PUBLIC_SHARE_FILE_TYPES = ("images",)
+        agent.PUBLIC_TUNNEL_URL = "https://example.trycloudflare.com"
 
     def tearDown(self) -> None:
         agent.WORKSPACE_PATH = self.old_workspace
+        agent.PUBLIC_SHARE_FOLDER = self.old_folder
+        agent.PUBLIC_SHARE_FILE_TYPES = self.old_file_types
+        agent.PUBLIC_TUNNEL_URL = self.old_tunnel_url
         self.temp.cleanup()
 
-    def test_public_image_route_finds_only_the_matching_image_and_reports_mime_type(self) -> None:
-        image, mime_type = agent.public_image_file(f"/image/captures/{self.capture_id}")
+    def test_public_share_repeats_its_selected_folder_in_the_url_path(self) -> None:
+        image, mime_type = agent.public_share_file("/captures/Bird.webp")
         self.assertEqual(image.read_bytes(), b"webp-bytes")
         self.assertEqual(mime_type, "image/webp")
+        self.assertEqual(agent.public_share_base_url(), "https://example.trycloudflare.com/captures/")
 
-    def test_public_image_route_rejects_traversal_and_non_image_requests(self) -> None:
-        for path in (f"/image/%2e%2e/{self.capture_id}", "/image/captures/not-an-image", "/health"):
+    def test_public_share_rejects_traversal_and_filtered_file_types(self) -> None:
+        for path in ("/%2e%2e/Bird.webp", "/notes.txt", "/Bird.webp", "/captures/notes.txt", "/"):
             with self.subTest(path=path), self.assertRaises(agent.AgentApiError) as raised:
-                agent.public_image_file(path)
-            self.assertEqual(raised.exception.code, "PUBLIC_IMAGE_NOT_FOUND")
+                agent.public_share_file(path)
+            self.assertEqual(raised.exception.code, "PUBLIC_SHARE_NOT_FOUND")
 
-    def test_public_robots_text_explicitly_allows_openai_agents_and_other_crawlers(self) -> None:
-        robots = agent.PUBLIC_ROBOTS_TEXT.decode("utf-8")
-        for user_agent in ("OAI-SearchBot", "ChatGPT-User", "GPTBot", "*"):
-            with self.subTest(user_agent=user_agent):
-                self.assertIn(f"User-agent: {user_agent}\nContent-Signal: search=yes,ai-input=yes,ai-train=no,use=full\nAllow: /", robots)
+    def test_workspace_share_options_accepts_only_the_documented_selectors(self) -> None:
+        folder, file_types = agent.workspace_share_options({"folder": "captures", "fileTypes": ["images", "documents"]})
+        self.assertEqual(folder.logical_path, "captures")
+        self.assertEqual(file_types, ("images", "documents"))
+        with self.assertRaises(agent.AgentApiError):
+            agent.workspace_share_options({"folder": "captures", "fileTypes": ["all", "images"]})
 
 
 async def _bytes_result(stdout: bytes, stderr: bytes):

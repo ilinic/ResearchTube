@@ -1,14 +1,12 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
-const widget = await readFile(new URL("../ui/capture-frame-widget-v24.html", import.meta.url), "utf8");
+const widget = await readFile(new URL("../ui/capture-frame-widget-v25.html", import.meta.url), "utf8");
 
 assert.match(widget, /researchtube_get_capture_frame_image/);
 assert.match(widget, /workspacePath/);
 assert.match(widget, /window\.openai/);
 assert.match(widget, /openai:set_globals/);
-assert.match(widget, /publicUrl/);
-assert.match(widget, /Public image URL/);
 assert.match(widget, /toolResponseMetadata/);
 assert.match(widget, /captureFrameImageBase64/);
 assert.match(widget, /createImageBitmap/);
@@ -17,7 +15,8 @@ assert.match(widget, /<canvas id="image"/);
 assert.match(widget, /youtube-video-link/);
 assert.match(widget, /researchtube_copy_capture_frame_path/);
 assert.match(widget, /id="copy-frame-name"/);
-assert.match(widget, /<g transform="translate\(12 12\)">/);
+assert.match(widget, /<g transform="translate\(10 9\)">/);
+assert.match(widget, /<path d="M9 -6v7H2"><\/path>/);
 assert.match(widget, /refreshing/);
 assert.match(widget, /overflow-wrap: anywhere/);
 assert.doesNotMatch(widget, /researchtube_copy_capture_frame_image/);
@@ -38,4 +37,6 @@ assert.doesNotMatch(widget, /dataTransfer/);
 assert.doesNotMatch(widget, /makeDragFile/);
 assert.doesNotMatch(widget, /dragFile/);
 assert.doesNotMatch(widget, /draggable=/);
+assert.doesNotMatch(widget, /publicUrl/);
+assert.doesNotMatch(widget, /Public image URL/);
 console.log("capture frame widget: ok");

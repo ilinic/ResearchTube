@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 
 const background = await readFile(new URL("../background.js", import.meta.url), "utf8");
 
-for (const tool of ["workspace_list", "workspace_stat", "workspace_mkdir", "workspace_move", "workspace_delete", "media_probe", "capture_frame", "researchtube_get_capture_frame_image", "researchtube_copy_capture_frame_path"]) {
+for (const tool of ["workspace_list", "workspace_stat", "workspace_mkdir", "workspace_move", "workspace_delete", "workspace_share_start", "workspace_share_status", "workspace_share_stop", "media_probe", "capture_frame", "researchtube_get_capture_frame_image", "researchtube_copy_capture_frame_path"]) {
   assert.match(background, new RegExp(`name: "${tool}"`), `${tool} must be published in tools/list`);
 }
 assert.match(background, /"\/media\/capture-frame"/);
@@ -14,7 +14,7 @@ for (const tool of ["youtube_get_download_formats", "youtube_get_download_task_d
 assert.match(background, /youtubeFormats: youtubeFormatsSchema/);
 assert.match(background, /youtube_get_download_formats\.downloadFormats/);
 assert.match(background, /afterEventId/);
-assert.match(background, /const REQUIRED_AGENT_INTERFACE_VERSION = 15;/);
+assert.match(background, /const REQUIRED_AGENT_INTERFACE_VERSION = 16;/);
 assert.match(background, /availableBytes/);
 assert.match(background, /operatingSystem.*release.*version.*architecture/s);
 assert.match(background, /function normalizeWorkspacePath\(/);
@@ -32,9 +32,13 @@ assert.doesNotMatch(background, /chrome\.downloads\.download/);
 assert.match(background, /chrome\.offscreen\.createDocument/);
 assert.match(background, /capture-frame-offscreen\.html/);
 assert.match(background, /saves only the image in the workspace/);
-assert.match(background, /publicUrl/);
+assert.doesNotMatch(background, /Public HTTPS URL served only by the Agent's image-only Cloudflare Quick Tunnel/);
 assert.match(background, /outputPath/);
 assert.match(background, /cloudflared/);
+assert.match(background, /workspace_share_start/);
+assert.match(background, /workspace_share_status/);
+assert.match(background, /workspace_share_stop/);
+assert.match(background, /no artificial intermediate segment/);
 assert.doesNotMatch(background, /saveToLibrary/);
 assert.doesNotMatch(background, /delivery\.workspacePath/);
 assert.match(background, /--download-sections/);

@@ -11,7 +11,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
-import hashlib
 import json
 import math
 import mimetypes
@@ -27,8 +26,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote, unquote, urlparse
 
-AGENT_VERSION = "0.16.2"
-INTERFACE_VERSION = 15
+AGENT_VERSION = "0.17.0"
+INTERFACE_VERSION = 16
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
 TASK_POLL_INTERVAL_MS = 1_000
@@ -84,9 +83,18 @@ PUBLIC_TUNNEL_URL: str | None = None
 PUBLIC_TUNNEL_PROCESS: asyncio.subprocess.Process | None = None
 PUBLIC_TUNNEL_READY = asyncio.Event()
 PUBLIC_TUNNEL_WATCHERS: list[asyncio.Task[None]] = []
-PUBLIC_IMAGE_ROUTE_PREFIX = "/image/"
-PUBLIC_IMAGE_CAPTURE_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{8,64}")
-PUBLIC_ROBOTS_TEXT = b"""# ResearchTube captured-frame endpoint: public access is intentional.\n# These groups are repeated after any Cloudflare-managed directives so the\n# origin explicitly grants the OpenAI crawlers and user-directed fetcher access.\n\nUser-agent: OAI-SearchBot\nContent-Signal: search=yes,ai-input=yes,ai-train=no,use=full\nAllow: /\n\nUser-agent: ChatGPT-User\nContent-Signal: search=yes,ai-input=yes,ai-train=no,use=full\nAllow: /\n\nUser-agent: GPTBot\nContent-Signal: search=yes,ai-input=yes,ai-train=no,use=full\nAllow: /\n\nUser-agent: *\nContent-Signal: search=yes,ai-input=yes,ai-train=no,use=full\nAllow: /\n"""
+PUBLIC_SHARE_SERVER: asyncio.AbstractServer | None = None
+PUBLIC_SHARE_FOLDER: ResolvedWorkspacePath | None = None
+PUBLIC_SHARE_FILE_TYPES: tuple[str, ...] = ()
+PUBLIC_SHARE_LOCK = asyncio.Lock()
+PUBLIC_SHARE_FILE_TYPE_SUFFIXES: dict[str, frozenset[str]] = {
+    "images": frozenset({".avif", ".bmp", ".gif", ".jpeg", ".jpg", ".png", ".svg", ".webp"}),
+    "audio": frozenset({".aac", ".flac", ".m4a", ".mp3", ".ogg", ".opus", ".wav", ".weba"}),
+    "video": frozenset({".avi", ".m4v", ".mkv", ".mov", ".mp4", ".mpeg", ".mpg", ".webm"}),
+    "documents": frozenset({".csv", ".html", ".htm", ".json", ".md", ".pdf", ".rtf", ".text", ".txt", ".xml"}),
+    "archives": frozenset({".7z", ".bz2", ".gz", ".rar", ".tar", ".xz", ".zip"}),
+}
+PUBLIC_SHARE_FILE_TYPE_NAMES = frozenset((*PUBLIC_SHARE_FILE_TYPE_SUFFIXES, "other", "all"))
 
 
 @dataclass(frozen=True)
@@ -846,32 +854,6 @@ def capture_output_path(value: Any, source_path: str, timestamp_seconds: float, 
     }
 
 
-def capture_public_id(logical_path: str) -> str:
-    """Return a stable opaque ID without retaining a path-to-ID table.
-
-    Automatically named captures already contain a random [cap_<id>] marker.
-    A caller may supply a custom workspace filename, though, so fall back to a
-    deterministic digest of the logical path.  The image server derives this
-    value again while scanning only the requested directory.
-    """
-    match = re.search(r"\[cap_([A-Za-z0-9_-]{8,64})\]", logical_path)
-    if match:
-        return match.group(1)
-    return hashlib.sha256(logical_path.encode("utf-8")).hexdigest()[:32]
-
-
-def public_image_url(logical_path: str) -> str:
-    if PUBLIC_TUNNEL_URL is None:
-        raise AgentApiError("PUBLIC_IMAGE_URL_UNAVAILABLE", "The public image tunnel is not ready. Confirm that cloudflared is available and wait for the Agent startup message.")
-    parts, _ = WorkspacePathResolver.logical_parts(logical_path, field_name="workspace output", error_code="CAPTURE_FRAME_FAILED")
-    if len(parts) < 2:
-        directory_parts: tuple[str, ...] = ()
-    else:
-        directory_parts = parts[:-1]
-    route = "/".join(quote(part, safe="") for part in (*directory_parts, capture_public_id(logical_path)))
-    return f"{PUBLIC_TUNNEL_URL}{PUBLIC_IMAGE_ROUTE_PREFIX}{route}"
-
-
 def capture_frame_options(payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict) or set(payload) - {"path", "youtube", "timestampSeconds", "videoStreamIndex", "seekMode", "applyDisplayRotation", "crop", "resize", "image", "outputPath"}:
         raise AgentApiError("CAPTURE_FRAME_INVALID", "capture_frame requires only documented fields.")
@@ -1097,7 +1079,6 @@ async def capture_frame_from_workspace_options(options: dict[str, Any]) -> dict[
                 "format": options["image"]["format"], "mimeType": mime_type,
                 "width": width, "height": height, "imageSizeBytes": image_size,
                 "workspacePath": logical_output_path,
-                "publicUrl": public_image_url(logical_output_path),
             },
         }
         log(f"capture_frame path={item.logical_path} timestamp={options['timestampSeconds']:.3f} -> {logical_output_path}")
@@ -1774,6 +1755,14 @@ def image_response(status: str, image_bytes: bytes = b"", mime_type: str = "text
     return "\r\n".join(headers).encode("ascii") + image_bytes
 
 
+def public_file_response_headers(status: str, size: int, mime_type: str) -> bytes:
+    headers = [
+        f"HTTP/1.1 {status}", f"Content-Type: {mime_type}", f"Content-Length: {size}",
+        "X-Content-Type-Options: nosniff", "Cache-Control: no-store", "Connection: close", "", "",
+    ]
+    return "\r\n".join(headers).encode("ascii")
+
+
 async def read_request(reader: asyncio.StreamReader) -> tuple[str, str, bytes]:
     request_line = await asyncio.wait_for(reader.readline(), timeout=5)
     parts = request_line.decode("latin-1").strip().split()
@@ -1799,57 +1788,83 @@ async def read_request(reader: asyncio.StreamReader) -> tuple[str, str, bytes]:
     return parts[0].upper(), urlparse(parts[1]).path, body
 
 
-def public_image_file(path: str) -> tuple[Path, str]:
-    """Resolve a single captured image from the intentionally narrow public route."""
-    if not path.startswith(PUBLIC_IMAGE_ROUTE_PREFIX):
-        raise AgentApiError("PUBLIC_IMAGE_NOT_FOUND", "Unknown public image path.")
-    encoded_segments = path.removeprefix(PUBLIC_IMAGE_ROUTE_PREFIX).split("/")
+def workspace_share_options(payload: Any) -> tuple[ResolvedWorkspacePath, tuple[str, ...]]:
+    if not isinstance(payload, dict) or set(payload) != {"folder", "fileTypes"}:
+        raise AgentApiError("WORKSPACE_SHARE_INVALID", "workspace_share_start requires folder and fileTypes.")
+    resolver = WorkspacePathResolver()
+    folder = resolver.resolve_existing(payload["folder"], field_name="folder", expected_type="directory", allow_root=True)
+    file_types = payload["fileTypes"]
+    if not isinstance(file_types, list) or not file_types or len(file_types) > len(PUBLIC_SHARE_FILE_TYPE_NAMES) or len(set(file_types)) != len(file_types):
+        raise AgentApiError("WORKSPACE_SHARE_INVALID", "fileTypes must be a non-empty array of unique supported file categories.")
+    if any(not isinstance(item, str) or item not in PUBLIC_SHARE_FILE_TYPE_NAMES for item in file_types):
+        raise AgentApiError("WORKSPACE_SHARE_INVALID", "fileTypes contains an unsupported file category.")
+    if "all" in file_types and len(file_types) != 1:
+        raise AgentApiError("WORKSPACE_SHARE_INVALID", "fileTypes all cannot be combined with other categories.")
+    return folder, tuple(file_types)
+
+
+def public_share_file_type(path: Path) -> str:
+    suffix = path.suffix.lower()
+    for name, suffixes in PUBLIC_SHARE_FILE_TYPE_SUFFIXES.items():
+        if suffix in suffixes:
+            return name
+    return "other"
+
+
+def public_share_file(path: str) -> tuple[Path, str]:
+    """Resolve one public URL whose path begins with the shared folder path."""
+    if PUBLIC_SHARE_FOLDER is None or not PUBLIC_SHARE_FILE_TYPES:
+        raise AgentApiError("PUBLIC_SHARE_NOT_ACTIVE", "No workspace folder is currently shared.")
+    encoded_segments = path.removeprefix("/").split("/")
     if not encoded_segments or any(not segment for segment in encoded_segments):
-        raise AgentApiError("PUBLIC_IMAGE_NOT_FOUND", "Invalid public image path.")
+        raise AgentApiError("PUBLIC_SHARE_NOT_FOUND", "The requested shared file was not found.")
     try:
         segments = tuple(unquote(segment, encoding="utf-8", errors="strict") for segment in encoded_segments)
     except UnicodeDecodeError as error:
-        raise AgentApiError("PUBLIC_IMAGE_NOT_FOUND", "Invalid public image path.") from error
-    if any("/" in segment or "\\" in segment for segment in segments):
-        raise AgentApiError("PUBLIC_IMAGE_NOT_FOUND", "Invalid public image path.")
-    capture_id = segments[-1]
-    if not PUBLIC_IMAGE_CAPTURE_ID_PATTERN.fullmatch(capture_id):
-        raise AgentApiError("PUBLIC_IMAGE_NOT_FOUND", "Invalid capture ID.")
-    directory_path = "/".join(segments[:-1])
-    resolver = WorkspacePathResolver()
+        raise AgentApiError("PUBLIC_SHARE_NOT_FOUND", "The requested shared file was not found.") from error
+    if any(not segment or segment in {".", ".."} or "/" in segment or "\\" in segment for segment in segments):
+        raise AgentApiError("PUBLIC_SHARE_NOT_FOUND", "The requested shared file was not found.")
+    folder_parts, _ = WorkspacePathResolver.logical_parts(
+        PUBLIC_SHARE_FOLDER.logical_path, field_name="shared folder", error_code="PUBLIC_SHARE_NOT_FOUND", allow_root=True,
+    )
+    if tuple(segments[:len(folder_parts)]) != folder_parts:
+        raise AgentApiError("PUBLIC_SHARE_NOT_FOUND", "The requested shared file was not found.")
+    relative_parts = segments[len(folder_parts):]
+    if not relative_parts:
+        raise AgentApiError("PUBLIC_SHARE_NOT_FOUND", "The requested shared file was not found.")
+    candidate = PUBLIC_SHARE_FOLDER.physical_path
+    for segment in relative_parts:
+        candidate = candidate / segment
+        is_junction = getattr(candidate, "is_junction", lambda: False)
+        if candidate.is_symlink() or is_junction():
+            raise AgentApiError("PUBLIC_SHARE_NOT_FOUND", "The requested shared file was not found.")
     try:
-        directory = resolver.resolve_existing(directory_path, field_name="public image directory", expected_type="directory", allow_root=True)
-    except AgentApiError as error:
-        raise AgentApiError("PUBLIC_IMAGE_NOT_FOUND", "Captured image was not found.") from error
-    candidates: list[Path] = []
-    try:
-        for candidate in directory.physical_path.iterdir():
-            if candidate.is_symlink() or not candidate.is_file() or candidate.suffix.lower() not in IMAGE_MIME_TYPES:
-                continue
-            logical_path = resolver.logical_existing_file(candidate, error_code="PUBLIC_IMAGE_NOT_FOUND")
-            if capture_public_id(logical_path) == capture_id:
-                candidates.append(candidate.resolve(strict=True))
+        resolved = candidate.resolve(strict=True)
     except OSError as error:
-        raise AgentApiError("PUBLIC_IMAGE_NOT_FOUND", "Captured image is unavailable.") from error
-    if len(candidates) != 1:
-        raise AgentApiError("PUBLIC_IMAGE_NOT_FOUND", "Captured image was not found.")
-    image_file = candidates[0]
-    mime_type = IMAGE_MIME_TYPES.get(image_file.suffix.lower())
-    if mime_type is None:
-        raise AgentApiError("PUBLIC_IMAGE_NOT_FOUND", "Captured image was not found.")
-    return image_file, mime_type
+        raise AgentApiError("PUBLIC_SHARE_NOT_FOUND", "The requested shared file was not found.") from error
+    if not path_is_within(resolved, PUBLIC_SHARE_FOLDER.physical_path) or not resolved.is_file():
+        raise AgentApiError("PUBLIC_SHARE_NOT_FOUND", "The requested shared file was not found.")
+    file_type = public_share_file_type(resolved)
+    if "all" not in PUBLIC_SHARE_FILE_TYPES and file_type not in PUBLIC_SHARE_FILE_TYPES:
+        raise AgentApiError("PUBLIC_SHARE_NOT_FOUND", "The requested shared file was not found.")
+    mime_type = mimetypes.guess_type(resolved.name)[0] or "application/octet-stream"
+    return resolved, mime_type
 
 
-async def handle_public_image_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+async def handle_public_share_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
     try:
         method, path, body = await read_request(reader)
-        if method == "GET" and path == "/robots.txt" and not body:
-            writer.write(image_response("200 OK", PUBLIC_ROBOTS_TEXT, "text/plain; charset=utf-8"))
-        elif method != "GET" or body:
+        if method not in {"GET", "HEAD"} or body:
             writer.write(image_response("404 Not Found"))
         else:
-            image_file, mime_type = public_image_file(path)
-            writer.write(image_response("200 OK", image_file.read_bytes(), mime_type))
+            shared_file, mime_type = public_share_file(path)
+            size = shared_file.stat().st_size
+            writer.write(public_file_response_headers("200 OK", size, mime_type))
+            if method == "GET":
+                with shared_file.open("rb") as source:
+                    while chunk := source.read(64 * 1024):
+                        writer.write(chunk)
+                        await writer.drain()
         await writer.drain()
     except (AgentApiError, OSError, UnicodeDecodeError, asyncio.TimeoutError, asyncio.IncompleteReadError):
         try:
@@ -1876,36 +1891,40 @@ async def watch_cloudflared_stream(stream: asyncio.StreamReader | None) -> None:
             if match and PUBLIC_TUNNEL_URL is None:
                 PUBLIC_TUNNEL_URL = match.group(0)
                 PUBLIC_TUNNEL_READY.set()
-                log(f"Public image tunnel: {PUBLIC_TUNNEL_URL}")
+                log(f"Public workspace tunnel: {PUBLIC_TUNNEL_URL}")
     except (OSError, asyncio.CancelledError):
         return
 
 
-async def start_public_image_tunnel(port: int) -> None:
+async def start_public_share_tunnel(port: int) -> None:
     global PUBLIC_TUNNEL_PROCESS, PUBLIC_TUNNEL_WATCHERS
     cloudflared = find_component("cloudflared", COMPONENTS["cloudflared"][0])
     if cloudflared.error:
-        log("cloudflared discovery is ambiguous; public image URLs are unavailable.", error=True)
-        return
+        raise AgentApiError("CLOUDFLARED_DISCOVERY_ERROR", "cloudflared discovery is ambiguous.", cloudflared.error)
     if not cloudflared.executable:
-        log("cloudflared is unavailable; public image URLs are unavailable.", error=True)
-        return
+        raise AgentApiError("CLOUDFLARED_NOT_AVAILABLE", "cloudflared is not available. Extract it under tools/cloudflared or install it on PATH.")
     try:
         PUBLIC_TUNNEL_PROCESS = await asyncio.create_subprocess_exec(
             cloudflared.executable, "tunnel", "--url", f"http://127.0.0.1:{port}",
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
     except OSError as error:
-        log(f"cloudflared could not start: {error.__class__.__name__}", error=True)
-        return
+        raise AgentApiError("CLOUDFLARED_START_FAILED", "cloudflared could not start.") from error
     PUBLIC_TUNNEL_WATCHERS = [
         asyncio.create_task(watch_cloudflared_stream(PUBLIC_TUNNEL_PROCESS.stdout)),
         asyncio.create_task(watch_cloudflared_stream(PUBLIC_TUNNEL_PROCESS.stderr)),
     ]
 
 
-async def stop_public_image_tunnel() -> None:
-    global PUBLIC_TUNNEL_PROCESS, PUBLIC_TUNNEL_URL, PUBLIC_TUNNEL_WATCHERS
+async def stop_public_share_unlocked() -> bool:
+    global PUBLIC_SHARE_SERVER, PUBLIC_SHARE_FOLDER, PUBLIC_SHARE_FILE_TYPES, PUBLIC_TUNNEL_PROCESS, PUBLIC_TUNNEL_URL, PUBLIC_TUNNEL_WATCHERS
+    was_active = PUBLIC_SHARE_SERVER is not None or PUBLIC_TUNNEL_PROCESS is not None
+    if PUBLIC_SHARE_SERVER is not None:
+        PUBLIC_SHARE_SERVER.close()
+        await PUBLIC_SHARE_SERVER.wait_closed()
+    PUBLIC_SHARE_SERVER = None
+    PUBLIC_SHARE_FOLDER = None
+    PUBLIC_SHARE_FILE_TYPES = ()
     for watcher in PUBLIC_TUNNEL_WATCHERS:
         watcher.cancel()
     if PUBLIC_TUNNEL_WATCHERS:
@@ -1921,6 +1940,63 @@ async def stop_public_image_tunnel() -> None:
     PUBLIC_TUNNEL_PROCESS = None
     PUBLIC_TUNNEL_URL = None
     PUBLIC_TUNNEL_READY.clear()
+    return was_active
+
+
+async def workspace_share_start(payload: Any) -> dict[str, Any]:
+    folder, file_types = workspace_share_options(payload)
+    async with PUBLIC_SHARE_LOCK:
+        await stop_public_share_unlocked()
+        global PUBLIC_SHARE_SERVER, PUBLIC_SHARE_FOLDER, PUBLIC_SHARE_FILE_TYPES
+        server = await asyncio.start_server(handle_public_share_client, host="127.0.0.1", port=0)
+        socket = next(iter(server.sockets or ()), None)
+        if socket is None:
+            server.close()
+            await server.wait_closed()
+            raise AgentApiError("PUBLIC_SHARE_START_FAILED", "The local workspace sharing server did not receive a port.")
+        PUBLIC_SHARE_SERVER = server
+        PUBLIC_SHARE_FOLDER = folder
+        PUBLIC_SHARE_FILE_TYPES = file_types
+        try:
+            await start_public_share_tunnel(socket.getsockname()[1])
+            await asyncio.wait_for(PUBLIC_TUNNEL_READY.wait(), timeout=15)
+            if PUBLIC_TUNNEL_URL is None:
+                raise AgentApiError("PUBLIC_SHARE_START_FAILED", "cloudflared did not provide a public URL.")
+        except (AgentApiError, asyncio.TimeoutError) as error:
+            await stop_public_share_unlocked()
+            if isinstance(error, AgentApiError):
+                raise
+            raise AgentApiError("PUBLIC_SHARE_START_FAILED", "cloudflared did not provide a public URL within 15 seconds.") from error
+        log(f"workspace_share_start folder={folder.logical_path or '<root>'} fileTypes={','.join(file_types)}")
+        return workspace_share_status_document()
+
+
+def public_share_base_url() -> str | None:
+    if PUBLIC_TUNNEL_URL is None or PUBLIC_SHARE_FOLDER is None:
+        return None
+    parts, _ = WorkspacePathResolver.logical_parts(
+        PUBLIC_SHARE_FOLDER.logical_path, field_name="shared folder", error_code="PUBLIC_SHARE_NOT_FOUND", allow_root=True,
+    )
+    route = "/".join(quote(part, safe="") for part in parts)
+    return f"{PUBLIC_TUNNEL_URL}/{route}/" if route else f"{PUBLIC_TUNNEL_URL}/"
+
+
+def workspace_share_status_document() -> dict[str, Any]:
+    active = PUBLIC_SHARE_SERVER is not None and PUBLIC_TUNNEL_PROCESS is not None and PUBLIC_TUNNEL_PROCESS.returncode is None and PUBLIC_TUNNEL_URL is not None
+    return {
+        "state": "active" if active else "inactive",
+        "folder": PUBLIC_SHARE_FOLDER.logical_path if active and PUBLIC_SHARE_FOLDER is not None else None,
+        "fileTypes": list(PUBLIC_SHARE_FILE_TYPES) if active else [],
+        "publicBaseUrl": public_share_base_url() if active else None,
+        "methods": ["GET", "HEAD"] if active else [],
+    }
+
+
+async def workspace_share_stop() -> dict[str, Any]:
+    async with PUBLIC_SHARE_LOCK:
+        stopped = await stop_public_share_unlocked()
+    log(f"workspace_share_stop stopped={str(stopped).lower()}")
+    return {"state": "stopped", "stopped": stopped}
 
 
 def parse_json_body(body: bytes) -> Any:
@@ -1961,6 +2037,12 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             response_status, response_body = "200 OK", workspace_move(parse_json_body(body))
         elif method == "POST" and path == "/workspace/delete":
             response_status, response_body = "200 OK", workspace_delete(parse_json_body(body))
+        elif method == "POST" and path == "/workspace/share/start":
+            response_status, response_body = "200 OK", await workspace_share_start(parse_json_body(body))
+        elif method == "POST" and path == "/workspace/share/status":
+            response_status, response_body = "200 OK", workspace_share_status_document()
+        elif method == "POST" and path == "/workspace/share/stop":
+            response_status, response_body = "200 OK", await workspace_share_stop()
         elif method == "POST" and path == "/media/probe":
             response_status, response_body = "200 OK", await media_probe(parse_json_body(body))
         elif method == "POST" and path == "/media/capture-frame":
@@ -2005,28 +2087,13 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
 async def serve(port: int) -> None:
     initial_health = await health_snapshot()
     server = await asyncio.start_server(handle_client, host="127.0.0.1", port=port)
-    image_server = await asyncio.start_server(handle_public_image_client, host="127.0.0.1", port=0)
-    image_socket = next(iter(image_server.sockets or ()), None)
-    if image_socket is None:
-        image_server.close()
-        await image_server.wait_closed()
-        server.close()
-        await server.wait_closed()
-        raise OSError("The public image server did not receive a local port.")
-    image_port = image_socket.getsockname()[1]
-    await start_public_image_tunnel(image_port)
-    if PUBLIC_TUNNEL_PROCESS is not None:
-        try:
-            await asyncio.wait_for(PUBLIC_TUNNEL_READY.wait(), timeout=15)
-        except asyncio.TimeoutError:
-            log("cloudflared did not provide a public URL within 15 seconds; capture_frame will report the tunnel as unavailable.", error=True)
     log_startup_health(initial_health, port)
-    log(f"Image-only server listening on 127.0.0.1:{image_port}")
     try:
-        async with server, image_server:
+        async with server:
             await server.serve_forever()
     finally:
-        await stop_public_image_tunnel()
+        async with PUBLIC_SHARE_LOCK:
+            await stop_public_share_unlocked()
         await TASKS.shutdown()
 
 

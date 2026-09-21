@@ -16,9 +16,9 @@ var DEFAULTS = {
   youtubeSearchCooldownUntil: 0,
   youtubeSearchCooldownLevel: 0
 };
-var EXTENSION_VERSION = "1.17.1";
-var REQUIRED_AGENT_INTERFACE_VERSION = 15;
-var CAPTURE_FRAME_WIDGET_URI = "ui://researchtube/capture-frame-v24.html";
+var EXTENSION_VERSION = "1.18.0";
+var REQUIRED_AGENT_INTERFACE_VERSION = 16;
+var CAPTURE_FRAME_WIDGET_URI = "ui://researchtube/capture-frame-v25.html";
 var CAPTURE_FRAME_OFFSCREEN_DOCUMENT = "capture-frame-offscreen.html";
 var AGENT_HEALTH_TIMEOUT_MS = 5e3;
 var AGENT_TASK_TIMEOUT_MS = 1e4;
@@ -441,6 +441,25 @@ var workspaceDeleteSchema = {
   properties: { path: { type: "string" }, type: { type: "string", enum: ["file", "directory"] }, deleted: { type: "boolean", const: true } },
   required: ["path", "type", "deleted"]
 };
+var workspaceShareFileTypeSchema = { type: "string", enum: ["images", "audio", "video", "documents", "archives", "other", "all"] };
+var workspaceShareStatusSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    state: { type: "string", enum: ["active", "inactive"] },
+    folder: nullableString,
+    fileTypes: { type: "array", uniqueItems: true, items: workspaceShareFileTypeSchema },
+    publicBaseUrl: { ...nullableString, pattern: "^https://" },
+    methods: { type: "array", items: { type: "string", enum: ["GET", "HEAD"] } }
+  },
+  required: ["state", "folder", "fileTypes", "publicBaseUrl", "methods"]
+};
+var workspaceShareStopSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: { state: { type: "string", const: "stopped" }, stopped: { type: "boolean" } },
+  required: ["state", "stopped"]
+};
 var mediaProbeSectionSchema = { type: "string", enum: ["format", "streams", "chapters", "programs"] };
 var ffprobeObjectSchema = { type: "object", additionalProperties: true };
 var mediaProbeSchema = {
@@ -535,10 +554,9 @@ var captureFrameSchema = {
         width: { type: "integer", minimum: 1 },
         height: { type: "integer", minimum: 1 },
         imageSizeBytes: { type: "integer", minimum: 0 },
-        workspacePath: { type: "string", minLength: 1, description: "Logical workspace-relative path of the captured image. capture_frame always creates this file." },
-        publicUrl: { type: "string", pattern: "^https://", description: "Public HTTPS URL served only by the Agent's image-only Cloudflare Quick Tunnel. It ends in the capture ID rather than the local filename; open it when visual inspection is useful." }
+        workspacePath: { type: "string", minLength: 1, description: "Logical workspace-relative path of the captured image. capture_frame always creates this file." }
       },
-      required: ["format", "mimeType", "width", "height", "imageSizeBytes", "workspacePath", "publicUrl"]
+      required: ["format", "mimeType", "width", "height", "imageSizeBytes", "workspacePath"]
     }
   },
   required: ["sourcePath", "requestedTimestampSeconds", "actualTimestampSeconds", "selectedVideoStreamIndex", "seekMode", "displayRotationApplied", "image"]
@@ -608,6 +626,30 @@ function toolDefinitions() {
       annotations: localWorkspaceDeleteAnnotations,
       inputSchema: { type: "object", additionalProperties: false, properties: { path: { type: "string", minLength: 1 } }, required: ["path"] },
       outputSchema: workspaceDeleteSchema
+    },
+    {
+      name: "workspace_share_start",
+      title: "Publish a selected workspace folder temporarily",
+      description: "Explicitly start a temporary public HTTPS share for one existing Local Agent workspace folder through cloudflared. The public path repeats folder directly with no artificial intermediate segment: if folder is captures, a file captures/frame.png is served as https://<random>.trycloudflare.com/captures/frame.png. fileTypes is an allow-list; no directory listing is exposed, only GET and HEAD for regular non-redirect files beneath the selected folder. Starting a new share closes any prior share. Anyone with the returned URL can access allowed files until workspace_share_stop or Agent shutdown.",
+      annotations: { ...localWorkspaceWriteAnnotations, openWorldHint: true },
+      inputSchema: { type: "object", additionalProperties: false, properties: { folder: { type: "string", description: "Existing logical workspace-relative directory. Use an empty string only to publish the workspace root." }, fileTypes: { type: "array", minItems: 1, maxItems: 7, uniqueItems: true, items: workspaceShareFileTypeSchema, description: "Allowed categories. all cannot be combined with another category." } }, required: ["folder", "fileTypes"] },
+      outputSchema: workspaceShareStatusSchema
+    },
+    {
+      name: "workspace_share_status",
+      title: "Inspect the current public workspace share",
+      description: "Report whether a cloudflared workspace share is active, its selected logical folder, allowed file categories, public URL root, and supported download methods. This never exposes a host filesystem path.",
+      annotations: localAgentReadAnnotations,
+      inputSchema: { type: "object", additionalProperties: false, properties: {} },
+      outputSchema: workspaceShareStatusSchema
+    },
+    {
+      name: "workspace_share_stop",
+      title: "Stop the current public workspace share",
+      description: "Immediately close the currently active local sharing server and its cloudflared Quick Tunnel. It does not delete workspace files.",
+      annotations: { ...localWorkspaceWriteAnnotations, openWorldHint: true },
+      inputSchema: { type: "object", additionalProperties: false, properties: {} },
+      outputSchema: workspaceShareStopSchema
     },
     {
       name: "media_probe",
@@ -1313,6 +1355,39 @@ async function workspaceDelete(path) {
   }
   return { path: logicalPath, type: normalizeWorkspaceType(document.type, ["file", "directory"]), deleted: true };
 }
+var workspaceShareFileTypes = /* @__PURE__ */ new Set(["images", "audio", "video", "documents", "archives", "other", "all"]);
+function normalizeWorkspaceShareFileTypes(value) {
+  if (!Array.isArray(value) || !value.length || value.length > workspaceShareFileTypes.size || new Set(value).size !== value.length || value.some((item) => typeof item !== "string" || !workspaceShareFileTypes.has(item)) || value.includes("all") && value.length !== 1) {
+    throw localAgentError("WORKSPACE_SHARE_INVALID", "fileTypes must be a non-empty array of unique supported categories; all cannot be combined with another category.");
+  }
+  return value;
+}
+function normalizeWorkspaceShareStatus(document) {
+  if (!document || typeof document !== "object" || Array.isArray(document) || !["active", "inactive"].includes(document.state) || !Array.isArray(document.fileTypes) || !Array.isArray(document.methods)) {
+    throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid workspace sharing status.");
+  }
+  const active = document.state === "active";
+  const fileTypes = active ? normalizeWorkspaceShareFileTypes(document.fileTypes) : document.fileTypes;
+  if (!active && fileTypes.length) throw localAgentError("AGENT_INVALID_RESPONSE", "An inactive workspace share must not have file types.");
+  if (document.folder !== null && typeof document.folder !== "string") throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid shared folder.");
+  const folder = document.folder === null ? null : normalizeWorkspacePath(document.folder, "folder", { allowRoot: true });
+  if (document.publicBaseUrl !== null && (typeof document.publicBaseUrl !== "string" || !/^https:\/\//.test(document.publicBaseUrl))) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid public workspace URL.");
+  if (document.methods.some((method) => method !== "GET" && method !== "HEAD")) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid public workspace methods.");
+  if (active !== (folder !== null && document.publicBaseUrl !== null && fileTypes.length > 0 && document.methods.length === 2)) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an inconsistent workspace sharing status.");
+  return { state: document.state, folder, fileTypes, publicBaseUrl: document.publicBaseUrl, methods: document.methods };
+}
+async function workspaceShareStart(folder, fileTypes) {
+  const input = { folder: normalizeWorkspacePath(folder, "folder", { allowRoot: true }), fileTypes: normalizeWorkspaceShareFileTypes(fileTypes) };
+  return normalizeWorkspaceShareStatus(await agentJsonRequest("/workspace/share/start", { method: "POST", body: input, timeoutMs: 2e4 }));
+}
+async function workspaceShareStatus() {
+  return normalizeWorkspaceShareStatus(await agentJsonRequest("/workspace/share/status", { method: "POST", body: {} }));
+}
+async function workspaceShareStop() {
+  const document = await agentJsonRequest("/workspace/share/stop", { method: "POST", body: {} });
+  if (!document || typeof document !== "object" || document.state !== "stopped" || typeof document.stopped !== "boolean") throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid workspace sharing stop result.");
+  return { state: "stopped", stopped: document.stopped };
+}
 var mediaProbeSectionNames = /* @__PURE__ */ new Set(["format", "streams", "chapters", "programs"]);
 function normalizeMediaProbeSections(value) {
   if (value === void 0) return void 0;
@@ -1460,7 +1535,7 @@ function normalizeCaptureFrameResult(document, input) {
   }
   const expectedMimeType = { png: "image/png", jpeg: "image/jpeg", webp: "image/webp" }[image.format];
   if (image.mimeType !== expectedMimeType) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an inconsistent captured-image MIME type.");
-  if (typeof image.workspacePath !== "string" || Object.hasOwn(document, "inlineImageBase64") || typeof image.publicUrl !== "string" || !/^https:\/\//.test(image.publicUrl)) {
+  if (typeof image.workspacePath !== "string" || Object.hasOwn(document, "inlineImageBase64") || Object.hasOwn(image, "publicUrl")) {
     throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid workspace image result.");
   }
   const remote = input.youtube === void 0 ? {} : {
@@ -1487,8 +1562,7 @@ function normalizeCaptureFrameResult(document, input) {
         width: image.width,
         height: image.height,
         imageSizeBytes: image.imageSizeBytes,
-        workspacePath: normalizeWorkspacePath(image.workspacePath, "image.workspacePath"),
-        publicUrl: image.publicUrl
+        workspacePath: normalizeWorkspacePath(image.workspacePath, "image.workspacePath")
       }
     }
   };
@@ -1733,7 +1807,7 @@ function safeErrorMessage(error) {
   return String(error?.message || error || "Unknown error").replace(/sk-[A-Za-z0-9_-]+/g, "[redacted]");
 }
 async function readCaptureFrameWidgetHtml() {
-  const response = await fetch(chrome.runtime.getURL("ui/capture-frame-widget-v24.html"));
+  const response = await fetch(chrome.runtime.getURL("ui/capture-frame-widget-v25.html"));
   if (!response.ok) throw new Error("The bundled capture-frame widget could not be read.");
   return response.text();
 }
@@ -1843,6 +1917,16 @@ async function handleMcpRequest(request) {
   if (request?.method === "tools/call" && request.params?.name === "workspace_delete") {
     const path = request.params.arguments?.path;
     return executeToolCall(request.id, "workspace_delete", { path }, () => workspaceDelete(path));
+  }
+  if (request?.method === "tools/call" && request.params?.name === "workspace_share_start") {
+    const args = request.params.arguments ?? {};
+    return executeToolCall(request.id, "workspace_share_start", { folder: args.folder, fileTypes: args.fileTypes }, () => workspaceShareStart(args.folder, args.fileTypes));
+  }
+  if (request?.method === "tools/call" && request.params?.name === "workspace_share_status") {
+    return executeToolCall(request.id, "workspace_share_status", {}, workspaceShareStatus);
+  }
+  if (request?.method === "tools/call" && request.params?.name === "workspace_share_stop") {
+    return executeToolCall(request.id, "workspace_share_stop", {}, workspaceShareStop);
   }
   if (request?.method === "tools/call" && request.params?.name === "media_probe") {
     const path = request.params.arguments?.path;
