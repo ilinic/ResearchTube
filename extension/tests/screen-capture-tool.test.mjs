@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 
 const background = await readFile(new URL("../background.js", import.meta.url), "utf8");
 
-assert.match(background, /name: "capture_screen"/);
+assert.match(background, /name: "media_capture_screen"/);
 assert.match(background, /Capture the complete current virtual desktop/);
 assert.match(background, /Small platform display queries provide only truthful virtual-desktop bounds and monitorCount/);
 assert.match(background, /gdigrab on Windows, x11grab on Linux\/X11, and avfoundation on macOS/);

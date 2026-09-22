@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 
 const widget = await readFile(new URL("../ui/capture-frame-widget-v27.html", import.meta.url), "utf8");
 
-assert.match(widget, /researchtube_get_capture_frame_image/);
+assert.match(widget, /media_load_workspace_image/);
 assert.match(widget, /workspacePath/);
 assert.match(widget, /window\.openai/);
 assert.match(widget, /openai:set_globals/);
@@ -11,10 +11,15 @@ assert.match(widget, /toolResponseMetadata/);
 assert.match(widget, /Waiting for image data/, "the iframe must stay visible while ChatGPT publishes the initial tool output");
 assert.match(widget, /for \(let attempt = 1; attempt <= 24;/, "the initial tool output must be retried during the short ChatGPT bootstrap window");
 assert.match(widget, /parseToolOutput/, "serialized tool output must be accepted as well as structured output");
-assert.match(widget, /captureFrameImageBase64/);
-assert.match(widget, /createImageBitmap/);
-assert.match(widget, /getContext\("2d"\)/);
-assert.match(widget, /<canvas id="image"/);
+assert.match(widget, /localAgentImageUrl/);
+assert.match(widget, /http:\/\/127\.0\.0\.1:/);
+assert.match(widget, /LOCAL_AGENT_RETRY_DELAYS_MS = \[0, 1000, 2000, 4000\]/, "Local Agent image retries must back off and stop after four attempts");
+assert.match(widget, /Local Agent is unavailable\. Start it, then click Refresh image\./, "a stopped Local Agent must end in a clear non-looping error");
+assert.match(widget, /info\.workspacePath === lastWorkspacePath\) return/, "bootstrap polling must not restart a failed image load");
+assert.match(widget, /<img id="image"/);
+assert.doesNotMatch(widget, /createImageBitmap/);
+assert.doesNotMatch(widget, /getContext\("2d"\)/);
+assert.doesNotMatch(widget, /base64/i, "the active widget must load images only from the Local Agent URL");
 assert.match(widget, /youtube-video-link/);
 assert.match(widget, /youtubeTagId\(path\).*\{11\}/, "workspace images with a canonical 11-character [yt_id] tag must gain a YouTube link");
 assert.match(widget, /\|\| youtubeTagId\(info\.workspacePath\)/, "the canonical YouTube tag must be linked for generic workspace images too");
@@ -23,7 +28,7 @@ assert.match(widget, /youtube-timestamp-link.*timestampSeconds/s, "the filename 
 assert.match(widget, /watch\?v=.*&t=/, "the timestamp marker must link to the same YouTube video at that time");
 assert.match(widget, /const isPartial = .*partial_/, "partial-download provenance must be recognized");
 assert.match(widget, /videoId && !isPartial/, "a partial-file local timestamp must not become a YouTube timestamp link");
-assert.match(widget, /researchtube_copy_capture_frame_path/);
+assert.match(widget, /media_copy_workspace_path/);
 assert.match(widget, /id="copy-frame-name"/);
 assert.match(widget, /<g transform="translate\(10 9\)">/);
 assert.match(widget, /<path d="M9 -6v7H2"><\/path>/);

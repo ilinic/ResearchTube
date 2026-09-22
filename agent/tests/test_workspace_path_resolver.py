@@ -101,6 +101,25 @@ class WorkspacePathResolverTests(unittest.TestCase):
             agent.workspace_list({"path": "external"})
         self.assertEqual(raised.exception.code, "WORKSPACE_PATH_INVALID")
 
+    def test_widget_image_url_resolves_only_a_workspace_image(self) -> None:
+        image = agent.WORKSPACE_PATH / "captures" / "frame.png"
+        image.parent.mkdir(parents=True, exist_ok=True)
+        image.write_bytes(b"png")
+        physical, mime_type = agent.widget_image_file("captures/frame.png")
+        self.assertEqual(physical, image)
+        self.assertEqual(mime_type, "image/png")
+        with self.assertRaises(agent.AgentApiError) as raised:
+            agent.widget_image_file("../outside.png")
+        self.assertEqual(raised.exception.code, "WORKSPACE_PATH_INVALID")
+
+    def test_workspace_image_metadata_does_not_read_or_return_image_bytes(self) -> None:
+        image = agent.WORKSPACE_PATH / "captures" / "frame.png"
+        image.parent.mkdir(parents=True, exist_ok=True)
+        image.write_bytes(b"image-bytes")
+        _item, metadata = agent.workspace_image_metadata({"path": "captures/frame.png"})
+        self.assertEqual(metadata, {"path": "captures/frame.png", "mimeType": "image/png", "imageSizeBytes": 11})
+        self.assertNotIn("inlineImageBase64", metadata)
+
     def test_health_serialization_omits_host_paths(self) -> None:
         snapshot = {
             "status": "ok", "agentVersion": "0.5.0", "interfaceVersion": 1,
@@ -446,16 +465,34 @@ class CaptureFrameTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("--windows-filenames", capture_commands[0])
         self.assertFalse((agent.WORKSPACE_PATH / ".researchtube-capture-tmp").exists())
 
-    async def test_workspace_image_returns_encoded_bytes_without_host_path(self) -> None:
+    async def test_workspace_image_metadata_never_returns_encoded_bytes(self) -> None:
         image = agent.WORKSPACE_PATH / "captures" / "frame.png"
         image.parent.mkdir(parents=True, exist_ok=True)
         image.write_bytes(b"image-bytes")
-        result = agent.workspace_image({"path": "captures/frame.png"})
-        self.assertEqual(result["path"], "captures/frame.png")
-        self.assertEqual(result["mimeType"], "image/png")
-        self.assertEqual(result["imageSizeBytes"], 11)
+        _item, result = agent.workspace_image_metadata({"path": "captures/frame.png"})
+        self.assertEqual(result, {"path": "captures/frame.png", "mimeType": "image/png", "imageSizeBytes": 11})
         self.assertNotIn(str(self.root), json.dumps(result))
-        self.assertEqual(result["inlineImageBase64"], "aW1hZ2UtYnl0ZXM=")
+        self.assertNotIn("base64", json.dumps(result).lower())
+
+    async def test_inspect_workspace_image_returns_verified_metadata_without_host_path(self) -> None:
+        image = agent.WORKSPACE_PATH / "crops" / "selection.png"
+        image.parent.mkdir(parents=True, exist_ok=True)
+        image.write_bytes(b"image-bytes")
+        streams = [{"codec_type": "video", "codec_name": "png", "width": 200, "height": 120}]
+        with patch.object(agent, "find_component", return_value=agent.ComponentDiscovery("local", "/private/ffprobe")), patch.object(agent, "ffprobe_streams_for_file", new=AsyncMock(return_value=streams)):
+            result = await agent.inspect_workspace_image({"path": "crops/selection.png"})
+        self.assertEqual(result, {"workspacePath": "crops/selection.png", "format": "png", "mimeType": "image/png", "width": 200, "height": 120, "imageSizeBytes": 11})
+        self.assertNotIn(str(self.root), json.dumps(result))
+
+    async def test_inspect_workspace_image_rejects_mismatched_content(self) -> None:
+        image = agent.WORKSPACE_PATH / "crops" / "selection.png"
+        image.parent.mkdir(parents=True, exist_ok=True)
+        image.write_bytes(b"not-png")
+        streams = [{"codec_type": "video", "codec_name": "mjpeg", "width": 200, "height": 120}]
+        with patch.object(agent, "find_component", return_value=agent.ComponentDiscovery("local", "/private/ffprobe")), patch.object(agent, "ffprobe_streams_for_file", new=AsyncMock(return_value=streams)):
+            with self.assertRaises(agent.AgentApiError) as raised:
+                await agent.inspect_workspace_image({"path": "crops/selection.png"})
+        self.assertEqual(raised.exception.code, "INVALID_IMAGE")
 
     async def test_capture_frame_rejects_invalid_transform_before_starting_processes(self) -> None:
         with self.assertRaises(agent.AgentApiError) as raised:

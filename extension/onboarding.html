@@ -67,6 +67,19 @@
       <p id="status">Checking status…</p>
     </section>
 
+    <section aria-labelledby="mcp-tools-heading">
+      <h2 id="mcp-tools-heading">MCP tool availability</h2>
+      <p class="field-help">Changes are saved immediately. To apply them in ChatGPT:</p>
+      <ol class="refresh-instructions">
+        <li>Open <a href="#" data-open="chatgpt">ChatGPT Plugins <svg class="external-link-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7M21 3l-9 9M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg></a>.</li>
+        <li>Find <strong>ResearchTube</strong> and open <strong>Manage</strong>.</li>
+        <li>Click <strong>Refresh</strong> to reload the MCP tool schema.</li>
+      </ol>
+      <label class="tool-default"><input id="new-tools-enabled" type="checkbox"> <span>Enable newly added tools by default</span></label>
+      <p id="mcp-tools-result" class="field-help" role="status"></p>
+      <div id="mcp-tools" class="mcp-tools" aria-live="polite">Loading MCP tools…</div>
+    </section>
+
   </main>
   <script src="onboarding.js"></script>
 </body>

@@ -15,12 +15,35 @@ const DEFAULTS = {
   youtubeSearchCooldownUntil: 0,
   youtubeSearchCooldownLevel: 0
 };
-const EXTENSION_VERSION = "1.31.0";
-const REQUIRED_AGENT_INTERFACE_VERSION = 28;
+const DEFAULT_MCP_TOOL_PREFERENCES = Object.freeze({ newToolsEnabledByDefault: true, enabledByName: {} });
+const MCP_TOOL_GROUPS = Object.freeze({
+  system: { title: "System", order: 10 },
+  workspace: { title: "Workspace", order: 20 },
+  media: { title: "Media and images", order: 30 },
+  youtube: { title: "YouTube", order: 40 },
+  downloads: { title: "Downloads", order: 50 },
+  clipboard: { title: "Clipboard", order: 60 },
+  library: { title: "Library and sharing", order: 70 },
+  custom: { title: "Custom", order: 90 }
+});
+// This is deliberately explicit metadata, rather than a rule inferred from a
+// tool name. New third-party tools without an entry land safely in Custom.
+const MCP_TOOL_SETTINGS = Object.freeze({
+  system_agent_status: { group: "system", alwaysEnabled: true }, system_check_debug_banner: { group: "system" },
+  workspace_list: { group: "workspace" }, workspace_stat: { group: "workspace" }, workspace_mkdir: { group: "workspace" }, workspace_move: { group: "workspace" }, workspace_delete: { group: "workspace" },
+  media_probe: { group: "media" }, media_capture_frame: { group: "media" }, media_capture_screen: { group: "media" }, media_image_crop: { group: "media" }, media_show_workspace_image: { group: "media" }, media_inspect_image: { group: "media" },
+  youtube_search: { group: "youtube" }, youtube_get_video: { group: "youtube" }, youtube_get_channel_videos: { group: "youtube" }, youtube_get_channel_playlists: { group: "youtube" }, youtube_get_playlist_videos: { group: "youtube" }, youtube_get_transcript: { group: "youtube" }, youtube_get_comments: { group: "youtube" }, youtube_get_comment_replies: { group: "youtube" },
+  youtube_get_download_formats: { group: "downloads" }, youtube_download: { group: "downloads" }, youtube_get_download_task: { group: "downloads" }, youtube_get_download_task_diagnostics: { group: "downloads" }, youtube_cancel_download_task: { group: "downloads" },
+  clipboard_status: { group: "clipboard" }, clipboard_get: { group: "clipboard" }, clipboard_set: { group: "clipboard" },
+  library_store_start: { group: "library" }, library_store_status: { group: "library" }, library_store_cancel: { group: "library" }, workspace_share_start: { group: "library" }, workspace_share_status: { group: "library" }, workspace_share_stop: { group: "library" }
+});
+const EXTENSION_VERSION = "1.37.0";
+const REQUIRED_AGENT_INTERFACE_VERSION = 34;
 // A UI resource URI is a cache key in MCP Apps. Increment it whenever the
 // rendered template changes so ChatGPT does not reuse a stale iframe bundle.
-const CAPTURE_FRAME_WIDGET_URI = "ui://researchtube/capture-frame-v29.html";
-const RESEARCHTUBE_MCP_INSTRUCTIONS = "ResearchTube exposes MCP tools that may be loaded or discovered lazily by the client. When the user mentions ResearchTube, invokes @ResearchTube, asks to repeat a ResearchTube operation, or requests a capability previously provided by ResearchTube, do not infer that ResearchTube is unavailable merely because its tools are not currently visible as a top-level tool namespace. Before reporting that a ResearchTube capability is unavailable, discover or inspect the available ResearchTube MCP tools and attempt to locate the requested capability. Only report ResearchTube as unavailable if tool discovery actually fails, the required tool cannot be found after discovery, or an actual ResearchTube tool invocation returns an availability, connection, compatibility, or transport error. Successful use earlier in the conversation is evidence that the tools may be discoverable again; rediscover them rather than assuming access has disappeared. capture_frame, capture_screen, and researchtube_image_crop never render a widget themselves: when showInChat is true, after the successful creation result immediately call researchtube_show_workspace_image with the returned workspace image path. When showInChat is false, do not call the display tool.";
+const CAPTURE_FRAME_WIDGET_URI = "ui://researchtube/capture-frame-v31.html";
+const RESEARCHTUBE_SERVER_DESCRIPTION = "ResearchTube provides YouTube research, local media and image operations, workspace management, screenshots, clipboard, and Library integration. Search this server when the user refers to ResearchTube, YouTube analysis, a previously created workspace file, captured frame, screenshot, crop, clipboard, or asks to continue a previous ResearchTube operation.";
+const RESEARCHTUBE_MCP_INSTRUCTIONS = "ResearchTube exposes MCP tools that may be loaded or discovered lazily by the client. When the user mentions ResearchTube, invokes @ResearchTube, asks to repeat a ResearchTube operation, or requests a capability previously provided by ResearchTube, do not infer that ResearchTube is unavailable merely because its tools are not currently visible as a top-level tool namespace. Before reporting that a ResearchTube capability is unavailable, discover or inspect the available ResearchTube MCP tools and attempt to locate the requested capability. Only report ResearchTube as unavailable if tool discovery actually fails, the required tool cannot be found after discovery, or an actual ResearchTube tool invocation returns an availability, connection, compatibility, or transport error. Successful use earlier in the conversation is evidence that the tools may be discoverable again; rediscover them rather than assuming access has disappeared. media_capture_frame, media_capture_screen, and media_image_crop never render a widget themselves: when showInChat is true, after the successful creation result immediately call media_show_workspace_image with the returned workspace image path. When showInChat is false, do not call the display tool.";
 const CAPTURE_FRAME_OFFSCREEN_DOCUMENT = "capture-frame-offscreen.html";
 const AGENT_HEALTH_TIMEOUT_MS = 5_000;
 const AGENT_TASK_TIMEOUT_MS = 10_000;
@@ -30,7 +53,7 @@ const SEARCH_MIN_START_INTERVAL_MS = 500;
 const SEARCH_CACHE_TTL_MS = 5 * 60_000;
 const SEARCH_COOLDOWN_STEPS_MS = [2_000, 5_000, 10_000, 20_000, 40_000, 60_000];
 // Deliberately isolated prototype: this is not an MCP tool and does not use
-// the Local Agent, capture_frame, drag-and-drop, or a ChatGPT widget API.
+// the Local Agent, media_capture_frame, drag-and-drop, or a ChatGPT widget API.
 const CDP_SERVICE_TAB_STORAGE_KEY = "researchtubeCdpServiceTabId";
 const CDP_PROTOCOL_VERSION = "1.3";
 const CDP_COMPOSER_SETTLE_MS = 750;
@@ -499,7 +522,7 @@ const captureFrameSchema = {
       properties: {
         format: captureFrameFormatSchema, mimeType: { type: "string", enum: ["image/png", "image/jpeg", "image/webp"] },
         width: { type: "integer", minimum: 1 }, height: { type: "integer", minimum: 1 }, imageSizeBytes: { type: "integer", minimum: 0 },
-        workspacePath: { type: "string", minLength: 1, description: "Logical workspace-relative path of the captured image. capture_frame always creates this file." }
+        workspacePath: { type: "string", minLength: 1, description: "Logical workspace-relative path of the captured image. media_capture_frame always creates this file." }
       },
       required: ["format", "mimeType", "width", "height", "imageSizeBytes", "workspacePath"]
     }
@@ -567,6 +590,17 @@ const showWorkspaceImageSchema = {
   },
   required: ["workspacePath", "mimeType", "imageSizeBytes", "showInChat"]
 };
+const mediaInspectImageSchema = {
+  type: "object", additionalProperties: false,
+  properties: {
+    workspacePath: { type: "string", minLength: 1, description: "Logical workspace-relative path of the inspected image." },
+    format: { type: "string", enum: ["png", "jpeg", "webp"] },
+    mimeType: { type: "string", enum: ["image/png", "image/jpeg", "image/webp"] },
+    width: { type: "integer", minimum: 1 }, height: { type: "integer", minimum: 1 },
+    imageSizeBytes: { type: "integer", minimum: 0 }
+  },
+  required: ["workspacePath", "format", "mimeType", "width", "height", "imageSizeBytes"]
+};
 const clipboardRevisionSchema = { type: "string", pattern: "^cb_[0-9]+$", description: "Opaque revision returned by clipboard_status or clipboard_get. Do not construct it." };
 const clipboardStatusSchema = {
   type: "object", additionalProperties: false,
@@ -579,7 +613,7 @@ const clipboardStatusSchema = {
   },
   required: ["type", "revision"]
 };
-const clipboardGetSchema = {
+const clipboardGetSuccessSchema = {
   type: "object", additionalProperties: false,
   properties: {
     type: { type: "string", enum: ["text", "image"] },
@@ -590,6 +624,20 @@ const clipboardGetSchema = {
   },
   required: ["type", "revision"],
   oneOf: [{ required: ["text"] }, { required: ["workspacePath", "width", "height", "sizeBytes"] }]
+};
+const clipboardGetSchema = {
+  oneOf: [
+    clipboardGetSuccessSchema,
+    {
+      type: "object", additionalProperties: false,
+      properties: {
+        ok: { type: "boolean", const: false },
+        status: { type: "string", const: "clipboard_changed" },
+        message: { type: "string" }
+      },
+      required: ["ok", "status", "message"]
+    }
+  ]
 };
 const clipboardSetSchema = {
   type: "object", additionalProperties: false,
@@ -653,7 +701,7 @@ const libraryStoreCancelSchema = { type: "object", additionalProperties: false, 
 function toolDefinitions() {
   return [
     {
-      name: "researchtube_agent_status",
+      name: "system_agent_status",
       title: "Get ResearchTube Local Agent status",
       description: "Checks availability, compatibility, platform information, and component status of the ResearchTube Local Agent. When ResearchTube availability is uncertain, prefer discovering ResearchTube tools and calling this tool rather than concluding that ResearchTube is unavailable from tool visibility alone. Returns the serving Chrome Extension implementation version and its required Extension ↔ Agent interface version, plus the Agent implementation version, interface version, public operating-system information, workspace health, and status, version, discovery source, and diagnostic message for yt-dlp, Deno, ffmpeg, and ffprobe. Deno is an optional local JavaScript runtime passed explicitly to yt-dlp when available. Physical host paths and host identity are intentionally never exposed through MCP. A missing or mismatched Agent interfaceVersion prevents the Extension from using Agent tools, but does not affect ordinary YouTube research tools.",
       annotations: localAgentReadAnnotations,
@@ -661,7 +709,7 @@ function toolDefinitions() {
       outputSchema: agentStatusSchema
     },
     {
-      name: "researchtube_check_debug_banner",
+      name: "system_check_debug_banner",
       title: "Check whether Chrome may show the ResearchTube debugger banner",
       description: "Check the current Chrome startup configuration for ResearchTube automatic file attachment. ResearchTube uses chrome.debugger to place a local file into ChatGPT, and Chrome may show a debugger banner during that operation. The required Chrome command-line switch to suppress that banner is --silent-debugger-extension-api. This tool checks every currently detected Chrome browser instance through the Local Agent and reports whether the banner is suppressed everywhere, enabled everywhere, mixed, or could not be determined. It also counts normal Chrome windows and tabs visible to the Extension. It never returns process IDs, command lines, profiles, local paths, or renderer-process data. Run it again whenever the current Chrome configuration may have changed.",
       annotations: localAgentReadAnnotations,
@@ -772,7 +820,7 @@ function toolDefinitions() {
       outputSchema: mediaProbeSchema
     },
     {
-      name: "capture_frame",
+      name: "media_capture_frame",
       title: "Extract one frame from workspace or YouTube",
       description: "Extract one frame either from an existing workspace media path, or directly from YouTube without downloading the full video. For direct YouTube capture, first call youtube_get_download_formats and pass its exact numeric video formatId as youtube.formatId; the browser-side youtubeFormats list is not accepted because it can differ from local yt-dlp. The Local Agent uses yt-dlp --download-sections with ffmpeg to download only a short window around timestampSeconds, deletes that temporary section, and saves only the image in the workspace. The image filename uses the title returned by that same yt-dlp operation plus [yt_<videoId>], timestamp, and unique capture ID. path and youtube are mutually exclusive. videoStreamIndex is only for path sources. showInChat defaults to false: set it true only when the user needs to see this particular frame inline. Inline display is presentation only; it does not make image pixels a reliable visual input to ChatGPT. No media URLs or host paths are exposed.",
       annotations: localWorkspaceWriteAnnotations,
@@ -788,8 +836,8 @@ function toolDefinitions() {
           crop: captureFrameCropSchema,
           resize: captureFrameResizeSchema,
           image: captureFrameImageInputSchema,
-          outputPath: { type: "string", minLength: 1, description: "Optional logical workspace-relative output image path. If omitted, capture_frame writes a uniquely named image to captures/. Use this only to choose a different workspace folder or filename; capture_frame never overwrites an existing file." },
-          showInChat: { type: "boolean", default: false, description: "Set true only when the user needs this resulting frame displayed inline. After a successful result, call researchtube_show_workspace_image for its returned image.workspacePath. Default false keeps the chat compact and must not create a display widget." }
+          outputPath: { type: "string", minLength: 1, description: "Optional logical workspace-relative output image path. If omitted, media_capture_frame writes a uniquely named image to captures/. Use this only to choose a different workspace folder or filename; media_capture_frame never overwrites an existing file." },
+          showInChat: { type: "boolean", default: false, description: "Set true only when the user needs this resulting frame displayed inline. After a successful result, call media_show_workspace_image for its returned image.workspacePath. Default false keeps the chat compact and must not create a display widget." }
         },
         required: ["timestampSeconds"],
         oneOf: [{ required: ["path"] }, { required: ["youtube"] }]
@@ -801,16 +849,16 @@ function toolDefinitions() {
       }
     },
     {
-      name: "capture_screen",
+      name: "media_capture_screen",
       title: "Capture the full desktop",
       description: "Capture the complete current virtual desktop into one workspace image. FFmpeg is the only pixel-capture implementation: gdigrab on Windows, x11grab on Linux/X11, and avfoundation on macOS. Small platform display queries provide only truthful virtual-desktop bounds and monitorCount; they do not capture pixels. Linux Wayland capture is intentionally not supported. On macOS, the operating system must grant screen-recording permission to the FFmpeg process. This can capture visible sensitive information; invoke it only when a current full-screen image is actually needed. The default is a lossless PNG. JPEG or WebP may be chosen when a smaller file is preferable. outputPath is optional: if omitted, the Agent creates a uniquely named image under screenshots/. Any supplied outputPath must be a logical workspace-relative image path with an extension that matches image.format. showInChat defaults to false: set it true only when the user needs to see this screenshot inline. Inline display is presentation only; it does not make image pixels a reliable visual input to ChatGPT. The tool never returns a host path and never overwrites an existing workspace file.",
       annotations: localWorkspaceWriteAnnotations,
       inputSchema: {
         type: "object", additionalProperties: false,
         properties: {
-          outputPath: { type: "string", minLength: 1, description: "Optional logical workspace-relative image path. If omitted, capture_screen creates a uniquely named file under screenshots/. It never overwrites an existing file." },
+          outputPath: { type: "string", minLength: 1, description: "Optional logical workspace-relative image path. If omitted, media_capture_screen creates a uniquely named file under screenshots/. It never overwrites an existing file." },
           image: screenCaptureImageInputSchema,
-          showInChat: { type: "boolean", default: false, description: "Set true only when the user needs this screenshot displayed inline. After a successful result, call researchtube_show_workspace_image for its workspacePath. Default false keeps the chat compact and must not create a display widget." }
+          showInChat: { type: "boolean", default: false, description: "Set true only when the user needs this screenshot displayed inline. After a successful result, call media_show_workspace_image for its workspacePath. Default false keeps the chat compact and must not create a display widget." }
         }
       },
       outputSchema: screenCaptureSchema,
@@ -820,7 +868,7 @@ function toolDefinitions() {
       }
     },
     {
-      name: "researchtube_image_crop",
+      name: "media_image_crop",
       title: "Crop a workspace image",
       description: "Create a new PNG, JPEG, or WebP image by cutting one rectangular pixel area from an existing PNG, JPEG, or WebP image in the ResearchTube workspace. crop.x and crop.y are zero-based coordinates in the stored source-image pixels; crop.width and crop.height must keep the entire rectangle inside the source image. The source is never changed. The default output is a PNG under crops/; image.format may choose JPEG or WebP, and outputPath may choose a different logical workspace path with a matching extension. showInChat defaults to false: set it true only when the user needs to see this cropped result inline. Inline display is presentation only; it does not make image pixels a reliable visual input to ChatGPT. The tool never overwrites an existing file and never returns a host path.",
       annotations: localWorkspaceWriteAnnotations,
@@ -831,7 +879,7 @@ function toolDefinitions() {
           crop: captureFrameCropSchema,
           image: captureFrameImageInputSchema,
           outputPath: { type: "string", minLength: 1, description: "Optional logical workspace-relative path for the new cropped image. If omitted, the Agent creates a unique PNG under crops/. It never overwrites an existing file." },
-          showInChat: { type: "boolean", default: false, description: "Set true only when the user needs this cropped image displayed inline. After a successful result, call researchtube_show_workspace_image for its returned image.workspacePath. Default false keeps the chat compact and must not create a display widget." }
+          showInChat: { type: "boolean", default: false, description: "Set true only when the user needs this cropped image displayed inline. After a successful result, call media_show_workspace_image for its returned image.workspacePath. Default false keeps the chat compact and must not create a display widget." }
         },
         required: ["path", "crop"]
       },
@@ -842,9 +890,9 @@ function toolDefinitions() {
       }
     },
     {
-      name: "researchtube_show_workspace_image",
+      name: "media_show_workspace_image",
       title: "Show a workspace image in chat",
-      description: "Display one existing PNG, JPEG, or WebP image from the ResearchTube workspace inline in ChatGPT. Use this to show a file created earlier, including a file not created by ResearchTube. This tool is for user presentation only; it does not make the image pixels a reliable visual input to ChatGPT. It reads the local image but never exposes a host filesystem path or image bytes to the model.",
+      description: "Show a previously created ResearchTube workspace image inline in ChatGPT. Use this after media_capture_frame, media_capture_screen, or media_image_crop when showInChat was requested, or whenever the user asks to show a prior capture, screenshot, crop, or workspace image. This tool is for user presentation only; it does not make the image pixels a reliable visual input to ChatGPT. It reads the local image but never exposes a host filesystem path or image bytes to the model.",
       annotations: localAgentReadAnnotations,
       inputSchema: { type: "object", additionalProperties: false, properties: { path: { type: "string", minLength: 1, description: "Logical workspace-relative path of an existing PNG, JPEG, or WebP image." } }, required: ["path"] },
       outputSchema: showWorkspaceImageSchema,
@@ -854,6 +902,14 @@ function toolDefinitions() {
         "openai/toolInvocation/invoking": "Loading workspace image…",
         "openai/toolInvocation/invoked": "Workspace image shown."
       }
+    },
+    {
+      name: "media_inspect_image",
+      title: "Inspect workspace image metadata",
+      description: "Independently validate one PNG, JPEG, or WebP image in the ResearchTube workspace and return only its logical workspace path, verified format, MIME type, pixel dimensions, and byte size. Use this when image dimensions or format must be checked; use workspace_stat only for generic filesystem metadata because it never reads file contents. This tool does not return image pixels, base64 data, a widget, or a host filesystem path.",
+      annotations: localAgentReadAnnotations,
+      inputSchema: { type: "object", additionalProperties: false, properties: { path: { type: "string", minLength: 1, description: "Logical workspace-relative path of an existing PNG, JPEG, or WebP image." } }, required: ["path"] },
+      outputSchema: mediaInspectImageSchema
     },
     {
       name: "clipboard_status",
@@ -866,7 +922,7 @@ function toolDefinitions() {
     {
       name: "clipboard_get",
       title: "Read text or image from clipboard",
-      description: "Explicitly read the current local clipboard. For text, returns Unicode text directly. For an image, creates one PNG under clipboard/ and returns only its logical workspace path and metadata. If revision is supplied, the tool rejects a changed clipboard instead of reading a different object. Never call this merely to poll clipboard state; use clipboard_status first. Clipboard contents may be sensitive.",
+      description: "Explicitly read the current local clipboard. For text, returns Unicode text directly. For an image, creates one PNG under clipboard/ and returns only its logical workspace path and metadata. If revision is supplied and the clipboard changed, returns the ordinary structured state result status: clipboard_changed without reading clipboard contents; refresh with clipboard_status before deciding whether to read again. Never call this merely to poll clipboard state; use clipboard_status first. Clipboard contents may be sensitive.",
       annotations: localWorkspaceWriteAnnotations,
       inputSchema: { type: "object", additionalProperties: false, properties: { revision: clipboardRevisionSchema } },
       outputSchema: clipboardGetSchema
@@ -880,11 +936,11 @@ function toolDefinitions() {
       outputSchema: clipboardSetSchema
     },
     {
-      name: "researchtube_get_capture_frame_image",
+      name: "media_load_workspace_image",
       title: "Load a captured workspace frame for the ResearchTube widget",
-      description: "Widget-only support tool. Reads the captured image at the supplied logical workspace path so the capture-frame widget can display or refresh it. It is not available to the model and exposes no host path.",
+      description: "Widget-only support tool. Validates the supplied logical workspace image path and returns its loopback Local Agent URL so the widget can display or refresh it without placing image bytes in MCP. It is not available to the model and exposes no host path.",
       annotations: localAgentReadAnnotations,
-      inputSchema: { type: "object", additionalProperties: false, properties: { path: { type: "string", minLength: 1, description: "Logical workspace-relative path returned by capture_frame.image.workspacePath." } }, required: ["path"] },
+      inputSchema: { type: "object", additionalProperties: false, properties: { path: { type: "string", minLength: 1, description: "Logical workspace-relative path returned by media_capture_frame.image.workspacePath." } }, required: ["path"] },
       outputSchema: {
         type: "object", additionalProperties: false,
         properties: { path: { type: "string" }, mimeType: { type: "string", enum: ["image/png", "image/jpeg", "image/webp"] }, imageSizeBytes: { type: "integer", minimum: 0 } },
@@ -897,7 +953,7 @@ function toolDefinitions() {
       }
     },
     {
-      name: "researchtube_copy_capture_frame_path",
+      name: "media_copy_workspace_path",
       title: "Copy a captured-frame workspace path",
       description: "Widget-only action. Copies one logical ResearchTube workspace image path to the local system clipboard through the installed Chrome Extension. It is not available to the model.",
       annotations: localWorkspaceWriteAnnotations,
@@ -1022,6 +1078,100 @@ function toolDefinitions() {
       outputSchema: { type: "object", additionalProperties: false, properties: { videoId: { type: "string" }, parentCommentId: { type: "string" }, parent: commentParentSchema, replies: { type: "array", items: replySchema }, returned: { type: "integer" }, requested: { type: "integer" }, totalReplies: nullableInteger }, required: ["videoId", "parentCommentId", "parent", "replies", "returned", "requested", "totalReplies"] }
     }
   ];
+}
+
+function isPrivateMcpTool(tool) {
+  return tool?._meta?.["openai/visibility"] === "private" || tool?._meta?.ui?.visibility?.includes("app");
+}
+
+function publicMcpTools() {
+  return toolDefinitions().filter((tool) => !isPrivateMcpTool(tool));
+}
+
+function toolSettingsMetadata(name) {
+  const metadata = MCP_TOOL_SETTINGS[name] || {};
+  const group = MCP_TOOL_GROUPS[metadata.group] ? metadata.group : "custom";
+  return { group, alwaysEnabled: metadata.alwaysEnabled === true };
+}
+
+function shortMcpToolDescription(tool) {
+  const firstSentence = String(tool.description || tool.title || "").match(/^.*?[.!?](?:\s|$)/)?.[0]?.trim() || tool.title || tool.name;
+  return firstSentence.length <= 180 ? firstSentence : `${firstSentence.slice(0, 177).trimEnd()}…`;
+}
+
+function normalizeMcpToolPreferences(value) {
+  const rawEnabled = value && typeof value === "object" && !Array.isArray(value) && value.enabledByName && typeof value.enabledByName === "object" && !Array.isArray(value.enabledByName)
+    ? value.enabledByName : {};
+  const enabledByName = {};
+  for (const [name, enabled] of Object.entries(rawEnabled)) if (typeof enabled === "boolean") enabledByName[name] = enabled;
+  return {
+    newToolsEnabledByDefault: value?.newToolsEnabledByDefault !== false,
+    enabledByName
+  };
+}
+
+async function mcpToolPreferences() {
+  const stored = await chrome.storage.local.get("mcpToolPreferences");
+  const preferences = normalizeMcpToolPreferences(stored.mcpToolPreferences ?? DEFAULT_MCP_TOOL_PREFERENCES);
+  let changed = false;
+  for (const tool of publicMcpTools()) {
+    const { alwaysEnabled } = toolSettingsMetadata(tool.name);
+    if (!alwaysEnabled && !Object.hasOwn(preferences.enabledByName, tool.name)) {
+      preferences.enabledByName[tool.name] = preferences.newToolsEnabledByDefault;
+      changed = true;
+    }
+  }
+  if (changed) await chrome.storage.local.set({ mcpToolPreferences: preferences });
+  return preferences;
+}
+
+async function mcpToolSettingsCatalog() {
+  const preferences = await mcpToolPreferences();
+  return publicMcpTools().map((tool) => {
+    const metadata = toolSettingsMetadata(tool.name);
+    return {
+      name: tool.name,
+      title: tool.title,
+      description: shortMcpToolDescription(tool),
+      group: metadata.group,
+      alwaysEnabled: metadata.alwaysEnabled,
+      enabled: metadata.alwaysEnabled || preferences.enabledByName[tool.name] === true
+    };
+  }).sort((left, right) => (MCP_TOOL_GROUPS[left.group].order - MCP_TOOL_GROUPS[right.group].order) || left.title.localeCompare(right.title));
+}
+
+async function enabledMcpToolDefinitions() {
+  const catalog = await mcpToolSettingsCatalog();
+  const enabledNames = new Set(catalog.filter((tool) => tool.enabled).map((tool) => tool.name));
+  return publicMcpTools().filter((tool) => enabledNames.has(tool.name));
+}
+
+async function isMcpToolEnabled(name) {
+  const tool = publicMcpTools().find((candidate) => candidate.name === name);
+  if (!tool) return true;
+  const metadata = toolSettingsMetadata(name);
+  if (metadata.alwaysEnabled) return true;
+  const preferences = await mcpToolPreferences();
+  return preferences.enabledByName[name] === true;
+}
+
+async function updateMcpToolEnabled(name, enabled) {
+  const tool = publicMcpTools().find((candidate) => candidate.name === name);
+  if (!tool) return { ok: false, errorCode: "MCP_TOOL_UNKNOWN", message: "Unknown public MCP tool." };
+  if (toolSettingsMetadata(name).alwaysEnabled) return { ok: false, errorCode: "MCP_TOOL_REQUIRED", message: "This MCP tool is always enabled." };
+  if (typeof enabled !== "boolean") return { ok: false, errorCode: "MCP_TOOL_INVALID", message: "enabled must be a boolean." };
+  const preferences = await mcpToolPreferences();
+  preferences.enabledByName[name] = enabled;
+  await chrome.storage.local.set({ mcpToolPreferences: preferences });
+  return { ok: true, name, enabled };
+}
+
+async function updateNewToolsEnabledByDefault(enabled) {
+  if (typeof enabled !== "boolean") return { ok: false, errorCode: "MCP_TOOL_INVALID", message: "newToolsEnabledByDefault must be a boolean." };
+  const preferences = await mcpToolPreferences();
+  preferences.newToolsEnabledByDefault = enabled;
+  await chrome.storage.local.set({ mcpToolPreferences: preferences });
+  return { ok: true, newToolsEnabledByDefault: enabled };
 }
 
 function sleep(milliseconds) { return new Promise((resolve) => setTimeout(resolve, milliseconds)); }
@@ -1527,6 +1677,18 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
   if (message?.type === "save-agent-port") {
     saveAgentPort(message.payload).then(sendResponse).catch((error) => sendResponse({ ok: false, error: safeErrorMessage(error) }));
+    return true;
+  }
+  if (message?.type === "get-mcp-tool-settings") {
+    mcpToolPreferences().then(async (preferences) => sendResponse({ ok: true, preferences, tools: await mcpToolSettingsCatalog(), groups: MCP_TOOL_GROUPS })).catch((error) => sendResponse({ ok: false, error: safeErrorMessage(error) }));
+    return true;
+  }
+  if (message?.type === "set-mcp-tool-enabled") {
+    updateMcpToolEnabled(message.payload?.name, message.payload?.enabled).then(sendResponse).catch((error) => sendResponse({ ok: false, error: safeErrorMessage(error) }));
+    return true;
+  }
+  if (message?.type === "set-mcp-new-tools-default") {
+    updateNewToolsEnabledByDefault(message.payload?.enabled).then(sendResponse).catch((error) => sendResponse({ ok: false, error: safeErrorMessage(error) }));
     return true;
   }
   if (message?.type === "test-agent-connection") {
@@ -2073,6 +2235,25 @@ async function workspaceStat(path) {
   return normalizeWorkspaceStat(document);
 }
 
+function normalizeMediaInspectImage(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)
+    || !new Set(["png", "jpeg", "webp"]).has(value.format)
+    || !new Set(["image/png", "image/jpeg", "image/webp"]).has(value.mimeType)
+    || !Number.isInteger(value.width) || value.width < 1
+    || !Number.isInteger(value.height) || value.height < 1
+    || !Number.isInteger(value.imageSizeBytes) || value.imageSizeBytes < 0) {
+    throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid image metadata.");
+  }
+  const expectedMimeType = { png: "image/png", jpeg: "image/jpeg", webp: "image/webp" }[value.format];
+  if (value.mimeType !== expectedMimeType) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned inconsistent image metadata.");
+  return { workspacePath: normalizeWorkspacePath(value.workspacePath, "workspacePath"), format: value.format, mimeType: value.mimeType, width: value.width, height: value.height, imageSizeBytes: value.imageSizeBytes };
+}
+
+async function mediaInspectImage(path) {
+  const document = await agentJsonRequest("/media/inspect-image", { method: "POST", body: { path: normalizeWorkspacePath(path, "path") } });
+  return normalizeMediaInspectImage(document);
+}
+
 async function workspaceMkdir(path) {
   const document = await agentJsonRequest("/workspace/mkdir", { method: "POST", body: { path: normalizeWorkspacePath(path, "path") } });
   if (!document || typeof document !== "object" || document.type !== "directory" || typeof document.created !== "boolean") {
@@ -2214,8 +2395,8 @@ function captureFrameObject(value, field, allowed) {
 }
 
 function normalizeCaptureFrameInput(argumentsValue = {}) {
-  const args = captureFrameObject(argumentsValue, "capture_frame", new Set(["path", "youtube", "timestampSeconds", "videoStreamIndex", "seekMode", "applyDisplayRotation", "crop", "resize", "image", "outputPath", "showInChat"]));
-  if ((args.path === undefined) === (args.youtube === undefined)) throw localAgentError("CAPTURE_FRAME_INVALID", "capture_frame requires exactly one source: path or youtube.");
+  const args = captureFrameObject(argumentsValue, "media_capture_frame", new Set(["path", "youtube", "timestampSeconds", "videoStreamIndex", "seekMode", "applyDisplayRotation", "crop", "resize", "image", "outputPath", "showInChat"]));
+  if ((args.path === undefined) === (args.youtube === undefined)) throw localAgentError("CAPTURE_FRAME_INVALID", "media_capture_frame requires exactly one source: path or youtube.");
   const path = args.path === undefined ? undefined : normalizeWorkspacePath(args.path, "path");
   let youtube;
   if (args.youtube !== undefined) {
@@ -2330,7 +2511,7 @@ async function captureFrame(argumentsValue) {
 }
 
 function normalizeScreenCaptureInput(argumentsValue = {}) {
-  const args = captureFrameObject(argumentsValue, "capture_screen", new Set(["outputPath", "image", "showInChat"]));
+  const args = captureFrameObject(argumentsValue, "media_capture_screen", new Set(["outputPath", "image", "showInChat"]));
   const imageValue = captureFrameObject(args.image, "image", new Set(["format", "quality"]));
   const format = imageValue.format === undefined ? "png" : imageValue.format;
   if (!new Set(["png", "jpeg", "webp"]).has(format)) throw localAgentError("SCREEN_CAPTURE_INVALID", "image.format must be png, jpeg, or webp.");
@@ -2369,7 +2550,7 @@ async function captureScreen(argumentsValue) {
 }
 
 function normalizeImageCropInput(argumentsValue = {}) {
-  const args = captureFrameObject(argumentsValue, "researchtube_image_crop", new Set(["path", "crop", "image", "outputPath", "showInChat"]));
+  const args = captureFrameObject(argumentsValue, "media_image_crop", new Set(["path", "crop", "image", "outputPath", "showInChat"]));
   const path = normalizeWorkspacePath(args.path, "path");
   const cropValue = captureFrameObject(args.crop, "crop", new Set(["x", "y", "width", "height"]));
   if (!["x", "y", "width", "height"].every((key) => Object.hasOwn(cropValue, key))) throw localAgentError("IMAGE_CROP_INVALID", "crop requires x, y, width, and height.");
@@ -2417,23 +2598,31 @@ async function imageCrop(argumentsValue) {
   return normalizeImageCropResult(await agentJsonRequest("/media/image-crop", { method: "POST", body: agentInput, timeoutMs: AGENT_CAPTURE_FRAME_TIMEOUT_MS }), input);
 }
 
-async function getCaptureFrameImage(path) {
+async function getWorkspaceImageMetadata(path) {
   const logicalPath = normalizeWorkspacePath(path, "path");
-  const document = await agentJsonRequest("/media/workspace-image", { method: "POST", body: { path: logicalPath }, timeoutMs: AGENT_CAPTURE_FRAME_TIMEOUT_MS });
+  const document = await agentJsonRequest("/media/workspace-image-info", { method: "POST", body: { path: logicalPath }, timeoutMs: AGENT_CAPTURE_FRAME_TIMEOUT_MS });
   if (!document || typeof document !== "object" || document.path !== logicalPath
     || !new Set(["image/png", "image/jpeg", "image/webp"]).has(document.mimeType)
-    || !Number.isInteger(document.imageSizeBytes) || document.imageSizeBytes < 0
-    || typeof document.inlineImageBase64 !== "string" || !document.inlineImageBase64) {
-    throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid workspace image.");
+    || !Number.isInteger(document.imageSizeBytes) || document.imageSizeBytes < 0) {
+    throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid workspace image metadata.");
   }
-  return { metadata: { path: logicalPath, mimeType: document.mimeType, imageSizeBytes: document.imageSizeBytes }, inlineImageBase64: document.inlineImageBase64 };
+  return { path: logicalPath, mimeType: document.mimeType, imageSizeBytes: document.imageSizeBytes };
+}
+
+async function localAgentWorkspaceImageUrl(path) {
+  const logicalPath = normalizeWorkspacePath(path, "path");
+  const config = await getConfig();
+  const port = normalizeAgentPort(config.agentPort);
+  await requireCompatibleAgent(port);
+  const encodedWorkspacePath = logicalPath.split("/").map((segment) => encodeURIComponent(segment)).join("/");
+  return `http://127.0.0.1:${port}/${encodedWorkspacePath}`;
 }
 
 async function showWorkspaceImage(path) {
-  const result = await getCaptureFrameImage(path);
+  const metadata = await getWorkspaceImageMetadata(path);
   return {
-    metadata: { workspacePath: result.metadata.path, mimeType: result.metadata.mimeType, imageSizeBytes: result.metadata.imageSizeBytes, showInChat: true },
-    inlineImageBase64: result.inlineImageBase64
+    metadata: { workspacePath: metadata.path, mimeType: metadata.mimeType, imageSizeBytes: metadata.imageSizeBytes, showInChat: true },
+    localAgentImageUrl: await localAgentWorkspaceImageUrl(metadata.path)
   };
 }
 
@@ -2489,7 +2678,14 @@ function normalizeClipboardGetResult(document) {
 }
 
 async function clipboardGet(argumentsValue) {
-  return normalizeClipboardGetResult(await agentJsonRequest("/clipboard/get", { method: "POST", body: normalizeClipboardGetInput(argumentsValue), timeoutMs: AGENT_CAPTURE_FRAME_TIMEOUT_MS }));
+  try {
+    return normalizeClipboardGetResult(await agentJsonRequest("/clipboard/get", { method: "POST", body: normalizeClipboardGetInput(argumentsValue), timeoutMs: AGENT_CAPTURE_FRAME_TIMEOUT_MS }));
+  } catch (error) {
+    if (error?.code === "CLIPBOARD_CHANGED") {
+      return { ok: false, status: "clipboard_changed", message: "The clipboard changed after the supplied revision." };
+    }
+    throw error;
+  }
 }
 
 function normalizeClipboardSetInput(argumentsValue = {}) {
@@ -2789,13 +2985,15 @@ async function readMcpResource(id, uri) {
   }
   try {
     const text = await readCaptureFrameWidgetHtml();
+    const config = await getConfig();
+    const loopbackOrigin = `http://127.0.0.1:${normalizeAgentPort(config.agentPort)}`;
     return {
       jsonrpc: "2.0", id,
       result: {
         contents: [{
           ...captureFrameWidgetResource(), text,
           _meta: {
-            ui: { prefersBorder: true, csp: { connectDomains: [], resourceDomains: [] } },
+            ui: { prefersBorder: true, csp: { connectDomains: [loopbackOrigin], resourceDomains: [loopbackOrigin] } },
             "openai/widgetDescription": "Displays a requested workspace image with context-specific provenance."
           }
         }]
@@ -2814,19 +3012,22 @@ async function handleMcpRequest(request) {
         protocolVersion: "2025-06-18",
         capabilities: { tools: { listChanged: false }, resources: { subscribe: false, listChanged: false } },
         instructions: RESEARCHTUBE_MCP_INSTRUCTIONS,
-        serverInfo: { name: "researchtube", version: EXTENSION_VERSION }
+        serverInfo: { name: "researchtube", version: EXTENSION_VERSION, title: "ResearchTube", description: RESEARCHTUBE_SERVER_DESCRIPTION }
       }
     };
   }
   if (request?.method === "notifications/initialized") return null;
   if (request?.method === "tools/list") {
-    return { jsonrpc: "2.0", id: request.id, result: { tools: toolDefinitions() } };
+    return { jsonrpc: "2.0", id: request.id, result: { tools: await enabledMcpToolDefinitions() } };
   }
   if (request?.method === "resources/list") {
     return { jsonrpc: "2.0", id: request.id, result: { resources: [captureFrameWidgetResource()] } };
   }
   if (request?.method === "resources/read") {
     return readMcpResource(request.id, request.params?.uri);
+  }
+  if (request?.method === "tools/call" && typeof request.params?.name === "string" && !(await isMcpToolEnabled(request.params.name))) {
+    return disabledMcpToolError(request.id, request.params.name);
   }
   if (request?.method === "tools/call" && request.params?.name === "youtube_download") {
     const input = request.params.arguments ?? {};
@@ -2853,11 +3054,11 @@ async function handleMcpRequest(request) {
     if (!taskId) return { jsonrpc: "2.0", id: request.id, error: { code: -32602, message: "taskId is required" } };
     return executeToolCall(request.id, "youtube_cancel_download_task", { taskId }, () => cancelYouTubeDownloadTask(taskId));
   }
-  if (request?.method === "tools/call" && request.params?.name === "researchtube_agent_status") {
-    return executeToolCall(request.id, "researchtube_agent_status", {}, () => getAgentStatus());
+  if (request?.method === "tools/call" && request.params?.name === "system_agent_status") {
+    return executeToolCall(request.id, "system_agent_status", {}, () => getAgentStatus());
   }
-  if (request?.method === "tools/call" && request.params?.name === "researchtube_check_debug_banner") {
-    return executeToolCall(request.id, "researchtube_check_debug_banner", {}, getDebugBannerStatus);
+  if (request?.method === "tools/call" && request.params?.name === "system_check_debug_banner") {
+    return executeToolCall(request.id, "system_check_debug_banner", {}, getDebugBannerStatus);
   }
   if (request?.method === "tools/call" && request.params?.name === "library_store_start") {
     const files = request.params.arguments?.files;
@@ -2913,20 +3114,24 @@ async function handleMcpRequest(request) {
     const sections = request.params.arguments?.sections;
     return executeToolCall(request.id, "media_probe", { path, sections }, () => mediaProbe(path, sections));
   }
-  if (request?.method === "tools/call" && request.params?.name === "capture_frame") {
+  if (request?.method === "tools/call" && request.params?.name === "media_capture_frame") {
     const args = request.params.arguments ?? {};
     return executeCaptureFrameToolCall(request.id, args);
   }
-  if (request?.method === "tools/call" && request.params?.name === "capture_screen") {
+  if (request?.method === "tools/call" && request.params?.name === "media_capture_screen") {
     const args = request.params.arguments ?? {};
-    return executeToolCall(request.id, "capture_screen", args, () => captureScreen(args));
+    return executeToolCall(request.id, "media_capture_screen", args, () => captureScreen(args));
   }
-  if (request?.method === "tools/call" && request.params?.name === "researchtube_image_crop") {
+  if (request?.method === "tools/call" && request.params?.name === "media_image_crop") {
     const args = request.params.arguments ?? {};
-    return executeToolCall(request.id, "researchtube_image_crop", args, () => imageCrop(args));
+    return executeToolCall(request.id, "media_image_crop", args, () => imageCrop(args));
   }
-  if (request?.method === "tools/call" && request.params?.name === "researchtube_show_workspace_image") {
+  if (request?.method === "tools/call" && request.params?.name === "media_show_workspace_image") {
     return executeShowWorkspaceImageToolCall(request.id, request.params.arguments?.path);
+  }
+  if (request?.method === "tools/call" && request.params?.name === "media_inspect_image") {
+    const path = request.params.arguments?.path;
+    return executeToolCall(request.id, "media_inspect_image", { path }, () => mediaInspectImage(path));
   }
   if (request?.method === "tools/call" && request.params?.name === "clipboard_status") {
     return executeToolCall(request.id, "clipboard_status", request.params.arguments ?? {}, () => clipboardStatus(request.params.arguments ?? {}));
@@ -2937,12 +3142,12 @@ async function handleMcpRequest(request) {
   if (request?.method === "tools/call" && request.params?.name === "clipboard_set") {
     return executeToolCall(request.id, "clipboard_set", request.params.arguments ?? {}, () => clipboardSet(request.params.arguments ?? {}));
   }
-  if (request?.method === "tools/call" && request.params?.name === "researchtube_get_capture_frame_image") {
+  if (request?.method === "tools/call" && request.params?.name === "media_load_workspace_image") {
     const path = request.params.arguments?.path;
     return executeCaptureFrameImageToolCall(request.id, path);
   }
-  if (request?.method === "tools/call" && request.params?.name === "researchtube_copy_capture_frame_path") {
-    return executeCaptureFrameWidgetActionToolCall(request.id, "researchtube_copy_capture_frame_path", request.params.arguments?.path, copyCaptureFramePath);
+  if (request?.method === "tools/call" && request.params?.name === "media_copy_workspace_path") {
+    return executeCaptureFrameWidgetActionToolCall(request.id, "media_copy_workspace_path", request.params.arguments?.path, copyCaptureFramePath);
   }
   if (request?.method === "tools/call" && request.params?.name === "youtube_search") {
     const query = String(request.params.arguments?.query ?? "").trim();
@@ -3013,16 +3218,16 @@ async function executeCaptureFrameToolCall(id, argumentsValue) {
   let input = null;
   try {
     input = normalizeCaptureFrameInput(argumentsValue);
-    void recordCommandDiagnostic("started", { tool: "capture_frame", input: summarizeCommandInput("capture_frame", input) });
+    void recordCommandDiagnostic("started", { tool: "media_capture_frame", input: summarizeCommandInput("media_capture_frame", input) });
     await setActionBadge("working");
     const result = await captureFrame(input);
     await refreshActionBadge();
-    void recordCommandDiagnostic("succeeded", { tool: "capture_frame", elapsed_ms: Date.now() - startedAt, output: summarizeCommandOutput(result.metadata) });
+    void recordCommandDiagnostic("succeeded", { tool: "media_capture_frame", elapsed_ms: Date.now() - startedAt, output: summarizeCommandOutput(result.metadata) });
     return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(result.metadata) }], structuredContent: result.metadata, isError: false } };
   } catch (error) {
     await refreshActionBadge();
     void recordCommandDiagnostic("failed", {
-      tool: "capture_frame", elapsed_ms: Date.now() - startedAt, error_code: error?.code || null, error: searchDiagnosticMessage(error)
+      tool: "media_capture_frame", elapsed_ms: Date.now() - startedAt, error_code: error?.code || null, error: searchDiagnosticMessage(error)
     });
     return toolError(id, error);
   }
@@ -3031,19 +3236,19 @@ async function executeCaptureFrameToolCall(id, argumentsValue) {
 async function executeCaptureFrameImageToolCall(id, path) {
   const startedAt = Date.now();
   try {
-    const result = await getCaptureFrameImage(path);
+    const metadata = await getWorkspaceImageMetadata(path);
+    const result = { metadata, localAgentImageUrl: await localAgentWorkspaceImageUrl(metadata.path) };
     const mcpResult = {
       content: [{ type: "text", text: JSON.stringify(result.metadata) }],
       structuredContent: result.metadata,
-      // The base64 image is intentionally widget-only. It never appears in
-      // model-visible structured content or in the service-worker console.
-      _meta: { researchtube: { captureFrameImageBase64: result.inlineImageBase64 } },
+      // Image delivery is widget-only; image bytes never enter the MCP result.
+      _meta: { researchtube: { localAgentImageUrl: result.localAgentImageUrl } },
       isError: false
     };
-    void recordCommandDiagnostic("succeeded", { tool: "researchtube_get_capture_frame_image", elapsed_ms: Date.now() - startedAt, output: { path: result.metadata.path, imageSizeBytes: result.metadata.imageSizeBytes } });
+    void recordCommandDiagnostic("succeeded", { tool: "media_load_workspace_image", elapsed_ms: Date.now() - startedAt, output: { path: result.metadata.path, imageSizeBytes: result.metadata.imageSizeBytes } });
     return { jsonrpc: "2.0", id, result: mcpResult };
   } catch (error) {
-    void recordCommandDiagnostic("failed", { tool: "researchtube_get_capture_frame_image", elapsed_ms: Date.now() - startedAt, error_code: error?.code || null, error: searchDiagnosticMessage(error) });
+    void recordCommandDiagnostic("failed", { tool: "media_load_workspace_image", elapsed_ms: Date.now() - startedAt, error_code: error?.code || null, error: searchDiagnosticMessage(error) });
     return toolError(id, error);
   }
 }
@@ -3052,10 +3257,10 @@ async function executeShowWorkspaceImageToolCall(id, path) {
   const startedAt = Date.now();
   try {
     const result = await showWorkspaceImage(path);
-    void recordCommandDiagnostic("succeeded", { tool: "researchtube_show_workspace_image", elapsed_ms: Date.now() - startedAt, output: result.metadata });
-    return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(result.metadata) }], structuredContent: result.metadata, _meta: { researchtube: { captureFrameImageBase64: result.inlineImageBase64 } }, isError: false } };
+    void recordCommandDiagnostic("succeeded", { tool: "media_show_workspace_image", elapsed_ms: Date.now() - startedAt, output: result.metadata });
+    return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(result.metadata) }], structuredContent: result.metadata, _meta: { researchtube: { localAgentImageUrl: result.localAgentImageUrl } }, isError: false } };
   } catch (error) {
-    void recordCommandDiagnostic("failed", { tool: "researchtube_show_workspace_image", elapsed_ms: Date.now() - startedAt, error_code: error?.code || null, error: searchDiagnosticMessage(error) });
+    void recordCommandDiagnostic("failed", { tool: "media_show_workspace_image", elapsed_ms: Date.now() - startedAt, error_code: error?.code || null, error: searchDiagnosticMessage(error) });
     return toolError(id, error);
   }
 }
@@ -3116,9 +3321,9 @@ async function executeToolCall(id, tool, input, work, operation = null) {
 }
 
 function summarizeCommandInput(tool, input) {
-  if (tool === "capture_frame") return { path: typeof input.path === "string" ? input.path : null, youtube: input.youtube && typeof input.youtube === "object" ? { videoId: input.youtube.videoId ?? null, formatId: input.youtube.formatId ?? null } : null, timestampSeconds: input.timestampSeconds ?? null, videoStreamIndex: input.videoStreamIndex ?? null, seekMode: input.seekMode ?? null, outputPath: typeof input.outputPath === "string" ? input.outputPath : null };
-  if (tool === "capture_screen") return { outputPath: typeof input.outputPath === "string" ? input.outputPath : null, format: input.image?.format ?? null };
-  if (tool === "researchtube_image_crop") return { path: typeof input.path === "string" ? input.path : null, crop: input.crop ?? null, outputPath: typeof input.outputPath === "string" ? input.outputPath : null, format: input.image?.format ?? null };
+  if (tool === "media_capture_frame") return { path: typeof input.path === "string" ? input.path : null, youtube: input.youtube && typeof input.youtube === "object" ? { videoId: input.youtube.videoId ?? null, formatId: input.youtube.formatId ?? null } : null, timestampSeconds: input.timestampSeconds ?? null, videoStreamIndex: input.videoStreamIndex ?? null, seekMode: input.seekMode ?? null, outputPath: typeof input.outputPath === "string" ? input.outputPath : null };
+  if (tool === "media_capture_screen") return { outputPath: typeof input.outputPath === "string" ? input.outputPath : null, format: input.image?.format ?? null };
+  if (tool === "media_image_crop") return { path: typeof input.path === "string" ? input.path : null, crop: input.crop ?? null, outputPath: typeof input.outputPath === "string" ? input.outputPath : null, format: input.image?.format ?? null };
   if (tool === "clipboard_status") return { sinceRevisionProvided: typeof input.sinceRevision === "string" };
   if (tool === "clipboard_get") return { revisionProvided: typeof input.revision === "string" };
   if (tool === "clipboard_set") return { type: typeof input.text === "string" ? "text" : typeof input.workspacePath === "string" ? "image" : "invalid", textBytes: typeof input.text === "string" ? new TextEncoder().encode(input.text).byteLength : null, workspacePath: typeof input.workspacePath === "string" ? input.workspacePath : null };
@@ -3148,6 +3353,10 @@ function toolError(id, error) {
   const text = typeof code === "string" ? `[${code}] ${message}` : message;
   const structuredError = { error: { code: typeof code === "string" ? code : "TOOL_ERROR", message, ...(typeof error?.detail === "string" ? { detail: error.detail } : {}) } };
   return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text }], structuredContent: structuredError, isError: true } };
+}
+
+function disabledMcpToolError(id, name) {
+  return toolError(id, Object.assign(new Error(`ResearchTube tool ${name} is disabled in Extension Settings. Enable it, then open ChatGPT Plugins, find ResearchTube, choose Manage, and click Refresh to reload the MCP tool schema.`), { code: "TOOL_DISABLED" }));
 }
 
 function boundedInt(value, fallback, min, max) {

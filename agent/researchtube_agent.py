@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import base64
 import ctypes
 import json
 import math
@@ -27,10 +26,10 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
-AGENT_VERSION = "0.30.0"
-INTERFACE_VERSION = 28
+AGENT_VERSION = "0.36.0"
+INTERFACE_VERSION = 34
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
 TASK_POLL_INTERVAL_MS = 1_000
@@ -1796,13 +1795,8 @@ async def image_crop(payload: Any) -> dict[str, Any]:
         raise
 
 
-def workspace_image(payload: Any) -> dict[str, Any]:
-    """Read one workspace image for the capture-frame MCP App only.
-
-    The Agent remains the sole filesystem owner.  This endpoint deliberately
-    returns a logical path plus encoded bytes, never a host path; the
-    Extension places the bytes in widget-only MCP metadata.
-    """
+def workspace_image_metadata(payload: Any) -> tuple[ResolvedWorkspacePath, dict[str, Any]]:
+    """Resolve compact metadata for one workspace image without reading pixels."""
     if not isinstance(payload, dict) or set(payload) != {"path"}:
         raise AgentApiError("WORKSPACE_IMAGE_INVALID", "workspace image retrieval requires only path.")
     item = WorkspacePathResolver().resolve_existing(payload.get("path"), field_name="path", expected_type="file")
@@ -1810,15 +1804,51 @@ def workspace_image(payload: Any) -> dict[str, Any]:
     if mime_type is None:
         raise AgentApiError("WORKSPACE_IMAGE_INVALID", "path must identify a PNG, JPEG, or WebP image in the workspace.")
     try:
-        image_bytes = item.physical_path.read_bytes()
+        size = item.physical_path.stat().st_size
     except OSError as error:
-        raise AgentApiError("WORKSPACE_IMAGE_UNAVAILABLE", "The workspace image could not be read.") from error
-    return {
-        "path": item.logical_path,
-        "mimeType": mime_type,
-        "imageSizeBytes": len(image_bytes),
-        "inlineImageBase64": base64.b64encode(image_bytes).decode("ascii"),
+        raise AgentApiError("WORKSPACE_IMAGE_UNAVAILABLE", "The workspace image could not be inspected.") from error
+    return item, {"path": item.logical_path, "mimeType": mime_type, "imageSizeBytes": size}
+
+
+def widget_image_file(logical_path: str) -> tuple[Path, str]:
+    """Resolve one direct Workspace-relative GET path for the image widget."""
+    if not isinstance(logical_path, str) or not logical_path:
+        raise AgentApiError("WORKSPACE_IMAGE_INVALID", "workspace image path is required.")
+    item = WorkspacePathResolver().resolve_existing(logical_path, field_name="path", expected_type="file")
+    mime_type = IMAGE_MIME_TYPES.get(item.physical_path.suffix.lower())
+    if mime_type is None:
+        raise AgentApiError("WORKSPACE_IMAGE_INVALID", "path must identify a PNG, JPEG, or WebP image in the workspace.")
+    return item.physical_path, mime_type
+
+
+async def inspect_workspace_image(payload: Any) -> dict[str, Any]:
+    """Return verified, bounded metadata for one workspace image only."""
+    if not isinstance(payload, dict) or set(payload) != {"path"}:
+        raise AgentApiError("IMAGE_INSPECT_INVALID", "image inspection requires only path.")
+    item = WorkspacePathResolver().resolve_existing(payload.get("path"), field_name="path", expected_type="file")
+    image_specifications = {
+        ".png": ("png", "image/png", "png"),
+        ".jpg": ("jpeg", "image/jpeg", "mjpeg"),
+        ".jpeg": ("jpeg", "image/jpeg", "mjpeg"),
+        ".webp": ("webp", "image/webp", "webp"),
     }
+    specification = image_specifications.get(item.physical_path.suffix.lower())
+    if specification is None:
+        raise AgentApiError("INVALID_IMAGE", "path must identify a PNG, JPEG, or WebP image in the workspace.")
+    ffprobe = find_component("ffprobe", COMPONENTS["ffprobe"][0])
+    if not ffprobe.executable:
+        raise AgentApiError("FFMPEG_NOT_AVAILABLE", "ffprobe is required to inspect workspace image metadata.")
+    streams = await ffprobe_streams_for_file(item.physical_path, ffprobe.executable)
+    stream = next((candidate for candidate in streams if candidate.get("codec_type") == "video"), None)
+    width, height = (stream.get("width"), stream.get("height")) if isinstance(stream, dict) else (None, None)
+    if not isinstance(stream, dict) or stream.get("codec_name") != specification[2] or not isinstance(width, int) or width < 1 or not isinstance(height, int) or height < 1:
+        raise AgentApiError("INVALID_IMAGE", "The workspace file is not a valid image matching its PNG, JPEG, or WebP extension.")
+    try:
+        image_size = item.physical_path.stat().st_size
+    except OSError as error:
+        raise AgentApiError("WORKSPACE_IMAGE_UNAVAILABLE", "The workspace image could not be inspected.") from error
+    log(f"inspect_workspace_image path={item.logical_path} -> ok")
+    return {"workspacePath": item.logical_path, "format": specification[0], "mimeType": specification[1], "width": width, "height": height, "imageSizeBytes": image_size}
 
 
 class WindowsClipboard:
@@ -2611,7 +2641,7 @@ def http_response(status: str, body: dict[str, Any] | None = None) -> bytes:
     headers = [
         f"HTTP/1.1 {status}", "Content-Type: application/json; charset=utf-8", f"Content-Length: {len(encoded)}",
         "Access-Control-Allow-Origin: *", "Access-Control-Allow-Methods: GET, POST, OPTIONS",
-        "Access-Control-Allow-Headers: Content-Type", "Connection: close", "", "",
+        "Access-Control-Allow-Headers: Content-Type", "Access-Control-Allow-Private-Network: true", "Connection: close", "", "",
     ]
     return "\r\n".join(headers).encode("ascii") + encoded
 
@@ -2619,7 +2649,7 @@ def http_response(status: str, body: dict[str, Any] | None = None) -> bytes:
 def image_response(status: str, image_bytes: bytes = b"", mime_type: str = "text/plain; charset=utf-8") -> bytes:
     headers = [
         f"HTTP/1.1 {status}", f"Content-Type: {mime_type}", f"Content-Length: {len(image_bytes)}",
-        "X-Content-Type-Options: nosniff", "Cache-Control: no-store", "Connection: close", "", "",
+        "X-Content-Type-Options: nosniff", "Cache-Control: no-store", "Access-Control-Allow-Origin: *", "Access-Control-Allow-Private-Network: true", "Connection: close", "", "",
     ]
     return "\r\n".join(headers).encode("ascii") + image_bytes
 
@@ -2632,7 +2662,16 @@ def public_file_response_headers(status: str, size: int, mime_type: str) -> byte
     return "\r\n".join(headers).encode("ascii")
 
 
-async def read_request(reader: asyncio.StreamReader) -> tuple[str, str, bytes]:
+def widget_image_response_headers(status: str, size: int, mime_type: str) -> bytes:
+    headers = [
+        f"HTTP/1.1 {status}", f"Content-Type: {mime_type}", f"Content-Length: {size}",
+        "X-Content-Type-Options: nosniff", "Cache-Control: no-store", "Access-Control-Allow-Origin: *",
+        "Access-Control-Allow-Methods: GET, OPTIONS", "Access-Control-Allow-Private-Network: true", "Connection: close", "", "",
+    ]
+    return "\r\n".join(headers).encode("ascii")
+
+
+async def read_request(reader: asyncio.StreamReader) -> tuple[str, str, dict[str, list[str]], bytes]:
     request_line = await asyncio.wait_for(reader.readline(), timeout=5)
     parts = request_line.decode("latin-1").strip().split()
     if len(parts) < 2:
@@ -2654,7 +2693,8 @@ async def read_request(reader: asyncio.StreamReader) -> tuple[str, str, bytes]:
     if content_length < 0 or content_length > MAX_REQUEST_BODY_BYTES:
         raise AgentApiError("REQUEST_TOO_LARGE", "Request body is too large.")
     body = await asyncio.wait_for(reader.readexactly(content_length), timeout=5) if content_length else b""
-    return parts[0].upper(), urlparse(parts[1]).path, body
+    parsed = urlparse(parts[1])
+    return parts[0].upper(), parsed.path, parse_qs(parsed.query, keep_blank_values=True), body
 
 
 def workspace_share_options(payload: Any) -> tuple[ResolvedWorkspacePath, tuple[str, ...]]:
@@ -2722,7 +2762,7 @@ def public_share_file(path: str) -> tuple[Path, str]:
 
 async def handle_public_share_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
     try:
-        method, path, body = await read_request(reader)
+        method, path, _query, body = await read_request(reader)
         if method not in {"GET", "HEAD"} or body:
             writer.write(image_response("404 Not Found"))
         else:
@@ -2906,7 +2946,7 @@ def mcp_tool_log(tool: str, payload: Any) -> dict[str, Any]:
 async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
     method, path = "", ""
     try:
-        method, path, body = await read_request(reader)
+        method, path, query, body = await read_request(reader)
         if method == "OPTIONS":
             response_status, response_body = "204 No Content", None
         elif method == "GET" and path == "/health":
@@ -2937,8 +2977,11 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             response_status, response_body = "200 OK", await capture_screen(parse_json_body(body))
         elif method == "POST" and path == "/media/image-crop":
             response_status, response_body = "200 OK", await image_crop(parse_json_body(body))
-        elif method == "POST" and path == "/media/workspace-image":
-            response_status, response_body = "200 OK", workspace_image(parse_json_body(body))
+        elif method == "POST" and path == "/media/workspace-image-info":
+            _item, response_body = workspace_image_metadata(parse_json_body(body))
+            response_status = "200 OK"
+        elif method == "POST" and path == "/media/inspect-image":
+            response_status, response_body = "200 OK", await inspect_workspace_image(parse_json_body(body))
         elif method == "POST" and path == "/clipboard/status":
             response_status, response_body = "200 OK", clipboard_status(parse_json_body(body))
         elif method == "POST" and path == "/clipboard/get":
@@ -2962,6 +3005,17 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             response_status, response_body = "202 Accepted", {"accepted": True}
         elif method == "GET" and path.startswith("/tasks/"):
             response_status, response_body = "200 OK", TASKS.snapshot(TASKS.get(path.removeprefix("/tasks/")))
+        elif method == "GET":
+            image_file, mime_type = widget_image_file(unquote(path.removeprefix("/")))
+            size = image_file.stat().st_size
+            writer.write(widget_image_response_headers("200 OK", size, mime_type))
+            with image_file.open("rb") as source:
+                while chunk := source.read(64 * 1024):
+                    writer.write(chunk)
+                    await writer.drain()
+            await writer.drain()
+            log("GET /<workspace-image> -> 200")
+            return
         elif not method:
             response_status, response_body = "400 Bad Request", error_document(AgentApiError("BAD_REQUEST", "Invalid HTTP request."))
         else:

@@ -47,6 +47,41 @@ async function testAgentConnection() {
   }
 }
 async function refreshDiagnostics() { const result = await call({ type: "get-diagnostics" }); const summary = $("diagnostics-summary"); if (!result?.ok) { summary.textContent = "Diagnostics are unavailable."; return result; } const count = Number(result.commandEntryCount || 0) + Number(result.searchEntryCount || 0); summary.textContent = count ? `${count} local event${count === 1 ? "" : "s"} captured (${result.commandEntryCount || 0} tool, ${result.searchEntryCount || 0} search). Copy the log after reproducing the problem.` : "No diagnostic events captured yet."; return result; }
+function toolGroupTitle(groups, group) { return groups?.[group]?.title || "Custom"; }
+function renderMcpTools(result) {
+  const container = $("mcp-tools"); const note = $("mcp-tools-result");
+  if (!result?.ok) { container.textContent = "MCP tool settings are unavailable."; note.textContent = result?.error || ""; return; }
+  const defaultCheckbox = $("new-tools-enabled");
+  defaultCheckbox.checked = result.preferences?.newToolsEnabledByDefault !== false;
+  defaultCheckbox.onchange = async () => {
+    const saved = await call({ type: "set-mcp-new-tools-default", payload: { enabled: defaultCheckbox.checked } });
+    if (!saved?.ok) { defaultCheckbox.checked = !defaultCheckbox.checked; note.textContent = saved?.message || "Could not save the default."; return; }
+    note.textContent = "Saved. Refresh the MCP tool schema in ChatGPT to apply future tool changes.";
+  };
+  container.replaceChildren();
+  const groups = new Map();
+  for (const tool of result.tools || []) { if (!groups.has(tool.group)) groups.set(tool.group, []); groups.get(tool.group).push(tool); }
+  for (const [group, tools] of groups) {
+    const groupElement = document.createElement("section"); groupElement.className = "tool-group";
+    const heading = document.createElement("h3"); heading.textContent = toolGroupTitle(result.groups, group); groupElement.append(heading);
+    for (const tool of tools) {
+      const row = document.createElement("label"); row.className = "tool-row";
+      const checkbox = document.createElement("input"); checkbox.type = "checkbox"; checkbox.checked = tool.enabled === true; checkbox.disabled = tool.alwaysEnabled === true;
+      const copy = document.createElement("span"); copy.className = "tool-copy";
+      const title = document.createElement("strong"); title.textContent = tool.title;
+      const description = document.createElement("span"); description.className = "tool-description"; description.textContent = tool.description;
+      const name = document.createElement("code"); name.textContent = tool.name;
+      copy.append(title, description, name); row.append(checkbox, copy); groupElement.append(row);
+      checkbox.addEventListener("change", async () => {
+        const saved = await call({ type: "set-mcp-tool-enabled", payload: { name: tool.name, enabled: checkbox.checked } });
+        if (!saved?.ok) { checkbox.checked = !checkbox.checked; note.textContent = saved?.message || "Could not save this tool setting."; return; }
+        note.textContent = "Saved. Open ChatGPT Plugins, then ResearchTube → Manage → Refresh.";
+      });
+    }
+    container.append(groupElement);
+  }
+}
+async function loadMcpToolSettings() { renderMcpTools(await call({ type: "get-mcp-tool-settings" })); }
 async function saveAndTest() { $("test-connection").disabled = true; $("test-connection").textContent = "Testing…"; const saved = await call({ type: "save-connection", payload: { tunnelId: $("tunnel-id").value, apiKey: $("api-key").value } }); const result = saved.ok ? await call({ type: "test-connection" }) : saved; renderResult(result); if (result.ok) { await call({ type: "save-connection", payload: { tunnelId: $("tunnel-id").value, onboardingCompleted: true } }); $("api-key").value = ""; $("api-key").placeholder = "••••••••••••••••"; } await refreshStatus(); $("test-connection").disabled = false; $("test-connection").textContent = "Save and test connection"; }
 $("test-connection").addEventListener("click", saveAndTest);
 $("test-agent").addEventListener("click", testAgentConnection);
@@ -56,5 +91,5 @@ $("copy-app-name").addEventListener("click", async () => { await navigator.clipb
 $("copy-prompt").addEventListener("click", async () => { await navigator.clipboard.writeText($("example-prompt").textContent.trim()); $("copy-prompt").textContent = "Copied"; setTimeout(() => { $("copy-prompt").textContent = "Copy example prompt"; }, 1400); });
 $("copy-diagnostics").addEventListener("click", async () => { const button = $("copy-diagnostics"); const result = await call({ type: "get-diagnostics" }); if (!result?.ok) { $("diagnostics-summary").textContent = "Could not export diagnostics."; return; } await navigator.clipboard.writeText(result.text); button.textContent = "Copied"; setTimeout(() => { button.textContent = "Copy diagnostics log"; }, 1400); });
 $("clear-diagnostics").addEventListener("click", async () => { const result = await call({ type: "clear-diagnostics" }); if (result?.ok) { $("diagnostics-summary").textContent = "No diagnostic events captured yet."; } else { $("diagnostics-summary").textContent = "Could not clear diagnostics."; } });
-async function init() { const state = await refreshStatus(); $("tunnel-id").value = state.tunnelId || ""; $("agent-port").value = state.agentPort || 17843; if (state.apiKeyPresent) $("api-key").placeholder = "••••••••••••••••"; await refreshDiagnostics(); }
+async function init() { const state = await refreshStatus(); $("tunnel-id").value = state.tunnelId || ""; $("agent-port").value = state.agentPort || 17843; if (state.apiKeyPresent) $("api-key").placeholder = "••••••••••••••••"; await refreshDiagnostics(); await loadMcpToolSettings(); }
 init();

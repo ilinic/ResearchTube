@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 
 const background = await readFile(new URL("../background.js", import.meta.url), "utf8");
 
-for (const tool of ["workspace_list", "workspace_stat", "workspace_mkdir", "workspace_move", "workspace_delete", "workspace_share_start", "workspace_share_status", "workspace_share_stop", "media_probe", "capture_frame", "capture_screen", "researchtube_image_crop", "researchtube_show_workspace_image", "clipboard_status", "clipboard_get", "clipboard_set", "researchtube_get_capture_frame_image", "researchtube_copy_capture_frame_path"]) {
+for (const tool of ["system_agent_status", "system_check_debug_banner", "workspace_list", "workspace_stat", "workspace_mkdir", "workspace_move", "workspace_delete", "workspace_share_start", "workspace_share_status", "workspace_share_stop", "media_probe", "media_capture_frame", "media_capture_screen", "media_image_crop", "media_show_workspace_image", "media_inspect_image", "clipboard_status", "clipboard_get", "clipboard_set", "media_load_workspace_image", "media_copy_workspace_path"]) {
   assert.match(background, new RegExp(`name: "${tool}"`), `${tool} must be published in tools/list`);
 }
 for (const tool of ["library_store_start", "library_store_status", "library_store_cancel"]) {
@@ -15,14 +15,17 @@ assert.match(background, /presses Send without inserting any text into the Compo
 assert.match(background, /"\/internal\/library-store-files"/, "only the Agent may resolve workspace paths for CDP");
 assert.match(background, /"\/media\/capture-frame"/);
 assert.match(background, /"\/media\/image-crop"/);
-assert.match(background, /"\/media\/workspace-image"/);
+assert.doesNotMatch(background, /"\/media\/workspace-image"/);
+assert.match(background, /"\/media\/workspace-image-info"/, "the widget must obtain bounded metadata without image bytes");
 for (const tool of ["youtube_get_download_formats", "youtube_get_download_task_diagnostics"]) {
   assert.match(background, new RegExp(`name: "${tool}"`), `${tool} must be published in tools/list`);
 }
 assert.match(background, /youtubeFormats: youtubeFormatsSchema/);
 assert.match(background, /youtube_get_download_formats\.downloadFormats/);
 assert.match(background, /afterEventId/);
-assert.match(background, /const REQUIRED_AGENT_INTERFACE_VERSION = 28;/);
+assert.match(background, /const REQUIRED_AGENT_INTERFACE_VERSION = 34;/);
+assert.match(background, /const RESEARCHTUBE_SERVER_DESCRIPTION =/, "the server must expose a bootstrap discovery description");
+assert.match(background, /description: RESEARCHTUBE_SERVER_DESCRIPTION/, "serverInfo must publish its bootstrap discovery description");
 assert.match(background, /const RESEARCHTUBE_MCP_INSTRUCTIONS =/, "the MCP server must publish lazy-discovery guidance");
 assert.match(background, /instructions: RESEARCHTUBE_MCP_INSTRUCTIONS/, "initialize must expose server-level MCP instructions");
 assert.match(background, /do not infer that ResearchTube is unavailable/, "instructions must forbid inferring unavailability from tool visibility");
@@ -38,10 +41,17 @@ assert.match(background, /author, creation time, location\/GPS/);
 assert.match(background, /CAPTURE_FRAME_WIDGET_URI/);
 assert.match(background, /resources\/read/);
 assert.match(background, /text\/html;profile=mcp-app/);
-assert.match(background, /captureFrameImageBase64/);
+assert.doesNotMatch(background, /captureFrameImageBase64/);
+assert.match(background, /localAgentImageUrl/, "the widget must keep image bytes out of MCP metadata");
+assert.match(background, /\$\{port\}\/\$\{encodedWorkspacePath\}/, "local image URL must place the logical workspace path directly after the Agent port");
+assert.doesNotMatch(background, /widget-image\?path=/, "the local image URL must not use a query-string path parameter");
+assert.match(background, /mcpToolPreferences/, "tool availability must be persisted by exact MCP tool name");
+assert.match(background, /newToolsEnabledByDefault/, "new MCP tools must have a configurable default state");
+assert.match(background, /TOOL_DISABLED/, "a stale ChatGPT tool schema must receive a clear disabled-tool result");
 assert.match(background, /showInChat defaults to false/);
 assert.match(background, /never render a widget themselves/, "creation tools must not create blank static-template iframes");
-assert.match(background, /After a successful result, call researchtube_show_workspace_image/, "showInChat must route presentation through the dedicated display tool");
+assert.match(background, /After a successful result, call media_show_workspace_image/, "showInChat must route presentation through the dedicated display tool");
+assert.match(background, /Independently validate one PNG, JPEG, or WebP image/, "image inspection must be distinct from generic workspace stat");
 assert.equal((background.match(/"openai\/outputTemplate": CAPTURE_FRAME_WIDGET_URI/g) || []).length, 1, "only the explicit workspace-image display tool may declare the widget template");
 assert.doesNotMatch(background, /researchtube_copy_capture_frame_image/);
 assert.doesNotMatch(background, /researchtube_download_capture_frame/);

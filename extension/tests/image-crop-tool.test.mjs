@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 
 const background = await readFile(new URL("../background.js", import.meta.url), "utf8");
 
-assert.match(background, /name: "researchtube_image_crop"/);
+assert.match(background, /name: "media_image_crop"/);
 assert.match(background, /Crop a workspace image/);
 assert.match(background, /crop\.x and crop\.y are zero-based coordinates in the stored source-image pixels/);
 assert.match(background, /existing PNG, JPEG, or WebP source image/);

@@ -66,7 +66,7 @@ The [OpenAI Secure MCP Tunnel guide](https://developers.openai.com/api/docs/guid
 
 | Tool | What ChatGPT can do with it |
 | --- | --- |
-| `researchtube_agent_status` | Check the optional local Agent's availability, version, workspace state, and optional component availability. An unavailable Agent is returned as normal structured data. |
+| `system_agent_status` | Check the optional local Agent's availability, version, workspace state, and optional component availability. An unavailable Agent is returned as normal structured data. |
 | `youtube_search` | Find public videos by topic, keywords, channel, or date. |
 | `youtube_get_channel_videos` | Browse a channel's public video catalogue by handle, URL, or channel ID; choose precise videos for deeper research. |
 | `youtube_get_channel_playlists` | List the public playlists displayed by a channel. |
