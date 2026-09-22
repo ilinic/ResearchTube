@@ -64,8 +64,8 @@ var MCP_TOOL_SETTINGS = Object.freeze({
   workspace_share_status: { group: "library" },
   workspace_share_stop: { group: "library" }
 });
-var EXTENSION_VERSION = "1.37.0";
-var REQUIRED_AGENT_INTERFACE_VERSION = 34;
+var EXTENSION_VERSION = "1.46.0";
+var REQUIRED_AGENT_INTERFACE_VERSION = 39;
 var CAPTURE_FRAME_WIDGET_URI = "ui://researchtube/capture-frame-v31.html";
 var RESEARCHTUBE_SERVER_DESCRIPTION = "ResearchTube provides YouTube research, local media and image operations, workspace management, screenshots, clipboard, and Library integration. Search this server when the user refers to ResearchTube, YouTube analysis, a previously created workspace file, captured frame, screenshot, crop, clipboard, or asks to continue a previous ResearchTube operation.";
 var RESEARCHTUBE_MCP_INSTRUCTIONS = "ResearchTube exposes MCP tools that may be loaded or discovered lazily by the client. When the user mentions ResearchTube, invokes @ResearchTube, asks to repeat a ResearchTube operation, or requests a capability previously provided by ResearchTube, do not infer that ResearchTube is unavailable merely because its tools are not currently visible as a top-level tool namespace. Before reporting that a ResearchTube capability is unavailable, discover or inspect the available ResearchTube MCP tools and attempt to locate the requested capability. Only report ResearchTube as unavailable if tool discovery actually fails, the required tool cannot be found after discovery, or an actual ResearchTube tool invocation returns an availability, connection, compatibility, or transport error. Successful use earlier in the conversation is evidence that the tools may be discoverable again; rediscover them rather than assuming access has disappeared. media_capture_frame, media_capture_screen, and media_image_crop never render a widget themselves: when showInChat is true, after the successful creation result immediately call media_show_workspace_image with the returned workspace image path. When showInChat is false, do not call the display tool.";
@@ -511,11 +511,15 @@ var workspaceShareStatusSchema = {
   properties: {
     state: { type: "string", enum: ["active", "inactive"] },
     folder: nullableString,
+    file: nullableString,
     fileTypes: { type: "array", uniqueItems: true, items: workspaceShareFileTypeSchema },
-    publicBaseUrl: { ...nullableString, pattern: "^https://", description: "Temporary URL for an external browser or HTTP client to download allowed files. ChatGPT may be unable to fetch a Quick Tunnel URL or use it as visual input, so do not rely on it for image inspection." },
-    methods: { type: "array", items: { type: "string", enum: ["GET", "HEAD"] } }
+    publicBaseUrl: { ...nullableString, pattern: "^https://", description: "Temporary folder URL for an external browser or HTTP client to download allowed files." },
+    publicFileUrl: { ...nullableString, pattern: "^https://", description: "Temporary URL when exactly one workspace file is shared." },
+    methods: { type: "array", items: { type: "string", enum: ["GET", "HEAD"] } },
+    externallyReachable: { type: ["boolean", "null"], description: "True only after an explicitly requested wsrv.nl probe obtained an image response." },
+    externalProbe: { type: "object", additionalProperties: false, properties: { state: { type: "string", enum: ["not_requested", "passed", "failed"] }, provider: { type: "string", const: "wsrv.nl" }, probePath: nullableString, httpStatus: nullableInteger, contentType: nullableString }, required: ["state", "provider", "probePath", "httpStatus", "contentType"] }
   },
-  required: ["state", "folder", "fileTypes", "publicBaseUrl", "methods"]
+  required: ["state", "folder", "file", "fileTypes", "publicBaseUrl", "publicFileUrl", "methods", "externallyReachable", "externalProbe"]
 };
 var workspaceShareStopSchema = {
   type: "object",
@@ -911,18 +915,18 @@ function toolDefinitions() {
     },
     {
       name: "workspace_share_start",
-      title: "Publish a workspace folder for external download only",
-      description: "Explicitly start a temporary public HTTPS share for an external browser or HTTP client to download files from one existing Local Agent workspace folder through cloudflared. A Quick Tunnel URL can be useful for external file access, but ChatGPT may be unable to fetch it or use it as visual input; do not rely on this tool to inspect or analyze image pixels. For a workspace image that ChatGPT needs to receive reliably, use library_store_start instead. The public path repeats folder directly with no artificial intermediate segment: if folder is captures, a file captures/frame.png is served as https://<random>.trycloudflare.com/captures/frame.png. fileTypes is an allow-list; no directory listing is exposed, only GET and HEAD for regular non-redirect files beneath the selected folder. Starting a new share closes any prior share. Anyone with the returned URL can access allowed files until workspace_share_stop or Agent shutdown.",
+      title: "Publish one workspace folder or file for external download",
+      description: "Explicitly start a temporary public HTTPS share through cloudflared for one existing workspace folder or one file. A folder share needs fileTypes and exposes only allowed regular files beneath that folder; a file share exposes exactly that file. No directory listing is exposed. Set verifyExternal=true to ask wsrv.nl to fetch an image: a folder share then requires probePath, an allowed image inside the folder; a single-file share must itself be an image. externallyReachable is true only after that independent image request succeeds. Starting a new share closes any prior share.",
       annotations: { ...localWorkspaceWriteAnnotations, openWorldHint: true },
-      inputSchema: { type: "object", additionalProperties: false, properties: { folder: { type: "string", description: "Existing logical workspace-relative directory. Use an empty string only to publish the workspace root." }, fileTypes: { type: "array", minItems: 1, maxItems: 7, uniqueItems: true, items: workspaceShareFileTypeSchema, description: "Allowed categories. all cannot be combined with another category." } }, required: ["folder", "fileTypes"] },
+      inputSchema: { type: "object", additionalProperties: false, properties: { folder: { type: "string", description: "Existing logical directory. Mutually exclusive with file; empty string means the workspace root." }, file: { type: "string", minLength: 1, description: "Existing logical file. Mutually exclusive with folder." }, fileTypes: { type: "array", minItems: 1, maxItems: 7, uniqueItems: true, items: workspaceShareFileTypeSchema, description: "Required only for a folder share; all cannot be combined with another category." }, verifyExternal: { type: "boolean", default: false, description: "Use wsrv.nl to verify external image reachability." }, probePath: { type: "string", minLength: 1, description: "Required only for a verified folder share: an allowed image inside folder." } }, oneOf: [{ required: ["folder", "fileTypes"], not: { required: ["file"] } }, { required: ["file"], not: { anyOf: [{ required: ["folder"] }, { required: ["fileTypes"] }, { required: ["probePath"] }] } }] },
       outputSchema: workspaceShareStatusSchema
     },
     {
       name: "workspace_share_status",
       title: "Inspect the current external-download share",
-      description: "Report whether a cloudflared external-download share is active, its selected logical folder, allowed file categories, public URL root, and supported download methods. Active means the URL is being served to ordinary browsers or HTTP clients; it does not show that ChatGPT can fetch it or use it as visual input. This never exposes a host filesystem path.",
+      description: "Report the active cloudflared folder or single-file download share. Set verifyExternal=true to repeat its configured wsrv.nl image probe without restarting the share. externallyReachable becomes true only after that probe succeeds. This never exposes a host filesystem path.",
       annotations: localAgentReadAnnotations,
-      inputSchema: { type: "object", additionalProperties: false, properties: {} },
+      inputSchema: { type: "object", additionalProperties: false, properties: { verifyExternal: { type: "boolean", default: false, description: "Repeat the configured external image probe." } } },
       outputSchema: workspaceShareStatusSchema
     },
     {
@@ -1483,6 +1487,78 @@ async function cdpWaitForStableComposer(tabId, timeoutMs = 45e3) {
   }
   throw cdpError("Timed out waiting for a stable ChatGPT Composer.");
 }
+var CDP_TEXT_COMPOSER_STATE_EXPRESSION = `(() => {
+  const target = document.querySelector('#prompt-textarea')
+    || document.querySelector('[contenteditable="true"][role="textbox"]')
+    || document.querySelector('textarea');
+  if (!target) return { ready: false, signature: null };
+  const style = getComputedStyle(target);
+  return {
+    ready: document.readyState === 'complete' && !target.disabled && style.display !== 'none' && style.visibility !== 'hidden',
+    signature: [target.tagName, target.id, target.getAttribute('role'), target.getAttribute('contenteditable')].join('|')
+  };
+})()`;
+async function cdpWaitForTextComposer(tabId, timeoutMs = 45e3) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const state = (await cdpEvaluate(tabId, CDP_TEXT_COMPOSER_STATE_EXPRESSION))?.value;
+    if (state?.ready && state.signature) return;
+    await sleep(250);
+  }
+  throw cdpError("Timed out waiting for the ChatGPT text Composer.");
+}
+async function cdpSetComposerText(tabId, text) {
+  const focusExpression = `(() => {
+    const target = document.querySelector('#prompt-textarea')
+      || document.querySelector('[contenteditable="true"][role="textbox"]')
+      || document.querySelector('textarea');
+    if (!target) return false;
+    target.focus();
+    return document.activeElement === target;
+  })()`;
+  const focused = (await cdpEvaluate(tabId, focusExpression))?.value;
+  if (focused !== true) throw cdpError("ChatGPT Composer could not receive keyboard input.");
+  await cdpCommand(tabId, "Input.insertText", { text });
+  const containsText = `(() => {
+    const target = document.querySelector('#prompt-textarea')
+      || document.querySelector('[contenteditable="true"][role="textbox"]')
+      || document.querySelector('textarea');
+    return Boolean(target && (target.value || target.textContent || '').includes(${JSON.stringify(text)}));
+  })()`;
+  await cdpWaitFor(tabId, containsText, "the inserted video-description prompt", 1e4);
+}
+function canonicalYouTubeVideoUrl(value) {
+  let url;
+  try {
+    url = new URL(String(value || ""));
+  } catch (_error) {
+    throw cdpError("The active tab is not a valid YouTube video URL.");
+  }
+  if (url.origin !== "https://www.youtube.com" || url.pathname !== "/watch") throw cdpError("Open one YouTube video before using Describe this video.");
+  const videoId = url.searchParams.get("v") || "";
+  if (!/^[A-Za-z0-9_-]{11}$/.test(videoId)) throw cdpError("The active YouTube page does not contain a valid video ID.");
+  return `https://www.youtube.com/watch?v=${videoId}`;
+}
+async function describeYouTubeVideoInChatGPT(sourceTab) {
+  const videoUrl = canonicalYouTubeVideoUrl(sourceTab?.url);
+  const prompt = `@ResearchTube ${videoUrl} Describe this video in my language.`;
+  const created = await chrome.tabs.create({ url: "https://chatgpt.com/", active: true, ...Number.isInteger(sourceTab?.index) ? { index: sourceTab.index + 1 } : {} });
+  if (!created?.id) throw cdpError("Chrome could not open a ChatGPT tab.");
+  const chatTab = await waitForChatGPTTab(created.id);
+  let attached = false;
+  try {
+    await cdpAttach(chatTab.id);
+    attached = true;
+    await cdpCommand(chatTab.id, "Runtime.enable");
+    await cdpWaitForTextComposer(chatTab.id);
+    await cdpSetComposerText(chatTab.id, prompt);
+    await cdpSendComposerText(chatTab.id);
+    cdpLog("Sent video-description prompt", { tabId: chatTab.id, videoUrl });
+    return { ok: true, videoUrl, chatTabId: chatTab.id };
+  } finally {
+    if (attached) await cdpDetach(chatTab.id);
+  }
+}
 function cdpAttachmentStateExpression(fileNames) {
   return `(() => {
     const expectedNames = ${JSON.stringify(fileNames)};
@@ -1547,21 +1623,51 @@ var CDP_ENABLED_SEND_BUTTON_EXPRESSION = `(() => [...document.querySelectorAll('
     button.dataset.testid === 'send-button'
     || /^(send|send prompt)$/i.test(button.getAttribute('aria-label') || '')
   )))()`;
-var CDP_CLICK_SEND_BUTTON_EXPRESSION = `(() => {
+var CDP_SEND_BUTTON_CENTER_EXPRESSION = `(() => {
   const button = [...document.querySelectorAll('button')].find((candidate) => !candidate.disabled
     && candidate.getAttribute('aria-disabled') !== 'true' && (
       candidate.dataset.testid === 'send-button'
       || /^(send|send prompt)$/i.test(candidate.getAttribute('aria-label') || '')
     ));
-  if (!button) return false;
-  button.click();
+  if (!button) return null;
+  const bounds = button.getBoundingClientRect();
+  if (bounds.width <= 0 || bounds.height <= 0) return null;
+  return { x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2 };
+})()`;
+var CDP_SUBMIT_COMPOSER_FORM_EXPRESSION = `(() => {
+  const composer = document.querySelector('#prompt-textarea')
+    || document.querySelector('[contenteditable="true"][role="textbox"]')
+    || document.querySelector('textarea');
+  if (!composer) return false;
+  const form = composer.closest('form');
+  if (!form) return false;
+  const submitButton = [...form.querySelectorAll('button')].find((candidate) => !candidate.disabled
+    && candidate.getAttribute('aria-disabled') !== 'true' && (
+      candidate.dataset.testid === 'send-button'
+      || /^(send|send prompt)$/i.test(candidate.getAttribute('aria-label') || '')
+    ));
+  if (!submitButton) return false;
+  form.requestSubmit(submitButton);
   return true;
 })()`;
+async function cdpClickEnabledSendButton(tabId, timeoutMs = 45e3) {
+  await cdpWaitFor(tabId, CDP_ENABLED_SEND_BUTTON_EXPRESSION, "the enabled ChatGPT Send button", timeoutMs);
+  const target = (await cdpEvaluate(tabId, CDP_SEND_BUTTON_CENTER_EXPRESSION))?.value;
+  if (!Number.isFinite(target?.x) || !Number.isFinite(target?.y)) throw cdpError("The ChatGPT Send button was not available.");
+  await cdpCommand(tabId, "Input.dispatchMouseEvent", { type: "mouseMoved", x: target.x, y: target.y, button: "none", buttons: 0 });
+  await cdpCommand(tabId, "Input.dispatchMouseEvent", { type: "mousePressed", x: target.x, y: target.y, button: "left", buttons: 1, clickCount: 1 });
+  await cdpCommand(tabId, "Input.dispatchMouseEvent", { type: "mouseReleased", x: target.x, y: target.y, button: "left", buttons: 0, clickCount: 1 });
+  cdpLog("Clicked ChatGPT Send button with browser input", { tabId });
+}
+async function cdpSendComposerText(tabId) {
+  await cdpWaitFor(tabId, CDP_ENABLED_SEND_BUTTON_EXPRESSION, "the enabled ChatGPT Send button", 5e3);
+  const submitted = (await cdpEvaluate(tabId, CDP_SUBMIT_COMPOSER_FORM_EXPRESSION))?.value;
+  if (submitted !== true) throw cdpError("The ChatGPT Composer form could not be submitted.");
+  cdpLog("Submitted ChatGPT Composer form", { tabId });
+}
 async function cdpSendAttachedImages(tabId, fileCount) {
   cdpLog("Sending attached image batch without Composer text", { tabId, fileCount });
-  await cdpWaitFor(tabId, CDP_ENABLED_SEND_BUTTON_EXPRESSION, "the enabled ChatGPT Send button", 9e4);
-  const clicked = (await cdpEvaluate(tabId, CDP_CLICK_SEND_BUTTON_EXPRESSION))?.value;
-  if (clicked !== true) throw cdpError("The ChatGPT Send button was not available.");
+  await cdpClickEnabledSendButton(tabId, 9e4);
   cdpLog("Attached image batch sent", { tabId, fileCount });
 }
 async function cdpAttachImagesNow(filePathValues, { onPhase = null } = {}) {
@@ -1840,6 +1946,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       return false;
     }
     chrome.tabs.create({ url, active: true }).then(() => sendResponse({ ok: true })).catch((error) => sendResponse({ ok: false, error: safeErrorMessage(error) }));
+    return true;
+  }
+  if (message?.type === "describe-youtube-video") {
+    describeYouTubeVideoInChatGPT(message.tab).then(sendResponse).catch((error) => sendResponse({ ok: false, error: safeErrorMessage(error) }));
     return true;
   }
   return false;
@@ -2372,7 +2482,7 @@ function normalizeWorkspaceShareFileTypes(value) {
   return value;
 }
 function normalizeWorkspaceShareStatus(document) {
-  if (!document || typeof document !== "object" || Array.isArray(document) || !["active", "inactive"].includes(document.state) || !Array.isArray(document.fileTypes) || !Array.isArray(document.methods)) {
+  if (!document || typeof document !== "object" || Array.isArray(document) || !["active", "inactive"].includes(document.state) || !Array.isArray(document.fileTypes) || !Array.isArray(document.methods) || !document.externalProbe || typeof document.externalProbe !== "object") {
     throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid workspace sharing status.");
   }
   const active = document.state === "active";
@@ -2380,17 +2490,31 @@ function normalizeWorkspaceShareStatus(document) {
   if (!active && fileTypes.length) throw localAgentError("AGENT_INVALID_RESPONSE", "An inactive workspace share must not have file types.");
   if (document.folder !== null && typeof document.folder !== "string") throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid shared folder.");
   const folder = document.folder === null ? null : normalizeWorkspacePath(document.folder, "folder", { allowRoot: true });
+  if (document.file !== null && typeof document.file !== "string") throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid shared file.");
+  const file = document.file === null ? null : normalizeWorkspacePath(document.file, "file");
   if (document.publicBaseUrl !== null && (typeof document.publicBaseUrl !== "string" || !/^https:\/\//.test(document.publicBaseUrl))) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid public workspace URL.");
+  if (document.publicFileUrl !== null && (typeof document.publicFileUrl !== "string" || !/^https:\/\//.test(document.publicFileUrl))) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid public workspace file URL.");
   if (document.methods.some((method) => method !== "GET" && method !== "HEAD")) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid public workspace methods.");
-  if (active !== (folder !== null && document.publicBaseUrl !== null && fileTypes.length > 0 && document.methods.length === 2)) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an inconsistent workspace sharing status.");
-  return { state: document.state, folder, fileTypes, publicBaseUrl: document.publicBaseUrl, methods: document.methods };
+  const folderShare = folder !== null && file === null && document.publicBaseUrl !== null && document.publicFileUrl === null && fileTypes.length > 0;
+  const fileShare = folder === null && file !== null && document.publicBaseUrl === null && document.publicFileUrl !== null && fileTypes.length === 0;
+  if (active !== ((folderShare || fileShare) && document.methods.length === 2)) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an inconsistent workspace sharing status.");
+  const probe = document.externalProbe;
+  if (!["not_requested", "passed", "failed"].includes(probe.state) || probe.provider !== "wsrv.nl" || probe.probePath !== null && typeof probe.probePath !== "string" || probe.httpStatus !== null && (!Number.isInteger(probe.httpStatus) || probe.httpStatus < 100 || probe.httpStatus > 599) || probe.contentType !== null && typeof probe.contentType !== "string") throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid external sharing probe.");
+  if (![true, false, null].includes(document.externallyReachable) || document.externallyReachable === true !== (probe.state === "passed") || document.externallyReachable === false !== (probe.state === "failed")) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an inconsistent external sharing probe.");
+  return { state: document.state, folder, file, fileTypes, publicBaseUrl: document.publicBaseUrl, publicFileUrl: document.publicFileUrl, methods: document.methods, externallyReachable: document.externallyReachable, externalProbe: { state: probe.state, provider: probe.provider, probePath: probe.probePath === null ? null : normalizeWorkspacePath(probe.probePath, "externalProbe.probePath"), httpStatus: probe.httpStatus, contentType: probe.contentType } };
 }
-async function workspaceShareStart(folder, fileTypes) {
-  const input = { folder: normalizeWorkspacePath(folder, "folder", { allowRoot: true }), fileTypes: normalizeWorkspaceShareFileTypes(fileTypes) };
+async function workspaceShareStart(args) {
+  const hasFolder = Object.hasOwn(args, "folder"), hasFile = Object.hasOwn(args, "file");
+  if (hasFolder === hasFile) throw localAgentError("WORKSPACE_SHARE_INVALID", "Specify exactly one of folder or file.");
+  const verifyExternal = args.verifyExternal === void 0 ? false : args.verifyExternal;
+  if (typeof verifyExternal !== "boolean") throw localAgentError("WORKSPACE_SHARE_INVALID", "verifyExternal must be a boolean.");
+  const input = hasFolder ? { folder: normalizeWorkspacePath(args.folder, "folder", { allowRoot: true }), fileTypes: normalizeWorkspaceShareFileTypes(args.fileTypes), verifyExternal } : { file: normalizeWorkspacePath(args.file, "file"), verifyExternal };
+  if (hasFolder && verifyExternal) input.probePath = normalizeWorkspacePath(args.probePath, "probePath");
   return normalizeWorkspaceShareStatus(await agentJsonRequest("/workspace/share/start", { method: "POST", body: input, timeoutMs: 2e4 }));
 }
-async function workspaceShareStatus() {
-  return normalizeWorkspaceShareStatus(await agentJsonRequest("/workspace/share/status", { method: "POST", body: {} }));
+async function workspaceShareStatus(verifyExternal = false) {
+  if (typeof verifyExternal !== "boolean") throw localAgentError("WORKSPACE_SHARE_INVALID", "verifyExternal must be a boolean.");
+  return normalizeWorkspaceShareStatus(await agentJsonRequest("/workspace/share/status", { method: "POST", body: { verifyExternal }, timeoutMs: verifyExternal ? 3e4 : 1e4 }));
 }
 async function workspaceShareStop() {
   const document = await agentJsonRequest("/workspace/share/stop", { method: "POST", body: {} });
@@ -3126,10 +3250,11 @@ async function handleMcpRequest(request) {
   }
   if (request?.method === "tools/call" && request.params?.name === "workspace_share_start") {
     const args = request.params.arguments ?? {};
-    return executeToolCall(request.id, "workspace_share_start", { folder: args.folder, fileTypes: args.fileTypes }, () => workspaceShareStart(args.folder, args.fileTypes));
+    return executeToolCall(request.id, "workspace_share_start", args, () => workspaceShareStart(args));
   }
   if (request?.method === "tools/call" && request.params?.name === "workspace_share_status") {
-    return executeToolCall(request.id, "workspace_share_status", {}, workspaceShareStatus);
+    const args = request.params.arguments ?? {};
+    return executeToolCall(request.id, "workspace_share_status", args, () => workspaceShareStatus(args.verifyExternal));
   }
   if (request?.method === "tools/call" && request.params?.name === "workspace_share_stop") {
     return executeToolCall(request.id, "workspace_share_stop", {}, workspaceShareStop);

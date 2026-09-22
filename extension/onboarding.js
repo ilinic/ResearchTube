@@ -62,6 +62,7 @@ function renderMcpTools(result) {
   const groups = new Map();
   for (const tool of result.tools || []) { if (!groups.has(tool.group)) groups.set(tool.group, []); groups.get(tool.group).push(tool); }
   for (const [group, tools] of groups) {
+    tools.sort((left, right) => left.name.localeCompare(right.name));
     const groupElement = document.createElement("section"); groupElement.className = "tool-group";
     const heading = document.createElement("h3"); heading.textContent = toolGroupTitle(result.groups, group); groupElement.append(heading);
     for (const tool of tools) {

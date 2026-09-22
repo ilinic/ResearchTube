@@ -27,4 +27,5 @@ assert.match(script, /get-mcp-tool-settings/);
 assert.match(script, /set-mcp-tool-enabled/);
 assert.match(script, /set-mcp-new-tools-default/);
 assert.match(script, /ResearchTube → Manage → Refresh/);
+assert.match(script, /tools\.sort\(\(left, right\) => left\.name\.localeCompare\(right\.name\)\)/, "each Settings group must be ordered by MCP command name");
 console.log("MCP tool settings: ok");

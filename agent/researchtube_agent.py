@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import ctypes
+from html import escape
 import json
 import math
 import mimetypes
@@ -26,10 +27,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote, unquote, urlparse
+from urllib.request import Request, urlopen
 
-AGENT_VERSION = "0.36.0"
-INTERFACE_VERSION = 34
+AGENT_VERSION = "0.45.0"
+INTERFACE_VERSION = 39
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
 TASK_POLL_INTERVAL_MS = 1_000
@@ -47,6 +50,7 @@ DEFAULT_DOWNLOAD_DIRECTORY = "downloads"
 MAX_LOGICAL_PATH_LENGTH = 1_024
 MAX_LOGICAL_COMPONENT_LENGTH = 240
 MAX_WORKSPACE_LIST_ENTRIES = 500
+MAX_PUBLIC_SHARE_DIRECTORY_ENTRIES = 500
 MEDIA_PROBE_TIMEOUT_SECONDS = 15
 CAPTURE_FRAME_TIMEOUT_SECONDS = 60
 YOUTUBE_CAPTURE_FRAME_TIMEOUT_SECONDS = 90
@@ -93,7 +97,9 @@ PUBLIC_TUNNEL_READY = asyncio.Event()
 PUBLIC_TUNNEL_WATCHERS: list[asyncio.Task[None]] = []
 PUBLIC_SHARE_SERVER: asyncio.AbstractServer | None = None
 PUBLIC_SHARE_FOLDER: ResolvedWorkspacePath | None = None
+PUBLIC_SHARE_FILE: ResolvedWorkspacePath | None = None
 PUBLIC_SHARE_FILE_TYPES: tuple[str, ...] = ()
+PUBLIC_SHARE_EXTERNAL_PROBE: dict[str, Any] = {"state": "not_requested", "provider": "wsrv.nl", "probePath": None, "httpStatus": None, "contentType": None}
 PUBLIC_SHARE_LOCK = asyncio.Lock()
 PUBLIC_SHARE_FILE_TYPE_SUFFIXES: dict[str, frozenset[str]] = {
     "images": frozenset({".avif", ".bmp", ".gif", ".jpeg", ".jpg", ".png", ".svg", ".webp"}),
@@ -2697,10 +2703,34 @@ async def read_request(reader: asyncio.StreamReader) -> tuple[str, str, dict[str
     return parts[0].upper(), parsed.path, parse_qs(parsed.query, keep_blank_values=True), body
 
 
-def workspace_share_options(payload: Any) -> tuple[ResolvedWorkspacePath, tuple[str, ...]]:
-    if not isinstance(payload, dict) or set(payload) != {"folder", "fileTypes"}:
-        raise AgentApiError("WORKSPACE_SHARE_INVALID", "workspace_share_start requires folder and fileTypes.")
+@dataclass(frozen=True)
+class WorkspaceShareOptions:
+    folder: ResolvedWorkspacePath | None
+    file: ResolvedWorkspacePath | None
+    file_types: tuple[str, ...]
+    verify_external: bool
+    probe_file: ResolvedWorkspacePath | None
+
+
+def workspace_share_options(payload: Any) -> WorkspaceShareOptions:
+    if not isinstance(payload, dict) or not set(payload).issubset({"folder", "file", "fileTypes", "verifyExternal", "probePath"}):
+        raise AgentApiError("WORKSPACE_SHARE_INVALID", "workspace_share_start received unsupported fields.")
+    has_folder, has_file = "folder" in payload, "file" in payload
+    if has_folder == has_file:
+        raise AgentApiError("WORKSPACE_SHARE_INVALID", "Specify exactly one of folder or file.")
+    verify_external = payload.get("verifyExternal", False)
+    if not isinstance(verify_external, bool):
+        raise AgentApiError("WORKSPACE_SHARE_INVALID", "verifyExternal must be a boolean.")
     resolver = WorkspacePathResolver()
+    if has_file:
+        if "fileTypes" in payload or "probePath" in payload:
+            raise AgentApiError("WORKSPACE_SHARE_INVALID", "A single-file share does not accept fileTypes or probePath.")
+        shared_file = resolver.resolve_existing(payload["file"], field_name="file", expected_type="file")
+        if verify_external and public_share_file_type(shared_file.physical_path) != "images":
+            raise AgentApiError("WORKSPACE_SHARE_INVALID", "verifyExternal requires an image file for wsrv.nl.")
+        return WorkspaceShareOptions(None, shared_file, (), verify_external, shared_file if verify_external else None)
+    if "fileTypes" not in payload:
+        raise AgentApiError("WORKSPACE_SHARE_INVALID", "A folder share requires fileTypes.")
     folder = resolver.resolve_existing(payload["folder"], field_name="folder", expected_type="directory", allow_root=True)
     file_types = payload["fileTypes"]
     if not isinstance(file_types, list) or not file_types or len(file_types) > len(PUBLIC_SHARE_FILE_TYPE_NAMES) or len(set(file_types)) != len(file_types):
@@ -2709,7 +2739,18 @@ def workspace_share_options(payload: Any) -> tuple[ResolvedWorkspacePath, tuple[
         raise AgentApiError("WORKSPACE_SHARE_INVALID", "fileTypes contains an unsupported file category.")
     if "all" in file_types and len(file_types) != 1:
         raise AgentApiError("WORKSPACE_SHARE_INVALID", "fileTypes all cannot be combined with other categories.")
-    return folder, tuple(file_types)
+    if not verify_external:
+        if "probePath" in payload:
+            raise AgentApiError("WORKSPACE_SHARE_INVALID", "probePath is only valid when verifyExternal is true.")
+        return WorkspaceShareOptions(folder, None, tuple(file_types), False, None)
+    if "probePath" not in payload:
+        raise AgentApiError("WORKSPACE_SHARE_INVALID", "A verified folder share requires probePath.")
+    probe_file = resolver.resolve_existing(payload["probePath"], field_name="probePath", expected_type="file")
+    if not path_is_within(probe_file.physical_path, folder.physical_path):
+        raise AgentApiError("WORKSPACE_SHARE_INVALID", "probePath must be inside the shared folder.")
+    if public_share_file_type(probe_file.physical_path) != "images" or ("all" not in file_types and "images" not in file_types):
+        raise AgentApiError("WORKSPACE_SHARE_INVALID", "probePath must be an allowed image file for wsrv.nl.")
+    return WorkspaceShareOptions(folder, None, tuple(file_types), True, probe_file)
 
 
 def public_share_file_type(path: Path) -> str:
@@ -2720,10 +2761,57 @@ def public_share_file_type(path: Path) -> str:
     return "other"
 
 
+def public_share_directory_listing(path: str) -> bytes | None:
+    """Return a small browseable listing for a directory within a folder share."""
+    if PUBLIC_SHARE_FOLDER is None:
+        return None
+    encoded_segments = [segment for segment in path.removeprefix("/").split("/") if segment]
+    try:
+        segments = tuple(unquote(segment, encoding="utf-8", errors="strict") for segment in encoded_segments)
+    except UnicodeDecodeError:
+        return None
+    if any(segment in {".", ".."} or "/" in segment or "\\" in segment for segment in segments):
+        return None
+    folder_parts, _ = WorkspacePathResolver.logical_parts(PUBLIC_SHARE_FOLDER.logical_path, field_name="shared folder", error_code="PUBLIC_SHARE_NOT_FOUND", allow_root=True)
+    if tuple(segments[:len(folder_parts)]) != folder_parts:
+        return None
+    relative_parts = segments[len(folder_parts):]
+    candidate = PUBLIC_SHARE_FOLDER.physical_path.joinpath(*relative_parts)
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError:
+        return None
+    if not path_is_within(resolved, PUBLIC_SHARE_FOLDER.physical_path) or not resolved.is_dir() or resolved.is_symlink():
+        return None
+    entries: list[tuple[str, bool]] = []
+    try:
+        children = sorted(resolved.iterdir(), key=lambda item: (not item.is_dir(), item.name.casefold()))[:MAX_PUBLIC_SHARE_DIRECTORY_ENTRIES]
+        for child in children:
+            is_junction = getattr(child, "is_junction", lambda: False)
+            if child.is_symlink() or is_junction():
+                continue
+            if child.is_dir():
+                entries.append((child.name, True))
+            elif child.is_file() and ("all" in PUBLIC_SHARE_FILE_TYPES or public_share_file_type(child) in PUBLIC_SHARE_FILE_TYPES):
+                entries.append((child.name, False))
+    except OSError:
+        return None
+    title = "/".join((*folder_parts, *relative_parts)) or "Workspace"
+    rows = []
+    if relative_parts:
+        rows.append('<li><a href="../">../</a></li>')
+    for name, is_directory in entries:
+        label = f"{name}/" if is_directory else name
+        href = f"{quote(name, safe='')}/" if is_directory else quote(name, safe='')
+        rows.append(f'<li><a href="{href}">{escape(label)}</a></li>')
+    body = f"<!doctype html><meta charset=\"utf-8\"><title>Index of /{escape(title)}</title><h1>Index of /{escape(title)}</h1><ul>{''.join(rows)}</ul>"
+    return body.encode("utf-8")
+
+
 def public_share_file(path: str) -> tuple[Path, str]:
     """Resolve one public URL whose path begins with the shared folder path."""
-    if PUBLIC_SHARE_FOLDER is None or not PUBLIC_SHARE_FILE_TYPES:
-        raise AgentApiError("PUBLIC_SHARE_NOT_ACTIVE", "No workspace folder is currently shared.")
+    if PUBLIC_SHARE_FOLDER is None and PUBLIC_SHARE_FILE is None:
+        raise AgentApiError("PUBLIC_SHARE_NOT_ACTIVE", "No workspace item is currently shared.")
     encoded_segments = path.removeprefix("/").split("/")
     if not encoded_segments or any(not segment for segment in encoded_segments):
         raise AgentApiError("PUBLIC_SHARE_NOT_FOUND", "The requested shared file was not found.")
@@ -2733,6 +2821,13 @@ def public_share_file(path: str) -> tuple[Path, str]:
         raise AgentApiError("PUBLIC_SHARE_NOT_FOUND", "The requested shared file was not found.") from error
     if any(not segment or segment in {".", ".."} or "/" in segment or "\\" in segment for segment in segments):
         raise AgentApiError("PUBLIC_SHARE_NOT_FOUND", "The requested shared file was not found.")
+    if PUBLIC_SHARE_FILE is not None:
+        file_parts, _ = WorkspacePathResolver.logical_parts(PUBLIC_SHARE_FILE.logical_path, field_name="shared file", error_code="PUBLIC_SHARE_NOT_FOUND")
+        if tuple(segments) != file_parts:
+            raise AgentApiError("PUBLIC_SHARE_NOT_FOUND", "The requested shared file was not found.")
+        mime_type = mimetypes.guess_type(PUBLIC_SHARE_FILE.physical_path.name)[0] or "application/octet-stream"
+        return PUBLIC_SHARE_FILE.physical_path, mime_type
+    assert PUBLIC_SHARE_FOLDER is not None
     folder_parts, _ = WorkspacePathResolver.logical_parts(
         PUBLIC_SHARE_FOLDER.logical_path, field_name="shared folder", error_code="PUBLIC_SHARE_NOT_FOUND", allow_root=True,
     )
@@ -2766,14 +2861,20 @@ async def handle_public_share_client(reader: asyncio.StreamReader, writer: async
         if method not in {"GET", "HEAD"} or body:
             writer.write(image_response("404 Not Found"))
         else:
-            shared_file, mime_type = public_share_file(path)
-            size = shared_file.stat().st_size
-            writer.write(public_file_response_headers("200 OK", size, mime_type))
-            if method == "GET":
-                with shared_file.open("rb") as source:
-                    while chunk := source.read(64 * 1024):
-                        writer.write(chunk)
-                        await writer.drain()
+            directory_listing = public_share_directory_listing(path)
+            if directory_listing is not None:
+                writer.write(public_file_response_headers("200 OK", len(directory_listing), "text/html; charset=utf-8"))
+                if method == "GET":
+                    writer.write(directory_listing)
+            else:
+                shared_file, mime_type = public_share_file(path)
+                size = shared_file.stat().st_size
+                writer.write(public_file_response_headers("200 OK", size, mime_type))
+                if method == "GET":
+                    with shared_file.open("rb") as source:
+                        while chunk := source.read(64 * 1024):
+                            writer.write(chunk)
+                            await writer.drain()
         await writer.drain()
     except (AgentApiError, OSError, UnicodeDecodeError, asyncio.TimeoutError, asyncio.IncompleteReadError):
         try:
@@ -2825,15 +2926,51 @@ async def start_public_share_tunnel(port: int) -> None:
     ]
 
 
+def public_share_file_url(shared_file: ResolvedWorkspacePath) -> str | None:
+    if PUBLIC_TUNNEL_URL is None:
+        return None
+    parts, _ = WorkspacePathResolver.logical_parts(shared_file.logical_path, field_name="shared file", error_code="PUBLIC_SHARE_NOT_FOUND")
+    return f"{PUBLIC_TUNNEL_URL}/{'/'.join(quote(part, safe='') for part in parts)}"
+
+
+def wsrv_external_probe_sync(public_url: str) -> dict[str, Any]:
+    probe_url = f"https://wsrv.nl/?url={quote(public_url, safe='')}&w=1&h=1&output=png"
+    try:
+        request = Request(probe_url, headers={"User-Agent": f"ResearchTube/{AGENT_VERSION}"})
+        with urlopen(request, timeout=20) as response:
+            content_type = response.headers.get_content_type().lower()
+            response.read(1)
+            return {"state": "passed" if 200 <= response.status < 300 and content_type.startswith("image/") else "failed", "provider": "wsrv.nl", "httpStatus": response.status, "contentType": content_type}
+    except HTTPError as error:
+        return {"state": "failed", "provider": "wsrv.nl", "httpStatus": error.code, "contentType": error.headers.get_content_type().lower() if error.headers else None}
+    except (URLError, OSError, TimeoutError, ValueError):
+        return {"state": "failed", "provider": "wsrv.nl", "httpStatus": None, "contentType": None}
+
+
+async def run_external_share_probe(probe_file: ResolvedWorkspacePath | None) -> None:
+    global PUBLIC_SHARE_EXTERNAL_PROBE
+    if probe_file is None:
+        PUBLIC_SHARE_EXTERNAL_PROBE = {"state": "not_requested", "provider": "wsrv.nl", "probePath": None, "httpStatus": None, "contentType": None}
+        return
+    public_url = public_share_file_url(probe_file)
+    if public_url is None:
+        PUBLIC_SHARE_EXTERNAL_PROBE = {"state": "failed", "provider": "wsrv.nl", "probePath": probe_file.logical_path, "httpStatus": None, "contentType": None}
+        return
+    result = await asyncio.to_thread(wsrv_external_probe_sync, public_url)
+    PUBLIC_SHARE_EXTERNAL_PROBE = {**result, "probePath": probe_file.logical_path}
+
+
 async def stop_public_share_unlocked() -> bool:
-    global PUBLIC_SHARE_SERVER, PUBLIC_SHARE_FOLDER, PUBLIC_SHARE_FILE_TYPES, PUBLIC_TUNNEL_PROCESS, PUBLIC_TUNNEL_URL, PUBLIC_TUNNEL_WATCHERS
+    global PUBLIC_SHARE_SERVER, PUBLIC_SHARE_FOLDER, PUBLIC_SHARE_FILE, PUBLIC_SHARE_FILE_TYPES, PUBLIC_SHARE_EXTERNAL_PROBE, PUBLIC_TUNNEL_PROCESS, PUBLIC_TUNNEL_URL, PUBLIC_TUNNEL_WATCHERS
     was_active = PUBLIC_SHARE_SERVER is not None or PUBLIC_TUNNEL_PROCESS is not None
     if PUBLIC_SHARE_SERVER is not None:
         PUBLIC_SHARE_SERVER.close()
         await PUBLIC_SHARE_SERVER.wait_closed()
     PUBLIC_SHARE_SERVER = None
     PUBLIC_SHARE_FOLDER = None
+    PUBLIC_SHARE_FILE = None
     PUBLIC_SHARE_FILE_TYPES = ()
+    PUBLIC_SHARE_EXTERNAL_PROBE = {"state": "not_requested", "provider": "wsrv.nl", "probePath": None, "httpStatus": None, "contentType": None}
     for watcher in PUBLIC_TUNNEL_WATCHERS:
         watcher.cancel()
     if PUBLIC_TUNNEL_WATCHERS:
@@ -2853,10 +2990,10 @@ async def stop_public_share_unlocked() -> bool:
 
 
 async def workspace_share_start(payload: Any) -> dict[str, Any]:
-    folder, file_types = workspace_share_options(payload)
+    options = workspace_share_options(payload)
     async with PUBLIC_SHARE_LOCK:
         await stop_public_share_unlocked()
-        global PUBLIC_SHARE_SERVER, PUBLIC_SHARE_FOLDER, PUBLIC_SHARE_FILE_TYPES
+        global PUBLIC_SHARE_SERVER, PUBLIC_SHARE_FOLDER, PUBLIC_SHARE_FILE, PUBLIC_SHARE_FILE_TYPES
         server = await asyncio.start_server(handle_public_share_client, host="127.0.0.1", port=0)
         socket = next(iter(server.sockets or ()), None)
         if socket is None:
@@ -2864,8 +3001,9 @@ async def workspace_share_start(payload: Any) -> dict[str, Any]:
             await server.wait_closed()
             raise AgentApiError("PUBLIC_SHARE_START_FAILED", "The local workspace sharing server did not receive a port.")
         PUBLIC_SHARE_SERVER = server
-        PUBLIC_SHARE_FOLDER = folder
-        PUBLIC_SHARE_FILE_TYPES = file_types
+        PUBLIC_SHARE_FOLDER = options.folder
+        PUBLIC_SHARE_FILE = options.file
+        PUBLIC_SHARE_FILE_TYPES = options.file_types
         try:
             await start_public_share_tunnel(socket.getsockname()[1])
             await asyncio.wait_for(PUBLIC_TUNNEL_READY.wait(), timeout=15)
@@ -2876,7 +3014,9 @@ async def workspace_share_start(payload: Any) -> dict[str, Any]:
             if isinstance(error, AgentApiError):
                 raise
             raise AgentApiError("PUBLIC_SHARE_START_FAILED", "cloudflared did not provide a public URL within 15 seconds.") from error
-        log(f"workspace_share_start folder={folder.logical_path or '<root>'} fileTypes={','.join(file_types)}")
+        await run_external_share_probe(options.probe_file)
+        target = options.file.logical_path if options.file is not None else (options.folder.logical_path or "<root>")
+        log(f"workspace_share_start target={target} mode={'file' if options.file is not None else 'folder'} verifyExternal={str(options.verify_external).lower()}")
         return workspace_share_status_document()
 
 
@@ -2892,13 +3032,37 @@ def public_share_base_url() -> str | None:
 
 def workspace_share_status_document() -> dict[str, Any]:
     active = PUBLIC_SHARE_SERVER is not None and PUBLIC_TUNNEL_PROCESS is not None and PUBLIC_TUNNEL_PROCESS.returncode is None and PUBLIC_TUNNEL_URL is not None
+    external_probe = PUBLIC_SHARE_EXTERNAL_PROBE if active else {"state": "not_requested", "provider": "wsrv.nl", "probePath": None, "httpStatus": None, "contentType": None}
     return {
         "state": "active" if active else "inactive",
         "folder": PUBLIC_SHARE_FOLDER.logical_path if active and PUBLIC_SHARE_FOLDER is not None else None,
+        "file": PUBLIC_SHARE_FILE.logical_path if active and PUBLIC_SHARE_FILE is not None else None,
         "fileTypes": list(PUBLIC_SHARE_FILE_TYPES) if active else [],
         "publicBaseUrl": public_share_base_url() if active else None,
+        "publicFileUrl": public_share_file_url(PUBLIC_SHARE_FILE) if active and PUBLIC_SHARE_FILE is not None else None,
         "methods": ["GET", "HEAD"] if active else [],
+        "externallyReachable": True if external_probe["state"] == "passed" else False if external_probe["state"] == "failed" else None,
+        "externalProbe": external_probe,
     }
+
+
+async def workspace_share_status(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict) or set(payload) - {"verifyExternal"}:
+        raise AgentApiError("WORKSPACE_SHARE_INVALID", "workspace_share_status received unsupported fields.")
+    verify_external = payload.get("verifyExternal", False)
+    if not isinstance(verify_external, bool):
+        raise AgentApiError("WORKSPACE_SHARE_INVALID", "verifyExternal must be a boolean.")
+    async with PUBLIC_SHARE_LOCK:
+        if verify_external and (PUBLIC_SHARE_FOLDER is not None or PUBLIC_SHARE_FILE is not None):
+            if PUBLIC_SHARE_FILE is not None:
+                probe_file = PUBLIC_SHARE_FILE
+            else:
+                probe_path = PUBLIC_SHARE_EXTERNAL_PROBE.get("probePath")
+                probe_file = WorkspacePathResolver().resolve_existing(probe_path, field_name="probePath", expected_type="file") if isinstance(probe_path, str) else None
+            if probe_file is None:
+                raise AgentApiError("WORKSPACE_SHARE_INVALID", "This share has no image probePath. Restart it with verifyExternal and a probePath.")
+            await run_external_share_probe(probe_file)
+        return workspace_share_status_document()
 
 
 async def workspace_share_stop() -> dict[str, Any]:
@@ -2966,7 +3130,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
         elif method == "POST" and path == "/workspace/share/start":
             response_status, response_body = "200 OK", await workspace_share_start(parse_json_body(body))
         elif method == "POST" and path == "/workspace/share/status":
-            response_status, response_body = "200 OK", workspace_share_status_document()
+            response_status, response_body = "200 OK", await workspace_share_status(parse_json_body(body))
         elif method == "POST" and path == "/workspace/share/stop":
             response_status, response_body = "200 OK", await workspace_share_stop()
         elif method == "POST" and path == "/media/probe":

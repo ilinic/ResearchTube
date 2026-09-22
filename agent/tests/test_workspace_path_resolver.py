@@ -515,15 +515,18 @@ class PublicWorkspaceShareTests(unittest.TestCase):
         (image.parent / "notes.txt").write_text("notes", encoding="utf-8")
         self.folder = agent.WorkspacePathResolver().resolve_existing("captures", field_name="folder", expected_type="directory")
         self.old_folder = agent.PUBLIC_SHARE_FOLDER
+        self.old_file = agent.PUBLIC_SHARE_FILE
         self.old_file_types = agent.PUBLIC_SHARE_FILE_TYPES
         self.old_tunnel_url = agent.PUBLIC_TUNNEL_URL
         agent.PUBLIC_SHARE_FOLDER = self.folder
+        agent.PUBLIC_SHARE_FILE = None
         agent.PUBLIC_SHARE_FILE_TYPES = ("images",)
         agent.PUBLIC_TUNNEL_URL = "https://example.trycloudflare.com"
 
     def tearDown(self) -> None:
         agent.WORKSPACE_PATH = self.old_workspace
         agent.PUBLIC_SHARE_FOLDER = self.old_folder
+        agent.PUBLIC_SHARE_FILE = self.old_file
         agent.PUBLIC_SHARE_FILE_TYPES = self.old_file_types
         agent.PUBLIC_TUNNEL_URL = self.old_tunnel_url
         self.temp.cleanup()
@@ -534,6 +537,23 @@ class PublicWorkspaceShareTests(unittest.TestCase):
         self.assertEqual(mime_type, "image/webp")
         self.assertEqual(agent.public_share_base_url(), "https://example.trycloudflare.com/captures/")
 
+    def test_public_share_folder_has_a_browseable_directory_listing(self) -> None:
+        listing = agent.public_share_directory_listing("/captures/")
+        self.assertIsNotNone(listing)
+        self.assertIn(b"Bird.webp", listing or b"")
+        self.assertNotIn(b"notes.txt", listing or b"")
+
+    def test_public_share_single_file_exposes_only_that_file(self) -> None:
+        shared_file = agent.WorkspacePathResolver().resolve_existing("captures/Bird.webp", field_name="file", expected_type="file")
+        agent.PUBLIC_SHARE_FOLDER = None
+        agent.PUBLIC_SHARE_FILE = shared_file
+        image, mime_type = agent.public_share_file("/captures/Bird.webp")
+        self.assertEqual(image.read_bytes(), b"webp-bytes")
+        self.assertEqual(mime_type, "image/webp")
+        self.assertIsNone(agent.public_share_directory_listing("/captures/"))
+        with self.assertRaises(agent.AgentApiError):
+            agent.public_share_file("/captures/notes.txt")
+
     def test_public_share_rejects_traversal_and_filtered_file_types(self) -> None:
         for path in ("/%2e%2e/Bird.webp", "/notes.txt", "/Bird.webp", "/captures/notes.txt", "/"):
             with self.subTest(path=path), self.assertRaises(agent.AgentApiError) as raised:
@@ -541,11 +561,16 @@ class PublicWorkspaceShareTests(unittest.TestCase):
             self.assertEqual(raised.exception.code, "PUBLIC_SHARE_NOT_FOUND")
 
     def test_workspace_share_options_accepts_only_the_documented_selectors(self) -> None:
-        folder, file_types = agent.workspace_share_options({"folder": "captures", "fileTypes": ["images", "documents"]})
-        self.assertEqual(folder.logical_path, "captures")
-        self.assertEqual(file_types, ("images", "documents"))
+        options = agent.workspace_share_options({"folder": "captures", "fileTypes": ["images", "documents"]})
+        self.assertEqual(options.folder.logical_path if options.folder else None, "captures")
+        self.assertEqual(options.file_types, ("images", "documents"))
+        single_file = agent.workspace_share_options({"file": "captures/Bird.webp", "verifyExternal": True})
+        self.assertEqual(single_file.file.logical_path if single_file.file else None, "captures/Bird.webp")
+        self.assertTrue(single_file.verify_external)
         with self.assertRaises(agent.AgentApiError):
             agent.workspace_share_options({"folder": "captures", "fileTypes": ["all", "images"]})
+        with self.assertRaises(agent.AgentApiError):
+            agent.workspace_share_options({"folder": "captures", "fileTypes": ["images"], "verifyExternal": True})
 
 
 async def _bytes_result(stdout: bytes, stderr: bytes):
