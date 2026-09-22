@@ -37,7 +37,7 @@ const MCP_TOOL_SETTINGS = Object.freeze({
   clipboard_status: { group: "clipboard" }, clipboard_get: { group: "clipboard" }, clipboard_set: { group: "clipboard" },
   library_store_start: { group: "library" }, library_store_status: { group: "library" }, library_store_cancel: { group: "library" }, workspace_share_start: { group: "library" }, workspace_share_status: { group: "library" }, workspace_share_stop: { group: "library" }
 });
-const EXTENSION_VERSION = "1.46.0";
+const EXTENSION_VERSION = "1.62.0";
 const REQUIRED_AGENT_INTERFACE_VERSION = 39;
 // A UI resource URI is a cache key in MCP Apps. Increment it whenever the
 // rendered template changes so ChatGPT does not reuse a stale iframe bundle.
@@ -59,11 +59,15 @@ const CDP_PROTOCOL_VERSION = "1.3";
 const CDP_COMPOSER_SETTLE_MS = 750;
 const CDP_FILE_CHOOSER_ATTEMPTS = 2;
 const CDP_IMAGE_BATCH_MAX_FILES = 5;
+// Check at roughly 0.5, 1, 2 and 4 seconds after form submission. ChatGPT can
+// restore a draft after its initial send handler has already run.
+const CDP_SENT_DRAFT_CLEAR_CHECK_DELAYS_MS = [500, 500, 1_000, 2_000];
 const LIBRARY_STORE_TASK_STORAGE_KEY = "researchtubeLibraryStoreTasksV1";
 const LIBRARY_STORE_QUEUE_STORAGE_KEY = "researchtubeLibraryStoreQueueV1";
 const SEARCH_DIAGNOSTIC_MAX_ENTRIES = 250;
 const SEARCH_DIAGNOSTIC_MAX_QUERY_LENGTH = 360;
 const COMMAND_DIAGNOSTIC_MAX_ENTRIES = 300;
+const DESCRIBE_VIDEO_DUPLICATE_WINDOW_MS = 8_000;
 
 let polling = false;
 let currentPollPromise = null;
@@ -75,6 +79,7 @@ let searchQueueDepth = 0;
 let searchRequestSequence = 0;
 let searchDiagnosticWrite = Promise.resolve();
 let commandDiagnosticWrite = Promise.resolve();
+const recentDescribeVideoRequests = new Map();
 let captureFrameOffscreenPromise = null;
 // The ChatGPT Composer is deliberately a single, background service tab.  A
 // debugger may only be attached to it once, so image requests must never run
@@ -1380,41 +1385,77 @@ async function cdpWaitForTextComposer(tabId, timeoutMs = 45_000) {
 }
 
 async function cdpSetComposerText(tabId, text) {
-  const focusExpression = `(() => {
+  const selectComposerContentsExpression = `(() => {
     const target = document.querySelector('#prompt-textarea')
       || document.querySelector('[contenteditable="true"][role="textbox"]')
       || document.querySelector('textarea');
     if (!target) return false;
     target.focus();
+    if (typeof target.select === 'function') {
+      target.select();
+      return document.activeElement === target;
+    }
+    const selection = window.getSelection();
+    if (!selection) return false;
+    const range = document.createRange();
+    range.selectNodeContents(target);
+    selection.removeAllRanges();
+    selection.addRange(range);
     return document.activeElement === target;
   })()`;
-  const focused = (await cdpEvaluate(tabId, focusExpression))?.value;
-  if (focused !== true) throw cdpError("ChatGPT Composer could not receive keyboard input.");
-  // This is a single browser-level insertion, so the prompt appears without
-  // a character-by-character delay.
-  await cdpCommand(tabId, "Input.insertText", { text });
-  const containsText = `(() => {
+  const exactText = `(() => {
     const target = document.querySelector('#prompt-textarea')
       || document.querySelector('[contenteditable="true"][role="textbox"]')
       || document.querySelector('textarea');
-    return Boolean(target && (target.value || target.textContent || '').includes(${JSON.stringify(text)}));
+    const current = target?.value ?? target?.innerText ?? target?.textContent ?? '';
+    return current.trim() === ${JSON.stringify(text)};
   })()`;
-  await cdpWaitFor(tabId, containsText, "the inserted video-description prompt", 10_000);
+  // ChatGPT can restore a previous unsent draft in a new tab. Replacing the
+  // selected Composer content prevents that stale draft being joined to the
+  // new video request, while keeping one immediate browser-level insertion.
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    const selected = (await cdpEvaluate(tabId, selectComposerContentsExpression))?.value;
+    if (selected !== true) throw cdpError("ChatGPT Composer could not receive keyboard input.");
+    await cdpCommand(tabId, "Input.insertText", { text });
+    await sleep(120);
+    if ((await cdpEvaluate(tabId, exactText))?.value === true) {
+      cdpLog("Composer prompt replaced", { tabId, attempt });
+      return;
+    }
+  }
+  throw cdpError("ChatGPT Composer retained an older draft instead of replacing it.");
 }
 
 function canonicalYouTubeVideoUrl(value) {
   let url;
   try { url = new URL(String(value || "")); } catch (_error) { throw cdpError("The active tab is not a valid YouTube video URL."); }
-  if (url.origin !== "https://www.youtube.com" || url.pathname !== "/watch") throw cdpError("Open one YouTube video before using Describe this video.");
-  const videoId = url.searchParams.get("v") || "";
+  if (url.origin !== "https://www.youtube.com") throw cdpError("Open one YouTube video or Short before using Describe this video.");
+  const shortMatch = url.pathname.match(/^\/shorts\/([A-Za-z0-9_-]{11})$/);
+  const videoId = url.pathname === "/watch" ? (url.searchParams.get("v") || "") : (shortMatch?.[1] || "");
   if (!/^[A-Za-z0-9_-]{11}$/.test(videoId)) throw cdpError("The active YouTube page does not contain a valid video ID.");
   return `https://www.youtube.com/watch?v=${videoId}`;
 }
 
+function describeYouTubeVideoTitle(value) {
+  const title = String(value || "").replace(/\s+/g, " ").trim()
+    .replace(/\s*-\s*YouTube(?:\s+Shorts)?$/i, "").trim();
+  return title || "YouTube video";
+}
+
 async function describeYouTubeVideoInChatGPT(sourceTab) {
   const videoUrl = canonicalYouTubeVideoUrl(sourceTab?.url);
-  const prompt = `@ResearchTube ${videoUrl} Describe this video in my language.`;
-  const created = await chrome.tabs.create({ url: "https://chatgpt.com/", active: true, ...(Number.isInteger(sourceTab?.index) ? { index: sourceTab.index + 1 } : {}) });
+  const videoTitle = describeYouTubeVideoTitle(sourceTab?.title);
+  const now = Date.now();
+  const previous = recentDescribeVideoRequests.get(videoUrl) || 0;
+  if (now - previous < DESCRIBE_VIDEO_DUPLICATE_WINDOW_MS) {
+    cdpLog("Suppressed duplicate video-description request", { videoUrl });
+    return { ok: true, videoUrl, duplicateSuppressed: true };
+  }
+  recentDescribeVideoRequests.set(videoUrl, now);
+  const prompt = `@ResearchTube ${videoTitle} ${videoUrl} Study the video and tell me what it is about in my language.`;
+  // Keep the user on the current YouTube page while ChatGPT works in its new
+  // adjacent background tab. The Library flow already uses this CDP mode.
+  const created = await chrome.tabs.create({ url: "https://chatgpt.com/", active: false, ...(Number.isInteger(sourceTab?.index) ? { index: sourceTab.index + 1 } : {}) });
   if (!created?.id) throw cdpError("Chrome could not open a ChatGPT tab.");
   const chatTab = await waitForChatGPTTab(created.id);
   let attached = false;
@@ -1423,9 +1464,13 @@ async function describeYouTubeVideoInChatGPT(sourceTab) {
     await cdpCommand(chatTab.id, "Runtime.enable");
     await cdpWaitForTextComposer(chatTab.id);
     await cdpSetComposerText(chatTab.id, prompt);
-    await cdpSendComposerText(chatTab.id);
+    await cdpSendComposerText(chatTab.id, prompt);
     cdpLog("Sent video-description prompt", { tabId: chatTab.id, videoUrl });
     return { ok: true, videoUrl, chatTabId: chatTab.id };
+  } catch (error) {
+    // A failed attempt must not stop the user from immediately trying again.
+    recentDescribeVideoRequests.delete(videoUrl);
+    throw error;
   } finally {
     if (attached) await cdpDetach(chatTab.id);
   }
@@ -1529,6 +1574,77 @@ const CDP_SUBMIT_COMPOSER_FORM_EXPRESSION = `(() => {
   return true;
 })()`;
 
+function cdpComposerTextExpression(expectedText) {
+  return `(() => {
+    const composer = document.querySelector('#prompt-textarea')
+      || document.querySelector('[contenteditable="true"][role="textbox"]')
+      || document.querySelector('textarea');
+    const current = composer?.value ?? composer?.innerText ?? composer?.textContent ?? '';
+    return current.trim() === ${JSON.stringify(expectedText)};
+  })()`;
+}
+
+function cdpComposerDraftStateExpression(expectedText) {
+  return `(() => {
+    const composer = document.querySelector('#prompt-textarea')
+      || document.querySelector('[contenteditable="true"][role="textbox"]')
+      || document.querySelector('textarea');
+    if (!composer) return "missing";
+    const current = composer.value ?? composer.innerText ?? composer.textContent ?? '';
+    if (current.trim() === ${JSON.stringify(expectedText)}) return "match";
+    if (current.trim() === '') return "empty";
+    return "changed";
+  })()`;
+}
+
+const CDP_SELECT_COMPOSER_CONTENTS_EXPRESSION = `(() => {
+  const composer = document.querySelector('#prompt-textarea')
+    || document.querySelector('[contenteditable="true"][role="textbox"]')
+    || document.querySelector('textarea');
+  if (!composer) return false;
+  composer.focus();
+  if (typeof composer.select === 'function') return composer.select(), document.activeElement === composer;
+  const selection = window.getSelection();
+  if (!selection) return false;
+  const range = document.createRange();
+  range.selectNodeContents(composer);
+  selection.removeAllRanges();
+  selection.addRange(range);
+  return document.activeElement === composer;
+})()`;
+
+async function cdpClearSentComposerDraft(tabId, sentText) {
+  // requestSubmit starts ChatGPT's send path, but its draft cleanup can be
+  // delayed or rehydrated. A cleanup never submits anything. It only clears
+  // the exact automation text, and stops as soon as the user changes it.
+  for (let attempt = 0; attempt < CDP_SENT_DRAFT_CLEAR_CHECK_DELAYS_MS.length; attempt += 1) {
+    await sleep(CDP_SENT_DRAFT_CLEAR_CHECK_DELAYS_MS[attempt]);
+    try {
+      const state = (await cdpEvaluate(tabId, cdpComposerDraftStateExpression(sentText)))?.value;
+      if (state === "missing") return;
+      if (state === "changed") {
+        cdpLog("Composer draft changed by user; stopping cleanup", { tabId, attempt: attempt + 1 });
+        return;
+      }
+      // An empty Composer is safe. Keep checking because ChatGPT may restore
+      // the stale draft later in its asynchronous send path.
+      if (state === "empty") continue;
+      if (state !== "match") return;
+
+      const selected = (await cdpEvaluate(tabId, CDP_SELECT_COMPOSER_CONTENTS_EXPRESSION))?.value;
+      if (selected !== true) return;
+      await cdpCommand(tabId, "Input.dispatchKeyEvent", { type: "keyDown", key: "Backspace", code: "Backspace", windowsVirtualKeyCode: 8, nativeVirtualKeyCode: 8 });
+      await cdpCommand(tabId, "Input.dispatchKeyEvent", { type: "keyUp", key: "Backspace", code: "Backspace", windowsVirtualKeyCode: 8, nativeVirtualKeyCode: 8 });
+      cdpLog("Cleared delayed Composer draft after submission", { tabId, attempt: attempt + 1 });
+    } catch (error) {
+      // The prompt is already sent. A best-effort draft cleanup must never
+      // turn that successful send into an error visible to the user.
+      cdpLog("Stopped Composer draft cleanup", { tabId, attempt: attempt + 1, error: safeErrorMessage(error) });
+      return;
+    }
+  }
+}
+
 async function cdpClickEnabledSendButton(tabId, timeoutMs = 45_000) {
   await cdpWaitFor(tabId, CDP_ENABLED_SEND_BUTTON_EXPRESSION, "the enabled ChatGPT Send button", timeoutMs);
   const target = (await cdpEvaluate(tabId, CDP_SEND_BUTTON_CENTER_EXPRESSION))?.value;
@@ -1542,13 +1658,14 @@ async function cdpClickEnabledSendButton(tabId, timeoutMs = 45_000) {
   cdpLog("Clicked ChatGPT Send button with browser input", { tabId });
 }
 
-async function cdpSendComposerText(tabId) {
+async function cdpSendComposerText(tabId, text) {
   // Send through the Composer's own form. This avoids relying on a synthetic
   // pointer click, which ChatGPT can ignore even when it shows the button.
   await cdpWaitFor(tabId, CDP_ENABLED_SEND_BUTTON_EXPRESSION, "the enabled ChatGPT Send button", 5_000);
   const submitted = (await cdpEvaluate(tabId, CDP_SUBMIT_COMPOSER_FORM_EXPRESSION))?.value;
   if (submitted !== true) throw cdpError("The ChatGPT Composer form could not be submitted.");
   cdpLog("Submitted ChatGPT Composer form", { tabId });
+  await cdpClearSentComposerDraft(tabId, text);
 }
 
 async function cdpSendAttachedImages(tabId, fileCount) {

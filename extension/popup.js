@@ -11,7 +11,10 @@ function currentYouTubeVideoTab(tabs) {
   const tab = tabs?.[0];
   try {
     const url = new URL(tab?.url || "");
-    return url.origin === "https://www.youtube.com" && url.pathname === "/watch" && /^[A-Za-z0-9_-]{11}$/.test(url.searchParams.get("v") || "") ? tab : null;
+    if (url.origin !== "https://www.youtube.com") return null;
+    const isWatchVideo = url.pathname === "/watch" && /^[A-Za-z0-9_-]{11}$/.test(url.searchParams.get("v") || "");
+    const isShort = /^\/shorts\/[A-Za-z0-9_-]{11}$/.test(url.pathname);
+    return isWatchVideo || isShort ? tab : null;
   } catch (_error) { return null; }
 }
 let activeYouTubeVideoTab = null;
@@ -39,12 +42,12 @@ async function load() {
   $("agent-status").className = agent.className;
 }
 $("chatgpt").addEventListener("click", () => call({ type: "open-external", target: "chatgptNewChat" }));
-$("describe-video").addEventListener("click", async () => {
-  const button = $("describe-video"); const status = $("describe-video-status");
+$("describe-video").addEventListener("click", () => {
   if (!activeYouTubeVideoTab) return;
-  button.disabled = true; status.hidden = false; status.className = "action-status"; status.textContent = "Opening ChatGPT…";
-  const result = await call({ type: "describe-youtube-video", tab: { url: activeYouTubeVideoTab.url, index: activeYouTubeVideoTab.index } });
-  if (result?.ok) { status.classList.add("ok"); status.textContent = "Sent to ChatGPT."; } else { status.classList.add("error"); status.textContent = result?.error || "Could not send the video-description request."; button.disabled = false; }
+  // Start the background request first.  It owns the full CDP lifecycle, so the
+  // popup can close without waiting for ChatGPT to become ready.
+  void call({ type: "describe-youtube-video", tab: { url: activeYouTubeVideoTab.url, title: activeYouTubeVideoTab.title, index: activeYouTubeVideoTab.index } }).catch(() => {});
+  window.close();
 });
 $("settings").addEventListener("click", () => chrome.runtime.openOptionsPage());
 load();

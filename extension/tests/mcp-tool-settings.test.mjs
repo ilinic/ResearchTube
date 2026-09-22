@@ -20,6 +20,8 @@ assert.match(background, /tools: await enabledMcpToolDefinitions\(\)/);
 assert.match(html, /MCP tool availability/);
 assert.match(html, /id="new-tools-enabled"/);
 assert.match(html, /ChatGPT Plugins/);
+assert.doesNotMatch(html, /<h2>Status<\/h2>/, "Settings must not display the obsolete connection-status section");
+assert.doesNotMatch(script, /formatStatus\(/, "Settings must not maintain obsolete connection-status rendering");
 assert.match(html, /Find <strong>ResearchTube<\/strong> and open <strong>Manage<\/strong>/);
 assert.match(html, /Click <strong>Refresh<\/strong> to reload the MCP tool schema/);
 assert.match(html, /data-open="chatgpt"/);

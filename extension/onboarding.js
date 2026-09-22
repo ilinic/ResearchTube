@@ -10,8 +10,6 @@ const messages = {
 async function call(message) { return chrome.runtime.sendMessage(message); }
 function escapeHtml(value) { const element = document.createElement("span"); element.textContent = value; return element.innerHTML; }
 function renderResult(result) { const box = $("test-result"); box.hidden = false; box.className = result.ok ? "ok" : "error"; if (result.ok) box.innerHTML = "<strong>Connection successful.</strong><br>✓ API key accepted<br>✓ Tunnel found<br>✓ ResearchTube can access the tunnel"; else { const message = messages[result.errorCode] || result.message || "Connection test failed."; box.innerHTML = `<strong>${escapeHtml(message)}</strong>${result.detail ? `<details><summary>Technical details</summary>${escapeHtml(result.detail)}</details>` : ""}`; } }
-function formatStatus(state) { const test = state.lastConnectionTest; if (!test) return state.configured ? "Connection configured. No connection test has been run yet." : "Connection is not configured."; const when = new Date(test.timestamp).toLocaleString(); return test.success ? `Last connection test: Successful — ${when}` : `Last connection test: Failed — ${when}`; }
-async function refreshStatus() { const state = await call({ type: "status" }); $("status").textContent = formatStatus(state); return state; }
 function componentLabel(name) { return name === "ytDlp" ? "yt-dlp" : name; }
 function componentDetail(component) {
   const version = component.version ? ` — ${component.version}` : "";
@@ -83,7 +81,7 @@ function renderMcpTools(result) {
   }
 }
 async function loadMcpToolSettings() { renderMcpTools(await call({ type: "get-mcp-tool-settings" })); }
-async function saveAndTest() { $("test-connection").disabled = true; $("test-connection").textContent = "Testing…"; const saved = await call({ type: "save-connection", payload: { tunnelId: $("tunnel-id").value, apiKey: $("api-key").value } }); const result = saved.ok ? await call({ type: "test-connection" }) : saved; renderResult(result); if (result.ok) { await call({ type: "save-connection", payload: { tunnelId: $("tunnel-id").value, onboardingCompleted: true } }); $("api-key").value = ""; $("api-key").placeholder = "••••••••••••••••"; } await refreshStatus(); $("test-connection").disabled = false; $("test-connection").textContent = "Save and test connection"; }
+async function saveAndTest() { $("test-connection").disabled = true; $("test-connection").textContent = "Testing…"; const saved = await call({ type: "save-connection", payload: { tunnelId: $("tunnel-id").value, apiKey: $("api-key").value } }); const result = saved.ok ? await call({ type: "test-connection" }) : saved; renderResult(result); if (result.ok) { await call({ type: "save-connection", payload: { tunnelId: $("tunnel-id").value, onboardingCompleted: true } }); $("api-key").value = ""; $("api-key").placeholder = "••••••••••••••••"; } $("test-connection").disabled = false; $("test-connection").textContent = "Save and test connection"; }
 $("test-connection").addEventListener("click", saveAndTest);
 $("test-agent").addEventListener("click", testAgentConnection);
 document.querySelectorAll("[data-open]").forEach((link) => link.addEventListener("click", (event) => { event.preventDefault(); call({ type: "open-external", target: link.dataset.open }); }));
@@ -92,5 +90,5 @@ $("copy-app-name").addEventListener("click", async () => { await navigator.clipb
 $("copy-prompt").addEventListener("click", async () => { await navigator.clipboard.writeText($("example-prompt").textContent.trim()); $("copy-prompt").textContent = "Copied"; setTimeout(() => { $("copy-prompt").textContent = "Copy example prompt"; }, 1400); });
 $("copy-diagnostics").addEventListener("click", async () => { const button = $("copy-diagnostics"); const result = await call({ type: "get-diagnostics" }); if (!result?.ok) { $("diagnostics-summary").textContent = "Could not export diagnostics."; return; } await navigator.clipboard.writeText(result.text); button.textContent = "Copied"; setTimeout(() => { button.textContent = "Copy diagnostics log"; }, 1400); });
 $("clear-diagnostics").addEventListener("click", async () => { const result = await call({ type: "clear-diagnostics" }); if (result?.ok) { $("diagnostics-summary").textContent = "No diagnostic events captured yet."; } else { $("diagnostics-summary").textContent = "Could not clear diagnostics."; } });
-async function init() { const state = await refreshStatus(); $("tunnel-id").value = state.tunnelId || ""; $("agent-port").value = state.agentPort || 17843; if (state.apiKeyPresent) $("api-key").placeholder = "••••••••••••••••"; await refreshDiagnostics(); await loadMcpToolSettings(); }
+async function init() { const state = await call({ type: "status" }); $("tunnel-id").value = state.tunnelId || ""; $("agent-port").value = state.agentPort || 17843; if (state.apiKeyPresent) $("api-key").placeholder = "••••••••••••••••"; await refreshDiagnostics(); await loadMcpToolSettings(); }
 init();
