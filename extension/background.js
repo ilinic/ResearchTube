@@ -15,11 +15,12 @@ const DEFAULTS = {
   youtubeSearchCooldownUntil: 0,
   youtubeSearchCooldownLevel: 0
 };
-const EXTENSION_VERSION = "1.21.2";
-const REQUIRED_AGENT_INTERFACE_VERSION = 19;
+const EXTENSION_VERSION = "1.31.0";
+const REQUIRED_AGENT_INTERFACE_VERSION = 28;
 // A UI resource URI is a cache key in MCP Apps. Increment it whenever the
 // rendered template changes so ChatGPT does not reuse a stale iframe bundle.
-const CAPTURE_FRAME_WIDGET_URI = "ui://researchtube/capture-frame-v25.html";
+const CAPTURE_FRAME_WIDGET_URI = "ui://researchtube/capture-frame-v29.html";
+const RESEARCHTUBE_MCP_INSTRUCTIONS = "ResearchTube exposes MCP tools that may be loaded or discovered lazily by the client. When the user mentions ResearchTube, invokes @ResearchTube, asks to repeat a ResearchTube operation, or requests a capability previously provided by ResearchTube, do not infer that ResearchTube is unavailable merely because its tools are not currently visible as a top-level tool namespace. Before reporting that a ResearchTube capability is unavailable, discover or inspect the available ResearchTube MCP tools and attempt to locate the requested capability. Only report ResearchTube as unavailable if tool discovery actually fails, the required tool cannot be found after discovery, or an actual ResearchTube tool invocation returns an availability, connection, compatibility, or transport error. Successful use earlier in the conversation is evidence that the tools may be discoverable again; rediscover them rather than assuming access has disappeared. capture_frame, capture_screen, and researchtube_image_crop never render a widget themselves: when showInChat is true, after the successful creation result immediately call researchtube_show_workspace_image with the returned workspace image path. When showInChat is false, do not call the display tool.";
 const CAPTURE_FRAME_OFFSCREEN_DOCUMENT = "capture-frame-offscreen.html";
 const AGENT_HEALTH_TIMEOUT_MS = 5_000;
 const AGENT_TASK_TIMEOUT_MS = 10_000;
@@ -108,9 +109,9 @@ const ytDlpDownloadFormatsSchema = {
     available: { type: "boolean", description: "True when this Local Agent's current yt-dlp process successfully exposed at least one selectable media stream." },
     source: { type: "string", enum: ["ytDlp", "unavailable"], description: "ytDlp means the list came from the same local yt-dlp installation that youtube_download will invoke. unavailable means that local discovery did not yield usable formats." },
     message: { ...nullableString, description: "Why the local yt-dlp format list is unavailable, if known. It never contains media URLs, credentials, host paths, or raw process output." },
-    combined: { type: "array", items: downloadFormatSchema, description: "Ready-made video+audio formats confirmed by local yt-dlp. Select an exact numeric formatId here as selection.combined." },
-    video: { type: "array", items: downloadFormatSchema, description: "Video-only formats confirmed by local yt-dlp. Select one exact numeric formatId here as selection.video." },
-    audio: { type: "array", items: downloadFormatSchema, description: "Audio-only formats confirmed by local yt-dlp. Select one exact numeric formatId here as selection.audio." }
+    combined: { type: "array", items: downloadFormatSchema, description: "Ready-made video+audio formats confirmed by local yt-dlp. Select an exact numeric formatId here as formatSelection.combined." },
+    video: { type: "array", items: downloadFormatSchema, description: "Video-only formats confirmed by local yt-dlp. Select one exact numeric formatId here as formatSelection.video." },
+    audio: { type: "array", items: downloadFormatSchema, description: "Audio-only formats confirmed by local yt-dlp. Select one exact numeric formatId here as formatSelection.audio." }
   },
   required: ["available", "source", "message", "combined", "video", "audio"]
 };
@@ -265,10 +266,11 @@ const youtubeDownloadResultSchema = {
   properties: {
     videoId: { type: "string", description: "YouTube video ID requested for download." },
     filePath: { type: "string", description: "Path relative to the Local Agent workspace; it never exposes an arbitrary system path." },
-    fileName: { type: "string", description: "Sanitized downloaded filename, including [yt_<videoId>] and the task ID." },
-    outputDir: { type: "string", description: "Workspace-relative output directory used for this download." }
+    fileName: { type: "string", description: "Sanitized downloaded filename, including [yt_<videoId>], an optional [partial_<start>_<end>] tag, and the task ID." },
+    outputDir: { type: "string", description: "Workspace-relative output directory used for this download." },
+    partial: { anyOf: [{ type: "object", additionalProperties: false, properties: { startSeconds: { type: "number", minimum: 0 }, endSeconds: { type: "number", minimum: 0 } }, required: ["startSeconds", "endSeconds"] }, { type: "null" }], description: "Requested time range when this is a partial download; otherwise null." }
   },
-  required: ["videoId", "filePath", "fileName", "outputDir"]
+  required: ["videoId", "filePath", "fileName", "outputDir", "partial"]
 };
 const downloadSelectionValueSchema = {
   anyOf: [
@@ -463,6 +465,13 @@ const captureFrameImageInputSchema = {
     compressionLevel: { type: "integer", minimum: 0, maximum: 9, description: "PNG compression level. It is invalid for JPEG/WebP." }
   }
 };
+const screenCaptureImageInputSchema = {
+  type: "object", additionalProperties: false,
+  properties: {
+    format: { ...captureFrameFormatSchema, default: "png" },
+    quality: { type: "integer", minimum: 1, maximum: 100, description: "JPEG/WebP quality. It is invalid for PNG." }
+  }
+};
 const captureFrameYoutubeInputSchema = {
   type: "object", additionalProperties: false,
   properties: {
@@ -484,6 +493,7 @@ const captureFrameSchema = {
     selectedVideoStreamIndex: { type: "integer", minimum: 0, description: "ffprobe streams[].index of the video stream used." },
     seekMode: { type: "string", enum: ["accurate", "fast"] },
     displayRotationApplied: { type: "boolean" },
+    showInChat: { type: "boolean", description: "Whether this result was requested for visible inline display in ChatGPT." },
     image: {
       type: "object", additionalProperties: false,
       properties: {
@@ -494,7 +504,7 @@ const captureFrameSchema = {
       required: ["format", "mimeType", "width", "height", "imageSizeBytes", "workspacePath"]
     }
   },
-  required: ["sourcePath", "requestedTimestampSeconds", "actualTimestampSeconds", "selectedVideoStreamIndex", "seekMode", "displayRotationApplied", "image"]
+  required: ["sourcePath", "requestedTimestampSeconds", "actualTimestampSeconds", "selectedVideoStreamIndex", "seekMode", "displayRotationApplied", "showInChat", "image"]
 };
 const captureFrameWidgetActionSchema = {
   type: "object", additionalProperties: false,
@@ -503,6 +513,91 @@ const captureFrameWidgetActionSchema = {
     action: { type: "string", enum: ["copiedPath"] }
   },
   required: ["path", "action"]
+};
+const screenCaptureSchema = {
+  type: "object", additionalProperties: false,
+  properties: {
+    workspacePath: { type: "string", minLength: 1, description: "Logical workspace-relative path of the created screen image." },
+    format: captureFrameFormatSchema,
+    mimeType: { type: "string", enum: ["image/png", "image/jpeg", "image/webp"] },
+    width: { type: "integer", minimum: 1, description: "Virtual-desktop image width in pixels." },
+    height: { type: "integer", minimum: 1, description: "Virtual-desktop image height in pixels." },
+    imageSizeBytes: { type: "integer", minimum: 0 },
+    showInChat: { type: "boolean", description: "Whether this screenshot was requested for visible inline display in ChatGPT." },
+    monitorCount: { type: "integer", minimum: 1, description: "Number of monitors included in the captured virtual desktop." },
+    virtualDesktop: {
+      type: "object", additionalProperties: false,
+      properties: {
+        left: { type: "integer", description: "Left edge of the virtual desktop in operating-system display coordinates; it may be negative." },
+        top: { type: "integer", description: "Top edge of the virtual desktop in operating-system display coordinates; it may be negative." },
+        width: { type: "integer", minimum: 1 }, height: { type: "integer", minimum: 1 }
+      },
+      required: ["left", "top", "width", "height"]
+    }
+  },
+  required: ["workspacePath", "format", "mimeType", "width", "height", "imageSizeBytes", "showInChat", "monitorCount", "virtualDesktop"]
+};
+const imageCropSchema = {
+  type: "object", additionalProperties: false,
+  properties: {
+    sourcePath: { type: "string", minLength: 1, description: "Logical workspace-relative path of the source image." },
+    sourceWidth: { type: "integer", minimum: 1, description: "Stored source-image width in pixels, before cropping." },
+    sourceHeight: { type: "integer", minimum: 1, description: "Stored source-image height in pixels, before cropping." },
+    crop: captureFrameCropSchema,
+    showInChat: { type: "boolean", description: "Whether the cropped image was requested for visible inline display in ChatGPT." },
+    image: {
+      type: "object", additionalProperties: false,
+      properties: {
+        format: captureFrameFormatSchema, mimeType: { type: "string", enum: ["image/png", "image/jpeg", "image/webp"] },
+        width: { type: "integer", minimum: 1 }, height: { type: "integer", minimum: 1 }, imageSizeBytes: { type: "integer", minimum: 0 },
+        workspacePath: { type: "string", minLength: 1, description: "Logical workspace-relative path of the new cropped image." }
+      },
+      required: ["format", "mimeType", "width", "height", "imageSizeBytes", "workspacePath"]
+    }
+  },
+  required: ["sourcePath", "sourceWidth", "sourceHeight", "crop", "showInChat", "image"]
+};
+const showWorkspaceImageSchema = {
+  type: "object", additionalProperties: false,
+  properties: {
+    workspacePath: { type: "string", minLength: 1, description: "Logical workspace-relative path of the displayed image." },
+    mimeType: { type: "string", enum: ["image/png", "image/jpeg", "image/webp"] },
+    imageSizeBytes: { type: "integer", minimum: 0 },
+    showInChat: { type: "boolean", const: true }
+  },
+  required: ["workspacePath", "mimeType", "imageSizeBytes", "showInChat"]
+};
+const clipboardRevisionSchema = { type: "string", pattern: "^cb_[0-9]+$", description: "Opaque revision returned by clipboard_status or clipboard_get. Do not construct it." };
+const clipboardStatusSchema = {
+  type: "object", additionalProperties: false,
+  properties: {
+    type: { type: "string", enum: ["text", "image", "empty", "unsupported"] },
+    revision: clipboardRevisionSchema,
+    changed: { type: "boolean" },
+    sizeBytes: { type: "integer", minimum: 0 },
+    width: { type: "integer", minimum: 1 }, height: { type: "integer", minimum: 1 }
+  },
+  required: ["type", "revision"]
+};
+const clipboardGetSchema = {
+  type: "object", additionalProperties: false,
+  properties: {
+    type: { type: "string", enum: ["text", "image"] },
+    revision: clipboardRevisionSchema,
+    text: { type: "string" },
+    workspacePath: { type: "string", minLength: 1 },
+    width: { type: "integer", minimum: 1 }, height: { type: "integer", minimum: 1 }, sizeBytes: { type: "integer", minimum: 0 }
+  },
+  required: ["type", "revision"],
+  oneOf: [{ required: ["text"] }, { required: ["workspacePath", "width", "height", "sizeBytes"] }]
+};
+const clipboardSetSchema = {
+  type: "object", additionalProperties: false,
+  properties: {
+    success: { type: "boolean", const: true }, type: { type: "string", enum: ["text", "image"] }, revision: clipboardRevisionSchema,
+    width: { type: "integer", minimum: 1 }, height: { type: "integer", minimum: 1 }
+  },
+  required: ["success", "type", "revision"]
 };
 const pureReadAnnotations = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true };
 // The Local Agent is fixed to loopback, so this status read has no open-world
@@ -560,7 +655,7 @@ function toolDefinitions() {
     {
       name: "researchtube_agent_status",
       title: "Get ResearchTube Local Agent status",
-      description: "Check the optional ResearchTube Local Agent on the configured localhost port. Returns the serving Chrome Extension implementation version and its required Extension ↔ Agent interface version, plus the Agent implementation version, interface version, public operating-system information, workspace health, and status, version, discovery source, and diagnostic message for yt-dlp, Deno, ffmpeg, and ffprobe. Deno is an optional local JavaScript runtime passed explicitly to yt-dlp when available. Physical host paths and host identity are intentionally never exposed through MCP. A missing or mismatched Agent interfaceVersion prevents the Extension from using Agent tools, but does not affect ordinary YouTube research tools.",
+      description: "Checks availability, compatibility, platform information, and component status of the ResearchTube Local Agent. When ResearchTube availability is uncertain, prefer discovering ResearchTube tools and calling this tool rather than concluding that ResearchTube is unavailable from tool visibility alone. Returns the serving Chrome Extension implementation version and its required Extension ↔ Agent interface version, plus the Agent implementation version, interface version, public operating-system information, workspace health, and status, version, discovery source, and diagnostic message for yt-dlp, Deno, ffmpeg, and ffprobe. Deno is an optional local JavaScript runtime passed explicitly to yt-dlp when available. Physical host paths and host identity are intentionally never exposed through MCP. A missing or mismatched Agent interfaceVersion prevents the Extension from using Agent tools, but does not affect ordinary YouTube research tools.",
       annotations: localAgentReadAnnotations,
       inputSchema: { type: "object", additionalProperties: false, properties: {} },
       outputSchema: agentStatusSchema
@@ -576,7 +671,7 @@ function toolDefinitions() {
     {
       name: "library_store_start",
       title: "Store a batch of workspace images in ChatGPT Library",
-      description: "Queue one indivisible batch of 1 to 5 PNG, JPEG, or WebP images from the ResearchTube workspace for ChatGPT Library storage. ResearchTube uses one dedicated background ChatGPT service tab and submits the batch with the appropriate Store this image/these images in the Library request. The returned taskId must be polled with library_store_status. A completed task means ResearchTube confirmed Composer acceptance and submitted the request to ChatGPT; it never claims that the later ChatGPT Library update is complete.",
+      description: "Queue one indivisible batch of 1 to 5 PNG, JPEG, or WebP images from the ResearchTube workspace for ChatGPT Library storage. ResearchTube uses one dedicated background ChatGPT service tab, attaches the batch, and presses Send without inserting any text into the Composer. The returned taskId must be polled with library_store_status. A completed task means ResearchTube confirmed Composer acceptance and clicked Send; it never claims that the later ChatGPT Library update is complete.",
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
       inputSchema: { type: "object", additionalProperties: false, properties: { files: { type: "array", minItems: 1, maxItems: 5, uniqueItems: true, items: libraryStoreFileSchema, description: "One immutable batch. Files are attached and submitted together, never split or mixed with another task." } }, required: ["files"] },
       outputSchema: libraryStoreStartSchema
@@ -584,7 +679,7 @@ function toolDefinitions() {
     {
       name: "library_store_status",
       title: "Check a Library storage task",
-      description: "Return the current local status of one ResearchTube Library storage task. submitted means the request left the Composer for ChatGPT; libraryAvailability remains not_verified because ResearchTube cannot observe the later Library update.",
+      description: "Return the current local status of one ResearchTube Library storage task. submitted means ResearchTube confirmed the image batch in Composer and clicked Send without adding instruction text; libraryAvailability remains not_verified because ResearchTube cannot observe the later Library update.",
       annotations: localAgentReadAnnotations,
       inputSchema: { type: "object", additionalProperties: false, properties: { taskId: { type: "string", minLength: 1 } }, required: ["taskId"] },
       outputSchema: libraryStoreStatusSchema
@@ -679,7 +774,7 @@ function toolDefinitions() {
     {
       name: "capture_frame",
       title: "Extract one frame from workspace or YouTube",
-      description: "Extract one frame either from an existing workspace media path, or directly from YouTube without downloading the full video. For direct YouTube capture, first call youtube_get_download_formats and pass its exact numeric video formatId as youtube.formatId; the browser-side youtubeFormats list is not accepted because it can differ from local yt-dlp. The Local Agent uses yt-dlp --download-sections with ffmpeg to download only a short window around timestampSeconds, deletes that temporary section, and saves only the image in the workspace. The image filename uses the title returned by that same yt-dlp operation plus [yt_<videoId>], timestamp, and unique capture ID. path and youtube are mutually exclusive. videoStreamIndex is only for path sources. No media URLs or host paths are exposed.",
+      description: "Extract one frame either from an existing workspace media path, or directly from YouTube without downloading the full video. For direct YouTube capture, first call youtube_get_download_formats and pass its exact numeric video formatId as youtube.formatId; the browser-side youtubeFormats list is not accepted because it can differ from local yt-dlp. The Local Agent uses yt-dlp --download-sections with ffmpeg to download only a short window around timestampSeconds, deletes that temporary section, and saves only the image in the workspace. The image filename uses the title returned by that same yt-dlp operation plus [yt_<videoId>], timestamp, and unique capture ID. path and youtube are mutually exclusive. videoStreamIndex is only for path sources. showInChat defaults to false: set it true only when the user needs to see this particular frame inline. Inline display is presentation only; it does not make image pixels a reliable visual input to ChatGPT. No media URLs or host paths are exposed.",
       annotations: localWorkspaceWriteAnnotations,
       inputSchema: {
         type: "object", additionalProperties: false,
@@ -693,18 +788,96 @@ function toolDefinitions() {
           crop: captureFrameCropSchema,
           resize: captureFrameResizeSchema,
           image: captureFrameImageInputSchema,
-          outputPath: { type: "string", minLength: 1, description: "Optional logical workspace-relative output image path. If omitted, capture_frame writes a uniquely named image to captures/. Use this only to choose a different workspace folder or filename; capture_frame never overwrites an existing file." }
+          outputPath: { type: "string", minLength: 1, description: "Optional logical workspace-relative output image path. If omitted, capture_frame writes a uniquely named image to captures/. Use this only to choose a different workspace folder or filename; capture_frame never overwrites an existing file." },
+          showInChat: { type: "boolean", default: false, description: "Set true only when the user needs this resulting frame displayed inline. After a successful result, call researchtube_show_workspace_image for its returned image.workspacePath. Default false keeps the chat compact and must not create a display widget." }
         },
         required: ["timestampSeconds"],
         oneOf: [{ required: ["path"] }, { required: ["youtube"] }]
       },
       outputSchema: captureFrameSchema,
       _meta: {
-        ui: { resourceUri: CAPTURE_FRAME_WIDGET_URI },
-        "openai/outputTemplate": CAPTURE_FRAME_WIDGET_URI,
         "openai/toolInvocation/invoking": "Capturing frame…",
         "openai/toolInvocation/invoked": "Frame captured."
       }
+    },
+    {
+      name: "capture_screen",
+      title: "Capture the full desktop",
+      description: "Capture the complete current virtual desktop into one workspace image. FFmpeg is the only pixel-capture implementation: gdigrab on Windows, x11grab on Linux/X11, and avfoundation on macOS. Small platform display queries provide only truthful virtual-desktop bounds and monitorCount; they do not capture pixels. Linux Wayland capture is intentionally not supported. On macOS, the operating system must grant screen-recording permission to the FFmpeg process. This can capture visible sensitive information; invoke it only when a current full-screen image is actually needed. The default is a lossless PNG. JPEG or WebP may be chosen when a smaller file is preferable. outputPath is optional: if omitted, the Agent creates a uniquely named image under screenshots/. Any supplied outputPath must be a logical workspace-relative image path with an extension that matches image.format. showInChat defaults to false: set it true only when the user needs to see this screenshot inline. Inline display is presentation only; it does not make image pixels a reliable visual input to ChatGPT. The tool never returns a host path and never overwrites an existing workspace file.",
+      annotations: localWorkspaceWriteAnnotations,
+      inputSchema: {
+        type: "object", additionalProperties: false,
+        properties: {
+          outputPath: { type: "string", minLength: 1, description: "Optional logical workspace-relative image path. If omitted, capture_screen creates a uniquely named file under screenshots/. It never overwrites an existing file." },
+          image: screenCaptureImageInputSchema,
+          showInChat: { type: "boolean", default: false, description: "Set true only when the user needs this screenshot displayed inline. After a successful result, call researchtube_show_workspace_image for its workspacePath. Default false keeps the chat compact and must not create a display widget." }
+        }
+      },
+      outputSchema: screenCaptureSchema,
+      _meta: {
+        "openai/toolInvocation/invoking": "Capturing desktop…",
+        "openai/toolInvocation/invoked": "Desktop captured."
+      }
+    },
+    {
+      name: "researchtube_image_crop",
+      title: "Crop a workspace image",
+      description: "Create a new PNG, JPEG, or WebP image by cutting one rectangular pixel area from an existing PNG, JPEG, or WebP image in the ResearchTube workspace. crop.x and crop.y are zero-based coordinates in the stored source-image pixels; crop.width and crop.height must keep the entire rectangle inside the source image. The source is never changed. The default output is a PNG under crops/; image.format may choose JPEG or WebP, and outputPath may choose a different logical workspace path with a matching extension. showInChat defaults to false: set it true only when the user needs to see this cropped result inline. Inline display is presentation only; it does not make image pixels a reliable visual input to ChatGPT. The tool never overwrites an existing file and never returns a host path.",
+      annotations: localWorkspaceWriteAnnotations,
+      inputSchema: {
+        type: "object", additionalProperties: false,
+        properties: {
+          path: { type: "string", minLength: 1, description: "Logical workspace-relative path of an existing PNG, JPEG, or WebP source image." },
+          crop: captureFrameCropSchema,
+          image: captureFrameImageInputSchema,
+          outputPath: { type: "string", minLength: 1, description: "Optional logical workspace-relative path for the new cropped image. If omitted, the Agent creates a unique PNG under crops/. It never overwrites an existing file." },
+          showInChat: { type: "boolean", default: false, description: "Set true only when the user needs this cropped image displayed inline. After a successful result, call researchtube_show_workspace_image for its returned image.workspacePath. Default false keeps the chat compact and must not create a display widget." }
+        },
+        required: ["path", "crop"]
+      },
+      outputSchema: imageCropSchema,
+      _meta: {
+        "openai/toolInvocation/invoking": "Cropping image…",
+        "openai/toolInvocation/invoked": "Image cropped."
+      }
+    },
+    {
+      name: "researchtube_show_workspace_image",
+      title: "Show a workspace image in chat",
+      description: "Display one existing PNG, JPEG, or WebP image from the ResearchTube workspace inline in ChatGPT. Use this to show a file created earlier, including a file not created by ResearchTube. This tool is for user presentation only; it does not make the image pixels a reliable visual input to ChatGPT. It reads the local image but never exposes a host filesystem path or image bytes to the model.",
+      annotations: localAgentReadAnnotations,
+      inputSchema: { type: "object", additionalProperties: false, properties: { path: { type: "string", minLength: 1, description: "Logical workspace-relative path of an existing PNG, JPEG, or WebP image." } }, required: ["path"] },
+      outputSchema: showWorkspaceImageSchema,
+      _meta: {
+        ui: { resourceUri: CAPTURE_FRAME_WIDGET_URI },
+        "openai/outputTemplate": CAPTURE_FRAME_WIDGET_URI,
+        "openai/toolInvocation/invoking": "Loading workspace image…",
+        "openai/toolInvocation/invoked": "Workspace image shown."
+      }
+    },
+    {
+      name: "clipboard_status",
+      title: "Inspect clipboard state",
+      description: "Inspect the current local system clipboard without returning text or saving an image. It reports only supported type (text or image), an opaque revision, and safe metadata. Provide sinceRevision from an earlier response to learn whether the clipboard changed. Do not call this in the background or repeatedly without a user request: the clipboard may contain sensitive data.",
+      annotations: localAgentReadAnnotations,
+      inputSchema: { type: "object", additionalProperties: false, properties: { sinceRevision: clipboardRevisionSchema } },
+      outputSchema: clipboardStatusSchema
+    },
+    {
+      name: "clipboard_get",
+      title: "Read text or image from clipboard",
+      description: "Explicitly read the current local clipboard. For text, returns Unicode text directly. For an image, creates one PNG under clipboard/ and returns only its logical workspace path and metadata. If revision is supplied, the tool rejects a changed clipboard instead of reading a different object. Never call this merely to poll clipboard state; use clipboard_status first. Clipboard contents may be sensitive.",
+      annotations: localWorkspaceWriteAnnotations,
+      inputSchema: { type: "object", additionalProperties: false, properties: { revision: clipboardRevisionSchema } },
+      outputSchema: clipboardGetSchema
+    },
+    {
+      name: "clipboard_set",
+      title: "Put text or a workspace image on clipboard",
+      description: "Explicitly replace the local system clipboard with either text supplied in text or PNG/JPEG/WebP image pixels decoded from workspacePath. Supply exactly one. An image is placed as image data, never as a copied file, path, or file reference. The clipboard may be sensitive and this affects what the user pastes next. Text is limited to 2 MiB; image files to 20 MiB and decoded images to 50 megapixels.",
+      annotations: localWorkspaceWriteAnnotations,
+      inputSchema: { type: "object", additionalProperties: false, properties: { text: { type: "string", maxLength: 2_000_000, description: "Unicode text to place on the system clipboard." }, workspacePath: { type: "string", minLength: 1, description: "Logical workspace-relative PNG, JPEG, or WebP path. Its decoded image pixels, not the file, are placed on the clipboard." } }, oneOf: [{ required: ["text"] }, { required: ["workspacePath"] }] },
+      outputSchema: clipboardSetSchema
     },
     {
       name: "researchtube_get_capture_frame_image",
@@ -743,16 +916,18 @@ function toolDefinitions() {
     {
       name: "youtube_download",
       title: "Download a public YouTube video",
-      description: "Start an asynchronous download of one public YouTube video through the optional ResearchTube Local Agent and its locally resolved yt-dlp, Deno, and ffmpeg executables. First call youtube_get_download_formats(videoId) immediately before this tool and select exact numeric formatId values from that tool's local-yt-dlp downloadFormats response; never select a numeric ID only from youtube_get_video.youtubeFormats because that direct-YouTube snapshot is advisory and can differ. 'best' remains allowed for one requested component. selection must be either combined alone, video alone, audio alone, or video plus audio; never mix combined with video/audio. A video+audio pair is remuxed into MP4 without re-encoding and therefore requires ffmpeg. The Agent accepts no arbitrary yt-dlp selector or arguments, no credentials, and no playlist. Returns a start handle only. Poll youtube_get_download_task no faster than pollIntervalMs; phase identifies the real yt-dlp operation and progressPercent is the percent within that phase, not a fabricated whole-task percentage. If a task fails or its output is unexpected, use youtube_get_download_task_diagnostics to inspect its normalized lifecycle and cleanup record. outputDir, when supplied, must be a safe workspace-relative directory.",
+      description: "Start an asynchronous download of one public YouTube video through the optional ResearchTube Local Agent and its locally resolved yt-dlp, Deno, and ffmpeg executables. First call youtube_get_download_formats(videoId) immediately before this tool and select exact numeric formatId values from that tool's local-yt-dlp downloadFormats response; never select a numeric ID only from youtube_get_video.youtubeFormats because that direct-YouTube snapshot is advisory and can differ. formatSelection chooses the downloaded media tracks: combined alone, video alone, audio alone, or video plus audio; never mix combined with video/audio. 'best' remains allowed for one requested component. startSeconds and endSeconds are optional as a pair: omit both to download the full video, or provide both to download only that source-video interval. A partial download requires ffmpeg and its resulting filename includes [partial_<start>_<end>]. A video+audio pair is remuxed into MP4 without re-encoding and therefore requires ffmpeg. The Agent accepts no arbitrary yt-dlp selector or arguments, no credentials, and no playlist. Returns a start handle only. Poll youtube_get_download_task no faster than pollIntervalMs; phase identifies the real yt-dlp operation and progressPercent is the percent within that phase, not a fabricated whole-task percentage. If a task fails or its output is unexpected, use youtube_get_download_task_diagnostics to inspect its normalized lifecycle and cleanup record. outputDir, when supplied, must be a safe workspace-relative directory.",
       annotations: localDownloadAnnotations,
       inputSchema: {
         type: "object", additionalProperties: false,
         properties: {
           videoId: { type: "string", pattern: "^[A-Za-z0-9_-]{6,}$", description: "Public YouTube video ID returned by youtube_search, a channel or playlist catalogue, or youtube_get_video." },
-          selection: downloadSelectionSchema,
+          formatSelection: downloadSelectionSchema,
+          startSeconds: { type: "number", minimum: 0, description: "Optional source-video interval start in seconds. Must be supplied together with endSeconds; omit both to download the full video." },
+          endSeconds: { type: "number", exclusiveMinimum: 0, description: "Optional source-video interval end in seconds. Must be greater than startSeconds and supplied together with it." },
           outputDir: { type: "string", minLength: 1, description: "Optional directory relative to the Local Agent workspace. Defaults to downloads. Do not use an absolute path or .. segments." }
         },
-        required: ["videoId", "selection"]
+        required: ["videoId", "formatSelection"]
       },
       outputSchema: youtubeDownloadStartSchema
     },
@@ -1090,35 +1265,6 @@ function cdpAbsoluteFilePath(value) {
   return filePath;
 }
 
-const CDP_COMPOSER_SELECTOR_EXPRESSION = `(() => {
-  const visible = (element) => {
-    const style = getComputedStyle(element);
-    return style.display !== 'none' && style.visibility !== 'hidden' && element.getClientRects().length > 0;
-  };
-  const candidates = [
-    ...document.querySelectorAll('textarea:not([disabled])'),
-    ...document.querySelectorAll('[contenteditable="true"][role="textbox"]:not([aria-disabled="true"])'),
-    ...document.querySelectorAll('[contenteditable="true"]:not([aria-disabled="true"])')
-  ].filter(visible);
-  const composer = candidates[0] || null;
-  if (!composer) return { found: false };
-  composer.focus();
-  if (typeof composer.select === 'function') composer.select();
-  else {
-    const range = document.createRange();
-    range.selectNodeContents(composer);
-    const selection = getSelection();
-    selection?.removeAllRanges();
-    selection?.addRange(range);
-  }
-  return { found: true, tagName: composer.tagName, contentEditable: composer.isContentEditable };
-})()`;
-
-function cdpComposerContainsTextExpression(text) {
-  return `(() => [...document.querySelectorAll('textarea, [contenteditable="true"]')]
-    .some((element) => (element.value || element.innerText || element.textContent || '').trim() === ${JSON.stringify(text)}))()`;
-}
-
 const CDP_ENABLED_SEND_BUTTON_EXPRESSION = `(() => [...document.querySelectorAll('button')]
   .some((button) => !button.disabled && button.getAttribute('aria-disabled') !== 'true' && (
     button.dataset.testid === 'send-button'
@@ -1136,19 +1282,12 @@ const CDP_CLICK_SEND_BUTTON_EXPRESSION = `(() => {
   return true;
 })()`;
 
-async function cdpStoreImagesInLibrary(tabId, fileCount) {
-  const prompt = fileCount === 1 ? "Store this image in the Library." : "Store these images in the Library.";
-  const composer = (await cdpEvaluate(tabId, CDP_COMPOSER_SELECTOR_EXPRESSION))?.value;
-  if (!composer?.found) throw cdpError("The ChatGPT Composer text field was not found.");
-  cdpLog("Writing Library storage request", { tabId, fileCount, prompt });
-  await cdpCommand(tabId, "Input.insertText", { text: prompt });
-  await cdpWaitFor(tabId, cdpComposerContainsTextExpression(prompt), "the Library storage request in the Composer");
+async function cdpSendAttachedImages(tabId, fileCount) {
+  cdpLog("Sending attached image batch without Composer text", { tabId, fileCount });
   await cdpWaitFor(tabId, CDP_ENABLED_SEND_BUTTON_EXPRESSION, "the enabled ChatGPT Send button", 90_000);
   const clicked = (await cdpEvaluate(tabId, CDP_CLICK_SEND_BUTTON_EXPRESSION))?.value;
   if (clicked !== true) throw cdpError("The ChatGPT Send button was not available.");
-  cdpLog("Library storage request submitted", { tabId, fileCount, prompt });
-  await cdpWaitFor(tabId, `!(${cdpComposerContainsTextExpression(prompt)})`, "the submitted Library request to leave the Composer", 15_000);
-  return prompt;
+  cdpLog("Attached image batch sent", { tabId, fileCount });
 }
 
 async function cdpAttachImagesNow(filePathValues, { onPhase = null } = {}) {
@@ -1176,9 +1315,9 @@ async function cdpAttachImagesNow(filePathValues, { onPhase = null } = {}) {
     await cdpWaitForAttachmentAccepted(tab.id, fileNames);
     if (onPhase) await onPhase("composerAccepted");
     if (onPhase) await onPhase("submitting");
-    const prompt = await cdpStoreImagesInLibrary(tab.id, filePaths.length);
-    cdpLog("Image batch completed", { tabId: tab.id, fileCount: filePaths.length, prompt });
-    return { ok: true, tabId: tab.id, fileCount: filePaths.length, prompt };
+    await cdpSendAttachedImages(tab.id, filePaths.length);
+    cdpLog("Image batch completed", { tabId: tab.id, fileCount: filePaths.length });
+    return { ok: true, tabId: tab.id, fileCount: filePaths.length };
   } finally {
     if (attached) await cdpCommand(tab.id, "Page.setInterceptFileChooserDialog", { enabled: false }).then(() => cdpLog("File-chooser interception disabled", { tabId: tab.id })).catch((error) => cdpErrorLog("Could not disable file-chooser interception", error));
     if (attached) await cdpDetach(tab.id);
@@ -1275,11 +1414,11 @@ async function drainLibraryStoreQueue() {
       try {
         const localPaths = await resolveLibraryStoreFiles(task.files);
         await cdpAttachImagesNow(localPaths, { onPhase: async (phase) => {
-          const messages = { attaching: "Attaching the image batch to the background ChatGPT Composer.", composerAccepted: "The ChatGPT Composer accepted the image batch.", submitting: "Submitting the Library storage request to ChatGPT." };
-          await updateLibraryStoreTask(task, phase, messages[phase] || "Processing the Library storage request.");
+          const messages = { attaching: "Attaching the image batch to the background ChatGPT Composer.", composerAccepted: "The ChatGPT Composer accepted the image batch.", submitting: "Sending the attached image batch to ChatGPT without Composer text." };
+          await updateLibraryStoreTask(task, phase, messages[phase] || "Processing the attached image batch.");
         } });
         task.libraryAvailability = "not_verified";
-        await updateLibraryStoreTask(task, "submitted", "ResearchTube submitted the Library request to ChatGPT. Library completion cannot be verified.", {
+        await updateLibraryStoreTask(task, "submitted", "ResearchTube sent the attached image batch to ChatGPT without Composer text. Library completion cannot be verified.", {
           status: "completed", submittedAt: libraryStoreNow()
         });
       } catch (error) {
@@ -1742,19 +1881,19 @@ function publicDownloadStartTask(task) {
   };
 }
 
-function normalizeDownloadSelection(value) {
+function normalizeFormatSelection(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw localAgentError("FORMAT_SELECTION_INVALID", "selection is required.");
+    throw localAgentError("FORMAT_SELECTION_INVALID", "formatSelection is required.");
   }
   const allowed = new Set(["combined", "video", "audio"]);
   if (Object.keys(value).some((key) => !allowed.has(key))) {
-    throw localAgentError("FORMAT_SELECTION_INVALID", "selection contains an unsupported field.");
+    throw localAgentError("FORMAT_SELECTION_INVALID", "formatSelection contains an unsupported field.");
   }
   const selection = {};
   for (const key of allowed) {
     if (!(key in value) || value[key] === null) continue;
     if (typeof value[key] !== "string" || !/^(?:best|[0-9]+)$/.test(value[key])) {
-      throw localAgentError("FORMAT_SELECTION_INVALID", `selection.${key} must be 'best' or a numeric formatId.`);
+      throw localAgentError("FORMAT_SELECTION_INVALID", `formatSelection.${key} must be 'best' or a numeric formatId.`);
     }
     selection[key] = value[key];
   }
@@ -1770,12 +1909,17 @@ function normalizeDownloadSelection(value) {
 async function startYouTubeDownload(args = {}) {
   const videoId = typeof args.videoId === "string" ? args.videoId.trim() : "";
   if (!/^[A-Za-z0-9_-]{6,}$/.test(videoId)) throw localAgentError("INVALID_VIDEO_ID", "videoId is required.");
-  const selection = normalizeDownloadSelection(args.selection);
+  const formatSelection = normalizeFormatSelection(args.formatSelection);
+  const startSeconds = args.startSeconds;
+  const endSeconds = args.endSeconds;
+  if ((startSeconds === undefined) !== (endSeconds === undefined)) throw localAgentError("DOWNLOAD_RANGE_INVALID", "startSeconds and endSeconds must be supplied together.");
+  if (startSeconds !== undefined && (!Number.isFinite(startSeconds) || startSeconds < 0)) throw localAgentError("DOWNLOAD_RANGE_INVALID", "startSeconds must be a finite non-negative number.");
+  if (endSeconds !== undefined && (!Number.isFinite(endSeconds) || endSeconds < 0 || endSeconds <= startSeconds)) throw localAgentError("DOWNLOAD_RANGE_INVALID", "endSeconds must be a finite number greater than startSeconds.");
   const outputDir = args.outputDir;
   if (outputDir !== undefined && (typeof outputDir !== "string" || !outputDir.trim())) {
     throw localAgentError("OUTPUT_DIR_INVALID", "outputDir must be a non-empty workspace-relative directory string.");
   }
-  return publicDownloadStartTask(normalizeAgentTask(await agentJsonRequest("/tasks/youtube-download", { method: "POST", body: { videoId, selection, ...(outputDir === undefined ? {} : { outputDir: outputDir.trim() }) } })));
+  return publicDownloadStartTask(normalizeAgentTask(await agentJsonRequest("/tasks/youtube-download", { method: "POST", body: { videoId, formatSelection, ...(startSeconds === undefined ? {} : { startSeconds, endSeconds }), ...(outputDir === undefined ? {} : { outputDir: outputDir.trim() }) } })));
 }
 
 function normalizeYtDlpDownloadFormats(value) {
@@ -2070,7 +2214,7 @@ function captureFrameObject(value, field, allowed) {
 }
 
 function normalizeCaptureFrameInput(argumentsValue = {}) {
-  const args = captureFrameObject(argumentsValue, "capture_frame", new Set(["path", "youtube", "timestampSeconds", "videoStreamIndex", "seekMode", "applyDisplayRotation", "crop", "resize", "image", "outputPath"]));
+  const args = captureFrameObject(argumentsValue, "capture_frame", new Set(["path", "youtube", "timestampSeconds", "videoStreamIndex", "seekMode", "applyDisplayRotation", "crop", "resize", "image", "outputPath", "showInChat"]));
   if ((args.path === undefined) === (args.youtube === undefined)) throw localAgentError("CAPTURE_FRAME_INVALID", "capture_frame requires exactly one source: path or youtube.");
   const path = args.path === undefined ? undefined : normalizeWorkspacePath(args.path, "path");
   let youtube;
@@ -2087,6 +2231,8 @@ function normalizeCaptureFrameInput(argumentsValue = {}) {
   if (seekMode !== "accurate" && seekMode !== "fast") throw localAgentError("CAPTURE_FRAME_INVALID", "seekMode must be accurate or fast.");
   const applyDisplayRotation = args.applyDisplayRotation === undefined ? true : args.applyDisplayRotation;
   if (typeof applyDisplayRotation !== "boolean") throw localAgentError("CAPTURE_FRAME_INVALID", "applyDisplayRotation must be a boolean.");
+  const showInChat = args.showInChat === undefined ? false : args.showInChat;
+  if (typeof showInChat !== "boolean") throw localAgentError("CAPTURE_FRAME_INVALID", "showInChat must be a boolean.");
 
   let crop;
   if (args.crop !== undefined) {
@@ -2131,7 +2277,7 @@ function normalizeCaptureFrameInput(argumentsValue = {}) {
     ...(path === undefined ? {} : { path }), ...(youtube === undefined ? {} : { youtube }), timestampSeconds, ...(videoStreamIndex === undefined ? {} : { videoStreamIndex }), seekMode, applyDisplayRotation,
     ...(crop === undefined ? {} : { crop }), ...(resize === undefined ? {} : { resize }),
     image: { format: imageFormat, ...(quality === undefined ? {} : { quality }), ...(compressionLevel === undefined ? {} : { compressionLevel }) },
-    ...(outputPath === undefined ? {} : { outputPath })
+    ...(outputPath === undefined ? {} : { outputPath }), showInChat
   };
 }
 
@@ -2166,7 +2312,7 @@ function normalizeCaptureFrameResult(document, input) {
   return {
     metadata: {
       sourcePath: document.sourcePath, requestedTimestampSeconds, actualTimestampSeconds, selectedVideoStreamIndex,
-      seekMode: input.seekMode, displayRotationApplied: document.displayRotationApplied,
+      seekMode: input.seekMode, displayRotationApplied: document.displayRotationApplied, showInChat: input.showInChat,
       ...remote,
       image: {
         format: image.format, mimeType: image.mimeType, width: image.width, height: image.height, imageSizeBytes: image.imageSizeBytes,
@@ -2178,8 +2324,97 @@ function normalizeCaptureFrameResult(document, input) {
 
 async function captureFrame(argumentsValue) {
   const input = normalizeCaptureFrameInput(argumentsValue);
-  const document = await agentJsonRequest("/media/capture-frame", { method: "POST", body: input, timeoutMs: AGENT_CAPTURE_FRAME_TIMEOUT_MS });
+  const { showInChat: _showInChat, ...agentInput } = input;
+  const document = await agentJsonRequest("/media/capture-frame", { method: "POST", body: agentInput, timeoutMs: AGENT_CAPTURE_FRAME_TIMEOUT_MS });
   return normalizeCaptureFrameResult(document, input);
+}
+
+function normalizeScreenCaptureInput(argumentsValue = {}) {
+  const args = captureFrameObject(argumentsValue, "capture_screen", new Set(["outputPath", "image", "showInChat"]));
+  const imageValue = captureFrameObject(args.image, "image", new Set(["format", "quality"]));
+  const format = imageValue.format === undefined ? "png" : imageValue.format;
+  if (!new Set(["png", "jpeg", "webp"]).has(format)) throw localAgentError("SCREEN_CAPTURE_INVALID", "image.format must be png, jpeg, or webp.");
+  const quality = imageValue.quality === undefined ? undefined : captureFrameInteger(imageValue.quality, "image.quality", 1);
+  if (quality !== undefined && quality > 100) throw localAgentError("SCREEN_CAPTURE_INVALID", "image.quality must be from 1 to 100.");
+  if (format === "png" && quality !== undefined) throw localAgentError("SCREEN_CAPTURE_INVALID", "image.quality is available only for jpeg and webp output.");
+  const outputPath = args.outputPath === undefined ? undefined : normalizeWorkspacePath(args.outputPath, "outputPath");
+  const extension = outputPath?.slice(outputPath.lastIndexOf(".")).toLowerCase();
+  const allowedExtensions = { png: new Set([".png"]), jpeg: new Set([".jpg", ".jpeg"]), webp: new Set([".webp"]) };
+  if (extension && !allowedExtensions[format].has(extension)) throw localAgentError("SCREEN_CAPTURE_INVALID", `outputPath extension must match image.format ${format}.`);
+  const showInChat = args.showInChat === undefined ? false : args.showInChat;
+  if (typeof showInChat !== "boolean") throw localAgentError("SCREEN_CAPTURE_INVALID", "showInChat must be a boolean.");
+  return { image: { format, ...(quality === undefined ? {} : { quality }) }, ...(outputPath === undefined ? {} : { outputPath }), showInChat };
+}
+
+function normalizeScreenCaptureResult(document) {
+  if (!document || typeof document !== "object" || Array.isArray(document) || typeof document.workspacePath !== "string"
+    || !new Set(["png", "jpeg", "webp"]).has(document.format) || !new Set(["image/png", "image/jpeg", "image/webp"]).has(document.mimeType)
+    || !Number.isInteger(document.width) || document.width < 1 || !Number.isInteger(document.height) || document.height < 1
+    || !Number.isInteger(document.imageSizeBytes) || document.imageSizeBytes < 0 || !Number.isInteger(document.monitorCount) || document.monitorCount < 1
+    || !document.virtualDesktop || typeof document.virtualDesktop !== "object" || Array.isArray(document.virtualDesktop)
+    || !Number.isInteger(document.virtualDesktop.left) || !Number.isInteger(document.virtualDesktop.top)
+    || !Number.isInteger(document.virtualDesktop.width) || document.virtualDesktop.width < 1 || !Number.isInteger(document.virtualDesktop.height) || document.virtualDesktop.height < 1
+    || document.virtualDesktop.width !== document.width || document.virtualDesktop.height !== document.height) {
+    throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid screen-capture result.");
+  }
+  const expectedMimeType = { png: "image/png", jpeg: "image/jpeg", webp: "image/webp" }[document.format];
+  if (document.mimeType !== expectedMimeType) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an inconsistent screen-capture MIME type.");
+  return { workspacePath: normalizeWorkspacePath(document.workspacePath, "workspacePath"), format: document.format, mimeType: document.mimeType, width: document.width, height: document.height, imageSizeBytes: document.imageSizeBytes, showInChat: false, monitorCount: document.monitorCount, virtualDesktop: { left: document.virtualDesktop.left, top: document.virtualDesktop.top, width: document.virtualDesktop.width, height: document.virtualDesktop.height } };
+}
+
+async function captureScreen(argumentsValue) {
+  const input = normalizeScreenCaptureInput(argumentsValue);
+  const { showInChat, ...agentInput } = input;
+  return { ...normalizeScreenCaptureResult(await agentJsonRequest("/media/capture-screen", { method: "POST", body: agentInput, timeoutMs: AGENT_CAPTURE_FRAME_TIMEOUT_MS })), showInChat };
+}
+
+function normalizeImageCropInput(argumentsValue = {}) {
+  const args = captureFrameObject(argumentsValue, "researchtube_image_crop", new Set(["path", "crop", "image", "outputPath", "showInChat"]));
+  const path = normalizeWorkspacePath(args.path, "path");
+  const cropValue = captureFrameObject(args.crop, "crop", new Set(["x", "y", "width", "height"]));
+  if (!["x", "y", "width", "height"].every((key) => Object.hasOwn(cropValue, key))) throw localAgentError("IMAGE_CROP_INVALID", "crop requires x, y, width, and height.");
+  const crop = { x: captureFrameInteger(cropValue.x, "crop.x"), y: captureFrameInteger(cropValue.y, "crop.y"), width: captureFrameInteger(cropValue.width, "crop.width", 1), height: captureFrameInteger(cropValue.height, "crop.height", 1) };
+  const imageValue = captureFrameObject(args.image, "image", new Set(["format", "quality", "compressionLevel"]));
+  const format = imageValue.format === undefined ? "png" : imageValue.format;
+  if (!new Set(["png", "jpeg", "webp"]).has(format)) throw localAgentError("IMAGE_CROP_INVALID", "image.format must be png, jpeg, or webp.");
+  const quality = imageValue.quality === undefined ? undefined : captureFrameInteger(imageValue.quality, "image.quality", 1);
+  if (quality !== undefined && quality > 100) throw localAgentError("IMAGE_CROP_INVALID", "image.quality must be from 1 to 100.");
+  const compressionLevel = imageValue.compressionLevel === undefined ? undefined : captureFrameInteger(imageValue.compressionLevel, "image.compressionLevel");
+  if (compressionLevel !== undefined && compressionLevel > 9) throw localAgentError("IMAGE_CROP_INVALID", "image.compressionLevel must be from 0 to 9.");
+  if (format === "png" && quality !== undefined) throw localAgentError("IMAGE_CROP_INVALID", "image.quality is available only for jpeg and webp output.");
+  if (format !== "png" && compressionLevel !== undefined) throw localAgentError("IMAGE_CROP_INVALID", "image.compressionLevel is available only for png output.");
+  const outputPath = args.outputPath === undefined ? undefined : normalizeWorkspacePath(args.outputPath, "outputPath");
+  const extension = outputPath?.slice(outputPath.lastIndexOf(".")).toLowerCase();
+  const allowedExtensions = { png: new Set([".png"]), jpeg: new Set([".jpg", ".jpeg"]), webp: new Set([".webp"]) };
+  if (extension && !allowedExtensions[format].has(extension)) throw localAgentError("IMAGE_CROP_INVALID", `outputPath extension must match image.format ${format}.`);
+  const showInChat = args.showInChat === undefined ? false : args.showInChat;
+  if (typeof showInChat !== "boolean") throw localAgentError("IMAGE_CROP_INVALID", "showInChat must be a boolean.");
+  return { path, crop, image: { format, ...(quality === undefined ? {} : { quality }), ...(compressionLevel === undefined ? {} : { compressionLevel }) }, ...(outputPath === undefined ? {} : { outputPath }), showInChat };
+}
+
+function normalizeImageCropResult(document, input) {
+  const image = document?.image;
+  if (!document || typeof document !== "object" || Array.isArray(document) || document.sourcePath !== input.path
+    || !Number.isInteger(document.sourceWidth) || document.sourceWidth < 1 || !Number.isInteger(document.sourceHeight) || document.sourceHeight < 1
+    || !document.crop || document.crop.x !== input.crop.x || document.crop.y !== input.crop.y || document.crop.width !== input.crop.width || document.crop.height !== input.crop.height
+    || !image || typeof image !== "object" || Array.isArray(image) || image.format !== input.image.format
+    || !new Set(["image/png", "image/jpeg", "image/webp"]).has(image.mimeType)
+    || image.width !== input.crop.width || image.height !== input.crop.height || !Number.isInteger(image.imageSizeBytes) || image.imageSizeBytes < 0
+    || typeof image.workspacePath !== "string" || Object.hasOwn(image, "publicUrl") || Object.hasOwn(document, "inlineImageBase64")) {
+    throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid image-crop result.");
+  }
+  const expectedMimeType = { png: "image/png", jpeg: "image/jpeg", webp: "image/webp" }[image.format];
+  if (image.mimeType !== expectedMimeType) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an inconsistent cropped-image MIME type.");
+  return {
+    sourcePath: input.path, sourceWidth: document.sourceWidth, sourceHeight: document.sourceHeight, crop: input.crop, showInChat: input.showInChat,
+    image: { format: image.format, mimeType: image.mimeType, width: image.width, height: image.height, imageSizeBytes: image.imageSizeBytes, workspacePath: normalizeWorkspacePath(image.workspacePath, "image.workspacePath") }
+  };
+}
+
+async function imageCrop(argumentsValue) {
+  const input = normalizeImageCropInput(argumentsValue);
+  const { showInChat: _showInChat, ...agentInput } = input;
+  return normalizeImageCropResult(await agentJsonRequest("/media/image-crop", { method: "POST", body: agentInput, timeoutMs: AGENT_CAPTURE_FRAME_TIMEOUT_MS }), input);
 }
 
 async function getCaptureFrameImage(path) {
@@ -2192,6 +2427,93 @@ async function getCaptureFrameImage(path) {
     throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid workspace image.");
   }
   return { metadata: { path: logicalPath, mimeType: document.mimeType, imageSizeBytes: document.imageSizeBytes }, inlineImageBase64: document.inlineImageBase64 };
+}
+
+async function showWorkspaceImage(path) {
+  const result = await getCaptureFrameImage(path);
+  return {
+    metadata: { workspacePath: result.metadata.path, mimeType: result.metadata.mimeType, imageSizeBytes: result.metadata.imageSizeBytes, showInChat: true },
+    inlineImageBase64: result.inlineImageBase64
+  };
+}
+
+function normalizeClipboardRevision(value, field) {
+  if (typeof value !== "string" || !/^cb_[0-9]+$/.test(value)) throw localAgentError("CLIPBOARD_INVALID", `${field} must be a clipboard revision returned by clipboard_status.`);
+  return value;
+}
+
+function normalizeClipboardStatusInput(argumentsValue = {}) {
+  const args = captureFrameObject(argumentsValue, "clipboard_status", new Set(["sinceRevision"]));
+  return args.sinceRevision === undefined ? {} : { sinceRevision: normalizeClipboardRevision(args.sinceRevision, "sinceRevision") };
+}
+
+function normalizeClipboardStatusResult(document, input) {
+  if (!document || typeof document !== "object" || Array.isArray(document) || !new Set(["text", "image", "empty", "unsupported"]).has(document.type)) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid clipboard status.");
+  const result = { type: document.type, revision: normalizeClipboardRevision(document.revision, "revision") };
+  if (input.sinceRevision !== undefined) {
+    if (typeof document.changed !== "boolean") throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent did not return clipboard change status.");
+    result.changed = document.changed;
+  }
+  if (document.sizeBytes !== undefined) {
+    if (!Number.isInteger(document.sizeBytes) || document.sizeBytes < 0) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid clipboard size.");
+    result.sizeBytes = document.sizeBytes;
+  }
+  if (document.type === "image") {
+    if (!Number.isInteger(document.width) || document.width < 1 || !Number.isInteger(document.height) || document.height < 1) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid clipboard image dimensions.");
+    result.width = document.width; result.height = document.height;
+  }
+  return result;
+}
+
+async function clipboardStatus(argumentsValue) {
+  const input = normalizeClipboardStatusInput(argumentsValue);
+  return normalizeClipboardStatusResult(await agentJsonRequest("/clipboard/status", { method: "POST", body: input, timeoutMs: AGENT_TASK_TIMEOUT_MS }), input);
+}
+
+function normalizeClipboardGetInput(argumentsValue = {}) {
+  const args = captureFrameObject(argumentsValue, "clipboard_get", new Set(["revision"]));
+  return args.revision === undefined ? {} : { revision: normalizeClipboardRevision(args.revision, "revision") };
+}
+
+function normalizeClipboardGetResult(document) {
+  if (!document || typeof document !== "object" || Array.isArray(document) || !new Set(["text", "image"]).has(document.type)) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid clipboard value.");
+  const result = { type: document.type, revision: normalizeClipboardRevision(document.revision, "revision") };
+  if (document.type === "text") {
+    if (typeof document.text !== "string") throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid clipboard text.");
+    result.text = document.text;
+  } else {
+    if (typeof document.workspacePath !== "string" || !Number.isInteger(document.width) || document.width < 1 || !Number.isInteger(document.height) || document.height < 1 || !Number.isInteger(document.sizeBytes) || document.sizeBytes < 0) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid clipboard image metadata.");
+    result.workspacePath = normalizeWorkspacePath(document.workspacePath, "workspacePath"); result.width = document.width; result.height = document.height; result.sizeBytes = document.sizeBytes;
+  }
+  return result;
+}
+
+async function clipboardGet(argumentsValue) {
+  return normalizeClipboardGetResult(await agentJsonRequest("/clipboard/get", { method: "POST", body: normalizeClipboardGetInput(argumentsValue), timeoutMs: AGENT_CAPTURE_FRAME_TIMEOUT_MS }));
+}
+
+function normalizeClipboardSetInput(argumentsValue = {}) {
+  const args = captureFrameObject(argumentsValue, "clipboard_set", new Set(["text", "workspacePath"]));
+  if ((args.text === undefined) === (args.workspacePath === undefined)) throw localAgentError("CLIPBOARD_INVALID", "clipboard_set requires exactly one of text or workspacePath.");
+  if (args.text !== undefined) {
+    if (typeof args.text !== "string" || new TextEncoder().encode(args.text).byteLength > 2 * 1024 * 1024) throw localAgentError("CLIPBOARD_TOO_LARGE", "text must be a Unicode string of at most 2 MiB UTF-8.");
+    return { text: args.text };
+  }
+  return { workspacePath: normalizeWorkspacePath(args.workspacePath, "workspacePath") };
+}
+
+function normalizeClipboardSetResult(document) {
+  if (!document || typeof document !== "object" || Array.isArray(document) || document.success !== true || !new Set(["text", "image"]).has(document.type)) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid clipboard write result.");
+  const result = { success: true, type: document.type, revision: normalizeClipboardRevision(document.revision, "revision") };
+  if (document.type === "image") {
+    if (!Number.isInteger(document.width) || document.width < 1 || !Number.isInteger(document.height) || document.height < 1) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid clipboard image dimensions.");
+    result.width = document.width; result.height = document.height;
+  }
+  return result;
+}
+
+async function clipboardSet(argumentsValue) {
+  return normalizeClipboardSetResult(await agentJsonRequest("/clipboard/set", { method: "POST", body: normalizeClipboardSetInput(argumentsValue), timeoutMs: AGENT_CAPTURE_FRAME_TIMEOUT_MS }));
 }
 
 async function ensureCaptureFrameOffscreenDocument() {
@@ -2447,16 +2769,16 @@ function safeErrorMessage(error) {
 }
 
 async function readCaptureFrameWidgetHtml() {
-  const response = await fetch(chrome.runtime.getURL("ui/capture-frame-widget-v25.html"));
-  if (!response.ok) throw new Error("The bundled capture-frame widget could not be read.");
+  const response = await fetch(chrome.runtime.getURL("ui/capture-frame-widget-v27.html"));
+  if (!response.ok) throw new Error("The bundled workspace-image widget could not be read.");
   return response.text();
 }
 
 function captureFrameWidgetResource() {
   return {
     uri: CAPTURE_FRAME_WIDGET_URI,
-    name: "ResearchTube captured-frame viewer",
-    description: "Displays an image already saved in the local ResearchTube workspace.",
+    name: "ResearchTube workspace-image viewer",
+    description: "Displays a requested frame, screenshot, cropped image, or existing workspace image.",
     mimeType: "text/html;profile=mcp-app"
   };
 }
@@ -2474,7 +2796,7 @@ async function readMcpResource(id, uri) {
           ...captureFrameWidgetResource(), text,
           _meta: {
             ui: { prefersBorder: true, csp: { connectDomains: [], resourceDomains: [] } },
-            "openai/widgetDescription": "Displays a captured workspace video frame."
+            "openai/widgetDescription": "Displays a requested workspace image with context-specific provenance."
           }
         }]
       }
@@ -2491,6 +2813,7 @@ async function handleMcpRequest(request) {
       result: {
         protocolVersion: "2025-06-18",
         capabilities: { tools: { listChanged: false }, resources: { subscribe: false, listChanged: false } },
+        instructions: RESEARCHTUBE_MCP_INSTRUCTIONS,
         serverInfo: { name: "researchtube", version: EXTENSION_VERSION }
       }
     };
@@ -2593,6 +2916,26 @@ async function handleMcpRequest(request) {
   if (request?.method === "tools/call" && request.params?.name === "capture_frame") {
     const args = request.params.arguments ?? {};
     return executeCaptureFrameToolCall(request.id, args);
+  }
+  if (request?.method === "tools/call" && request.params?.name === "capture_screen") {
+    const args = request.params.arguments ?? {};
+    return executeToolCall(request.id, "capture_screen", args, () => captureScreen(args));
+  }
+  if (request?.method === "tools/call" && request.params?.name === "researchtube_image_crop") {
+    const args = request.params.arguments ?? {};
+    return executeToolCall(request.id, "researchtube_image_crop", args, () => imageCrop(args));
+  }
+  if (request?.method === "tools/call" && request.params?.name === "researchtube_show_workspace_image") {
+    return executeShowWorkspaceImageToolCall(request.id, request.params.arguments?.path);
+  }
+  if (request?.method === "tools/call" && request.params?.name === "clipboard_status") {
+    return executeToolCall(request.id, "clipboard_status", request.params.arguments ?? {}, () => clipboardStatus(request.params.arguments ?? {}));
+  }
+  if (request?.method === "tools/call" && request.params?.name === "clipboard_get") {
+    return executeToolCall(request.id, "clipboard_get", request.params.arguments ?? {}, () => clipboardGet(request.params.arguments ?? {}));
+  }
+  if (request?.method === "tools/call" && request.params?.name === "clipboard_set") {
+    return executeToolCall(request.id, "clipboard_set", request.params.arguments ?? {}, () => clipboardSet(request.params.arguments ?? {}));
   }
   if (request?.method === "tools/call" && request.params?.name === "researchtube_get_capture_frame_image") {
     const path = request.params.arguments?.path;
@@ -2705,6 +3048,18 @@ async function executeCaptureFrameImageToolCall(id, path) {
   }
 }
 
+async function executeShowWorkspaceImageToolCall(id, path) {
+  const startedAt = Date.now();
+  try {
+    const result = await showWorkspaceImage(path);
+    void recordCommandDiagnostic("succeeded", { tool: "researchtube_show_workspace_image", elapsed_ms: Date.now() - startedAt, output: result.metadata });
+    return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(result.metadata) }], structuredContent: result.metadata, _meta: { researchtube: { captureFrameImageBase64: result.inlineImageBase64 } }, isError: false } };
+  } catch (error) {
+    void recordCommandDiagnostic("failed", { tool: "researchtube_show_workspace_image", elapsed_ms: Date.now() - startedAt, error_code: error?.code || null, error: searchDiagnosticMessage(error) });
+    return toolError(id, error);
+  }
+}
+
 async function executeCaptureFrameWidgetActionToolCall(id, tool, path, action) {
   const startedAt = Date.now();
   try {
@@ -2762,7 +3117,12 @@ async function executeToolCall(id, tool, input, work, operation = null) {
 
 function summarizeCommandInput(tool, input) {
   if (tool === "capture_frame") return { path: typeof input.path === "string" ? input.path : null, youtube: input.youtube && typeof input.youtube === "object" ? { videoId: input.youtube.videoId ?? null, formatId: input.youtube.formatId ?? null } : null, timestampSeconds: input.timestampSeconds ?? null, videoStreamIndex: input.videoStreamIndex ?? null, seekMode: input.seekMode ?? null, outputPath: typeof input.outputPath === "string" ? input.outputPath : null };
-  if (tool === "youtube_download") return { videoId: typeof input.videoId === "string" ? input.videoId : null, selection: input.selection ?? null, outputDir: typeof input.outputDir === "string" ? input.outputDir.slice(0, 300) : null };
+  if (tool === "capture_screen") return { outputPath: typeof input.outputPath === "string" ? input.outputPath : null, format: input.image?.format ?? null };
+  if (tool === "researchtube_image_crop") return { path: typeof input.path === "string" ? input.path : null, crop: input.crop ?? null, outputPath: typeof input.outputPath === "string" ? input.outputPath : null, format: input.image?.format ?? null };
+  if (tool === "clipboard_status") return { sinceRevisionProvided: typeof input.sinceRevision === "string" };
+  if (tool === "clipboard_get") return { revisionProvided: typeof input.revision === "string" };
+  if (tool === "clipboard_set") return { type: typeof input.text === "string" ? "text" : typeof input.workspacePath === "string" ? "image" : "invalid", textBytes: typeof input.text === "string" ? new TextEncoder().encode(input.text).byteLength : null, workspacePath: typeof input.workspacePath === "string" ? input.workspacePath : null };
+  if (tool === "youtube_download") return { videoId: typeof input.videoId === "string" ? input.videoId : null, formatSelection: input.formatSelection ?? null, startSeconds: input.startSeconds ?? null, endSeconds: input.endSeconds ?? null, outputDir: typeof input.outputDir === "string" ? input.outputDir.slice(0, 300) : null };
   if (tool === "youtube_search") return { query: searchDiagnosticQuery(input.query), limit: input.limit };
   if (tool === "youtube_get_comment_replies") return { videoId: input.videoId, commentId: input.commentId, limit: input.limit };
   if (tool === "youtube_get_channel_videos") return { channel: input.channel, limit: input.limit, includeShorts: input.includeShorts, includeStreams: input.includeStreams, continuationProvided: Boolean(input.continuation) };
@@ -2773,6 +3133,8 @@ function summarizeCommandInput(tool, input) {
 
 function summarizeCommandOutput(value) {
   if (!value || typeof value !== "object") return null;
+  if (value.type === "text" && typeof value.revision === "string" && typeof value.text === "string") return { type: "text", revision: value.revision, textBytes: new TextEncoder().encode(value.text).byteLength };
+  if ((value.type === "image" || value.type === "text") && typeof value.revision === "string") return { type: value.type, revision: value.revision, ...(Number.isInteger(value.width) ? { width: value.width, height: value.height } : {}), ...(Number.isInteger(value.sizeBytes) ? { sizeBytes: value.sizeBytes } : {}) };
   const summary = {};
   for (const key of ["videoId", "query", "returned", "requested", "hasMore", "totalReplies", "continuation", "sourcePath", "requestedTimestampSeconds", "selectedVideoStreamIndex"]) {
     if (Object.hasOwn(value, key)) summary[key] = value[key];

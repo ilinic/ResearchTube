@@ -105,7 +105,7 @@ print(f'__RESEARCHTUBE_FINAL_FILE__:{output}', flush=True)
 
     async def test_progress_and_final_mp4(self) -> None:
         manager = agent.DownloadTaskManager()
-        started = await manager.create_download({"videoId": "abc123", "selection": {"video": "best", "audio": "best"}})
+        started = await manager.create_download({"videoId": "abc123", "formatSelection": {"video": "best", "audio": "best"}})
         self.assertIsNone(started["progressPercent"])
         self.assertEqual(started["phase"], "preparing")
         task = manager.get(started["taskId"])
@@ -143,6 +143,7 @@ print(f'__RESEARCHTUBE_FINAL_FILE__:{output}', flush=True)
         task = agent.DownloadTask(
             task_id="test-task", url="https://www.youtube.com/watch?v=abc123", video_id="abc123",
             selection=agent.DownloadSelection(video="best", audio="best"),
+            partial_range=None,
             output_directory=agent.WORKSPACE_PATH / "downloads", output_directory_relative="downloads",
             created_at="2026-09-19T00:00:00.000Z", last_updated_at="2026-09-19T00:00:00.000Z",
         )
@@ -160,16 +161,39 @@ print(f'__RESEARCHTUBE_FINAL_FILE__:{output}', flush=True)
 
     async def test_combined_track_does_not_require_ffmpeg(self) -> None:
         manager = agent.DownloadTaskManager()
-        started = await manager.create_download({"videoId": "abc123", "selection": {"combined": "22"}})
+        started = await manager.create_download({"videoId": "abc123", "formatSelection": {"combined": "22"}})
         task = manager.get(started["taskId"])
         await task.runner
         self.assertEqual(task.status, "completed")
         self.assertIn("22", self.command)
         self.assertNotIn("--merge-output-format", self.command)
 
+    async def test_partial_download_requires_a_complete_range_and_marks_result(self) -> None:
+        manager = agent.DownloadTaskManager()
+        started = await manager.create_download({
+            "videoId": "abc123", "formatSelection": {"combined": "22"}, "startSeconds": 12.5, "endSeconds": 47.25,
+        })
+        task = manager.get(started["taskId"])
+        await task.runner
+        self.assertEqual(task.status, "completed")
+        self.assertEqual(task.result["partial"], {"startSeconds": 12.5, "endSeconds": 47.25})
+        self.assertIn("--download-sections", self.command)
+        section_index = self.command.index("--download-sections")
+        self.assertEqual(self.command[section_index + 1], "*12.500-47.250")
+        self.assertIn("--downloader", self.command)
+        self.assertIn("ffmpeg", self.command)
+        output_index = self.command.index("--output")
+        self.assertIn("[partial_12.500_47.250]", self.command[output_index + 1])
+
+    def test_partial_range_requires_both_bounds_in_ascending_order(self) -> None:
+        with self.assertRaisesRegex(agent.AgentApiError, "supplied together"):
+            agent.parse_download_range({"startSeconds": 1})
+        with self.assertRaisesRegex(agent.AgentApiError, "greater than"):
+            agent.parse_download_range({"startSeconds": 4, "endSeconds": 4})
+
     async def test_unavailable_exact_format_has_structured_error(self) -> None:
         manager = agent.DownloadTaskManager()
-        started = await manager.create_download({"videoId": "abc123", "selection": {"video": "999"}})
+        started = await manager.create_download({"videoId": "abc123", "formatSelection": {"video": "999"}})
         task = manager.get(started["taskId"])
         await task.runner
         self.assertEqual(task.status, "failed")
@@ -184,7 +208,7 @@ print(f'__RESEARCHTUBE_FINAL_FILE__:{output}', flush=True)
 
     async def test_final_output_is_not_guessed_from_a_task_named_file(self) -> None:
         manager = agent.DownloadTaskManager()
-        started = await manager.create_download({"videoId": "abc123", "selection": {"combined": "998"}})
+        started = await manager.create_download({"videoId": "abc123", "formatSelection": {"combined": "998"}})
         task = manager.get(started["taskId"])
         await task.runner
         self.assertEqual(task.status, "failed")
@@ -196,7 +220,7 @@ print(f'__RESEARCHTUBE_FINAL_FILE__:{output}', flush=True)
 
     def test_format_selection_rejects_mixed_combined_and_tracks(self) -> None:
         with self.assertRaisesRegex(agent.AgentApiError, "do not mix"):
-            agent.parse_download_selection({"combined": "22", "video": "137"})
+            agent.parse_format_selection({"combined": "22", "video": "137"})
 
 
 if __name__ == "__main__":

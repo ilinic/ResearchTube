@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import ctypes
 import json
 import math
 import mimetypes
@@ -19,15 +20,17 @@ import platform
 import re
 import secrets
 import shutil
+import struct
 import sys
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, unquote, urlparse
 
-AGENT_VERSION = "0.20.1"
-INTERFACE_VERSION = 19
+AGENT_VERSION = "0.30.0"
+INTERFACE_VERSION = 28
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
 TASK_POLL_INTERVAL_MS = 1_000
@@ -51,6 +54,11 @@ YOUTUBE_CAPTURE_FRAME_TIMEOUT_SECONDS = 90
 YOUTUBE_CAPTURE_PRE_ROLL_SECONDS = 12.0
 YOUTUBE_CAPTURE_POST_ROLL_SECONDS = 3.0
 DEBUG_BANNER_SWITCH = "--silent-debugger-extension-api"
+MAX_CLIPBOARD_TEXT_BYTES = 2 * 1024 * 1024
+MAX_CLIPBOARD_IMAGE_FILE_BYTES = 20 * 1024 * 1024
+MAX_CLIPBOARD_IMAGE_PIXELS = 50_000_000
+MAX_CLIPBOARD_IMAGE_DIB_BYTES = 200 * 1024 * 1024
+CLIPBOARD_OPEN_ATTEMPTS = 4
 MEDIA_PROBE_SECTIONS = {
     "format": ("-show_format", "format"),
     "streams": ("-show_streams", "streams"),
@@ -428,19 +436,19 @@ class DownloadSelection:
         return "+".join(parts)
 
 
-def parse_download_selection(value: Any) -> DownloadSelection:
+def parse_format_selection(value: Any) -> DownloadSelection:
     if not isinstance(value, dict):
-        raise AgentApiError("FORMAT_SELECTION_INVALID", "selection must describe one combined track or video and/or audio tracks.")
+        raise AgentApiError("FORMAT_SELECTION_INVALID", "formatSelection must describe one combined track or video and/or audio tracks.")
     unknown = set(value) - {"combined", "video", "audio"}
     if unknown:
-        raise AgentApiError("FORMAT_SELECTION_INVALID", "selection contains an unsupported field.")
+        raise AgentApiError("FORMAT_SELECTION_INVALID", "formatSelection contains an unsupported field.")
 
     def parse_value(name: str) -> str | None:
         candidate = value.get(name)
         if candidate is None:
             return None
         if not isinstance(candidate, str) or not re.fullmatch(r"(?:best|[0-9]+)", candidate):
-            raise AgentApiError("FORMAT_SELECTION_INVALID", f"selection.{name} must be 'best', a numeric YouTube formatId, or null.")
+            raise AgentApiError("FORMAT_SELECTION_INVALID", f"formatSelection.{name} must be 'best', a numeric YouTube formatId, or null.")
         return candidate
 
     selection = DownloadSelection(parse_value("combined"), parse_value("video"), parse_value("audio"))
@@ -449,6 +457,31 @@ def parse_download_selection(value: Any) -> DownloadSelection:
     if selection.combined is None and selection.video is None and selection.audio is None:
         raise AgentApiError("FORMAT_SELECTION_INVALID", "Select a combined, video, or audio track.")
     return selection
+
+
+@dataclass(frozen=True)
+class DownloadRange:
+    start_seconds: float
+    end_seconds: float
+
+    def filename_tag(self) -> str:
+        return f"partial_{self.start_seconds:.3f}_{self.end_seconds:.3f}"
+
+
+def parse_download_range(payload: dict[str, Any]) -> DownloadRange | None:
+    start = payload.get("startSeconds")
+    end = payload.get("endSeconds")
+    if start is None and end is None:
+        return None
+    if start is None or end is None:
+        raise AgentApiError("DOWNLOAD_RANGE_INVALID", "startSeconds and endSeconds must be supplied together.")
+    if isinstance(start, bool) or not isinstance(start, (int, float)) or not math.isfinite(start) or start < 0:
+        raise AgentApiError("DOWNLOAD_RANGE_INVALID", "startSeconds must be a finite non-negative number.")
+    if isinstance(end, bool) or not isinstance(end, (int, float)) or not math.isfinite(end) or end < 0:
+        raise AgentApiError("DOWNLOAD_RANGE_INVALID", "endSeconds must be a finite non-negative number.")
+    if end <= start:
+        raise AgentApiError("DOWNLOAD_RANGE_INVALID", "endSeconds must be greater than startSeconds.")
+    return DownloadRange(float(start), float(end))
 
 
 def nullable_nonnegative_number(value: Any) -> float | int | None:
@@ -910,6 +943,42 @@ def capture_image(value: Any) -> dict[str, Any]:
     }
 
 
+def screen_capture_image(value: Any) -> dict[str, Any]:
+    item = capture_object(value, field_name="image", allowed={"format", "quality"})
+    image_format = item.get("format", "png")
+    if image_format not in {"png", "jpeg", "webp"}:
+        raise AgentApiError("SCREEN_CAPTURE_INVALID", "image.format must be png, jpeg, or webp.")
+    quality = item.get("quality")
+    if quality is not None:
+        quality = positive_integer(quality, field_name="image.quality")
+        if quality > 100:
+            raise AgentApiError("SCREEN_CAPTURE_INVALID", "image.quality must be from 1 to 100.")
+    if image_format == "png" and quality is not None:
+        raise AgentApiError("SCREEN_CAPTURE_INVALID", "image.quality is available only for jpeg and webp output.")
+    return {"format": image_format, "quality": quality if quality is not None else (90 if image_format in {"jpeg", "webp"} else None)}
+
+
+def screen_capture_default_workspace_path(image_format: str) -> str:
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    capture_id = secrets.token_urlsafe(8)
+    return f"screenshots/screenshot_{timestamp}_{capture_id}.{image_format}"
+
+
+def screen_capture_options(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict) or set(payload) - {"outputPath", "image"}:
+        raise AgentApiError("SCREEN_CAPTURE_INVALID", "capture_screen requires only documented fields.")
+    image = screen_capture_image(payload.get("image"))
+    output_path = payload.get("outputPath")
+    if output_path is not None and (not isinstance(output_path, str) or not output_path):
+        raise AgentApiError("SCREEN_CAPTURE_INVALID", "outputPath must be a non-empty logical workspace path.")
+    path = output_path or screen_capture_default_workspace_path(image["format"])
+    suffix = Path(path).suffix.lower()
+    allowed_suffixes = {"png": {".png"}, "jpeg": {".jpg", ".jpeg"}, "webp": {".webp"}}
+    if suffix not in allowed_suffixes[image["format"]]:
+        raise AgentApiError("SCREEN_CAPTURE_INVALID", f"outputPath extension must match image.format {image['format']}.")
+    return {"image": image, "outputPath": path}
+
+
 def capture_default_workspace_path(source_path: str, timestamp_seconds: float, image_format: str) -> str:
     """Name an automatically created capture as a normal workspace artifact.
 
@@ -920,12 +989,15 @@ def capture_default_workspace_path(source_path: str, timestamp_seconds: float, i
     """
     source_stem = Path(source_path).stem.strip()
     match = re.search(r"\s+\[yt_([A-Za-z0-9_-]+)\]", source_stem)
+    partial_match = re.search(r"\s+\[(partial_\d+(?:\.\d+)?_\d+(?:\.\d+)?)\]", source_stem)
     title = source_stem[:match.start()].strip() if match else source_stem
     title = title or "ResearchTube frame"
     video_part = f" [yt_{match.group(1)}]" if match else ""
+    partial_part = f" [{partial_match.group(1)}]" if partial_match else ""
     timestamp_part = f"{timestamp_seconds:.3f}".replace("-", "_")
-    capture_id = secrets.token_urlsafe(12)
-    return f"captures/{title}{video_part} [t_{timestamp_part}] [cap_{capture_id}].{image_format}"
+    # Six bytes encode to a compact, fixed eight-character URL-safe ID.
+    capture_id = secrets.token_urlsafe(6)
+    return f"captures/{title}{video_part}{partial_part} [t_{timestamp_part}] [cap_{capture_id}].{image_format}"
 
 
 def capture_output_path(value: Any, source_path: str, timestamp_seconds: float, image_format: str) -> dict[str, Any]:
@@ -951,7 +1023,7 @@ def capture_frame_options(payload: Any) -> dict[str, Any]:
             raise AgentApiError("CAPTURE_FRAME_INVALID", "youtube requires videoId and formatId.")
         youtube = {
             "videoId": validate_video_id(youtube_item["videoId"]),
-            "formatId": parse_download_selection({"video": youtube_item["formatId"]}).video or "",
+            "formatId": parse_format_selection({"video": youtube_item["formatId"]}).video or "",
         }
         if not re.fullmatch(r"[0-9]+", youtube["formatId"]):
             raise AgentApiError("CAPTURE_FRAME_INVALID", "youtube.formatId must be a numeric ID returned by youtube_get_download_formats.")
@@ -971,6 +1043,39 @@ def capture_frame_options(payload: Any) -> dict[str, Any]:
         "applyDisplayRotation": rotation, "crop": capture_crop(payload.get("crop")), "resize": capture_resize(payload.get("resize")),
         "image": image, "outputPath": capture_output_path(payload.get("outputPath"), path if isinstance(path, str) else "", timestamp, image["format"]),
     }
+
+
+def image_crop_default_workspace_path(source_path: str, crop: dict[str, int], image_format: str) -> str:
+    source_stem = Path(source_path).stem.strip() or "ResearchTube image"
+    # Leave enough room for the crop provenance and unique ID under the
+    # portable 240-character workspace path-component limit.
+    source_stem = source_stem[:150].rstrip() or "ResearchTube image"
+    crop_tag = f"crop_{crop['x']}_{crop['y']}_{crop['width']}_{crop['height']}"
+    return f"crops/{source_stem} [{crop_tag}] [img_{secrets.token_urlsafe(8)}].{image_format}"
+
+
+def image_crop_options(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict) or set(payload) - {"path", "crop", "image", "outputPath"}:
+        raise AgentApiError("IMAGE_CROP_INVALID", "image_crop requires only documented fields.")
+    path = payload.get("path")
+    if not isinstance(path, str) or not path:
+        raise AgentApiError("IMAGE_CROP_INVALID", "path must be a non-empty logical workspace image path.")
+    crop = capture_crop(payload.get("crop"))
+    if crop is None:
+        raise AgentApiError("IMAGE_CROP_INVALID", "crop requires x, y, width, and height.")
+    try:
+        image = capture_image(payload.get("image"))
+    except AgentApiError as error:
+        raise AgentApiError("IMAGE_CROP_INVALID", error.message) from error
+    output_path = payload.get("outputPath")
+    if output_path is not None and (not isinstance(output_path, str) or not output_path):
+        raise AgentApiError("IMAGE_CROP_INVALID", "outputPath must be a non-empty logical workspace path.")
+    path = output_path or image_crop_default_workspace_path(path, crop, image["format"])
+    suffix = Path(path).suffix.lower()
+    allowed_suffixes = {"png": {".png"}, "jpeg": {".jpg", ".jpeg"}, "webp": {".webp"}}
+    if suffix not in allowed_suffixes[image["format"]]:
+        raise AgentApiError("IMAGE_CROP_INVALID", f"outputPath extension must match image.format {image['format']}.")
+    return {"path": payload["path"], "crop": crop, "image": image, "outputPath": path}
 
 
 async def ffprobe_streams_for_file(physical_path: Path, executable: str) -> list[dict[str, Any]]:
@@ -1061,6 +1166,291 @@ def capture_encoder_arguments(image: dict[str, Any]) -> tuple[list[str], str]:
         qscale = round(31 - ((image["quality"] - 1) * 29 / 99))
         return ["-c:v", "mjpeg", "-q:v", str(max(2, min(31, qscale)))], "image/jpeg"
     return ["-c:v", "libwebp", "-q:v", str(image["quality"])], "image/webp"
+
+
+def macos_virtual_desktop() -> tuple[list[dict[str, int]], dict[str, int]]:
+    """Return active macOS displays and the CoreGraphics virtual-desktop bounds."""
+    if platform.system() != "Darwin":
+        raise AgentApiError("SCREEN_CAPTURE_UNAVAILABLE", "capture_screen is unavailable on this operating system.")
+    class CGPoint(ctypes.Structure):
+        _fields_ = [("x", ctypes.c_double), ("y", ctypes.c_double)]
+    class CGSize(ctypes.Structure):
+        _fields_ = [("width", ctypes.c_double), ("height", ctypes.c_double)]
+    class CGRect(ctypes.Structure):
+        _fields_ = [("origin", CGPoint), ("size", CGSize)]
+    try:
+        core_graphics = ctypes.CDLL("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics")
+        active = (ctypes.c_uint32 * 32)()
+        count = ctypes.c_uint32()
+        core_graphics.CGGetActiveDisplayList.argtypes = [ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.c_uint32)]
+        core_graphics.CGGetActiveDisplayList.restype = ctypes.c_int32
+        core_graphics.CGDisplayBounds.argtypes = [ctypes.c_uint32]
+        core_graphics.CGDisplayBounds.restype = CGRect
+        if core_graphics.CGGetActiveDisplayList(32, active, ctypes.byref(count)) != 0 or count.value < 1:
+            raise OSError("no active displays")
+        displays = []
+        for index in range(count.value):
+            bounds = core_graphics.CGDisplayBounds(active[index])
+            displays.append({"index": index, "left": round(bounds.origin.x), "top": round(bounds.origin.y), "width": round(bounds.size.width), "height": round(bounds.size.height)})
+    except (AttributeError, OSError) as error:
+        raise AgentApiError("SCREEN_CAPTURE_UNAVAILABLE", "macOS could not read the virtual desktop geometry.") from error
+    left = min(item["left"] for item in displays)
+    top = min(item["top"] for item in displays)
+    right = max(item["left"] + item["width"] for item in displays)
+    bottom = max(item["top"] + item["height"] for item in displays)
+    if right <= left or bottom <= top:
+        raise AgentApiError("SCREEN_CAPTURE_UNAVAILABLE", "macOS reported no usable virtual desktop.")
+    return displays, {"left": left, "top": top, "width": right - left, "height": bottom - top}
+
+
+async def capture_screen_macos(payload: Any) -> dict[str, Any]:
+    """Capture macOS active displays solely with FFmpeg avfoundation and xstack."""
+    options = screen_capture_options(payload)
+    displays, virtual_desktop = macos_virtual_desktop()
+    ffmpeg = find_component("ffmpeg", COMPONENTS["ffmpeg"][0])
+    ffprobe = find_component("ffprobe", COMPONENTS["ffprobe"][0])
+    if ffmpeg.error or ffprobe.error:
+        raise AgentApiError("FFMPEG_DISCOVERY_ERROR", "ffmpeg or ffprobe discovery is ambiguous.", ffmpeg.error or ffprobe.error)
+    if not ffmpeg.executable or not ffprobe.executable:
+        raise AgentApiError("FFMPEG_NOT_AVAILABLE", "ffmpeg and ffprobe are required for macOS screen capture. Extract them under tools/ffmpeg or install them on PATH.")
+    resolver = WorkspacePathResolver()
+    destination_path: Path | None = None
+    try:
+        destination = resolver.resolve_destination(options["outputPath"], field_name="outputPath", error_code="WORKSPACE_PATH_INVALID")
+        destination.physical_path.parent.mkdir(parents=True, exist_ok=True)
+        destination = resolver.resolve_destination(destination.logical_path, field_name="outputPath", error_code="WORKSPACE_PATH_INVALID")
+        if destination.physical_path.exists() or destination.physical_path.is_symlink():
+            raise AgentApiError("SCREEN_CAPTURE_DESTINATION_EXISTS", "outputPath already exists; capture_screen never overwrites a workspace file.")
+        destination_path = destination.physical_path
+        command = [ffmpeg.executable, "-hide_banner", "-nostdin", "-v", "error"]
+        for display in displays:
+            command.extend(["-f", "avfoundation", "-framerate", "1", "-i", f"Capture screen {display['index']}:none"])
+        filters = []
+        labels = []
+        for display in displays:
+            label = f"d{display['index']}"
+            filters.append(f"[{display['index']}:v]scale={display['width']}:{display['height']}[{label}]")
+            labels.append(f"[{label}]")
+        layout = "|".join(f"{display['left'] - virtual_desktop['left']}_{display['top'] - virtual_desktop['top']}" for display in displays)
+        filters.append(f"{''.join(labels)}xstack=inputs={len(displays)}:layout={layout}:fill=black[out]")
+        encoder_args, mime_type = capture_encoder_arguments({**options["image"], "compressionLevel": 6 if options["image"]["format"] == "png" else None})
+        command.extend(["-filter_complex", ";".join(filters), "-map", "[out]", "-frames:v", "1", *encoder_args, "-y", str(destination_path)])
+        try:
+            process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+            await asyncio.wait_for(process.communicate(), timeout=CAPTURE_FRAME_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError as error:
+            process.kill()
+            await process.communicate()
+            raise AgentApiError("SCREEN_CAPTURE_FAILED", "FFmpeg timed out while capturing the macOS virtual desktop.") from error
+        except OSError as error:
+            raise AgentApiError("SCREEN_CAPTURE_UNAVAILABLE", "FFmpeg could not start macOS desktop capture.") from error
+        if process.returncode != 0 or not destination_path.is_file():
+            raise AgentApiError("SCREEN_CAPTURE_FAILED", "FFmpeg could not capture the macOS virtual desktop. Its build must support avfoundation and macOS screen recording must be permitted.")
+        output_streams = await ffprobe_streams_for_file(destination_path, ffprobe.executable)
+        stream = next((item for item in output_streams if item.get("codec_type") == "video"), None)
+        width = stream.get("width") if isinstance(stream, dict) else None
+        height = stream.get("height") if isinstance(stream, dict) else None
+        if width != virtual_desktop["width"] or height != virtual_desktop["height"]:
+            raise AgentApiError("SCREEN_CAPTURE_FAILED", "FFmpeg did not produce the requested macOS virtual-desktop dimensions.")
+        result = {"workspacePath": destination.logical_path, "format": options["image"]["format"], "mimeType": mime_type, "width": width, "height": height, "imageSizeBytes": destination_path.stat().st_size, "monitorCount": len(displays), "virtualDesktop": virtual_desktop}
+        log(f"capture_screen monitors={len(displays)} {width}x{height} -> {destination.logical_path}")
+        return result
+    except AgentApiError:
+        if destination_path is not None:
+            try:
+                destination_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
+
+
+async def x11_virtual_desktop() -> tuple[dict[str, int], int]:
+    """Read X11 root-display geometry and monitor count without capturing pixels."""
+    if not os.environ.get("DISPLAY") or os.environ.get("XDG_SESSION_TYPE", "").lower() == "wayland":
+        raise AgentApiError("SCREEN_CAPTURE_UNAVAILABLE", "capture_screen on Linux requires an X11 DISPLAY. Wayland capture is not implemented.")
+    xrandr = shutil.which("xrandr")
+    if not xrandr:
+        raise AgentApiError("SCREEN_CAPTURE_UNAVAILABLE", "Linux/X11 screen capture requires xrandr to report the virtual desktop and monitor count.")
+    try:
+        process = await asyncio.create_subprocess_exec(xrandr, "--query", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        stdout, _stderr = await asyncio.wait_for(process.communicate(), timeout=MEDIA_PROBE_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError as error:
+        process.kill()
+        await process.communicate()
+        raise AgentApiError("SCREEN_CAPTURE_UNAVAILABLE", "xrandr timed out while reading the X11 virtual desktop.") from error
+    except OSError as error:
+        raise AgentApiError("SCREEN_CAPTURE_UNAVAILABLE", "xrandr could not start for Linux/X11 screen capture.") from error
+    if process.returncode != 0:
+        raise AgentApiError("SCREEN_CAPTURE_UNAVAILABLE", "xrandr could not read the X11 virtual desktop.")
+    try:
+        text = stdout.decode("utf-8", "replace")
+        match = re.search(r"^Screen\s+\d+:.*?\bcurrent\s+(\d+)\s+x\s+(\d+)\b", text, re.MULTILINE)
+        monitor_count = len(re.findall(r"^\S+\s+connected(?:\s|$)", text, re.MULTILINE))
+        if match is None:
+            raise ValueError("missing X11 screen geometry")
+        width, height = int(match.group(1)), int(match.group(2))
+    except (AttributeError, ValueError) as error:
+        raise AgentApiError("SCREEN_CAPTURE_UNAVAILABLE", "xrandr returned invalid X11 virtual-desktop geometry.") from error
+    if width < 1 or height < 1 or monitor_count < 1:
+        raise AgentApiError("SCREEN_CAPTURE_UNAVAILABLE", "xrandr reported no usable X11 virtual desktop.")
+    # X11's root-window coordinates begin at 0,0; monitor layouts are within it.
+    return {"left": 0, "top": 0, "width": width, "height": height}, monitor_count
+
+
+async def capture_screen_x11(payload: Any) -> dict[str, Any]:
+    """Capture exactly one Linux/X11 virtual-desktop image through FFmpeg x11grab."""
+    options = screen_capture_options(payload)
+    virtual_desktop, monitor_count = await x11_virtual_desktop()
+    ffmpeg = find_component("ffmpeg", COMPONENTS["ffmpeg"][0])
+    ffprobe = find_component("ffprobe", COMPONENTS["ffprobe"][0])
+    if ffmpeg.error:
+        raise AgentApiError("FFMPEG_DISCOVERY_ERROR", "ffmpeg discovery is ambiguous.", ffmpeg.error)
+    if ffprobe.error:
+        raise AgentApiError("FFPROBE_DISCOVERY_ERROR", "ffprobe discovery is ambiguous.", ffprobe.error)
+    if not ffmpeg.executable:
+        raise AgentApiError("FFMPEG_NOT_AVAILABLE", "ffmpeg is required for Linux/X11 screen capture. Extract it under tools/ffmpeg or install it on PATH.")
+    if not ffprobe.executable:
+        raise AgentApiError("FFPROBE_NOT_AVAILABLE", "ffprobe is required to verify Linux/X11 screen capture dimensions. Extract it under tools/ffmpeg or install it on PATH.")
+    resolver = WorkspacePathResolver()
+    destination_path: Path | None = None
+    try:
+        destination = resolver.resolve_destination(options["outputPath"], field_name="outputPath", error_code="WORKSPACE_PATH_INVALID")
+        destination.physical_path.parent.mkdir(parents=True, exist_ok=True)
+        destination = resolver.resolve_destination(destination.logical_path, field_name="outputPath", error_code="WORKSPACE_PATH_INVALID")
+        if destination.physical_path.exists() or destination.physical_path.is_symlink():
+            raise AgentApiError("SCREEN_CAPTURE_DESTINATION_EXISTS", "outputPath already exists; capture_screen never overwrites a workspace file.")
+        destination_path = destination.physical_path
+        encoder_args, mime_type = capture_encoder_arguments({**options["image"], "compressionLevel": 6 if options["image"]["format"] == "png" else None})
+        command = [
+            ffmpeg.executable, "-hide_banner", "-nostdin", "-v", "error", "-f", "x11grab", "-framerate", "1",
+            "-video_size", f"{virtual_desktop['width']}x{virtual_desktop['height']}", "-i", f"{os.environ['DISPLAY']}+0,0",
+            "-map", "0:v:0", "-an", "-frames:v", "1", *encoder_args, "-y", str(destination_path),
+        ]
+        try:
+            process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+            await asyncio.wait_for(process.communicate(), timeout=CAPTURE_FRAME_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError as error:
+            process.kill()
+            await process.communicate()
+            raise AgentApiError("SCREEN_CAPTURE_FAILED", "FFmpeg timed out while capturing the Linux/X11 virtual desktop.") from error
+        except OSError as error:
+            raise AgentApiError("SCREEN_CAPTURE_UNAVAILABLE", "FFmpeg could not start Linux/X11 desktop capture.") from error
+        if process.returncode != 0 or not destination_path.is_file():
+            raise AgentApiError("SCREEN_CAPTURE_FAILED", "FFmpeg could not capture the Linux/X11 virtual desktop. Its build must support x11grab.")
+        output_streams = await ffprobe_streams_for_file(destination_path, ffprobe.executable)
+        output_stream = next((stream for stream in output_streams if stream.get("codec_type") == "video"), None)
+        width = output_stream.get("width") if isinstance(output_stream, dict) else None
+        height = output_stream.get("height") if isinstance(output_stream, dict) else None
+        if width != virtual_desktop["width"] or height != virtual_desktop["height"]:
+            raise AgentApiError("SCREEN_CAPTURE_FAILED", "FFmpeg did not produce the requested Linux/X11 virtual-desktop dimensions.")
+        result = {"workspacePath": destination.logical_path, "format": options["image"]["format"], "mimeType": mime_type, "width": width, "height": height, "imageSizeBytes": destination_path.stat().st_size, "monitorCount": monitor_count, "virtualDesktop": virtual_desktop}
+        log(f"capture_screen monitors={monitor_count} {width}x{height} -> {destination.logical_path}")
+        return result
+    except AgentApiError:
+        if destination_path is not None:
+            try:
+                destination_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
+
+
+def windows_virtual_desktop() -> tuple[dict[str, int], int]:
+    """Return the real Windows virtual-desktop rectangle and monitor count.
+
+    This does not capture any pixels. FFmpeg's gdigrab remains the only
+    Windows capture implementation; the small WinAPI query merely preserves
+    truthful geometry and monitor-count metadata in the MCP result.
+    """
+    try:
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        # Avoid DPI-scaled virtual-screen metrics in a high-DPI process. It is
+        # harmless when awareness was already set by the host application.
+        try:
+            user32.SetProcessDPIAware()
+        except AttributeError:
+            pass
+        get_system_metrics = user32.GetSystemMetrics
+        get_system_metrics.argtypes = [ctypes.c_int]
+        get_system_metrics.restype = ctypes.c_int
+        bounds = {
+            "left": get_system_metrics(76), "top": get_system_metrics(77),
+            "width": get_system_metrics(78), "height": get_system_metrics(79),
+        }
+        monitor_count = get_system_metrics(80)
+    except (AttributeError, OSError) as error:
+        raise AgentApiError("SCREEN_CAPTURE_UNAVAILABLE", "Windows could not read the virtual desktop geometry.") from error
+    if bounds["width"] < 1 or bounds["height"] < 1 or monitor_count < 1:
+        raise AgentApiError("SCREEN_CAPTURE_UNAVAILABLE", "Windows reported no usable virtual desktop.")
+    return bounds, monitor_count
+
+
+async def capture_screen_windows(payload: Any) -> dict[str, Any]:
+    """Capture exactly one Windows virtual-desktop image through FFmpeg gdigrab."""
+    options = screen_capture_options(payload)
+    virtual_desktop, monitor_count = windows_virtual_desktop()
+    ffmpeg = find_component("ffmpeg", COMPONENTS["ffmpeg"][0])
+    ffprobe = find_component("ffprobe", COMPONENTS["ffprobe"][0])
+    if ffmpeg.error:
+        raise AgentApiError("FFMPEG_DISCOVERY_ERROR", "ffmpeg discovery is ambiguous.", ffmpeg.error)
+    if ffprobe.error:
+        raise AgentApiError("FFPROBE_DISCOVERY_ERROR", "ffprobe discovery is ambiguous.", ffprobe.error)
+    if not ffmpeg.executable:
+        raise AgentApiError("FFMPEG_NOT_AVAILABLE", "ffmpeg is required for Windows screen capture. Extract it under tools/ffmpeg or install it on PATH.")
+    if not ffprobe.executable:
+        raise AgentApiError("FFPROBE_NOT_AVAILABLE", "ffprobe is required to verify Windows screen capture dimensions. Extract it under tools/ffmpeg or install it on PATH.")
+    resolver = WorkspacePathResolver()
+    destination_path: Path | None = None
+    try:
+        destination = resolver.resolve_destination(options["outputPath"], field_name="outputPath", error_code="WORKSPACE_PATH_INVALID")
+        destination.physical_path.parent.mkdir(parents=True, exist_ok=True)
+        destination = resolver.resolve_destination(destination.logical_path, field_name="outputPath", error_code="WORKSPACE_PATH_INVALID")
+        if destination.physical_path.exists() or destination.physical_path.is_symlink():
+            raise AgentApiError("SCREEN_CAPTURE_DESTINATION_EXISTS", "outputPath already exists; capture_screen never overwrites a workspace file.")
+        destination_path = destination.physical_path
+        encoder_args, mime_type = capture_encoder_arguments({**options["image"], "compressionLevel": 6 if options["image"]["format"] == "png" else None})
+        command = [
+            ffmpeg.executable, "-hide_banner", "-nostdin", "-v", "error",
+            "-f", "gdigrab", "-offset_x", str(virtual_desktop["left"]), "-offset_y", str(virtual_desktop["top"]),
+            "-video_size", f"{virtual_desktop['width']}x{virtual_desktop['height']}", "-framerate", "1", "-i", "desktop",
+            "-map", "0:v:0", "-an", "-frames:v", "1", *encoder_args, "-y", str(destination_path),
+        ]
+        try:
+            process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+            await asyncio.wait_for(process.communicate(), timeout=CAPTURE_FRAME_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError as error:
+            process.kill()
+            await process.communicate()
+            raise AgentApiError("SCREEN_CAPTURE_FAILED", "FFmpeg timed out while capturing the Windows virtual desktop.") from error
+        except OSError as error:
+            raise AgentApiError("SCREEN_CAPTURE_UNAVAILABLE", "FFmpeg could not start Windows desktop capture.") from error
+        if process.returncode != 0 or not destination_path.is_file():
+            raise AgentApiError("SCREEN_CAPTURE_FAILED", "FFmpeg could not capture the Windows virtual desktop. Its build must support gdigrab.")
+        output_streams = await ffprobe_streams_for_file(destination_path, ffprobe.executable)
+        output_stream = next((stream for stream in output_streams if stream.get("codec_type") == "video"), None)
+        width = output_stream.get("width") if isinstance(output_stream, dict) else None
+        height = output_stream.get("height") if isinstance(output_stream, dict) else None
+        if width != virtual_desktop["width"] or height != virtual_desktop["height"]:
+            raise AgentApiError("SCREEN_CAPTURE_FAILED", "FFmpeg did not produce the requested virtual-desktop dimensions.")
+        result = {"workspacePath": destination.logical_path, "format": options["image"]["format"], "mimeType": mime_type, "width": width, "height": height, "imageSizeBytes": destination_path.stat().st_size, "monitorCount": monitor_count, "virtualDesktop": virtual_desktop}
+        log(f"capture_screen monitors={monitor_count} {width}x{height} -> {destination.logical_path}")
+        return result
+    except AgentApiError:
+        if destination_path is not None:
+            try:
+                destination_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
+
+
+async def capture_screen(payload: Any) -> dict[str, Any]:
+    """Capture exactly one virtual-desktop image on the current platform."""
+    if os.name == "nt":
+        return await capture_screen_windows(payload)
+    if platform.system() == "Linux":
+        return await capture_screen_x11(payload)
+    return await capture_screen_macos(payload)
 
 
 def showinfo_timestamp(stderr: bytes) -> float | None:
@@ -1188,7 +1578,7 @@ def safe_capture_title(value: str) -> str:
 
 def youtube_capture_default_workspace_path(title: str, video_id: str, timestamp_seconds: float, image_format: str) -> str:
     timestamp_part = f"{timestamp_seconds:.3f}".replace("-", "_")
-    capture_id = secrets.token_urlsafe(12)
+    capture_id = secrets.token_urlsafe(6)
     return f"captures/{safe_capture_title(title)} [yt_{video_id}] [t_{timestamp_part}] [cap_{capture_id}].{image_format}"
 
 
@@ -1324,6 +1714,88 @@ IMAGE_MIME_TYPES = {
 }
 
 
+async def image_crop(payload: Any) -> dict[str, Any]:
+    """Crop one existing workspace image without exposing a host path."""
+    options = image_crop_options(payload)
+    resolver = WorkspacePathResolver()
+    source = resolver.resolve_existing(options["path"], field_name="path", expected_type="file")
+    if source.physical_path.suffix.lower() not in IMAGE_MIME_TYPES:
+        raise AgentApiError("IMAGE_CROP_INVALID", "path must identify a PNG, JPEG, or WebP image in the workspace.")
+    ffmpeg = find_component("ffmpeg", COMPONENTS["ffmpeg"][0])
+    ffprobe = find_component("ffprobe", COMPONENTS["ffprobe"][0])
+    if ffmpeg.error:
+        raise AgentApiError("FFMPEG_DISCOVERY_ERROR", "ffmpeg discovery is ambiguous.", ffmpeg.error)
+    if ffprobe.error:
+        raise AgentApiError("FFPROBE_DISCOVERY_ERROR", "ffprobe discovery is ambiguous.", ffprobe.error)
+    if not ffmpeg.executable:
+        raise AgentApiError("FFMPEG_NOT_AVAILABLE", "ffmpeg is not available. Extract it under tools/ffmpeg or install it on PATH.")
+    if not ffprobe.executable:
+        raise AgentApiError("FFPROBE_NOT_AVAILABLE", "ffprobe is not available. Extract it under tools/ffmpeg or install it on PATH.")
+
+    streams = await ffprobe_streams(source, ffprobe.executable)
+    source_stream = next((stream for stream in streams if stream.get("codec_type") == "video"), None)
+    source_width = source_stream.get("width") if isinstance(source_stream, dict) else None
+    source_height = source_stream.get("height") if isinstance(source_stream, dict) else None
+    if not isinstance(source_width, int) or source_width < 1 or not isinstance(source_height, int) or source_height < 1:
+        raise AgentApiError("IMAGE_CROP_INVALID", "ffprobe did not report usable dimensions for the source image.")
+    crop = options["crop"]
+    if crop["x"] + crop["width"] > source_width or crop["y"] + crop["height"] > source_height:
+        raise AgentApiError("IMAGE_CROP_INVALID", "crop must lie completely within the source image dimensions.")
+
+    destination_path: Path | None = None
+    try:
+        destination = resolver.resolve_destination(options["outputPath"], field_name="outputPath", error_code="WORKSPACE_PATH_INVALID")
+        destination.physical_path.parent.mkdir(parents=True, exist_ok=True)
+        destination = resolver.resolve_destination(destination.logical_path, field_name="outputPath", error_code="WORKSPACE_PATH_INVALID")
+        if destination.physical_path.exists() or destination.physical_path.is_symlink():
+            raise AgentApiError("IMAGE_CROP_DESTINATION_EXISTS", "outputPath already exists; image_crop never overwrites a workspace file.")
+        destination_path = destination.physical_path
+        encoder_args, mime_type = capture_encoder_arguments(options["image"])
+        command = [
+            ffmpeg.executable, "-hide_banner", "-nostdin", "-v", "error", "-noautorotate", "-i", str(source.physical_path),
+            "-map", "0:v:0", "-an", "-frames:v", "1",
+            "-vf", f"crop={crop['width']}:{crop['height']}:{crop['x']}:{crop['y']}",
+            *encoder_args, "-y", str(destination_path),
+        ]
+        try:
+            process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+            await asyncio.wait_for(process.communicate(), timeout=CAPTURE_FRAME_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError as error:
+            process.kill()
+            await process.communicate()
+            raise AgentApiError("IMAGE_CROP_FAILED", "ffmpeg timed out while cropping the image.") from error
+        except OSError as error:
+            raise AgentApiError("IMAGE_CROP_FAILED", "ffmpeg could not be started.") from error
+        if process.returncode != 0 or not destination_path.is_file():
+            raise AgentApiError("IMAGE_CROP_FAILED", "ffmpeg could not crop the image.")
+        output_streams = await ffprobe_streams_for_file(destination_path, ffprobe.executable)
+        output_stream = next((stream for stream in output_streams if stream.get("codec_type") == "video"), None)
+        width = output_stream.get("width") if isinstance(output_stream, dict) else None
+        height = output_stream.get("height") if isinstance(output_stream, dict) else None
+        if width != crop["width"] or height != crop["height"]:
+            raise AgentApiError("IMAGE_CROP_FAILED", "ffmpeg did not produce the requested crop dimensions.")
+        result = {
+            "sourcePath": source.logical_path,
+            "sourceWidth": source_width,
+            "sourceHeight": source_height,
+            "crop": crop,
+            "image": {
+                "format": options["image"]["format"], "mimeType": mime_type,
+                "width": width, "height": height, "imageSizeBytes": destination_path.stat().st_size,
+                "workspacePath": destination.logical_path,
+            },
+        }
+        log(f"image_crop path={source.logical_path} crop={crop['x']},{crop['y']} {crop['width']}x{crop['height']} -> {destination.logical_path}")
+        return result
+    except AgentApiError:
+        if destination_path is not None:
+            try:
+                destination_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
+
+
 def workspace_image(payload: Any) -> dict[str, Any]:
     """Read one workspace image for the capture-frame MCP App only.
 
@@ -1347,6 +1819,278 @@ def workspace_image(payload: Any) -> dict[str, Any]:
         "imageSizeBytes": len(image_bytes),
         "inlineImageBase64": base64.b64encode(image_bytes).decode("ascii"),
     }
+
+
+class WindowsClipboard:
+    """Small, explicit Win32 clipboard wrapper; no clipboard history is kept."""
+
+    CF_TEXT = 1
+    CF_DIB = 8
+    CF_UNICODETEXT = 13
+    CF_DIBV5 = 17
+    GMEM_MOVEABLE = 0x0002
+
+    def __init__(self) -> None:
+        if os.name != "nt":
+            raise AgentApiError("CLIPBOARD_UNAVAILABLE", "System clipboard access is unavailable on this operating system.")
+        try:
+            self.user32 = ctypes.WinDLL("user32", use_last_error=True)
+            self.kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            self.user32.OpenClipboard.argtypes = [ctypes.c_void_p]
+            self.user32.OpenClipboard.restype = ctypes.c_int
+            self.user32.CloseClipboard.restype = ctypes.c_int
+            self.user32.GetClipboardData.argtypes = [ctypes.c_uint]
+            self.user32.GetClipboardData.restype = ctypes.c_void_p
+            self.user32.SetClipboardData.argtypes = [ctypes.c_uint, ctypes.c_void_p]
+            self.user32.SetClipboardData.restype = ctypes.c_void_p
+            self.user32.EmptyClipboard.restype = ctypes.c_int
+            self.user32.IsClipboardFormatAvailable.argtypes = [ctypes.c_uint]
+            self.user32.IsClipboardFormatAvailable.restype = ctypes.c_int
+            self.user32.CountClipboardFormats.restype = ctypes.c_int
+            self.user32.GetClipboardSequenceNumber.restype = ctypes.c_uint32
+            self.kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
+            self.kernel32.GlobalLock.restype = ctypes.c_void_p
+            self.kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+            self.kernel32.GlobalSize.argtypes = [ctypes.c_void_p]
+            self.kernel32.GlobalSize.restype = ctypes.c_size_t
+            self.kernel32.GlobalAlloc.argtypes = [ctypes.c_uint, ctypes.c_size_t]
+            self.kernel32.GlobalAlloc.restype = ctypes.c_void_p
+            self.kernel32.GlobalFree.argtypes = [ctypes.c_void_p]
+            self.kernel32.GlobalFree.restype = ctypes.c_void_p
+        except (AttributeError, OSError) as error:
+            raise AgentApiError("CLIPBOARD_UNAVAILABLE", "Windows clipboard APIs are unavailable in this session.") from error
+
+    def open(self) -> None:
+        for attempt in range(CLIPBOARD_OPEN_ATTEMPTS):
+            if self.user32.OpenClipboard(None):
+                return
+            if attempt + 1 < CLIPBOARD_OPEN_ATTEMPTS:
+                time.sleep(0.03 * (attempt + 1))
+        raise AgentApiError("CLIPBOARD_BUSY", "The Windows clipboard is temporarily in use by another application.")
+
+    def close(self) -> None:
+        self.user32.CloseClipboard()
+
+    def sequence(self) -> int:
+        return int(self.user32.GetClipboardSequenceNumber())
+
+    @staticmethod
+    def revision(sequence: int) -> str:
+        return f"cb_{sequence}"
+
+    def has_image(self) -> bool:
+        return bool(self.user32.IsClipboardFormatAvailable(self.CF_DIBV5) or self.user32.IsClipboardFormatAvailable(self.CF_DIB))
+
+    def has_text(self) -> bool:
+        return bool(self.user32.IsClipboardFormatAvailable(self.CF_UNICODETEXT))
+
+    def global_bytes(self, handle: int, max_bytes: int) -> bytes:
+        size = int(self.kernel32.GlobalSize(handle))
+        if size < 1:
+            raise AgentApiError("CLIPBOARD_UNAVAILABLE", "Windows returned an unreadable clipboard object.")
+        if size > max_bytes:
+            raise AgentApiError("CLIPBOARD_TOO_LARGE", "The clipboard object exceeds the configured size limit.")
+        pointer = self.kernel32.GlobalLock(handle)
+        if not pointer:
+            raise AgentApiError("CLIPBOARD_BUSY", "The Windows clipboard object could not be read.")
+        try:
+            return ctypes.string_at(pointer, size)
+        finally:
+            self.kernel32.GlobalUnlock(handle)
+
+    def clipboard_dib(self) -> bytes:
+        handle = self.user32.GetClipboardData(self.CF_DIBV5) or self.user32.GetClipboardData(self.CF_DIB)
+        if not handle:
+            raise AgentApiError("CLIPBOARD_UNSUPPORTED", "The clipboard image cannot be read as a Windows bitmap.")
+        return self.global_bytes(handle, MAX_CLIPBOARD_IMAGE_DIB_BYTES)
+
+    def clipboard_text_bytes(self) -> bytes:
+        handle = self.user32.GetClipboardData(self.CF_UNICODETEXT)
+        if not handle:
+            raise AgentApiError("CLIPBOARD_UNSUPPORTED", "The clipboard text cannot be read as Unicode text.")
+        return self.global_bytes(handle, MAX_CLIPBOARD_TEXT_BYTES + 2)
+
+    def set_global_data(self, clipboard_format: int, data: bytes) -> None:
+        memory = self.kernel32.GlobalAlloc(self.GMEM_MOVEABLE, len(data))
+        if not memory:
+            raise AgentApiError("CLIPBOARD_UNAVAILABLE", "Windows could not allocate clipboard memory.")
+        pointer = self.kernel32.GlobalLock(memory)
+        if not pointer:
+            self.kernel32.GlobalFree(memory)
+            raise AgentApiError("CLIPBOARD_UNAVAILABLE", "Windows could not prepare clipboard memory.")
+        try:
+            ctypes.memmove(pointer, data, len(data))
+        finally:
+            self.kernel32.GlobalUnlock(memory)
+        if not self.user32.SetClipboardData(clipboard_format, memory):
+            self.kernel32.GlobalFree(memory)
+            raise AgentApiError("CLIPBOARD_UNAVAILABLE", "Windows rejected the clipboard data.")
+
+
+def clipboard_dib_metadata(dib: bytes) -> dict[str, int]:
+    """Validate a Windows DIB and return dimensions plus the BMP pixel offset."""
+    if len(dib) < 16:
+        raise AgentApiError("CLIPBOARD_UNSUPPORTED", "The clipboard image has an invalid bitmap header.")
+    header_size = struct.unpack_from("<I", dib)[0]
+    if header_size == 12:
+        if len(dib) < 12:
+            raise AgentApiError("CLIPBOARD_UNSUPPORTED", "The clipboard image has an incomplete bitmap header.")
+        width, height, bit_count = struct.unpack_from("<HHH", dib, 4)[0], struct.unpack_from("<HHH", dib, 4)[1], struct.unpack_from("<HHH", dib, 4)[2]
+        offset = 12 + (3 * (1 << bit_count) if bit_count <= 8 else 0)
+    elif header_size >= 40 and len(dib) >= header_size:
+        width, height = struct.unpack_from("<ii", dib, 4)
+        bit_count = struct.unpack_from("<H", dib, 14)[0]
+        compression = struct.unpack_from("<I", dib, 16)[0]
+        color_count = struct.unpack_from("<I", dib, 32)[0]
+        palette_entries = color_count or ((1 << bit_count) if bit_count <= 8 else 0)
+        extra_masks = 12 if header_size == 40 and compression == 3 else 0
+        offset = header_size + extra_masks + (4 * palette_entries)
+    else:
+        raise AgentApiError("CLIPBOARD_UNSUPPORTED", "The clipboard image uses an unsupported bitmap header.")
+    width, height = abs(int(width)), abs(int(height))
+    if width < 1 or height < 1 or bit_count not in {1, 4, 8, 16, 24, 32} or offset >= len(dib):
+        raise AgentApiError("CLIPBOARD_UNSUPPORTED", "The clipboard image bitmap is invalid.")
+    if width * height > MAX_CLIPBOARD_IMAGE_PIXELS:
+        raise AgentApiError("CLIPBOARD_TOO_LARGE", "The clipboard image exceeds the configured pixel limit.")
+    return {"width": width, "height": height, "pixelOffset": offset}
+
+
+def clipboard_bmp_from_dib(dib: bytes) -> bytes:
+    metadata = clipboard_dib_metadata(dib)
+    return struct.pack("<2sIHHI", b"BM", len(dib) + 14, 0, 0, 14 + metadata["pixelOffset"]) + dib
+
+
+def clipboard_status(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict) or set(payload) - {"sinceRevision"}:
+        raise AgentApiError("CLIPBOARD_INVALID", "clipboard_status accepts only optional sinceRevision.")
+    since = payload.get("sinceRevision")
+    if since is not None and (not isinstance(since, str) or not since.startswith("cb_")):
+        raise AgentApiError("CLIPBOARD_INVALID", "sinceRevision must be a clipboard revision returned by this tool.")
+    clipboard = WindowsClipboard()
+    clipboard.open()
+    try:
+        revision = clipboard.revision(clipboard.sequence())
+        result: dict[str, Any] = {"revision": revision}
+        if clipboard.has_image():
+            dib = clipboard.clipboard_dib()
+            metadata = clipboard_dib_metadata(dib)
+            result.update({"type": "image", "width": metadata["width"], "height": metadata["height"], "sizeBytes": len(dib)})
+        elif clipboard.has_text():
+            result.update({"type": "text", "sizeBytes": max(0, int(clipboard.kernel32.GlobalSize(clipboard.user32.GetClipboardData(clipboard.CF_UNICODETEXT))) - 2)})
+        elif clipboard.user32.CountClipboardFormats() == 0:
+            result["type"] = "empty"
+        else:
+            result["type"] = "unsupported"
+        if since is not None:
+            result["changed"] = since != revision
+        return result
+    finally:
+        clipboard.close()
+
+
+async def clipboard_get(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict) or set(payload) - {"revision"}:
+        raise AgentApiError("CLIPBOARD_INVALID", "clipboard_get accepts only optional revision.")
+    expected_revision = payload.get("revision")
+    if expected_revision is not None and (not isinstance(expected_revision, str) or not expected_revision.startswith("cb_")):
+        raise AgentApiError("CLIPBOARD_INVALID", "revision must be a clipboard revision returned by clipboard_status.")
+    clipboard = WindowsClipboard()
+    clipboard.open()
+    destination_path: Path | None = None
+    try:
+        revision = clipboard.revision(clipboard.sequence())
+        if expected_revision is not None and expected_revision != revision:
+            raise AgentApiError("CLIPBOARD_CHANGED", "The clipboard changed after the supplied revision.")
+        if clipboard.has_image():
+            dib = clipboard.clipboard_dib()
+            metadata = clipboard_dib_metadata(dib)
+            value_type = "image"
+        elif clipboard.has_text():
+            text_bytes = clipboard.clipboard_text_bytes()
+            value_type = "text"
+        elif clipboard.user32.CountClipboardFormats() == 0:
+            raise AgentApiError("CLIPBOARD_EMPTY", "The clipboard is empty.")
+        else:
+            raise AgentApiError("CLIPBOARD_UNSUPPORTED", "The clipboard does not contain supported text or image data.")
+    finally:
+        clipboard.close()
+    if value_type == "text":
+        text = text_bytes.decode("utf-16-le", "strict").rstrip("\x00")
+        if len(text.encode("utf-8")) > MAX_CLIPBOARD_TEXT_BYTES:
+            raise AgentApiError("CLIPBOARD_TOO_LARGE", "The clipboard text exceeds the configured size limit.")
+        return {"type": "text", "revision": revision, "text": text}
+    try:
+        bmp = clipboard_bmp_from_dib(dib)
+        resolver = WorkspacePathResolver()
+        output_path = f"clipboard/clipboard_image_{revision.removeprefix('cb_')}_{secrets.token_urlsafe(6)}.png"
+        destination = resolver.resolve_destination(output_path, field_name="outputPath", error_code="WORKSPACE_PATH_INVALID")
+        destination.physical_path.parent.mkdir(parents=True, exist_ok=True)
+        destination = resolver.resolve_destination(destination.logical_path, field_name="outputPath", error_code="WORKSPACE_PATH_INVALID")
+        destination_path = destination.physical_path
+        ffmpeg = find_component("ffmpeg", COMPONENTS["ffmpeg"][0])
+        if not ffmpeg.executable:
+            raise AgentApiError("FFMPEG_NOT_AVAILABLE", "ffmpeg is required to materialize a clipboard image into the workspace.")
+        process = await asyncio.create_subprocess_exec(ffmpeg.executable, "-hide_banner", "-nostdin", "-v", "error", "-f", "image2pipe", "-vcodec", "bmp", "-i", "pipe:0", "-frames:v", "1", "-c:v", "png", "-y", str(destination_path), stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+        _stdout, _stderr = await asyncio.wait_for(process.communicate(bmp), timeout=CAPTURE_FRAME_TIMEOUT_SECONDS)
+        if process.returncode != 0 or not destination_path.is_file():
+            raise AgentApiError("CLIPBOARD_UNSUPPORTED", "The clipboard image could not be converted to PNG.")
+        return {"type": "image", "revision": revision, "workspacePath": destination.logical_path, "width": metadata["width"], "height": metadata["height"], "sizeBytes": destination_path.stat().st_size}
+    except AgentApiError:
+        if destination_path is not None:
+            destination_path.unlink(missing_ok=True)
+        raise
+
+
+async def clipboard_set(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict) or set(payload) - {"text", "workspacePath"} or ("text" in payload) == ("workspacePath" in payload):
+        raise AgentApiError("CLIPBOARD_INVALID", "clipboard_set requires exactly one of text or workspacePath.")
+    if "text" in payload:
+        text = payload["text"]
+        if not isinstance(text, str):
+            raise AgentApiError("CLIPBOARD_INVALID", "text must be a Unicode string.")
+        encoded = text.encode("utf-16-le") + b"\x00\x00"
+        if len(encoded) - 2 > MAX_CLIPBOARD_TEXT_BYTES:
+            raise AgentApiError("CLIPBOARD_TOO_LARGE", "The text exceeds the configured clipboard limit.")
+        clipboard = WindowsClipboard()
+        clipboard.open()
+        try:
+            if not clipboard.user32.EmptyClipboard():
+                raise AgentApiError("CLIPBOARD_BUSY", "The Windows clipboard could not be cleared.")
+            clipboard.set_global_data(clipboard.CF_UNICODETEXT, encoded)
+            return {"success": True, "type": "text", "revision": clipboard.revision(clipboard.sequence())}
+        finally:
+            clipboard.close()
+    source = WorkspacePathResolver().resolve_existing(payload["workspacePath"], field_name="workspacePath", expected_type="file")
+    if source.physical_path.suffix.lower() not in IMAGE_MIME_TYPES:
+        raise AgentApiError("INVALID_IMAGE", "workspacePath must identify a PNG, JPEG, or WebP image.")
+    if source.physical_path.stat().st_size > MAX_CLIPBOARD_IMAGE_FILE_BYTES:
+        raise AgentApiError("CLIPBOARD_TOO_LARGE", "The workspace image file exceeds the configured clipboard limit.")
+    ffprobe = find_component("ffprobe", COMPONENTS["ffprobe"][0])
+    ffmpeg = find_component("ffmpeg", COMPONENTS["ffmpeg"][0])
+    if not ffprobe.executable or not ffmpeg.executable:
+        raise AgentApiError("FFMPEG_NOT_AVAILABLE", "ffmpeg and ffprobe are required to put a workspace image on the clipboard.")
+    streams = await ffprobe_streams_for_file(source.physical_path, ffprobe.executable)
+    stream = next((item for item in streams if item.get("codec_type") == "video"), None)
+    width, height = (stream.get("width"), stream.get("height")) if isinstance(stream, dict) else (None, None)
+    if not isinstance(width, int) or not isinstance(height, int) or width < 1 or height < 1:
+        raise AgentApiError("INVALID_IMAGE", "The workspace file is not a valid decodable image.")
+    if width * height > MAX_CLIPBOARD_IMAGE_PIXELS or width * height * 4 > MAX_CLIPBOARD_IMAGE_DIB_BYTES:
+        raise AgentApiError("CLIPBOARD_TOO_LARGE", "The workspace image exceeds the configured pixel or decoded-size limit.")
+    process = await asyncio.create_subprocess_exec(ffmpeg.executable, "-hide_banner", "-nostdin", "-v", "error", "-i", str(source.physical_path), "-frames:v", "1", "-f", "image2pipe", "-vcodec", "bmp", "pipe:1", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    bmp, _stderr = await asyncio.wait_for(process.communicate(), timeout=CAPTURE_FRAME_TIMEOUT_SECONDS)
+    if process.returncode != 0 or len(bmp) < 15 or not bmp.startswith(b"BM"):
+        raise AgentApiError("INVALID_IMAGE", "The workspace image could not be decoded for the clipboard.")
+    dib = bmp[14:]
+    clipboard_dib_metadata(dib)
+    clipboard = WindowsClipboard()
+    clipboard.open()
+    try:
+        if not clipboard.user32.EmptyClipboard():
+            raise AgentApiError("CLIPBOARD_BUSY", "The Windows clipboard could not be cleared.")
+        clipboard.set_global_data(clipboard.CF_DIB, dib)
+        return {"success": True, "type": "image", "revision": clipboard.revision(clipboard.sequence()), "width": width, "height": height}
+    finally:
+        clipboard.close()
 
 
 def library_store_files(payload: Any) -> dict[str, Any]:
@@ -1462,6 +2206,7 @@ class DownloadTask:
     url: str
     video_id: str
     selection: DownloadSelection
+    partial_range: DownloadRange | None
     output_directory: Path
     output_directory_relative: str
     created_at: str
@@ -1530,8 +2275,12 @@ class DownloadTaskManager:
     async def create_download(self, payload: Any) -> dict[str, Any]:
         if not isinstance(payload, dict):
             raise AgentApiError("INVALID_REQUEST", "The JSON body must be an object.")
+        unknown = set(payload) - {"videoId", "formatSelection", "outputDir", "startSeconds", "endSeconds"}
+        if unknown:
+            raise AgentApiError("INVALID_REQUEST", "youtube_download contains an unsupported field.")
         video_id = validate_video_id(payload.get("videoId"))
-        selection = parse_download_selection(payload.get("selection"))
+        selection = parse_format_selection(payload.get("formatSelection"))
+        partial_range = parse_download_range(payload)
         # yt-dlp requires a URL, but URL construction is private Agent work.
         url = f"https://www.youtube.com/watch?v={video_id}"
         output_directory, output_directory_relative = resolve_output_directory(payload.get("outputDir"))
@@ -1542,18 +2291,18 @@ class DownloadTaskManager:
             raise AgentApiError("YTDLP_NOT_AVAILABLE", "yt-dlp is not available. Place it in tools/yt-dlp or install it on PATH.")
         deno_executable = resolve_deno_runtime()
         ffmpeg_executable: str | None = None
-        if selection.requires_merge:
+        if selection.requires_merge or partial_range is not None:
             ffmpeg = find_component("ffmpeg", COMPONENTS["ffmpeg"][0])
             if ffmpeg.error:
                 raise AgentApiError("FFMPEG_DISCOVERY_ERROR", "ffmpeg discovery is ambiguous.", ffmpeg.error)
             if not ffmpeg.executable:
                 raise AgentApiError(
                     "FFMPEG_NOT_AVAILABLE",
-                    "ffmpeg is required when selected video and audio tracks must be merged. Extract it under tools/ffmpeg or install it on PATH.",
+                    "ffmpeg is required to merge selected tracks or download a time range. Extract it under tools/ffmpeg or install it on PATH.",
                 )
             ffmpeg_executable = ffmpeg.executable
         now = utc_now()
-        task = DownloadTask(self.new_task_id(), url, video_id, selection, output_directory, output_directory_relative, now, now)
+        task = DownloadTask(self.new_task_id(), url, video_id, selection, partial_range, output_directory, output_directory_relative, now, now)
         # Store before responding: returned IDs are immediately pollable.
         self.tasks[task.task_id] = task
         self.record_event(task, "taskCreated", message="Download task created.")
@@ -1651,7 +2400,8 @@ class DownloadTaskManager:
                 self.record_event(task, "taskCancelled", message="Download cancelled.")
                 return
             task.output_directory.mkdir(parents=True, exist_ok=True)
-            output_template = f"%(title)s [yt_%(id)s] [{task.task_id}].%(ext)s"
+            partial_tag = f" [{task.partial_range.filename_tag()}]" if task.partial_range is not None else ""
+            output_template = f"%(title)s [yt_%(id)s]{partial_tag} [{task.task_id}].%(ext)s"
             command = [
                 # --print below is required for the final workspace file path,
                 # but yt-dlp documents that it implies --quiet.  Re-enable
@@ -1663,6 +2413,10 @@ class DownloadTaskManager:
             if task.selection.requires_merge:
                 # No re-encode: yt-dlp/ffmpeg remux the exact selected tracks.
                 command.extend(["--merge-output-format", "mp4", "--ffmpeg-location", str(Path(ffmpeg).parent)])
+            elif task.partial_range is not None:
+                command.extend(["--ffmpeg-location", str(Path(ffmpeg).parent)])
+            if task.partial_range is not None:
+                command.extend(["--download-sections", f"*{task.partial_range.start_seconds:.3f}-{task.partial_range.end_seconds:.3f}", "--downloader", "ffmpeg"])
             command.extend([
                 "--progress-template", "download:researchtube_progress:%(progress._percent_str)s",
                 "--progress-template", "postprocess:researchtube_postprocess:%(progress.status)s",
@@ -1699,7 +2453,7 @@ class DownloadTaskManager:
             relative_file = WorkspacePathResolver().logical_existing_file(output_file, error_code="OUTPUT_FILE_NOT_FOUND")
             task.final_output_state = "verified"
             self.record_event(task, "finalOutputVerified", message="yt-dlp final output verified in workspace.", workspace_path=relative_file)
-            task.result = {"videoId": task.video_id, "filePath": relative_file, "fileName": output_file.name, "outputDir": task.output_directory_relative}
+            task.result = {"videoId": task.video_id, "filePath": relative_file, "fileName": output_file.name, "outputDir": task.output_directory_relative, "partial": None if task.partial_range is None else {"startSeconds": task.partial_range.start_seconds, "endSeconds": task.partial_range.end_seconds}}
             task.status = "completed"
             self.set_phase(task, "completed", "Download completed.")
             task.progress_percent = 100.0
@@ -2179,8 +2933,18 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             response_status, response_body = "200 OK", await media_probe(parse_json_body(body))
         elif method == "POST" and path == "/media/capture-frame":
             response_status, response_body = "200 OK", await capture_frame(parse_json_body(body))
+        elif method == "POST" and path == "/media/capture-screen":
+            response_status, response_body = "200 OK", await capture_screen(parse_json_body(body))
+        elif method == "POST" and path == "/media/image-crop":
+            response_status, response_body = "200 OK", await image_crop(parse_json_body(body))
         elif method == "POST" and path == "/media/workspace-image":
             response_status, response_body = "200 OK", workspace_image(parse_json_body(body))
+        elif method == "POST" and path == "/clipboard/status":
+            response_status, response_body = "200 OK", clipboard_status(parse_json_body(body))
+        elif method == "POST" and path == "/clipboard/get":
+            response_status, response_body = "200 OK", await clipboard_get(parse_json_body(body))
+        elif method == "POST" and path == "/clipboard/set":
+            response_status, response_body = "200 OK", await clipboard_set(parse_json_body(body))
         elif method == "POST" and path == "/internal/library-store-files":
             response_status, response_body = "200 OK", library_store_files(parse_json_body(body))
         elif method == "POST" and path.startswith("/mcp/log/"):

@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 
 const background = await readFile(new URL("../background.js", import.meta.url), "utf8");
 
-for (const tool of ["workspace_list", "workspace_stat", "workspace_mkdir", "workspace_move", "workspace_delete", "workspace_share_start", "workspace_share_status", "workspace_share_stop", "media_probe", "capture_frame", "researchtube_get_capture_frame_image", "researchtube_copy_capture_frame_path"]) {
+for (const tool of ["workspace_list", "workspace_stat", "workspace_mkdir", "workspace_move", "workspace_delete", "workspace_share_start", "workspace_share_status", "workspace_share_stop", "media_probe", "capture_frame", "capture_screen", "researchtube_image_crop", "researchtube_show_workspace_image", "clipboard_status", "clipboard_get", "clipboard_set", "researchtube_get_capture_frame_image", "researchtube_copy_capture_frame_path"]) {
   assert.match(background, new RegExp(`name: "${tool}"`), `${tool} must be published in tools/list`);
 }
 for (const tool of ["library_store_start", "library_store_status", "library_store_cancel"]) {
@@ -11,8 +11,10 @@ for (const tool of ["library_store_start", "library_store_status", "library_stor
 }
 assert.match(background, /maxItems: 5/, "Library upload batches must be capped at five files");
 assert.match(background, /libraryAvailability = "not_verified"/, "Library completion must not be claimed after ChatGPT submission");
+assert.match(background, /presses Send without inserting any text into the Composer/, "Library storage must not create a second text instruction");
 assert.match(background, /"\/internal\/library-store-files"/, "only the Agent may resolve workspace paths for CDP");
 assert.match(background, /"\/media\/capture-frame"/);
+assert.match(background, /"\/media\/image-crop"/);
 assert.match(background, /"\/media\/workspace-image"/);
 for (const tool of ["youtube_get_download_formats", "youtube_get_download_task_diagnostics"]) {
   assert.match(background, new RegExp(`name: "${tool}"`), `${tool} must be published in tools/list`);
@@ -20,7 +22,10 @@ for (const tool of ["youtube_get_download_formats", "youtube_get_download_task_d
 assert.match(background, /youtubeFormats: youtubeFormatsSchema/);
 assert.match(background, /youtube_get_download_formats\.downloadFormats/);
 assert.match(background, /afterEventId/);
-assert.match(background, /const REQUIRED_AGENT_INTERFACE_VERSION = 19;/);
+assert.match(background, /const REQUIRED_AGENT_INTERFACE_VERSION = 28;/);
+assert.match(background, /const RESEARCHTUBE_MCP_INSTRUCTIONS =/, "the MCP server must publish lazy-discovery guidance");
+assert.match(background, /instructions: RESEARCHTUBE_MCP_INSTRUCTIONS/, "initialize must expose server-level MCP instructions");
+assert.match(background, /do not infer that ResearchTube is unavailable/, "instructions must forbid inferring unavailability from tool visibility");
 assert.match(background, /tool === "library_store_status"/, "the Extension-local Library status poll must report an outcome to the Agent log");
 assert.match(background, /\/mcp\/log\/\$\{tool\}/, "status reports must identify the tool without sending its inputs");
 assert.match(background, /availableBytes/);
@@ -34,6 +39,10 @@ assert.match(background, /CAPTURE_FRAME_WIDGET_URI/);
 assert.match(background, /resources\/read/);
 assert.match(background, /text\/html;profile=mcp-app/);
 assert.match(background, /captureFrameImageBase64/);
+assert.match(background, /showInChat defaults to false/);
+assert.match(background, /never render a widget themselves/, "creation tools must not create blank static-template iframes");
+assert.match(background, /After a successful result, call researchtube_show_workspace_image/, "showInChat must route presentation through the dedicated display tool");
+assert.equal((background.match(/"openai\/outputTemplate": CAPTURE_FRAME_WIDGET_URI/g) || []).length, 1, "only the explicit workspace-image display tool may declare the widget template");
 assert.doesNotMatch(background, /researchtube_copy_capture_frame_image/);
 assert.doesNotMatch(background, /researchtube_download_capture_frame/);
 assert.doesNotMatch(background, /chrome\.downloads\.download/);

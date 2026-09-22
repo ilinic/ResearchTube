@@ -29,10 +29,9 @@ assert.match(background, /cdpAttachImagesNow/, "the queued public entrypoint mus
 assert.match(background, /CDP_IMAGE_BATCH_MAX_FILES = 5/, "a Composer batch must be capped at five images");
 assert.match(background, /libraryStoreQueue/, "Library batches must be queued independently");
 assert.match(background, /DOM\.setFileInputFiles", \{ files: filePaths/, "one chooser operation must receive the whole batch");
-assert.match(background, /Store this image in the Library\./, "a single image must use the singular Library request");
-assert.match(background, /Store these images in the Library\./, "a batch must use the plural Library request");
-assert.match(background, /Input\.insertText/, "the Library request must be written into the Composer through CDP");
-assert.match(background, /CDP_CLICK_SEND_BUTTON_EXPRESSION/, "the Library request must click ChatGPT Send");
+assert.match(background, /cdpSendAttachedImages/, "the queued image batch must still be sent through ChatGPT");
+assert.match(background, /CDP_CLICK_SEND_BUTTON_EXPRESSION/, "the attached image batch must click ChatGPT Send");
+assert.doesNotMatch(background, /Store this image in the Library\.|Store these images in the Library\.|Input\.insertText/, "the Library flow must not insert a second storage instruction into Composer");
 const prototype = background.slice(background.indexOf("const CDP_SERVICE_TAB_STORAGE_KEY"), background.indexOf("chrome.runtime.onInstalled"));
 assert.doesNotMatch(prototype, /document\.execCommand\('insertText'/);
 assert.doesNotMatch(prototype, /uploadFile|DataTransfer|dragstart|ImageContent/);

@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import struct
 import tempfile
 import unittest
 from pathlib import Path
@@ -242,6 +243,9 @@ class CaptureFrameTests(unittest.IsolatedAsyncioTestCase):
         self.media = agent.WORKSPACE_PATH / "downloads" / "sample.mp4"
         self.media.parent.mkdir(parents=True)
         self.media.write_bytes(b"media")
+        self.source_image = agent.WORKSPACE_PATH / "captures" / "source.png"
+        self.source_image.parent.mkdir(parents=True, exist_ok=True)
+        self.source_image.write_bytes(b"source-image")
         self.ffprobe_calls = 0
 
     async def asyncTearDown(self) -> None:
@@ -256,13 +260,49 @@ class CaptureFrameTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertRegex(
             path,
-            r"^captures/Big Buck Bunny 60fps \[yt_aqz-KE-bpKQ\] \[t_2\.000\] \[cap_[A-Za-z0-9_-]+\]\.png$",
+            r"^captures/Big Buck Bunny 60fps \[yt_aqz-KE-bpKQ\] \[t_2\.000\] \[cap_[A-Za-z0-9_-]{8}\]\.png$",
         )
         self.assertNotIn("tsk_JD8tamsp3A", path)
 
+    def test_default_capture_name_preserves_partial_provenance(self) -> None:
+        path = agent.capture_default_workspace_path(
+            "downloads/Big Buck Bunny [yt_aqz-KE-bpKQ] [partial_12.500_47.250] [tsk_JD8tamsp3A].mp4",
+            2.0,
+            "png",
+        )
+        self.assertRegex(path, r"^captures/Big Buck Bunny \[yt_aqz-KE-bpKQ\] \[partial_12\.500_47\.250\] \[t_2\.000\] \[cap_[A-Za-z0-9_-]{8}\]\.png$")
+
+    def test_screen_capture_defaults_to_a_workspace_screenshots_png(self) -> None:
+        options = agent.screen_capture_options({})
+        self.assertEqual(options["image"], {"format": "png", "quality": None})
+        self.assertRegex(options["outputPath"], r"^screenshots/screenshot_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}_[A-Za-z0-9_-]+\.png$")
+
+    def test_screen_capture_validates_matching_output_extension(self) -> None:
+        self.assertEqual(agent.screen_capture_options({"outputPath": "screenshots/desktop.jpg", "image": {"format": "jpeg", "quality": 85}})["outputPath"], "screenshots/desktop.jpg")
+        with self.assertRaisesRegex(agent.AgentApiError, "extension must match"):
+            agent.screen_capture_options({"outputPath": "screenshots/desktop.png", "image": {"format": "jpeg"}})
+
+    def test_clipboard_dib_metadata_validates_a_small_bitmap_without_accessing_clipboard(self) -> None:
+        dib = struct.pack("<IiiHHIIiiII", 40, 2, 3, 1, 24, 0, 24, 0, 0, 0, 0) + (b"\0" * 24)
+        self.assertEqual(agent.clipboard_dib_metadata(dib), {"width": 2, "height": 3, "pixelOffset": 40})
+        self.assertTrue(agent.clipboard_bmp_from_dib(dib).startswith(b"BM"))
+
+    def test_clipboard_tools_reject_non_windows_without_reading_any_data(self) -> None:
+        if os.name == "nt":
+            self.skipTest("This platform-neutral guard is covered by Windows integration tests.")
+        with self.assertRaisesRegex(agent.AgentApiError, "System clipboard access") as context:
+            agent.clipboard_status({})
+        self.assertEqual(context.exception.code, "CLIPBOARD_UNAVAILABLE")
+
+    async def test_linux_screen_capture_requires_x11_display_without_python_dependency(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(agent.AgentApiError, "requires an X11 DISPLAY") as context:
+                await agent.capture_screen_x11({})
+        self.assertEqual(context.exception.code, "SCREEN_CAPTURE_UNAVAILABLE")
+
     def test_youtube_capture_name_sanitizes_the_ytdlp_title(self) -> None:
         path = agent.youtube_capture_default_workspace_path('A: title / with * invalid?', "aqz-KE-bpKQ", 2.0, "png")
-        self.assertRegex(path, r"^captures/A title with invalid \[yt_aqz-KE-bpKQ\] \[t_2\.000\] \[cap_[A-Za-z0-9_-]+\]\.png$")
+        self.assertRegex(path, r"^captures/A title with invalid \[yt_aqz-KE-bpKQ\] \[t_2\.000\] \[cap_[A-Za-z0-9_-]{8}\]\.png$")
 
     def discovery(self, name, _candidates):
         return agent.ComponentDiscovery("local", f"/private/{name}")
@@ -302,11 +342,37 @@ class CaptureFrameTests(unittest.IsolatedAsyncioTestCase):
             "format": "png", "mimeType": "image/png", "width": 200, "height": 100,
             "imageSizeBytes": 11, "workspacePath": result["image"]["workspacePath"],
         })
-        self.assertRegex(result["image"]["workspacePath"], r"^captures/sample \[t_12\.500\] \[cap_[A-Za-z0-9_-]+\]\.png$")
+        self.assertRegex(result["image"]["workspacePath"], r"^captures/sample \[t_12\.500\] \[cap_[A-Za-z0-9_-]{8}\]\.png$")
         self.assertTrue((agent.WORKSPACE_PATH / "captures").is_dir())
         self.assertEqual((agent.WORKSPACE_PATH / result["image"]["workspacePath"]).read_bytes(), b"image-bytes")
         self.assertNotIn("inlineImageBase64", result)
         self.assertNotIn(str(self.root), json.dumps(result))
+
+    async def test_windows_screen_capture_uses_ffmpeg_gdigrab_and_reports_virtual_desktop(self) -> None:
+        commands: list[tuple[str, ...]] = []
+
+        async def windows_subprocess(*command, **_kwargs):
+            commands.append(command)
+            if command[0] == "/private/ffmpeg":
+                Path(command[-1]).write_bytes(b"screen-image")
+                return type("Process", (), {"returncode": 0, "communicate": staticmethod(lambda: _bytes_result(b"", b""))})()
+            if command[0] == "/private/ffprobe":
+                payload = json.dumps({"streams": [{"index": 0, "codec_type": "video", "width": 3200, "height": 1080}]}).encode("utf-8")
+                return type("Process", (), {"returncode": 0, "communicate": staticmethod(lambda: _bytes_result(payload, b""))})()
+            raise AssertionError(command)
+
+        virtual_desktop = {"left": -1280, "top": 0, "width": 3200, "height": 1080}
+        with patch.object(agent, "windows_virtual_desktop", return_value=(virtual_desktop, 2)), patch.object(agent, "find_component", side_effect=self.discovery), patch.object(asyncio, "create_subprocess_exec", side_effect=windows_subprocess):
+            result = await agent.capture_screen_windows({"outputPath": "screenshots/windows.png"})
+        self.assertEqual(result["virtualDesktop"], virtual_desktop)
+        self.assertEqual(result["monitorCount"], 2)
+        self.assertEqual(result["width"], 3200)
+        self.assertEqual(result["height"], 1080)
+        self.assertEqual(result["workspacePath"], "screenshots/windows.png")
+        self.assertEqual(commands[0][commands[0].index("-f") + 1], "gdigrab")
+        self.assertEqual(commands[0][commands[0].index("-offset_x") + 1], "-1280")
+        self.assertEqual(commands[0][commands[0].index("-video_size") + 1], "3200x1080")
+        self.assertIn("desktop", commands[0])
 
     async def test_capture_frame_honours_explicit_workspace_output_without_public_url(self) -> None:
         with patch.object(agent, "find_component", side_effect=self.discovery), patch.object(asyncio, "create_subprocess_exec", side_effect=self.subprocess):
@@ -319,6 +385,35 @@ class CaptureFrameTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("publicUrl", result["image"])
         self.assertNotIn("inlineImageBase64", result)
         self.assertEqual((agent.WORKSPACE_PATH / "captures" / "custom.webp").read_bytes(), b"image-bytes")
+
+    async def test_image_crop_creates_a_new_workspace_image_without_overwriting_source(self) -> None:
+        with patch.object(agent, "find_component", side_effect=self.discovery), patch.object(asyncio, "create_subprocess_exec", side_effect=self.subprocess):
+            result = await agent.image_crop({
+                "path": "captures/source.png",
+                "crop": {"x": 4, "y": 2, "width": 200, "height": 100},
+                "image": {"format": "webp", "quality": 75},
+                "outputPath": "crops/selected.webp",
+            })
+        self.assertEqual(result["sourcePath"], "captures/source.png")
+        self.assertEqual(result["sourceWidth"], 640)
+        self.assertEqual(result["sourceHeight"], 360)
+        self.assertEqual(result["crop"], {"x": 4, "y": 2, "width": 200, "height": 100})
+        self.assertEqual(result["image"], {
+            "format": "webp", "mimeType": "image/webp", "width": 200, "height": 100,
+            "imageSizeBytes": 11, "workspacePath": "crops/selected.webp",
+        })
+        self.assertEqual(self.source_image.read_bytes(), b"source-image")
+        self.assertEqual((agent.WORKSPACE_PATH / "crops" / "selected.webp").read_bytes(), b"image-bytes")
+        self.assertNotIn(str(self.root), json.dumps(result))
+
+    async def test_image_crop_rejects_a_rectangle_outside_the_source_image(self) -> None:
+        with patch.object(agent, "find_component", side_effect=self.discovery), patch.object(asyncio, "create_subprocess_exec", side_effect=self.subprocess):
+            with self.assertRaisesRegex(agent.AgentApiError, "completely within") as raised:
+                await agent.image_crop({
+                    "path": "captures/source.png",
+                    "crop": {"x": 500, "y": 2, "width": 200, "height": 100},
+                })
+        self.assertEqual(raised.exception.code, "IMAGE_CROP_INVALID")
 
     async def test_capture_frame_can_download_only_a_youtube_time_section(self) -> None:
         capture_commands: list[tuple[str, ...]] = []
@@ -353,7 +448,7 @@ class CaptureFrameTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_workspace_image_returns_encoded_bytes_without_host_path(self) -> None:
         image = agent.WORKSPACE_PATH / "captures" / "frame.png"
-        image.parent.mkdir(parents=True)
+        image.parent.mkdir(parents=True, exist_ok=True)
         image.write_bytes(b"image-bytes")
         result = agent.workspace_image({"path": "captures/frame.png"})
         self.assertEqual(result["path"], "captures/frame.png")

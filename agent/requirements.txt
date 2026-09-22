@@ -1,0 +1,4 @@
+# Optional dependency for capture_screen on macOS and Linux/X11.
+# It captures the complete virtual desktop, including all monitors.
+# Linux Wayland is intentionally unsupported; it requires a Portal/PipeWire implementation.
+mss>=10,<11
