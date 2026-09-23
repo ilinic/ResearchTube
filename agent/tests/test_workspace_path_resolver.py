@@ -343,6 +343,16 @@ class CaptureFrameTests(unittest.IsolatedAsyncioTestCase):
         agent.WORKSPACE_PATH = self.old_workspace
         self.temp.cleanup()
 
+    async def test_widget_image_post_copies_the_resolved_logical_path(self) -> None:
+        target = agent.WORKSPACE_PATH / "captures" / "widget.png"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"png")
+        copied = AsyncMock(return_value={"success": True, "type": "text", "revision": "cb_test"})
+        with patch.object(agent, "clipboard_set", new=copied):
+            result = await agent.copy_widget_workspace_path("captures/widget.png")
+        self.assertEqual(result, {"success": True})
+        copied.assert_awaited_once_with({"text": "captures/widget.png"})
+
     def test_default_capture_name_keeps_video_title_and_id_but_not_task_id(self) -> None:
         path = agent.capture_default_workspace_path(
             "downloads/Big Buck Bunny 60fps [yt_aqz-KE-bpKQ] [tsk_JD8tamsp3A].mp4",

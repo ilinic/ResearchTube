@@ -23,7 +23,7 @@ for (const tool of ["youtube_download_get_formats", "youtube_download_get_task",
 assert.match(background, /youtubeFormats: youtubeFormatsSchema/);
 assert.match(background, /youtube_download_get_formats\.downloadFormats/);
 assert.match(background, /afterEventId/);
-assert.match(background, /const REQUIRED_AGENT_INTERFACE_VERSION = 43;/);
+assert.match(background, /const REQUIRED_AGENT_INTERFACE_VERSION = 44;/);
 assert.match(background, /selection: \{ type: "string", enum: \["uniform"\]/, "visual maps must publish only the Iteration 1 uniform selector");
 assert.match(background, /"\/tasks\/visual-map"/, "visual maps must use the Agent task endpoint");
 assert.match(background, /const RESEARCHTUBE_SERVER_DESCRIPTION =/, "the server must expose a bootstrap discovery description");

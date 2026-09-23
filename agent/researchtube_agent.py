@@ -31,8 +31,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote, unquote, urlparse
 from urllib.request import Request, urlopen
 
-AGENT_VERSION = "1.71.0"
-INTERFACE_VERSION = 43
+AGENT_VERSION = "1.72.0"
+INTERFACE_VERSION = 44
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
 TASK_POLL_INTERVAL_MS = 1_000
@@ -2218,6 +2218,13 @@ def widget_image_file(logical_path: str) -> tuple[Path, str]:
     return item.physical_path, mime_type
 
 
+async def copy_widget_workspace_path(logical_path: str) -> dict[str, bool]:
+    """Copy one image-widget URL path after resolving it inside the Workspace."""
+    widget_image_file(logical_path)
+    await clipboard_set({"text": logical_path})
+    return {"success": True}
+
+
 async def inspect_workspace_image(payload: Any) -> dict[str, Any]:
     """Return verified, bounded metadata for one workspace image only."""
     if not isinstance(payload, dict) or set(payload) != {"path"}:
@@ -3568,6 +3575,13 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             response_status, response_body = "200 OK", VISUAL_MAP_TASKS.snapshot(VISUAL_MAP_TASKS.get(path.removeprefix("/tasks/visual-map/")))
         elif method == "GET" and path.startswith("/tasks/"):
             response_status, response_body = "200 OK", TASKS.snapshot(TASKS.get(path.removeprefix("/tasks/")))
+        elif method == "POST":
+            logical_path = unquote(path.removeprefix("/"))
+            response_body = await copy_widget_workspace_path(logical_path)
+            writer.write(http_response("200 OK", response_body))
+            await writer.drain()
+            log("POST /<workspace-image> -> 200 copied")
+            return
         elif method == "GET":
             image_file, mime_type = widget_image_file(unquote(path.removeprefix("/")))
             size = image_file.stat().st_size
