@@ -7,6 +7,13 @@ function agentSummary(agent, port) {
   if (agent.error === "AGENT_INTERFACE_INCOMPATIBLE") return { text: "Version mismatch", className: "bad" };
   return { text: `Ready · ${version(agent.agentVersion)}`, className: "good" };
 }
+function chromeAutomationSummary(agent) {
+  const state = agent?.available ? agent.chromeAutomation?.state : "unknown";
+  if (state === "enabled") return { text: "Enabled", className: "good" };
+  if (state === "disabled") return { text: "Disabled", className: "bad" };
+  if (state === "mixed") return { text: "Mixed", className: "warn" };
+  return { text: "Unknown", className: "warn" };
+}
 function currentYouTubeVideoTab(tabs) {
   const tab = tabs?.[0];
   try {
@@ -30,6 +37,7 @@ async function load() {
   const youtubeSearch = state.youtubeSearch;
   const searchLimited = Boolean(youtubeSearch?.rateLimited);
   const agent = agentSummary(state.agent, state.agentPort || 17843);
+  const chromeAutomation = chromeAutomationSummary(state.agent);
   $("extension-status").textContent = version(state.extensionVersion);
   $("extension-status").className = "good";
   $("tunnel-status").textContent = shortTunnel(state.tunnelId);
@@ -40,6 +48,8 @@ async function load() {
   $("interface-version").className = "good";
   $("agent-status").textContent = agent.text;
   $("agent-status").className = agent.className;
+  $("chrome-automation-status").textContent = chromeAutomation.text;
+  $("chrome-automation-status").className = chromeAutomation.className;
 }
 $("chatgpt").addEventListener("click", () => call({ type: "open-external", target: "chatgptNewChat" }));
 $("describe-video").addEventListener("click", () => {

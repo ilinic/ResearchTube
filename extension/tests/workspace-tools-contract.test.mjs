@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 
 const background = await readFile(new URL("../background.js", import.meta.url), "utf8");
 
-for (const tool of ["system_agent_status", "system_check_debug_banner", "workspace_list", "workspace_stat", "workspace_mkdir", "workspace_move", "workspace_delete", "online_share_start", "online_share_status", "online_share_stop", "media_probe", "media_capture_frame", "media_visual_map_create", "media_visual_map_get_task", "media_visual_map_cancel_task", "media_capture_screen", "media_image_crop", "media_image_show", "media_image_inspect", "clipboard_status", "clipboard_get", "clipboard_set", "media_load_workspace_image", "media_copy_workspace_path"]) {
+for (const tool of ["system_agent_status", "workspace_list", "workspace_stat", "workspace_mkdir", "workspace_move", "workspace_delete", "online_share_start", "online_share_status", "online_share_stop", "media_probe", "media_capture_frame", "media_visual_map_create", "media_visual_map_get_task", "media_visual_map_cancel_task", "media_camera_list", "media_camera_capture_frame", "media_camera_record_video", "media_camera_record_status", "media_camera_record_stop", "media_capture_screen", "media_image_crop", "media_image_show", "media_image_inspect", "clipboard_status", "clipboard_get", "clipboard_set", "media_load_workspace_image", "media_copy_workspace_path"]) {
   assert.match(background, new RegExp(`name: "${tool}"`), `${tool} must be published in tools/list`);
 }
 for (const tool of ["library_store_start", "library_store_status", "library_store_cancel"]) {
@@ -23,7 +23,7 @@ for (const tool of ["youtube_download_get_formats", "youtube_download_get_task",
 assert.match(background, /youtubeFormats: youtubeFormatsSchema/);
 assert.match(background, /youtube_download_get_formats\.downloadFormats/);
 assert.match(background, /afterEventId/);
-assert.match(background, /const REQUIRED_AGENT_INTERFACE_VERSION = 47;/);
+assert.match(background, /const REQUIRED_AGENT_INTERFACE_VERSION = 49;/);
 assert.match(background, /selection: \{ type: "string", enum: \["uniform", "sceneDetect", "hybrid"\]/, "visual maps must publish uniform, scene-detect, and hybrid selectors");
 assert.match(background, /sceneDetectThreshold: \{ type: "number", minimum: 0, maximum: 100, default: 10/, "visual maps must publish the native scdet percentage threshold");
 assert.match(background, /FFmpeg's native scdet filter/, "the visual-map description must name native scdet");
