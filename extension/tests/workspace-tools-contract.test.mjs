@@ -55,6 +55,8 @@ assert.match(background, /TOOL_DISABLED/, "a stale ChatGPT tool schema must rece
 assert.match(background, /showInChat defaults to false/);
 assert.match(background, /never render a widget themselves/, "creation tools must not create blank static-template iframes");
 assert.match(background, /After a successful result, call media_image_show/, "showInChat must route presentation through the dedicated display tool");
+assert.match(background, /A successful result means the image card has already been shown; do not call this tool again for the same image/, "the display tool must prevent duplicate retries");
+assert.match(background, /text: "Workspace image shown\."/, "the display tool must return an explicit compact success result to the model");
 assert.match(background, /Independently validate one PNG, JPEG, or WebP image/, "image inspection must be distinct from generic workspace stat");
 assert.equal((background.match(/"openai\/outputTemplate": CAPTURE_FRAME_WIDGET_URI/g) || []).length, 1, "only the explicit workspace-image display tool may declare the widget template");
 assert.doesNotMatch(background, /researchtube_copy_capture_frame_image/);
