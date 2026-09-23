@@ -1,3 +1,4 @@
 {
-  "port": 17843
+  "port": 17843,
+  "visualMapTimestampFont": "DejaVuSans.ttf"
 }

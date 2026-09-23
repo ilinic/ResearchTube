@@ -171,6 +171,65 @@ class WorkspacePathResolverTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "FILE_NOT_FOUND")
 
 
+class VisualMapContractTests(unittest.TestCase):
+    def test_visual_map_task_snapshot_reports_compact_progress(self) -> None:
+        manager = agent.VisualMapTaskManager()
+        task = agent.VisualMapTask("vismap_example", {}, "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z")
+        manager.update_progress(task, "extractingFrames", 42.5, "Extracting video frames.", 3, 6, 0, 1)
+        snapshot = manager.snapshot(task)
+        self.assertEqual(snapshot["taskId"], "vismap_example")
+        self.assertEqual(snapshot["phase"], "extractingFrames")
+        self.assertEqual(snapshot["progressPercent"], 42.5)
+        self.assertEqual(snapshot["completedFrames"], 3)
+        self.assertEqual(agent.response_log_suffix("/tasks/visual-map/vismap_example", snapshot), " 42.5%")
+
+    def test_uniform_timestamps_use_range_boundaries(self) -> None:
+        self.assertEqual(agent.uniform_visual_map_timestamps(1, 10, 4), [1, 4, 7, 10])
+        self.assertEqual(agent.uniform_visual_map_timestamps(1, 10, 1), [1])
+
+    def test_timestamp_labels_are_readable_without_unnecessary_hours(self) -> None:
+        self.assertEqual(agent.visual_map_timestamp_label(8), "0:08")
+        self.assertEqual(agent.visual_map_timestamp_label(185), "3:05")
+        self.assertEqual(agent.visual_map_timestamp_label(3729), "1:02:09")
+
+    def test_final_visual_map_sample_stays_on_the_video_track(self) -> None:
+        self.assertLess(agent.visual_map_extract_timestamp(634.566667, 634.566667, 60), 634.55)
+        self.assertGreater(agent.visual_map_extract_timestamp(634.566667, 634.566667, 60), 634.54)
+
+    def test_visual_map_default_name_uses_short_tag(self) -> None:
+        path = agent.visual_map_default_path("downloads/video.mp4", 1, "abcde")
+        self.assertIn("[vismap_abcde_001].png", path)
+
+    def test_timestamp_filter_uses_an_explicit_font_file(self) -> None:
+        with patch.object(agent, "visual_map_font_file", return_value=Path("/agent/tools/fonts/DejaVuSans.ttf")):
+            filter_value = agent.visual_map_label_filter("3:05", "bottomRight", 144)
+        self.assertIn("fontfile='/agent/tools/fonts/DejaVuSans.ttf'", filter_value)
+        self.assertIn("text='3\\:05'", filter_value)
+        self.assertIn("box=1", filter_value)
+
+    def test_timestamp_font_must_be_a_font_filename(self) -> None:
+        with patch.object(agent, "CONFIG_PATH") as config_path:
+            config_path.read_text.return_value = '{"visualMapTimestampFont":"../Arial.ttf"}'
+            with self.assertRaises(agent.AgentApiError) as raised:
+                agent.configured_visual_map_timestamp_font()
+        self.assertEqual(raised.exception.code, "VISUAL_MAP_TIMESTAMP_FONT_INVALID")
+
+    def test_visual_map_options_reject_other_selection_modes(self) -> None:
+        with self.assertRaises(agent.AgentApiError) as raised:
+            agent.visual_map_options({"workspacePath": "downloads/video.mp4", "columns": 3, "rows": 2, "maxTotalFrames": 6, "selection": "scdet"})
+        self.assertEqual(raised.exception.code, "VISUAL_MAP_INVALID")
+
+    def test_visual_map_options_default_to_uniform_and_timestamp_labels(self) -> None:
+        result = agent.visual_map_options({"workspacePath": "downloads/video.mp4", "columns": 3, "rows": 2, "maxTotalFrames": 6})
+        self.assertEqual(result["selection"], "uniform")
+        self.assertEqual(result["frameTimestampPosition"], "bottomRight")
+        self.assertEqual(result["startSeconds"], 0)
+
+    def test_visual_map_downscales_but_never_upscales(self) -> None:
+        self.assertEqual(agent.visual_map_thumbnail_size(1920, 1080, 2, 2, 4096), (1920, 1080))
+        self.assertEqual(agent.visual_map_thumbnail_size(1920, 1080, 6, 4, 4096), (682, 384))
+
+
 class MediaProbeTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()

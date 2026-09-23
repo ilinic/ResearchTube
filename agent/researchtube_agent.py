@@ -26,13 +26,13 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote, unquote, urlparse
 from urllib.request import Request, urlopen
 
-AGENT_VERSION = "0.61.0"
-INTERFACE_VERSION = 39
+AGENT_VERSION = "1.69.0"
+INTERFACE_VERSION = 41
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
 TASK_POLL_INTERVAL_MS = 1_000
@@ -46,6 +46,7 @@ ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "agent-config.json"
 WORKSPACE_PATH = ROOT / "workspace"
 TOOLS_PATH = ROOT / "tools"
+FONTS_PATH = TOOLS_PATH / "fonts"
 DEFAULT_DOWNLOAD_DIRECTORY = "downloads"
 MAX_LOGICAL_PATH_LENGTH = 1_024
 MAX_LOGICAL_COMPONENT_LENGTH = 240
@@ -53,6 +54,13 @@ MAX_WORKSPACE_LIST_ENTRIES = 500
 MAX_PUBLIC_SHARE_DIRECTORY_ENTRIES = 500
 MEDIA_PROBE_TIMEOUT_SECONDS = 15
 CAPTURE_FRAME_TIMEOUT_SECONDS = 60
+VISUAL_MAP_TIMEOUT_SECONDS = 180
+VISUAL_MAP_MAX_TOTAL_FRAMES = 120
+VISUAL_MAP_MAX_GRID_SIDE = 20
+VISUAL_MAP_MAX_CELLS = 120
+DEFAULT_VISUAL_MAP_MAX_DIMENSION = 4096
+DEFAULT_TIMESTAMP_FONT_SIZE_PX = 24
+DEFAULT_VISUAL_MAP_TIMESTAMP_FONT = "DejaVuSans.ttf"
 YOUTUBE_CAPTURE_FRAME_TIMEOUT_SECONDS = 90
 YOUTUBE_CAPTURE_PRE_ROLL_SECONDS = 12.0
 YOUTUBE_CAPTURE_POST_ROLL_SECONDS = 3.0
@@ -145,6 +153,17 @@ def configured_port() -> int:
     except (OSError, json.JSONDecodeError, AttributeError):
         pass
     return DEFAULT_PORT
+
+
+def configured_visual_map_timestamp_font() -> str:
+    """Return the configured font filename, never a path outside tools/fonts."""
+    try:
+        value = json.loads(CONFIG_PATH.read_text(encoding="utf-8")).get("visualMapTimestampFont", DEFAULT_VISUAL_MAP_TIMESTAMP_FONT)
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return DEFAULT_VISUAL_MAP_TIMESTAMP_FONT
+    if not isinstance(value, str) or not value or "/" in value or "\\" in value or Path(value).name != value or Path(value).suffix.lower() not in {".ttf", ".otf"}:
+        raise AgentApiError("VISUAL_MAP_TIMESTAMP_FONT_INVALID", "visualMapTimestampFont must be a .ttf or .otf filename from tools/fonts.")
+    return value
 
 
 def workspace_health() -> dict[str, str | int | None]:
@@ -1083,6 +1102,92 @@ def image_crop_options(payload: Any) -> dict[str, Any]:
     return {"path": payload["path"], "crop": crop, "image": image, "outputPath": path}
 
 
+def visual_map_options(payload: Any) -> dict[str, Any]:
+    allowed = {"workspacePath", "columns", "rows", "maxTotalFrames", "selection", "startSeconds", "endSeconds", "maxMapDimension", "frameTimestampPosition"}
+    if not isinstance(payload, dict) or set(payload) - allowed:
+        raise AgentApiError("VISUAL_MAP_INVALID", "media_visual_map_create requires only documented fields.")
+    path = payload.get("workspacePath")
+    if not isinstance(path, str) or not path:
+        raise AgentApiError("VISUAL_MAP_INVALID", "workspacePath must be a non-empty logical workspace video path.")
+    columns = nonnegative_integer(payload.get("columns"), field_name="columns")
+    rows = nonnegative_integer(payload.get("rows"), field_name="rows")
+    max_total_frames = nonnegative_integer(payload.get("maxTotalFrames"), field_name="maxTotalFrames")
+    if columns < 1 or rows < 1 or max_total_frames < 1:
+        raise AgentApiError("VISUAL_MAP_INVALID", "columns, rows, and maxTotalFrames must be positive integers.")
+    if columns > VISUAL_MAP_MAX_GRID_SIDE or rows > VISUAL_MAP_MAX_GRID_SIDE or columns * rows > VISUAL_MAP_MAX_CELLS:
+        raise AgentApiError("VISUAL_MAP_INVALID", "The visual-map grid is too large.")
+    if max_total_frames > VISUAL_MAP_MAX_TOTAL_FRAMES:
+        raise AgentApiError("VISUAL_MAP_INVALID", f"maxTotalFrames must not exceed {VISUAL_MAP_MAX_TOTAL_FRAMES}.")
+    if payload.get("selection", "uniform") != "uniform":
+        raise AgentApiError("VISUAL_MAP_INVALID", "Iteration 1 supports only selection=uniform.")
+    start, end = payload.get("startSeconds", 0), payload.get("endSeconds")
+    if not isinstance(start, (int, float)) or isinstance(start, bool) or not math.isfinite(start) or start < 0:
+        raise AgentApiError("VISUAL_MAP_INVALID", "startSeconds must be a finite number greater than or equal to zero.")
+    if end is not None and (not isinstance(end, (int, float)) or isinstance(end, bool) or not math.isfinite(end)):
+        raise AgentApiError("VISUAL_MAP_INVALID", "endSeconds must be a finite number.")
+    maximum = payload.get("maxMapDimension", DEFAULT_VISUAL_MAP_MAX_DIMENSION)
+    if not isinstance(maximum, int) or isinstance(maximum, bool) or maximum < 1:
+        raise AgentApiError("VISUAL_MAP_INVALID", "maxMapDimension must be a positive integer.")
+    timestamp_position = payload.get("frameTimestampPosition", "bottomRight")
+    if timestamp_position not in {"none", "topLeft", "topRight", "bottomLeft", "bottomRight"}:
+        raise AgentApiError("VISUAL_MAP_INVALID", "frameTimestampPosition is invalid.")
+    return {"workspacePath": path, "columns": columns, "rows": rows, "maxTotalFrames": max_total_frames, "selection": "uniform", "startSeconds": float(start), "endSeconds": None if end is None else float(end), "maxMapDimension": maximum, "frameTimestampPosition": timestamp_position}
+
+
+def uniform_visual_map_timestamps(start: float, end: float, count: int) -> list[float]:
+    if count == 1:
+        return [start]
+    step = (end - start) / (count - 1)
+    return [start + index * step for index in range(count - 1)] + [end]
+
+
+def visual_map_timestamp_label(value: float) -> str:
+    seconds = max(0, int(round(value)))
+    if seconds < 60:
+        return f"0:{seconds:02d}"
+    minutes, remainder = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes}:{remainder:02d}"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}:{minutes:02d}:{remainder:02d}"
+
+
+def visual_map_thumbnail_size(width: int, height: int, columns: int, rows: int, maximum: int) -> tuple[int, int]:
+    scale = min(1.0, maximum / (width * columns), maximum / (height * rows))
+    return max(1, int(width * scale)), max(1, int(height * scale))
+
+
+def visual_map_default_path(source_path: str, map_number: int, map_id: str) -> str:
+    stem = safe_capture_title(Path(source_path).stem)[:180].rstrip() or "Visual map"
+    return f"visual-maps/{stem} [vismap_{map_id}_{map_number:03d}].png"
+
+
+def video_frame_rate(stream: dict[str, Any]) -> float | None:
+    """Read ffprobe's rational rate when it is usable for endpoint sampling."""
+    for name in ("avg_frame_rate", "r_frame_rate"):
+        value = stream.get(name)
+        if not isinstance(value, str) or "/" not in value:
+            continue
+        try:
+            numerator, denominator = value.split("/", 1)
+            rate = float(numerator) / float(denominator)
+        except (TypeError, ValueError, ZeroDivisionError):
+            continue
+        if math.isfinite(rate) and rate > 0:
+            return rate
+    return None
+
+
+def visual_map_extract_timestamp(requested: float, video_duration: float, frame_rate: float | None) -> float:
+    """Keep an endpoint request within the range where a decoded video frame exists."""
+    frame_interval = 1.0 / frame_rate if frame_rate else min(1.0, video_duration / 2)
+    # stream.duration is normally the end immediately after the final frame.
+    # Leave a small fraction of a frame as well: decimal rounding in ffprobe
+    # can otherwise make select=gte(t, ...) miss that final frame by <1 μs.
+    final_sample = max(0.0, video_duration - frame_interval * 1.01)
+    return min(requested, final_sample)
+
+
 async def ffprobe_streams_for_file(physical_path: Path, executable: str) -> list[dict[str, Any]]:
     command = [executable, "-v", "error", "-show_streams", "-of", "json", str(physical_path)]
     try:
@@ -1470,6 +1575,279 @@ def showinfo_timestamp(stderr: bytes) -> float | None:
     except ValueError:
         return None
     return result if math.isfinite(result) else None
+
+
+async def visual_map_video_metadata(item: ResolvedWorkspacePath, executable: str) -> tuple[float, int, int, int, float | None]:
+    command = [executable, "-v", "error", "-show_entries", "format=duration:stream=index,codec_type,width,height,duration,avg_frame_rate,r_frame_rate:stream_side_data=rotation", "-of", "json", str(item.physical_path)]
+    try:
+        process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        stdout, _stderr = await asyncio.wait_for(process.communicate(), timeout=MEDIA_PROBE_TIMEOUT_SECONDS)
+    except (asyncio.TimeoutError, OSError) as error:
+        raise AgentApiError("VISUAL_MAP_FAILED", "ffprobe could not inspect the workspace video.") from error
+    if process.returncode != 0:
+        raise AgentApiError("VISUAL_MAP_FAILED", "ffprobe could not inspect the workspace video.")
+    try:
+        document = json.loads(stdout.decode("utf-8"))
+        container_duration = float(document["format"]["duration"])
+        stream = next(value for value in document["streams"] if value.get("codec_type") == "video" and isinstance(value.get("width"), int) and isinstance(value.get("height"), int))
+        width, height, index = stream["width"], stream["height"], stream["index"]
+    except (KeyError, TypeError, ValueError, StopIteration, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise AgentApiError("VISUAL_MAP_FAILED", "ffprobe did not report a usable video duration and stream dimensions.") from error
+    stream_duration = stream.get("duration")
+    try:
+        duration = float(stream_duration) if stream_duration is not None else container_duration
+    except (TypeError, ValueError):
+        duration = container_duration
+    if not math.isfinite(container_duration) or container_duration <= 0 or not math.isfinite(duration) or duration <= 0 or width < 1 or height < 1 or not isinstance(index, int):
+        raise AgentApiError("VISUAL_MAP_FAILED", "ffprobe did not report usable video metadata.")
+    if not math.isclose(video_stream_rotation(stream) % 180, 0.0, abs_tol=0.001):
+        width, height = height, width
+    return duration, width, height, index, video_frame_rate(stream)
+
+
+def visual_map_label_filter(label: str, position: str, height: int) -> str:
+    if position == "none":
+        return ""
+    font_size = max(1, min(DEFAULT_TIMESTAMP_FONT_SIZE_PX, math.floor(height * 0.15)))
+    padding = max(1, round(font_size * 0.30))
+    x = str(padding) if position.endswith("Left") else f"w-text_w-{padding}"
+    y = str(padding) if position.startswith("top") else f"h-text_h-{padding}"
+    font_file = visual_map_font_file()
+    if font_file is None:
+        raise AgentApiError("VISUAL_MAP_TIMESTAMP_FONT_UNAVAILABLE", "The configured visual-map timestamp font is unavailable in tools/fonts. Add the font there, choose its filename in agent-config.json, or use frameTimestampPosition=none.")
+    escaped_font = ffmpeg_filter_value(font_file.as_posix())
+    escaped_label = ffmpeg_filter_value(label)
+    return f"drawtext=fontfile='{escaped_font}':text='{escaped_label}':x={x}:y={y}:fontsize={font_size}:fontcolor=white:box=1:boxcolor=black@0.65:boxborderw={padding}"
+
+
+def ffmpeg_filter_value(value: str) -> str:
+    """Escape one literal FFmpeg filter option value without exposing paths."""
+    return value.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
+
+
+def visual_map_font_file() -> Path | None:
+    """Resolve the selected bundled font; no operating-system font paths are used."""
+    candidate = FONTS_PATH / configured_visual_map_timestamp_font()
+    return local_executable(candidate, FONTS_PATH)
+
+
+async def run_visual_map_ffmpeg(command: list[str], timeout: float) -> tuple[int, bytes]:
+    """Run one visual-map FFmpeg command without emitting diagnostic output."""
+    process: asyncio.subprocess.Process | None = None
+    try:
+        process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+        _stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        if process is not None and process.returncode is None:
+            process.kill()
+            await process.communicate()
+        raise
+    except OSError:
+        raise
+    return process.returncode, stderr
+
+
+VisualMapProgressReporter = Callable[[str, float, str, int, int, int, int], None]
+
+
+async def media_create_visual_map(payload: Any, progress: VisualMapProgressReporter | None = None) -> dict[str, Any]:
+    def report(phase: str, percentage: float, message: str, completed_frames: int, total_frames: int, completed_maps: int, total_maps: int) -> None:
+        if progress is not None:
+            progress(phase, percentage, message, completed_frames, total_frames, completed_maps, total_maps)
+
+    options = visual_map_options(payload)
+    resolver = WorkspacePathResolver()
+    source = resolver.resolve_existing(options["workspacePath"], field_name="workspacePath", expected_type="file")
+    ffmpeg = find_component("ffmpeg", COMPONENTS["ffmpeg"][0])
+    ffprobe = find_component("ffprobe", COMPONENTS["ffprobe"][0])
+    if ffmpeg.error or ffprobe.error:
+        raise AgentApiError("FFMPEG_DISCOVERY_ERROR", "ffmpeg or ffprobe discovery is ambiguous.", ffmpeg.error or ffprobe.error)
+    if not ffmpeg.executable or not ffprobe.executable:
+        raise AgentApiError("FFMPEG_NOT_AVAILABLE", "ffmpeg and ffprobe are required to create a visual map.")
+    duration, source_width, source_height, stream_index, frame_rate = await visual_map_video_metadata(source, ffprobe.executable)
+    start = options["startSeconds"]
+    end = duration if options["endSeconds"] is None else options["endSeconds"]
+    if end is None or end > duration or start >= end:
+        raise AgentApiError("VISUAL_MAP_INVALID", "The requested range must be within the video and have startSeconds less than endSeconds.")
+    timestamps = uniform_visual_map_timestamps(start, end, options["maxTotalFrames"])
+    thumbnail_width, thumbnail_height = visual_map_thumbnail_size(source_width, source_height, options["columns"], options["rows"], options["maxMapDimension"])
+    temporary_directory = resolver.resolve_destination(f".researchtube-visual-map-tmp/{secrets.token_urlsafe(8)}", field_name="temporary directory", error_code="WORKSPACE_PATH_INVALID")
+    temporary_directory.physical_path.mkdir(parents=True, exist_ok=True)
+    frames: list[tuple[float, Path]] = []
+    output_paths: list[Path] = []
+    map_id = secrets.token_urlsafe(5)
+    try:
+        report("extractingFrames", 5.0, "Extracting video frames.", 0, len(timestamps), 0, 0)
+        seen_decoded: set[float] = set()
+        for frame_number, timestamp in enumerate(timestamps):
+            frame_path = temporary_directory.physical_path / f"frame-{frame_number:03d}.png"
+            final_full_range_frame = options["endSeconds"] is None and len(timestamps) > 1 and frame_number == len(timestamps) - 1
+            extraction_timestamp = visual_map_extract_timestamp(timestamp, duration, frame_rate)
+            filters = (["reverse"] if final_full_range_frame else [f"select=gte(t\\,{extraction_timestamp:.9f})"])
+            filters.extend([f"scale={thumbnail_width}:{thumbnail_height}:force_original_aspect_ratio=decrease", f"pad={thumbnail_width}:{thumbnail_height}:(ow-iw)/2:(oh-ih):color=black"])
+            label_filter = visual_map_label_filter(visual_map_timestamp_label(timestamp), options["frameTimestampPosition"], thumbnail_height)
+            if label_filter:
+                filters.append(label_filter)
+            filters.append("showinfo")
+            command = [ffmpeg.executable, "-hide_banner", "-nostdin", "-v", "info"]
+            command.extend(["-sseof", "-1"] if final_full_range_frame else [])
+            command.extend(["-i", str(source.physical_path), "-map", f"0:{stream_index}", "-an", "-frames:v", "1", "-vf", ",".join(filters), "-c:v", "png", "-compression_level", "6", "-y", str(frame_path)])
+            try:
+                returncode, stderr = await run_visual_map_ffmpeg(command, CAPTURE_FRAME_TIMEOUT_SECONDS)
+            except (asyncio.TimeoutError, OSError) as error:
+                raise AgentApiError("VISUAL_MAP_FAILED", "ffmpeg could not extract a visual-map frame.") from error
+            if returncode != 0 or not frame_path.is_file():
+                raise AgentApiError("VISUAL_MAP_FAILED", "ffmpeg could not extract a visual-map frame.")
+            # reverse starts its output timestamp sequence at zero. The final
+            # full-range frame must therefore keep its nominal endpoint for
+            # duplicate detection instead of being confused with frame zero.
+            decoded_timestamp = None if final_full_range_frame else showinfo_timestamp(stderr)
+            decoded = round(decoded_timestamp if decoded_timestamp is not None else timestamp, 6)
+            if decoded in seen_decoded:
+                frame_path.unlink(missing_ok=True)
+                report("extractingFrames", 5.0 + 75.0 * (frame_number + 1) / len(timestamps), "Extracting video frames.", frame_number + 1, len(timestamps), 0, 0)
+                continue
+            seen_decoded.add(decoded)
+            frames.append((timestamp, frame_path))
+            report("extractingFrames", 5.0 + 75.0 * (frame_number + 1) / len(timestamps), "Extracting video frames.", frame_number + 1, len(timestamps), 0, 0)
+        if not frames:
+            raise AgentApiError("VISUAL_MAP_FAILED", "The requested range did not produce a frame.")
+        capacity = options["columns"] * options["rows"]
+        total_maps = math.ceil(len(frames) / capacity)
+        report("assemblingMaps", 80.0, "Assembling visual maps.", len(frames), len(timestamps), 0, total_maps)
+        maps: list[dict[str, Any]] = []
+        for map_number, offset in enumerate(range(0, len(frames), capacity), start=1):
+            group = frames[offset:offset + capacity]
+            destination = resolver.resolve_destination(visual_map_default_path(source.logical_path, map_number, map_id), field_name="visual map output", error_code="WORKSPACE_PATH_INVALID")
+            destination.physical_path.parent.mkdir(parents=True, exist_ok=True)
+            destination = resolver.resolve_destination(destination.logical_path, field_name="visual map output", error_code="WORKSPACE_PATH_INVALID")
+            if destination.physical_path.exists() or destination.physical_path.is_symlink():
+                raise AgentApiError("VISUAL_MAP_DESTINATION_EXISTS", "A visual-map output path already exists; this tool never overwrites a workspace file.")
+            output_paths.append(destination.physical_path)
+            command = [ffmpeg.executable, "-hide_banner", "-nostdin", "-v", "error"]
+            for _timestamp, frame_path in group:
+                command.extend(["-loop", "1", "-i", str(frame_path)])
+            for _ in range(capacity - len(group)):
+                command.extend(["-f", "lavfi", "-i", f"color=c=black@0.0:s={thumbnail_width}x{thumbnail_height}:r=1"])
+            labels = "".join(f"[{index}:v]" for index in range(capacity))
+            layout = "|".join(f"{(index % options['columns']) * thumbnail_width}_{(index // options['columns']) * thumbnail_height}" for index in range(capacity))
+            command.extend(["-filter_complex", f"{labels}xstack=inputs={capacity}:layout={layout}:fill=black@0.0,format=rgba[out]", "-map", "[out]", "-frames:v", "1", "-c:v", "png", "-compression_level", "6", "-y", str(destination.physical_path)])
+            try:
+                returncode, _stderr = await run_visual_map_ffmpeg(command, VISUAL_MAP_TIMEOUT_SECONDS)
+            except (asyncio.TimeoutError, OSError) as error:
+                raise AgentApiError("VISUAL_MAP_FAILED", "ffmpeg could not assemble a visual map.") from error
+            if returncode != 0 or not destination.physical_path.is_file():
+                raise AgentApiError("VISUAL_MAP_FAILED", "ffmpeg could not assemble a visual map.")
+            maps.append({"workspacePath": destination.logical_path, "frameCount": len(group), "timestampsSeconds": [timestamp for timestamp, _frame in group]})
+            report("assemblingMaps", 80.0 + 20.0 * map_number / total_maps, "Assembling visual maps.", len(frames), len(timestamps), map_number, total_maps)
+        result = {"sourcePath": source.logical_path, "selection": "uniform", "range": {"startSeconds": start, "endSeconds": end}, "columns": options["columns"], "rows": options["rows"], "mapCapacity": capacity, "maxTotalFrames": options["maxTotalFrames"], "actualTotalFrames": len(frames), "maps": maps}
+        log(f"media_visual_map_create path={source.logical_path} frames={len(frames)} maps={len(maps)} -> ok")
+        return result
+    except AgentApiError:
+        for output_path in output_paths:
+            output_path.unlink(missing_ok=True)
+        raise
+    finally:
+        shutil.rmtree(temporary_directory.physical_path, ignore_errors=True)
+
+
+@dataclass
+class VisualMapTask:
+    task_id: str
+    payload: dict[str, Any]
+    created_at: str
+    last_updated_at: str
+    status: str = "working"
+    status_message: str = "Preparing visual map."
+    phase: str = "preparing"
+    progress_percent: float = 0.0
+    completed_frames: int = 0
+    total_frames: int = 0
+    completed_maps: int = 0
+    total_maps: int = 0
+    result: dict[str, Any] | None = None
+    error: dict[str, str] | None = None
+    runner: asyncio.Task[None] | None = None
+
+    def touch(self, message: str | None = None) -> None:
+        self.last_updated_at = utc_now()
+        if message is not None:
+            self.status_message = message
+
+
+class VisualMapTaskManager:
+    def __init__(self) -> None:
+        self.tasks: dict[str, VisualMapTask] = {}
+
+    def new_task_id(self) -> str:
+        while True:
+            task_id = f"vismap_{secrets.token_urlsafe(7)}"
+            if task_id not in self.tasks:
+                return task_id
+
+    def get(self, task_id: str) -> VisualMapTask:
+        if not isinstance(task_id, str) or not task_id or task_id not in self.tasks:
+            raise AgentApiError("VISUAL_MAP_TASK_NOT_FOUND", "The requested visual-map task does not exist.")
+        return self.tasks[task_id]
+
+    def snapshot(self, task: VisualMapTask) -> dict[str, Any]:
+        document: dict[str, Any] = {
+            "taskId": task.task_id, "status": task.status, "statusMessage": task.status_message,
+            "phase": task.phase, "progressPercent": task.progress_percent,
+            "completedFrames": task.completed_frames, "totalFrames": task.total_frames,
+            "completedMaps": task.completed_maps, "totalMaps": task.total_maps,
+            "createdAt": task.created_at, "lastUpdatedAt": task.last_updated_at,
+            "pollIntervalMs": TASK_POLL_INTERVAL_MS,
+        }
+        if task.result is not None:
+            document["result"] = task.result
+        if task.error is not None:
+            document["error"] = task.error
+        return document
+
+    async def create(self, payload: Any) -> dict[str, Any]:
+        options = visual_map_options(payload)
+        WorkspacePathResolver().resolve_existing(options["workspacePath"], field_name="workspacePath", expected_type="file")
+        now = utc_now()
+        task = VisualMapTask(self.new_task_id(), options, now, now)
+        self.tasks[task.task_id] = task
+        task.runner = asyncio.create_task(self.run(task), name=f"researchtube-visual-map-{task.task_id}")
+        return self.snapshot(task)
+
+    def update_progress(self, task: VisualMapTask, phase: str, percentage: float, message: str, completed_frames: int, total_frames: int, completed_maps: int, total_maps: int) -> None:
+        task.phase, task.progress_percent = phase, max(0.0, min(100.0, percentage))
+        task.completed_frames, task.total_frames = completed_frames, total_frames
+        task.completed_maps, task.total_maps = completed_maps, total_maps
+        task.touch(message)
+
+    async def run(self, task: VisualMapTask) -> None:
+        try:
+            result = await media_create_visual_map(task.payload, lambda *update: self.update_progress(task, *update))
+            task.result, task.status, task.phase, task.progress_percent = result, "completed", "completed", 100.0
+            task.touch("Visual map completed.")
+        except AgentApiError as error:
+            task.status, task.phase = "failed", "failed"
+            task.error = {"code": error.code, "message": error.message}
+            task.touch("Visual map failed.")
+        except asyncio.CancelledError:
+            task.status, task.phase = "cancelled", "cancelled"
+            task.touch("Visual-map task cancelled.")
+            raise
+        except Exception as error:
+            log(f"visual-map task {task.task_id} failed unexpectedly: {error.__class__.__name__}", error=True)
+            task.status, task.phase = "failed", "failed"
+            task.error = {"code": "VISUAL_MAP_INTERNAL_ERROR", "message": "The visual-map task encountered an unexpected error."}
+            task.touch("Visual map failed.")
+
+    async def shutdown(self) -> None:
+        runners = [task.runner for task in self.tasks.values() if task.runner is not None and not task.runner.done()]
+        for runner in runners:
+            runner.cancel()
+        if runners:
+            await asyncio.gather(*runners, return_exceptions=True)
+
+
+VISUAL_MAP_TASKS = VisualMapTaskManager()
 
 
 async def capture_frame_from_workspace_options(options: dict[str, Any]) -> dict[str, Any]:
@@ -3137,6 +3515,8 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             response_status, response_body = "200 OK", await media_probe(parse_json_body(body))
         elif method == "POST" and path == "/media/capture-frame":
             response_status, response_body = "200 OK", await capture_frame(parse_json_body(body))
+        elif method == "POST" and path == "/tasks/visual-map":
+            response_status, response_body = "201 Created", await VISUAL_MAP_TASKS.create(parse_json_body(body))
         elif method == "POST" and path == "/media/capture-screen":
             response_status, response_body = "200 OK", await capture_screen(parse_json_body(body))
         elif method == "POST" and path == "/media/image-crop":
@@ -3167,6 +3547,8 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             task_id = path.removeprefix("/tasks/").removesuffix("/cancel").rstrip("/")
             await TASKS.cancel(task_id)
             response_status, response_body = "202 Accepted", {"accepted": True}
+        elif method == "GET" and path.startswith("/tasks/visual-map/"):
+            response_status, response_body = "200 OK", VISUAL_MAP_TASKS.snapshot(VISUAL_MAP_TASKS.get(path.removeprefix("/tasks/visual-map/")))
         elif method == "GET" and path.startswith("/tasks/"):
             response_status, response_body = "200 OK", TASKS.snapshot(TASKS.get(path.removeprefix("/tasks/")))
         elif method == "GET":
@@ -3188,7 +3570,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
         await writer.drain()
         log(f"{method or 'INVALID'} {path or '/'} -> {response_status.split()[0]}{response_log_suffix(path, response_body)}")
     except AgentApiError as error:
-        status = "404 Not Found" if error.code == "TASK_NOT_FOUND" else "400 Bad Request"
+        status = "404 Not Found" if error.code in {"TASK_NOT_FOUND", "VISUAL_MAP_TASK_NOT_FOUND"} else "400 Bad Request"
         writer.write(http_response(status, error_document(error)))
         await writer.drain()
         log(f"{method or 'INVALID'} {path or '/'} -> {status.split()[0]}")
@@ -3212,6 +3594,7 @@ async def serve(port: int) -> None:
     finally:
         async with PUBLIC_SHARE_LOCK:
             await stop_public_share_unlocked()
+        await VISUAL_MAP_TASKS.shutdown()
         await TASKS.shutdown()
 
 

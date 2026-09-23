@@ -37,6 +37,8 @@ var MCP_TOOL_SETTINGS = Object.freeze({
   workspace_delete: { group: "workspace" },
   media_probe: { group: "media" },
   media_capture_frame: { group: "media" },
+  media_visual_map_create: { group: "media" },
+  media_visual_map_get_task: { group: "media" },
   media_capture_screen: { group: "media" },
   media_image_crop: { group: "media" },
   media_show_workspace_image: { group: "media" },
@@ -64,8 +66,8 @@ var MCP_TOOL_SETTINGS = Object.freeze({
   workspace_share_status: { group: "library" },
   workspace_share_stop: { group: "library" }
 });
-var EXTENSION_VERSION = "1.62.0";
-var REQUIRED_AGENT_INTERFACE_VERSION = 39;
+var EXTENSION_VERSION = "1.71.0";
+var REQUIRED_AGENT_INTERFACE_VERSION = 41;
 var CAPTURE_FRAME_WIDGET_URI = "ui://researchtube/capture-frame-v31.html";
 var RESEARCHTUBE_SERVER_DESCRIPTION = "ResearchTube provides YouTube research, local media and image operations, workspace management, screenshots, clipboard, and Library integration. Search this server when the user refers to ResearchTube, YouTube analysis, a previously created workspace file, captured frame, screenshot, crop, clipboard, or asks to continue a previous ResearchTube operation.";
 var RESEARCHTUBE_MCP_INSTRUCTIONS = "ResearchTube exposes MCP tools that may be loaded or discovered lazily by the client. When the user mentions ResearchTube, invokes @ResearchTube, asks to repeat a ResearchTube operation, or requests a capability previously provided by ResearchTube, do not infer that ResearchTube is unavailable merely because its tools are not currently visible as a top-level tool namespace. Before reporting that a ResearchTube capability is unavailable, discover or inspect the available ResearchTube MCP tools and attempt to locate the requested capability. Only report ResearchTube as unavailable if tool discovery actually fails, the required tool cannot be found after discovery, or an actual ResearchTube tool invocation returns an availability, connection, compatibility, or transport error. Successful use earlier in the conversation is evidence that the tools may be discoverable again; rediscover them rather than assuming access has disappeared. media_capture_frame, media_capture_screen, and media_image_crop never render a widget themselves: when showInChat is true, after the successful creation result immediately call media_show_workspace_image with the returned workspace image path. When showInChat is false, do not call the display tool.";
@@ -640,6 +642,44 @@ var captureFrameSchema = {
   },
   required: ["sourcePath", "requestedTimestampSeconds", "actualTimestampSeconds", "selectedVideoStreamIndex", "seekMode", "displayRotationApplied", "showInChat", "image"]
 };
+var visualMapTimestampPositionSchema = { type: "string", enum: ["none", "topLeft", "topRight", "bottomLeft", "bottomRight"] };
+var visualMapSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    sourcePath: { type: "string", minLength: 1 },
+    selection: { type: "string", const: "uniform" },
+    range: { type: "object", additionalProperties: false, properties: { startSeconds: { type: "number", minimum: 0 }, endSeconds: { type: "number", minimum: 0 } }, required: ["startSeconds", "endSeconds"] },
+    columns: { type: "integer", minimum: 1 },
+    rows: { type: "integer", minimum: 1 },
+    mapCapacity: { type: "integer", minimum: 1 },
+    maxTotalFrames: { type: "integer", minimum: 1 },
+    actualTotalFrames: { type: "integer", minimum: 1 },
+    maps: { type: "array", minItems: 1, items: { type: "object", additionalProperties: false, properties: { workspacePath: { type: "string", minLength: 1 }, frameCount: { type: "integer", minimum: 1 }, timestampsSeconds: { type: "array", minItems: 1, items: { type: "number", minimum: 0 } } }, required: ["workspacePath", "frameCount", "timestampsSeconds"] } }
+  },
+  required: ["sourcePath", "selection", "range", "columns", "rows", "mapCapacity", "maxTotalFrames", "actualTotalFrames", "maps"]
+};
+var visualMapTaskSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    taskId: { type: "string", minLength: 1 },
+    status: { type: "string", enum: ["working", "completed", "failed", "cancelled"] },
+    statusMessage: { type: "string" },
+    phase: { type: "string", enum: ["preparing", "extractingFrames", "assemblingMaps", "completed", "failed", "cancelled"] },
+    progressPercent: { type: "number", minimum: 0, maximum: 100 },
+    completedFrames: { type: "integer", minimum: 0 },
+    totalFrames: { type: "integer", minimum: 0 },
+    completedMaps: { type: "integer", minimum: 0 },
+    totalMaps: { type: "integer", minimum: 0 },
+    createdAt: { type: "string" },
+    lastUpdatedAt: { type: "string" },
+    pollIntervalMs: { type: "integer", minimum: 100 },
+    result: visualMapSchema,
+    error: { type: "object", additionalProperties: false, properties: { code: { type: "string" }, message: { type: "string" } }, required: ["code", "message"] }
+  },
+  required: ["taskId", "status", "statusMessage", "phase", "progressPercent", "completedFrames", "totalFrames", "completedMaps", "totalMaps", "createdAt", "lastUpdatedAt", "pollIntervalMs"]
+};
 var captureFrameWidgetActionSchema = {
   type: "object",
   additionalProperties: false,
@@ -985,6 +1025,44 @@ function toolDefinitions() {
         "openai/toolInvocation/invoking": "Capturing frame\u2026",
         "openai/toolInvocation/invoked": "Frame captured."
       }
+    },
+    {
+      name: "media_visual_map_create",
+      title: "Start a uniform video visual map",
+      description: "Start an asynchronous task that creates chronological PNG contact sheets from an existing Workspace video. Iteration 1 supports only deterministic uniform selection and never downloads media. Poll media_visual_map_get_task no faster than pollIntervalMs until it completes; then display a specific map with media_show_workspace_image if needed.",
+      annotations: localWorkspaceWriteAnnotations,
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          workspacePath: { type: "string", minLength: 1, description: "Existing logical workspace-relative video path." },
+          columns: { type: "integer", minimum: 1 },
+          rows: { type: "integer", minimum: 1 },
+          maxTotalFrames: { type: "integer", minimum: 1, maximum: 120 },
+          selection: { type: "string", enum: ["uniform"], default: "uniform" },
+          startSeconds: { type: "number", minimum: 0, default: 0 },
+          endSeconds: { type: "number", minimum: 0 },
+          maxMapDimension: { type: "integer", minimum: 1, default: 4096 },
+          frameTimestampPosition: { ...visualMapTimestampPositionSchema, default: "bottomRight" }
+        },
+        required: ["workspacePath", "columns", "rows", "maxTotalFrames"]
+      },
+      outputSchema: visualMapTaskSchema,
+      _meta: { "openai/toolInvocation/invoking": "Starting visual map\u2026", "openai/toolInvocation/invoked": "Visual-map task started." }
+    },
+    {
+      name: "media_visual_map_get_task",
+      title: "Get visual-map task progress",
+      description: "Get the current phase, percentage, and final result or error for a visual-map task. Poll no faster than the returned pollIntervalMs. When completed, maps are Workspace images and are not displayed automatically.",
+      annotations: localWorkspaceReadAnnotations,
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: { taskId: { type: "string", minLength: 1 } },
+        required: ["taskId"]
+      },
+      outputSchema: visualMapTaskSchema,
+      _meta: { "openai/toolInvocation/invoking": "Checking visual-map progress\u2026", "openai/toolInvocation/invoked": "Visual-map progress checked." }
     },
     {
       name: "media_capture_screen",
@@ -2798,6 +2876,62 @@ async function captureFrame(argumentsValue) {
   const document = await agentJsonRequest("/media/capture-frame", { method: "POST", body: agentInput, timeoutMs: AGENT_CAPTURE_FRAME_TIMEOUT_MS });
   return normalizeCaptureFrameResult(document, input);
 }
+function normalizeVisualMapInput(argumentsValue = {}) {
+  const args = captureFrameObject(argumentsValue, "media_visual_map_create", /* @__PURE__ */ new Set(["workspacePath", "columns", "rows", "maxTotalFrames", "selection", "startSeconds", "endSeconds", "maxMapDimension", "frameTimestampPosition"]));
+  const workspacePath = normalizeWorkspacePath(args.workspacePath, "workspacePath");
+  const columns = captureFrameInteger(args.columns, "columns", 1);
+  const rows = captureFrameInteger(args.rows, "rows", 1);
+  const maxTotalFrames = captureFrameInteger(args.maxTotalFrames, "maxTotalFrames", 1);
+  if (maxTotalFrames > 120) throw localAgentError("VISUAL_MAP_INVALID", "maxTotalFrames must not exceed 120.");
+  const selection = args.selection === void 0 ? "uniform" : args.selection;
+  if (selection !== "uniform") throw localAgentError("VISUAL_MAP_INVALID", "Iteration 1 supports only selection=uniform.");
+  const startSeconds = args.startSeconds === void 0 ? 0 : captureFrameFiniteNumber(args.startSeconds, "startSeconds", { minimum: 0 });
+  const endSeconds = args.endSeconds === void 0 ? void 0 : captureFrameFiniteNumber(args.endSeconds, "endSeconds", { minimum: 0 });
+  if (endSeconds !== void 0 && startSeconds >= endSeconds) throw localAgentError("VISUAL_MAP_INVALID", "startSeconds must be less than endSeconds.");
+  const maxMapDimension = args.maxMapDimension === void 0 ? 4096 : captureFrameInteger(args.maxMapDimension, "maxMapDimension", 1);
+  const frameTimestampPosition = args.frameTimestampPosition === void 0 ? "bottomRight" : args.frameTimestampPosition;
+  if (!(/* @__PURE__ */ new Set(["none", "topLeft", "topRight", "bottomLeft", "bottomRight"])).has(frameTimestampPosition)) throw localAgentError("VISUAL_MAP_INVALID", "frameTimestampPosition is invalid.");
+  return { workspacePath, columns, rows, maxTotalFrames, selection, startSeconds, ...endSeconds === void 0 ? {} : { endSeconds }, maxMapDimension, frameTimestampPosition };
+}
+function normalizeVisualMapResult(document, input) {
+  if (!document || typeof document !== "object" || Array.isArray(document) || typeof document.sourcePath !== "string" || !document.sourcePath || document.selection !== "uniform" || !document.range || !Number.isFinite(document.range.startSeconds) || !Number.isFinite(document.range.endSeconds) || !Number.isInteger(document.columns) || document.columns < 1 || !Number.isInteger(document.rows) || document.rows < 1 || document.mapCapacity !== document.columns * document.rows || !Number.isInteger(document.maxTotalFrames) || document.maxTotalFrames < 1 || !Number.isInteger(document.actualTotalFrames) || document.actualTotalFrames < 1 || document.actualTotalFrames > document.maxTotalFrames || !Array.isArray(document.maps) || !document.maps.length) {
+    throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid visual-map result.");
+  }
+  if (input && (document.sourcePath !== input.workspacePath || document.range.startSeconds !== input.startSeconds || document.columns !== input.columns || document.rows !== input.rows || document.maxTotalFrames !== input.maxTotalFrames || document.actualTotalFrames > input.maxTotalFrames)) {
+    throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned a visual-map result that does not match the requested task.");
+  }
+  let count = 0;
+  const maps = document.maps.map((map) => {
+    if (!map || typeof map !== "object" || typeof map.workspacePath !== "string" || !Number.isInteger(map.frameCount) || map.frameCount < 1 || !Array.isArray(map.timestampsSeconds) || map.frameCount !== map.timestampsSeconds.length || map.timestampsSeconds.some((value) => !Number.isFinite(value) || value < 0)) {
+      throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid visual-map entries.");
+    }
+    count += map.frameCount;
+    return { workspacePath: normalizeWorkspacePath(map.workspacePath, "maps.workspacePath"), frameCount: map.frameCount, timestampsSeconds: map.timestampsSeconds };
+  });
+  if (count !== document.actualTotalFrames) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned inconsistent visual-map frame counts.");
+  return { sourcePath: document.sourcePath, selection: "uniform", range: { startSeconds: document.range.startSeconds, endSeconds: document.range.endSeconds }, columns: document.columns, rows: document.rows, mapCapacity: document.mapCapacity, maxTotalFrames: document.maxTotalFrames, actualTotalFrames: count, maps };
+}
+function normalizeVisualMapTask(document, input = null) {
+  if (!document || typeof document !== "object" || Array.isArray(document) || typeof document.taskId !== "string" || !document.taskId || !(/* @__PURE__ */ new Set(["working", "completed", "failed", "cancelled"])).has(document.status) || typeof document.statusMessage !== "string" || !(/* @__PURE__ */ new Set(["preparing", "extractingFrames", "assemblingMaps", "completed", "failed", "cancelled"])).has(document.phase) || !Number.isFinite(document.progressPercent) || document.progressPercent < 0 || document.progressPercent > 100 || !["completedFrames", "totalFrames", "completedMaps", "totalMaps", "pollIntervalMs"].every((key) => Number.isInteger(document[key]) && document[key] >= 0) || typeof document.createdAt !== "string" || typeof document.lastUpdatedAt !== "string" || document.pollIntervalMs < 100) {
+    throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid visual-map task.");
+  }
+  if (document.status === "completed" && (!document.result || document.error)) throw localAgentError("AGENT_INVALID_RESPONSE", "A completed visual-map task must contain only its result.");
+  if (document.status === "failed" && (!document.error || document.result || typeof document.error.code !== "string" || typeof document.error.message !== "string")) throw localAgentError("AGENT_INVALID_RESPONSE", "A failed visual-map task must contain only its error.");
+  const task = { taskId: document.taskId, status: document.status, statusMessage: document.statusMessage, phase: document.phase, progressPercent: document.progressPercent, completedFrames: document.completedFrames, totalFrames: document.totalFrames, completedMaps: document.completedMaps, totalMaps: document.totalMaps, createdAt: document.createdAt, lastUpdatedAt: document.lastUpdatedAt, pollIntervalMs: document.pollIntervalMs };
+  if (document.result) task.result = normalizeVisualMapResult(document.result, input);
+  if (document.error) task.error = { code: document.error.code, message: document.error.message };
+  return task;
+}
+async function createVisualMap(argumentsValue) {
+  const input = normalizeVisualMapInput(argumentsValue);
+  const document = await agentJsonRequest("/tasks/visual-map", { method: "POST", body: input, timeoutMs: AGENT_TASK_TIMEOUT_MS });
+  return normalizeVisualMapTask(document, input);
+}
+async function getVisualMapTask(taskId) {
+  if (typeof taskId !== "string" || !taskId.trim()) throw localAgentError("INVALID_ARGUMENT", "taskId must be a non-empty string.");
+  const document = await agentJsonRequest(`/tasks/visual-map/${encodeURIComponent(taskId)}`, { timeoutMs: AGENT_TASK_TIMEOUT_MS });
+  return normalizeVisualMapTask(document);
+}
 function normalizeScreenCaptureInput(argumentsValue = {}) {
   const args = captureFrameObject(argumentsValue, "media_capture_screen", /* @__PURE__ */ new Set(["outputPath", "image", "showInChat"]));
   const imageValue = captureFrameObject(args.image, "image", /* @__PURE__ */ new Set(["format", "quality"]));
@@ -3356,6 +3490,14 @@ async function handleMcpRequest(request) {
     const args = request.params.arguments ?? {};
     return executeCaptureFrameToolCall(request.id, args);
   }
+  if (request?.method === "tools/call" && request.params?.name === "media_visual_map_create") {
+    const args = request.params.arguments ?? {};
+    return executeToolCall(request.id, "media_visual_map_create", args, () => createVisualMap(args));
+  }
+  if (request?.method === "tools/call" && request.params?.name === "media_visual_map_get_task") {
+    const taskId = request.params.arguments?.taskId;
+    return executeToolCall(request.id, "media_visual_map_get_task", { taskId }, () => getVisualMapTask(taskId));
+  }
   if (request?.method === "tools/call" && request.params?.name === "media_capture_screen") {
     const args = request.params.arguments ?? {};
     return executeToolCall(request.id, "media_capture_screen", args, () => captureScreen(args));
@@ -3547,6 +3689,8 @@ async function executeToolCall(id, tool, input, work, operation = null) {
 }
 function summarizeCommandInput(tool, input) {
   if (tool === "media_capture_frame") return { path: typeof input.path === "string" ? input.path : null, youtube: input.youtube && typeof input.youtube === "object" ? { videoId: input.youtube.videoId ?? null, formatId: input.youtube.formatId ?? null } : null, timestampSeconds: input.timestampSeconds ?? null, videoStreamIndex: input.videoStreamIndex ?? null, seekMode: input.seekMode ?? null, outputPath: typeof input.outputPath === "string" ? input.outputPath : null };
+  if (tool === "media_visual_map_create") return { workspacePath: typeof input.workspacePath === "string" ? input.workspacePath : null, columns: input.columns ?? null, rows: input.rows ?? null, maxTotalFrames: input.maxTotalFrames ?? null, selection: input.selection ?? "uniform" };
+  if (tool === "media_visual_map_get_task") return { taskId: typeof input.taskId === "string" ? input.taskId : null };
   if (tool === "media_capture_screen") return { outputPath: typeof input.outputPath === "string" ? input.outputPath : null, format: input.image?.format ?? null };
   if (tool === "media_image_crop") return { path: typeof input.path === "string" ? input.path : null, crop: input.crop ?? null, outputPath: typeof input.outputPath === "string" ? input.outputPath : null, format: input.image?.format ?? null };
   if (tool === "clipboard_status") return { sinceRevisionProvided: typeof input.sinceRevision === "string" };

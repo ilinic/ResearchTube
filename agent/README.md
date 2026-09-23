@@ -14,6 +14,8 @@ It reads `agent-config.json` from this directory and defaults to port `17843`. C
 python researchtube_agent.py --port 17843
 ```
 
+Visual-map timestamp labels use only a font in `tools/fonts/`, so the result is the same on Windows, macOS, and Linux. The bundled default is `DejaVuSans.ttf`; select another `.ttf` or `.otf` in `agent-config.json` with `visualMapTimestampFont`, for example `"Arial.ttf"`. Font filenames only are accepted: the Agent never reads operating-system font directories.
+
 The Agent creates `workspace/` beside the script. Health reports the Agent version, workspace state, and status, version, and discovery source for `yt-dlp`, `deno`, `ffmpeg`, `ffprobe`, and `cloudflared`. Discovery always checks `tools/<component>/` first, then system `PATH`; it never depends on the process working directory.
 
 `capture_screen` uses the bundled or PATH `ffmpeg` as its sole pixel-capture implementation: `gdigrab` on Windows, `x11grab` on Linux/X11, and `avfoundation` on macOS. No Python screen-capture package or PowerShell is used. It captures the complete virtual desktop into one workspace image, including all monitors. Linux/X11 also needs `xrandr` to report the virtual-desktop geometry and monitor count. Linux Wayland is intentionally not supported; it requires a separate Portal/PipeWire implementation. On macOS, grant Screen Recording permission to the FFmpeg process.

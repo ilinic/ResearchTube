@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 
 const background = await readFile(new URL("../background.js", import.meta.url), "utf8");
 
-for (const tool of ["system_agent_status", "system_check_debug_banner", "workspace_list", "workspace_stat", "workspace_mkdir", "workspace_move", "workspace_delete", "workspace_share_start", "workspace_share_status", "workspace_share_stop", "media_probe", "media_capture_frame", "media_capture_screen", "media_image_crop", "media_show_workspace_image", "media_inspect_image", "clipboard_status", "clipboard_get", "clipboard_set", "media_load_workspace_image", "media_copy_workspace_path"]) {
+for (const tool of ["system_agent_status", "system_check_debug_banner", "workspace_list", "workspace_stat", "workspace_mkdir", "workspace_move", "workspace_delete", "workspace_share_start", "workspace_share_status", "workspace_share_stop", "media_probe", "media_capture_frame", "media_visual_map_create", "media_visual_map_get_task", "media_capture_screen", "media_image_crop", "media_show_workspace_image", "media_inspect_image", "clipboard_status", "clipboard_get", "clipboard_set", "media_load_workspace_image", "media_copy_workspace_path"]) {
   assert.match(background, new RegExp(`name: "${tool}"`), `${tool} must be published in tools/list`);
 }
 for (const tool of ["library_store_start", "library_store_status", "library_store_cancel"]) {
@@ -23,7 +23,9 @@ for (const tool of ["youtube_get_download_formats", "youtube_get_download_task_d
 assert.match(background, /youtubeFormats: youtubeFormatsSchema/);
 assert.match(background, /youtube_get_download_formats\.downloadFormats/);
 assert.match(background, /afterEventId/);
-assert.match(background, /const REQUIRED_AGENT_INTERFACE_VERSION = 39;/);
+assert.match(background, /const REQUIRED_AGENT_INTERFACE_VERSION = 41;/);
+assert.match(background, /selection: \{ type: "string", enum: \["uniform"\]/, "visual maps must publish only the Iteration 1 uniform selector");
+assert.match(background, /"\/tasks\/visual-map"/, "visual maps must use the Agent task endpoint");
 assert.match(background, /const RESEARCHTUBE_SERVER_DESCRIPTION =/, "the server must expose a bootstrap discovery description");
 assert.match(background, /description: RESEARCHTUBE_SERVER_DESCRIPTION/, "serverInfo must publish its bootstrap discovery description");
 assert.match(background, /const RESEARCHTUBE_MCP_INSTRUCTIONS =/, "the MCP server must publish lazy-discovery guidance");
