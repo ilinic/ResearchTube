@@ -28,12 +28,17 @@ assert.match(widget, /youtube-timestamp-link.*timestampSeconds/s, "the filename 
 assert.match(widget, /watch\?v=.*&t=/, "the timestamp marker must link to the same YouTube video at that time");
 assert.match(widget, /const isPartial = .*partial_/, "partial-download provenance must be recognized");
 assert.match(widget, /videoId && !isPartial/, "a partial-file local timestamp must not become a YouTube timestamp link");
-assert.match(widget, /media_copy_workspace_path/);
+assert.match(widget, /callTool\("media_copy_workspace_path"/, "path copying must use the widget MCP Apps tool-call bridge");
+assert.doesNotMatch(widget, /local-action-request/, "the widget must not post non-JSON-RPC local-action messages into the MCP Apps transport");
 assert.match(widget, /id="copy-frame-name"/);
 assert.match(widget, /<g transform="translate\(10 9\)">/);
 assert.match(widget, /<path d="M9 -6v7H2"><\/path>/);
 assert.match(widget, /refreshing/);
 assert.match(widget, /overflow-wrap: anywhere/);
+assert.match(widget, /class="top-row"/, "type, action status, and tags must share the compact top row");
+assert.doesNotMatch(widget, /class="brand"/, "the widget must not repeat the ResearchTube brand shown by the host");
+assert.doesNotMatch(widget, /brand-mark/, "the widget must not contain a redundant square brand icon");
+assert.match(widget, /setStatus\(""\)/, "a successfully loaded image must not consume a status line");
 assert.doesNotMatch(widget, /researchtube_copy_capture_frame_image/);
 assert.doesNotMatch(widget, /researchtube_download_capture_frame/);
 assert.doesNotMatch(widget, /id="download-image"/);

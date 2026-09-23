@@ -25,6 +25,7 @@ var MCP_TOOL_GROUPS = Object.freeze({
   downloads: { title: "Downloads", order: 50 },
   clipboard: { title: "Clipboard", order: 60 },
   library: { title: "Library and sharing", order: 70 },
+  online: { title: "Online Share", order: 80 },
   custom: { title: "Custom", order: 90 }
 });
 var MCP_TOOL_SETTINGS = Object.freeze({
@@ -39,10 +40,11 @@ var MCP_TOOL_SETTINGS = Object.freeze({
   media_capture_frame: { group: "media" },
   media_visual_map_create: { group: "media" },
   media_visual_map_get_task: { group: "media" },
+  media_visual_map_cancel_task: { group: "media" },
   media_capture_screen: { group: "media" },
   media_image_crop: { group: "media" },
-  media_show_workspace_image: { group: "media" },
-  media_inspect_image: { group: "media" },
+  media_image_show: { group: "media" },
+  media_image_inspect: { group: "media" },
   youtube_search: { group: "youtube" },
   youtube_get_video: { group: "youtube" },
   youtube_get_channel_videos: { group: "youtube" },
@@ -51,26 +53,26 @@ var MCP_TOOL_SETTINGS = Object.freeze({
   youtube_get_transcript: { group: "youtube" },
   youtube_get_comments: { group: "youtube" },
   youtube_get_comment_replies: { group: "youtube" },
-  youtube_get_download_formats: { group: "downloads" },
+  youtube_download_get_formats: { group: "downloads" },
   youtube_download: { group: "downloads" },
-  youtube_get_download_task: { group: "downloads" },
-  youtube_get_download_task_diagnostics: { group: "downloads" },
-  youtube_cancel_download_task: { group: "downloads" },
+  youtube_download_get_task: { group: "downloads" },
+  youtube_download_task_diagnostics: { group: "downloads" },
+  youtube_download_cancel_task: { group: "downloads" },
   clipboard_status: { group: "clipboard" },
   clipboard_get: { group: "clipboard" },
   clipboard_set: { group: "clipboard" },
   library_store_start: { group: "library" },
   library_store_status: { group: "library" },
   library_store_cancel: { group: "library" },
-  workspace_share_start: { group: "library" },
-  workspace_share_status: { group: "library" },
-  workspace_share_stop: { group: "library" }
+  online_share_start: { group: "online" },
+  online_share_status: { group: "online" },
+  online_share_stop: { group: "online" }
 });
-var EXTENSION_VERSION = "1.71.0";
-var REQUIRED_AGENT_INTERFACE_VERSION = 41;
-var CAPTURE_FRAME_WIDGET_URI = "ui://researchtube/capture-frame-v31.html";
-var RESEARCHTUBE_SERVER_DESCRIPTION = "ResearchTube provides YouTube research, local media and image operations, workspace management, screenshots, clipboard, and Library integration. Search this server when the user refers to ResearchTube, YouTube analysis, a previously created workspace file, captured frame, screenshot, crop, clipboard, or asks to continue a previous ResearchTube operation.";
-var RESEARCHTUBE_MCP_INSTRUCTIONS = "ResearchTube exposes MCP tools that may be loaded or discovered lazily by the client. When the user mentions ResearchTube, invokes @ResearchTube, asks to repeat a ResearchTube operation, or requests a capability previously provided by ResearchTube, do not infer that ResearchTube is unavailable merely because its tools are not currently visible as a top-level tool namespace. Before reporting that a ResearchTube capability is unavailable, discover or inspect the available ResearchTube MCP tools and attempt to locate the requested capability. Only report ResearchTube as unavailable if tool discovery actually fails, the required tool cannot be found after discovery, or an actual ResearchTube tool invocation returns an availability, connection, compatibility, or transport error. Successful use earlier in the conversation is evidence that the tools may be discoverable again; rediscover them rather than assuming access has disappeared. media_capture_frame, media_capture_screen, and media_image_crop never render a widget themselves: when showInChat is true, after the successful creation result immediately call media_show_workspace_image with the returned workspace image path. When showInChat is false, do not call the display tool.";
+var EXTENSION_VERSION = "1.77.0";
+var REQUIRED_AGENT_INTERFACE_VERSION = 43;
+var CAPTURE_FRAME_WIDGET_URI = "ui://researchtube/capture-frame-v35.html";
+var RESEARCHTUBE_SERVER_DESCRIPTION = "ResearchTube provides YouTube research, local media and image operations, workspace management, screenshots, clipboard, and Library integration. Search this server when the user refers to ResearchTube, YouTube analysis, a previously created workspace file, captured frame, screenshot, crop, clipboard, or asks to continue a previous ResearchTube operation. In clients with deferred tools, ResearchTube is discoverable through functions.exec lazy MCP-tool discovery; search there before treating the capability as unavailable.";
+var RESEARCHTUBE_MCP_INSTRUCTIONS = "ResearchTube exposes MCP tools that may be loaded or discovered lazily by the client. When the user mentions ResearchTube, invokes @ResearchTube, asks to repeat a ResearchTube operation, or requests a capability previously provided by ResearchTube, do not infer that ResearchTube is unavailable merely because its tools are not currently visible as a top-level tool namespace. In this client, ResearchTube is available through functions.exec with lazy MCP-tool discovery: search there for the appropriate ResearchTube tool before reporting that the capability is unavailable. Only report ResearchTube as unavailable if tool discovery actually fails, the required tool cannot be found after discovery, or an actual ResearchTube tool invocation returns an availability, connection, compatibility, or transport error. Successful use earlier in the conversation is evidence that the tools may be discoverable again; rediscover them rather than assuming access has disappeared. media_capture_frame, media_capture_screen, and media_image_crop never render a widget themselves: when showInChat is true, after the successful creation result immediately call media_image_show with the returned workspace image path. When showInChat is false, do not call the display tool.";
 var CAPTURE_FRAME_OFFSCREEN_DOCUMENT = "capture-frame-offscreen.html";
 var AGENT_HEALTH_TIMEOUT_MS = 5e3;
 var AGENT_TASK_TIMEOUT_MS = 1e4;
@@ -110,13 +112,27 @@ var libraryStoreLoading = null;
 var libraryStoreDraining = false;
 var searchCache = /* @__PURE__ */ new Map();
 var nullableString = { type: ["string", "null"] };
+var rejectedToolResultSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    status: { const: "rejected" },
+    error: {
+      type: "object",
+      additionalProperties: false,
+      properties: { code: { type: "string" }, message: { type: "string" }, detail: nullableString },
+      required: ["code", "message", "detail"]
+    }
+  },
+  required: ["status", "error"]
+};
 var nullableInteger = { type: ["integer", "null"] };
 var nullableNumber = { type: ["number", "null"] };
 var downloadFormatSchema = {
   type: "object",
   additionalProperties: false,
   properties: {
-    formatId: { type: "string", description: "Numeric media format identifier in this exact source snapshot. For youtube_download, select a numeric ID only when it was returned by youtube_get_download_formats, not merely by youtubeFormats." },
+    formatId: { type: "string", description: "Numeric media format identifier in this exact source snapshot. For youtube_download, select a numeric ID only when it was returned by youtube_download_get_formats, not merely by youtubeFormats." },
     kind: { type: "string", enum: ["combined", "video", "audio"], description: "combined contains video and audio; video and audio are separate tracks." },
     container: { ...nullableString, description: "Media container announced by YouTube, for example mp4, webm, or m4a; null only if absent." },
     videoCodec: { ...nullableString, description: "Video codec identifier announced by YouTube, for example avc1, vp9, or av01; null for audio-only tracks." },
@@ -368,9 +384,9 @@ var downloadSelectionSchema = {
   type: "object",
   additionalProperties: false,
   properties: {
-    combined: { ...downloadSelectionValueSchema, description: "One ready-made audio+video track: 'best' or a numeric formatId from youtube_get_download_formats.downloadFormats.combined. Do not set video or audio at the same time." },
-    video: { ...downloadSelectionValueSchema, description: "One video-only track: 'best' or a numeric formatId from youtube_get_download_formats.downloadFormats.video." },
-    audio: { ...downloadSelectionValueSchema, description: "One audio-only track: 'best' or a numeric formatId from youtube_get_download_formats.downloadFormats.audio." }
+    combined: { ...downloadSelectionValueSchema, description: "One ready-made audio+video track: 'best' or a numeric formatId from youtube_download_get_formats.downloadFormats.combined. Do not set video or audio at the same time." },
+    video: { ...downloadSelectionValueSchema, description: "One video-only track: 'best' or a numeric formatId from youtube_download_get_formats.downloadFormats.video." },
+    audio: { ...downloadSelectionValueSchema, description: "One audio-only track: 'best' or a numeric formatId from youtube_download_get_formats.downloadFormats.audio." }
   },
   description: "Select exactly one mode: combined alone; video alone; audio alone; or video plus audio. With video plus audio the Agent merges the exact tracks into MP4 without re-encoding."
 };
@@ -388,13 +404,13 @@ var youtubeDownloadStartSchema = {
   type: "object",
   additionalProperties: false,
   properties: {
-    taskId: { type: "string", description: "Opaque Local Agent download task ID. Pass it unchanged to youtube_get_download_task or youtube_cancel_download_task." },
+    taskId: { type: "string", description: "Opaque Local Agent download task ID. Pass it unchanged to youtube_download_get_task or youtube_download_cancel_task." },
     status: { type: "string", enum: ["working"], description: "The download has been created and is running asynchronously." },
     statusMessage: { type: "string" },
     phase: { ...downloadPhaseSchema, description: "Current yt-dlp operation phase. A new task begins in preparing." },
     createdAt: { type: "string", format: "date-time" },
     lastUpdatedAt: { type: "string", format: "date-time", description: "The time of the most recent progress, lifecycle, or liveness-heartbeat update." },
-    pollIntervalMs: { type: "integer", minimum: 100, description: "Suggested minimum interval before calling youtube_get_download_task again." },
+    pollIntervalMs: { type: "integer", minimum: 100, description: "Suggested minimum interval before calling youtube_download_get_task again." },
     progressPercent: { type: ["number", "null"], minimum: 0, maximum: 100, description: "Percent of the current phase; null while preparing. It is 100 once the task is completed." }
   },
   required: ["taskId", "status", "statusMessage", "phase", "createdAt", "lastUpdatedAt", "pollIntervalMs", "progressPercent"]
@@ -607,7 +623,7 @@ var captureFrameYoutubeInputSchema = {
   additionalProperties: false,
   properties: {
     videoId: { type: "string", minLength: 6, description: "YouTube video ID." },
-    formatId: { type: "string", pattern: "^[0-9]+$", description: "Exact numeric video formatId returned immediately beforehand by youtube_get_download_formats. Do not use youtube_get_video.youtubeFormats here." }
+    formatId: { type: "string", pattern: "^[0-9]+$", description: "Exact numeric video formatId returned immediately beforehand by youtube_download_get_formats. Do not use youtube_get_video.youtubeFormats here." }
   },
   required: ["videoId", "formatId"]
 };
@@ -679,6 +695,16 @@ var visualMapTaskSchema = {
     error: { type: "object", additionalProperties: false, properties: { code: { type: "string" }, message: { type: "string" } }, required: ["code", "message"] }
   },
   required: ["taskId", "status", "statusMessage", "phase", "progressPercent", "completedFrames", "totalFrames", "completedMaps", "totalMaps", "createdAt", "lastUpdatedAt", "pollIntervalMs"]
+};
+var visualMapCancelTaskSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    taskId: { type: "string", minLength: 1 },
+    accepted: { type: "boolean" },
+    message: { type: "string" }
+  },
+  required: ["taskId", "accepted", "message"]
 };
 var captureFrameWidgetActionSchema = {
   type: "object",
@@ -957,24 +983,24 @@ function toolDefinitions() {
       outputSchema: workspaceDeleteSchema
     },
     {
-      name: "workspace_share_start",
-      title: "Publish one workspace folder or file for external download",
+      name: "online_share_start",
+      title: "Start an online share",
       description: "Explicitly start a temporary public HTTPS share through cloudflared for one existing workspace folder or one file. A folder share needs fileTypes and exposes only allowed regular files beneath that folder; a file share exposes exactly that file. No directory listing is exposed. Set verifyExternal=true to ask wsrv.nl to fetch an image: a folder share then requires probePath, an allowed image inside the folder; a single-file share must itself be an image. externallyReachable is true only after that independent image request succeeds. Starting a new share closes any prior share.",
       annotations: { ...localWorkspaceWriteAnnotations, openWorldHint: true },
       inputSchema: { type: "object", additionalProperties: false, properties: { folder: { type: "string", description: "Existing logical directory. Mutually exclusive with file; empty string means the workspace root." }, file: { type: "string", minLength: 1, description: "Existing logical file. Mutually exclusive with folder." }, fileTypes: { type: "array", minItems: 1, maxItems: 7, uniqueItems: true, items: workspaceShareFileTypeSchema, description: "Required only for a folder share; all cannot be combined with another category." }, verifyExternal: { type: "boolean", default: false, description: "Use wsrv.nl to verify external image reachability." }, probePath: { type: "string", minLength: 1, description: "Required only for a verified folder share: an allowed image inside folder." } }, oneOf: [{ required: ["folder", "fileTypes"], not: { required: ["file"] } }, { required: ["file"], not: { anyOf: [{ required: ["folder"] }, { required: ["fileTypes"] }, { required: ["probePath"] }] } }] },
       outputSchema: workspaceShareStatusSchema
     },
     {
-      name: "workspace_share_status",
-      title: "Inspect the current external-download share",
+      name: "online_share_status",
+      title: "Get online-share status",
       description: "Report the active cloudflared folder or single-file download share. Set verifyExternal=true to repeat its configured wsrv.nl image probe without restarting the share. externallyReachable becomes true only after that probe succeeds. This never exposes a host filesystem path.",
       annotations: localAgentReadAnnotations,
       inputSchema: { type: "object", additionalProperties: false, properties: { verifyExternal: { type: "boolean", default: false, description: "Repeat the configured external image probe." } } },
       outputSchema: workspaceShareStatusSchema
     },
     {
-      name: "workspace_share_stop",
-      title: "Stop the current public workspace share",
+      name: "online_share_stop",
+      title: "Stop the online share",
       description: "Immediately close the currently active local sharing server and its cloudflared Quick Tunnel. It does not delete workspace files.",
       annotations: { ...localWorkspaceWriteAnnotations, openWorldHint: true },
       inputSchema: { type: "object", additionalProperties: false, properties: {} },
@@ -999,7 +1025,7 @@ function toolDefinitions() {
     {
       name: "media_capture_frame",
       title: "Extract one frame from workspace or YouTube",
-      description: "Extract one frame either from an existing workspace media path, or directly from YouTube without downloading the full video. For direct YouTube capture, first call youtube_get_download_formats and pass its exact numeric video formatId as youtube.formatId; the browser-side youtubeFormats list is not accepted because it can differ from local yt-dlp. The Local Agent uses yt-dlp --download-sections with ffmpeg to download only a short window around timestampSeconds, deletes that temporary section, and saves only the image in the workspace. The image filename uses the title returned by that same yt-dlp operation plus [yt_<videoId>], timestamp, and unique capture ID. path and youtube are mutually exclusive. videoStreamIndex is only for path sources. showInChat defaults to false: set it true only when the user needs to see this particular frame inline. Inline display is presentation only; it does not make image pixels a reliable visual input to ChatGPT. No media URLs or host paths are exposed.",
+      description: "Extract one frame either from an existing workspace media path, or directly from YouTube without downloading the full video. For direct YouTube capture, first call youtube_download_get_formats and pass its exact numeric video formatId as youtube.formatId; the browser-side youtubeFormats list is not accepted because it can differ from local yt-dlp. The Local Agent uses yt-dlp --download-sections with ffmpeg to download only a short window around timestampSeconds, deletes that temporary section, and saves only the image in the workspace. The image filename uses the title returned by that same yt-dlp operation plus [yt_<videoId>], timestamp, and unique capture ID. path and youtube are mutually exclusive. videoStreamIndex is only for path sources. showInChat defaults to false: set it true only when the user needs to see this particular frame inline. Inline display is presentation only; it does not make image pixels a reliable visual input to ChatGPT. No media URLs or host paths are exposed.",
       annotations: localWorkspaceWriteAnnotations,
       inputSchema: {
         type: "object",
@@ -1015,7 +1041,7 @@ function toolDefinitions() {
           resize: captureFrameResizeSchema,
           image: captureFrameImageInputSchema,
           outputPath: { type: "string", minLength: 1, description: "Optional logical workspace-relative output image path. If omitted, media_capture_frame writes a uniquely named image to captures/. Use this only to choose a different workspace folder or filename; media_capture_frame never overwrites an existing file." },
-          showInChat: { type: "boolean", default: false, description: "Set true only when the user needs this resulting frame displayed inline. After a successful result, call media_show_workspace_image for its returned image.workspacePath. Default false keeps the chat compact and must not create a display widget." }
+          showInChat: { type: "boolean", default: false, description: "Set true only when the user needs this resulting frame displayed inline. After a successful result, call media_image_show for its returned image.workspacePath. Default false keeps the chat compact and must not create a display widget." }
         },
         required: ["timestampSeconds"],
         oneOf: [{ required: ["path"] }, { required: ["youtube"] }]
@@ -1029,7 +1055,7 @@ function toolDefinitions() {
     {
       name: "media_visual_map_create",
       title: "Start a uniform video visual map",
-      description: "Start an asynchronous task that creates chronological PNG contact sheets from an existing Workspace video. Iteration 1 supports only deterministic uniform selection and never downloads media. Poll media_visual_map_get_task no faster than pollIntervalMs until it completes; then display a specific map with media_show_workspace_image if needed.",
+      description: "Start an asynchronous task that creates chronological PNG contact sheets from an existing Workspace video. Iteration 1 supports only deterministic uniform selection and never downloads media. Poll media_visual_map_get_task no faster than pollIntervalMs until it completes; then display a specific map with media_image_show if needed.",
       annotations: localWorkspaceWriteAnnotations,
       inputSchema: {
         type: "object",
@@ -1054,7 +1080,7 @@ function toolDefinitions() {
       name: "media_visual_map_get_task",
       title: "Get visual-map task progress",
       description: "Get the current phase, percentage, and final result or error for a visual-map task. Poll no faster than the returned pollIntervalMs. When completed, maps are Workspace images and are not displayed automatically.",
-      annotations: localWorkspaceReadAnnotations,
+      annotations: localAgentReadAnnotations,
       inputSchema: {
         type: "object",
         additionalProperties: false,
@@ -1063,6 +1089,20 @@ function toolDefinitions() {
       },
       outputSchema: visualMapTaskSchema,
       _meta: { "openai/toolInvocation/invoking": "Checking visual-map progress\u2026", "openai/toolInvocation/invoked": "Visual-map progress checked." }
+    },
+    {
+      name: "media_visual_map_cancel_task",
+      title: "Cancel visual-map task",
+      description: "Request cancellation of a working visual-map task. Pass taskId unchanged, then call media_visual_map_get_task to observe its terminal state.",
+      annotations: localWorkspaceWriteAnnotations,
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: { taskId: { type: "string", minLength: 1 } },
+        required: ["taskId"]
+      },
+      outputSchema: visualMapCancelTaskSchema,
+      _meta: { "openai/toolInvocation/invoking": "Cancelling visual map\u2026", "openai/toolInvocation/invoked": "Visual-map cancellation requested." }
     },
     {
       name: "media_capture_screen",
@@ -1075,7 +1115,7 @@ function toolDefinitions() {
         properties: {
           outputPath: { type: "string", minLength: 1, description: "Optional logical workspace-relative image path. If omitted, media_capture_screen creates a uniquely named file under screenshots/. It never overwrites an existing file." },
           image: screenCaptureImageInputSchema,
-          showInChat: { type: "boolean", default: false, description: "Set true only when the user needs this screenshot displayed inline. After a successful result, call media_show_workspace_image for its workspacePath. Default false keeps the chat compact and must not create a display widget." }
+          showInChat: { type: "boolean", default: false, description: "Set true only when the user needs this screenshot displayed inline. After a successful result, call media_image_show for its workspacePath. Default false keeps the chat compact and must not create a display widget." }
         }
       },
       outputSchema: screenCaptureSchema,
@@ -1097,7 +1137,7 @@ function toolDefinitions() {
           crop: captureFrameCropSchema,
           image: captureFrameImageInputSchema,
           outputPath: { type: "string", minLength: 1, description: "Optional logical workspace-relative path for the new cropped image. If omitted, the Agent creates a unique PNG under crops/. It never overwrites an existing file." },
-          showInChat: { type: "boolean", default: false, description: "Set true only when the user needs this cropped image displayed inline. After a successful result, call media_show_workspace_image for its returned image.workspacePath. Default false keeps the chat compact and must not create a display widget." }
+          showInChat: { type: "boolean", default: false, description: "Set true only when the user needs this cropped image displayed inline. After a successful result, call media_image_show for its returned image.workspacePath. Default false keeps the chat compact and must not create a display widget." }
         },
         required: ["path", "crop"]
       },
@@ -1108,7 +1148,7 @@ function toolDefinitions() {
       }
     },
     {
-      name: "media_show_workspace_image",
+      name: "media_image_show",
       title: "Show a workspace image in chat",
       description: "Show a previously created ResearchTube workspace image inline in ChatGPT. Use this after media_capture_frame, media_capture_screen, or media_image_crop when showInChat was requested, or whenever the user asks to show a prior capture, screenshot, crop, or workspace image. This tool is for user presentation only; it does not make the image pixels a reliable visual input to ChatGPT. It reads the local image but never exposes a host filesystem path or image bytes to the model.",
       annotations: localAgentReadAnnotations,
@@ -1122,7 +1162,7 @@ function toolDefinitions() {
       }
     },
     {
-      name: "media_inspect_image",
+      name: "media_image_inspect",
       title: "Inspect workspace image metadata",
       description: "Independently validate one PNG, JPEG, or WebP image in the ResearchTube workspace and return only its logical workspace path, verified format, MIME type, pixel dimensions, and byte size. Use this when image dimensions or format must be checked; use workspace_stat only for generic filesystem metadata because it never reads file contents. This tool does not return image pixels, base64 data, a widget, or a host filesystem path.",
       annotations: localAgentReadAnnotations,
@@ -1181,7 +1221,7 @@ function toolDefinitions() {
       _meta: { ui: { visibility: ["app"] }, "openai/visibility": "private", "openai/widgetAccessible": true }
     },
     {
-      name: "youtube_get_download_formats",
+      name: "youtube_download_get_formats",
       title: "Get formats available for download",
       description: "Ask the Local Agent's current yt-dlp installation which exact formats it can download for one public video now. This is the authoritative format source for youtube_download: choose numeric formatId values only from this tool and call it immediately before downloading. youtube_get_video.youtubeFormats is a separate advisory snapshot from the browser's direct YouTube player response; its IDs can legitimately differ from local yt-dlp because the two clients resolve YouTube playback independently. This tool exposes no media URLs, credentials, host paths, or raw yt-dlp output.",
       annotations: localDownloadReadAnnotations,
@@ -1191,7 +1231,7 @@ function toolDefinitions() {
     {
       name: "youtube_download",
       title: "Download a public YouTube video",
-      description: "Start an asynchronous download of one public YouTube video through the optional ResearchTube Local Agent and its locally resolved yt-dlp, Deno, and ffmpeg executables. First call youtube_get_download_formats(videoId) immediately before this tool and select exact numeric formatId values from that tool's local-yt-dlp downloadFormats response; never select a numeric ID only from youtube_get_video.youtubeFormats because that direct-YouTube snapshot is advisory and can differ. formatSelection chooses the downloaded media tracks: combined alone, video alone, audio alone, or video plus audio; never mix combined with video/audio. 'best' remains allowed for one requested component. startSeconds and endSeconds are optional as a pair: omit both to download the full video, or provide both to download only that source-video interval. A partial download requires ffmpeg and its resulting filename includes [partial_<start>_<end>]. A video+audio pair is remuxed into MP4 without re-encoding and therefore requires ffmpeg. The Agent accepts no arbitrary yt-dlp selector or arguments, no credentials, and no playlist. Returns a start handle only. Poll youtube_get_download_task no faster than pollIntervalMs; phase identifies the real yt-dlp operation and progressPercent is the percent within that phase, not a fabricated whole-task percentage. If a task fails or its output is unexpected, use youtube_get_download_task_diagnostics to inspect its normalized lifecycle and cleanup record. outputDir, when supplied, must be a safe workspace-relative directory.",
+      description: "Start an asynchronous download of one public YouTube video through the optional ResearchTube Local Agent and its locally resolved yt-dlp, Deno, and ffmpeg executables. First call youtube_download_get_formats(videoId) immediately before this tool and select exact numeric formatId values from that tool's local-yt-dlp downloadFormats response; never select a numeric ID only from youtube_get_video.youtubeFormats because that direct-YouTube snapshot is advisory and can differ. formatSelection chooses the downloaded media tracks: combined alone, video alone, audio alone, or video plus audio; never mix combined with video/audio. 'best' remains allowed for one requested component. startSeconds and endSeconds are optional as a pair: omit both to download the full video, or provide both to download only that source-video interval. A partial download requires ffmpeg and its resulting filename includes [partial_<start>_<end>]. A video+audio pair is remuxed into MP4 without re-encoding and therefore requires ffmpeg. The Agent accepts no arbitrary yt-dlp selector or arguments, no credentials, and no playlist. Returns a start handle only. Poll youtube_download_get_task no faster than pollIntervalMs; phase identifies the real yt-dlp operation and progressPercent is the percent within that phase, not a fabricated whole-task percentage. If a task fails or its output is unexpected, use youtube_download_task_diagnostics to inspect its normalized lifecycle and cleanup record. outputDir, when supplied, must be a safe workspace-relative directory.",
       annotations: localDownloadAnnotations,
       inputSchema: {
         type: "object",
@@ -1208,7 +1248,7 @@ function toolDefinitions() {
       outputSchema: youtubeDownloadStartSchema
     },
     {
-      name: "youtube_get_download_task",
+      name: "youtube_download_get_task",
       title: "Get YouTube download status",
       description: "Read the current status of an asynchronous youtube_download task. Pass taskId unchanged and poll no faster than pollIntervalMs while status is working. phase identifies the actual yt-dlp operation. progressPercent is the native 0\u2013100 percent for that phase: selected video and audio tracks each have their own percentage, merging has null, and completed has 100. lastUpdatedAt advances on progress, lifecycle changes, and liveness heartbeats. The terminal result contains only a workspace-relative filePath; its extension reflects the selected track or remuxed pair.",
       annotations: localDownloadReadAnnotations,
@@ -1216,7 +1256,7 @@ function toolDefinitions() {
       outputSchema: youtubeDownloadTaskSchema
     },
     {
-      name: "youtube_get_download_task_diagnostics",
+      name: "youtube_download_task_diagnostics",
       title: "Get YouTube download diagnostics",
       description: "Read normalized post-mortem lifecycle events for one youtube_download task, especially after failed, cancelled, or unexpected output states. Events identify yt-dlp start/exit, phase transitions, final-output reporting and verification, structured error code, and cleanup of task-specific workspace artifacts. It intentionally does not return raw yt-dlp stdout/stderr, signed media URLs, credentials, or host paths. Use afterEventId to fetch only newer events.",
       annotations: localDownloadReadAnnotations,
@@ -1224,9 +1264,9 @@ function toolDefinitions() {
       outputSchema: downloadTaskDiagnosticsSchema
     },
     {
-      name: "youtube_cancel_download_task",
+      name: "youtube_download_cancel_task",
       title: "Cancel YouTube download",
-      description: "Request cancellation of a currently running youtube_download task. Pass taskId unchanged. Cancellation is cooperative: after an accepted request, call youtube_get_download_task to observe the terminal state.",
+      description: "Request cancellation of a currently running youtube_download task. Pass taskId unchanged. Cancellation is cooperative: after an accepted request, call youtube_download_get_task to observe the terminal state.",
       annotations: localDownloadAnnotations,
       inputSchema: { type: "object", additionalProperties: false, properties: { taskId: { type: "string", minLength: 1, description: "Opaque taskId returned by youtube_download." } }, required: ["taskId"] },
       outputSchema: cancelDownloadTaskSchema
@@ -1244,7 +1284,7 @@ function toolDefinitions() {
     {
       name: "youtube_get_video",
       title: "Get public YouTube video details",
-      description: "Inspect one public YouTube video by video ID. Returns research metadata including title, description, channel, duration, absolute publication date when available, normalized views, likes, and comment count plus YouTube display text, category, tags, thumbnail, all public caption tracks, and youtubeFormats: an advisory format snapshot extracted directly from this video's browser-side YouTube player response. youtubeFormats is useful for media inspection but must not be treated as a guaranteed local download list; before youtube_download, call youtube_get_download_formats for the local yt-dlp-confirmed IDs. Both lists contain no media URLs or credentials. Each caption track has a trackIndex for youtube_get_transcript. It does not return canonical video URLs, caption text, comment text, replies, account-only, private, member-only, or age-restricted content.",
+      description: "Inspect one public YouTube video by video ID. Returns research metadata including title, description, channel, duration, absolute publication date when available, normalized views, likes, and comment count plus YouTube display text, category, tags, thumbnail, all public caption tracks, and youtubeFormats: an advisory format snapshot extracted directly from this video's browser-side YouTube player response. youtubeFormats is useful for media inspection but must not be treated as a guaranteed local download list; before youtube_download, call youtube_download_get_formats for the local yt-dlp-confirmed IDs. Both lists contain no media URLs or credentials. Each caption track has a trackIndex for youtube_get_transcript. It does not return canonical video URLs, caption text, comment text, replies, account-only, private, member-only, or age-restricted content.",
       annotations: pureReadAnnotations,
       inputSchema: { type: "object", additionalProperties: false, properties: { videoId: { type: "string", minLength: 6, description: "YouTube video ID obtained from youtube_search, a channel or playlist catalogue, or a prior youtube_get_video response." } }, required: ["videoId"] },
       outputSchema: { type: "object", additionalProperties: false, properties: { videoId: { type: "string" }, title: { type: "string" }, description: { type: "string" }, channel: commentAuthorSchema, publishedAt: nullableString, durationSeconds: { type: ["number", "null"] }, views: nullableInteger, viewsText: nullableString, likes: nullableInteger, likesText: nullableString, commentCount: nullableInteger, commentCountText: nullableString, category: nullableString, tags: { type: "array", items: { type: "string" } }, thumbnailUrl: nullableString, captions: { type: "object", additionalProperties: false, properties: { available: { type: "boolean" }, tracks: { type: "array", items: captionTrackSchema } }, required: ["available", "tracks"] }, youtubeFormats: youtubeFormatsSchema }, required: ["videoId", "title", "description", "channel", "publishedAt", "durationSeconds", "views", "viewsText", "likes", "likesText", "commentCount", "commentCountText", "category", "tags", "thumbnailUrl", "captions", "youtubeFormats"] }
@@ -1349,12 +1389,15 @@ async function mcpToolSettingsCatalog() {
       alwaysEnabled: metadata.alwaysEnabled,
       enabled: metadata.alwaysEnabled || preferences.enabledByName[tool.name] === true
     };
-  }).sort((left, right) => MCP_TOOL_GROUPS[left.group].order - MCP_TOOL_GROUPS[right.group].order || left.title.localeCompare(right.title));
+  }).sort((left, right) => MCP_TOOL_GROUPS[left.group].order - MCP_TOOL_GROUPS[right.group].order || left.name.localeCompare(right.name));
 }
 async function enabledMcpToolDefinitions() {
   const catalog = await mcpToolSettingsCatalog();
   const enabledNames = new Set(catalog.filter((tool) => tool.enabled).map((tool) => tool.name));
-  return publicMcpTools().filter((tool) => enabledNames.has(tool.name));
+  return publicMcpTools().filter((tool) => enabledNames.has(tool.name)).map((tool) => ({
+    ...tool,
+    outputSchema: { anyOf: [tool.outputSchema, rejectedToolResultSchema] }
+  }));
 }
 async function isMcpToolEnabled(name) {
   const tool = publicMcpTools().find((candidate) => candidate.name === name);
@@ -2118,6 +2161,14 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     describeYouTubeVideoInChatGPT(message.tab).then(sendResponse).catch((error) => sendResponse({ ok: false, error: safeErrorMessage(error) }));
     return true;
   }
+  if (message?.type === "researchtube_capture_frame_local_action") {
+    if (message.action !== "copyPath") {
+      sendResponse({ ok: false, error: "This widget action is not available." });
+      return false;
+    }
+    copyCaptureFramePath(message.path).then((data) => sendResponse({ ok: true, data })).catch((error) => sendResponse({ ok: false, error: safeErrorMessage(error) }));
+    return true;
+  }
   return false;
 });
 async function getConfig() {
@@ -2548,7 +2599,7 @@ async function getYouTubeDownloadTaskDiagnostics(taskId, args = {}) {
 async function cancelYouTubeDownloadTask(taskId) {
   if (typeof taskId !== "string" || !taskId) throw localAgentError("TASK_NOT_FOUND", "taskId is required.");
   await agentJsonRequest(`/tasks/${encodeURIComponent(taskId)}/cancel`, { method: "POST", body: {} });
-  return { taskId, accepted: true, message: "Cancellation request accepted. Poll youtube_get_download_task for the terminal status." };
+  return { taskId, accepted: true, message: "Cancellation request accepted. Poll youtube_download_get_task for the terminal status." };
 }
 function normalizeWorkspacePath(value, fieldName, { allowRoot = false } = {}) {
   if (allowRoot && value === "") return "";
@@ -2643,7 +2694,7 @@ async function workspaceDelete(path) {
 var workspaceShareFileTypes = /* @__PURE__ */ new Set(["images", "audio", "video", "documents", "archives", "other", "all"]);
 function normalizeWorkspaceShareFileTypes(value) {
   if (!Array.isArray(value) || !value.length || value.length > workspaceShareFileTypes.size || new Set(value).size !== value.length || value.some((item) => typeof item !== "string" || !workspaceShareFileTypes.has(item)) || value.includes("all") && value.length !== 1) {
-    throw localAgentError("WORKSPACE_SHARE_INVALID", "fileTypes must be a non-empty array of unique supported categories; all cannot be combined with another category.");
+    throw localAgentError("ONLINE_SHARE_INVALID", "fileTypes must be a non-empty array of unique supported categories; all cannot be combined with another category.");
   }
   return value;
 }
@@ -2671,15 +2722,15 @@ function normalizeWorkspaceShareStatus(document) {
 }
 async function workspaceShareStart(args) {
   const hasFolder = Object.hasOwn(args, "folder"), hasFile = Object.hasOwn(args, "file");
-  if (hasFolder === hasFile) throw localAgentError("WORKSPACE_SHARE_INVALID", "Specify exactly one of folder or file.");
+  if (hasFolder === hasFile) throw localAgentError("ONLINE_SHARE_INVALID", "Specify exactly one of folder or file.");
   const verifyExternal = args.verifyExternal === void 0 ? false : args.verifyExternal;
-  if (typeof verifyExternal !== "boolean") throw localAgentError("WORKSPACE_SHARE_INVALID", "verifyExternal must be a boolean.");
+  if (typeof verifyExternal !== "boolean") throw localAgentError("ONLINE_SHARE_INVALID", "verifyExternal must be a boolean.");
   const input = hasFolder ? { folder: normalizeWorkspacePath(args.folder, "folder", { allowRoot: true }), fileTypes: normalizeWorkspaceShareFileTypes(args.fileTypes), verifyExternal } : { file: normalizeWorkspacePath(args.file, "file"), verifyExternal };
   if (hasFolder && verifyExternal) input.probePath = normalizeWorkspacePath(args.probePath, "probePath");
   return normalizeWorkspaceShareStatus(await agentJsonRequest("/workspace/share/start", { method: "POST", body: input, timeoutMs: 2e4 }));
 }
 async function workspaceShareStatus(verifyExternal = false) {
-  if (typeof verifyExternal !== "boolean") throw localAgentError("WORKSPACE_SHARE_INVALID", "verifyExternal must be a boolean.");
+  if (typeof verifyExternal !== "boolean") throw localAgentError("ONLINE_SHARE_INVALID", "verifyExternal must be a boolean.");
   return normalizeWorkspaceShareStatus(await agentJsonRequest("/workspace/share/status", { method: "POST", body: { verifyExternal }, timeoutMs: verifyExternal ? 3e4 : 1e4 }));
 }
 async function workspaceShareStop() {
@@ -2762,7 +2813,7 @@ function normalizeCaptureFrameInput(argumentsValue = {}) {
     const value = captureFrameObject(args.youtube, "youtube", /* @__PURE__ */ new Set(["videoId", "formatId"]));
     if (!Object.hasOwn(value, "videoId") || !Object.hasOwn(value, "formatId") || Object.keys(value).length !== 2) throw localAgentError("CAPTURE_FRAME_INVALID", "youtube requires videoId and formatId.");
     const videoId = requireVideoId({ videoId: value.videoId });
-    if (typeof value.formatId !== "string" || !/^[0-9]+$/.test(value.formatId)) throw localAgentError("CAPTURE_FRAME_INVALID", "youtube.formatId must be a numeric ID returned by youtube_get_download_formats.");
+    if (typeof value.formatId !== "string" || !/^[0-9]+$/.test(value.formatId)) throw localAgentError("CAPTURE_FRAME_INVALID", "youtube.formatId must be a numeric ID returned by youtube_download_get_formats.");
     youtube = { videoId, formatId: value.formatId };
   }
   const timestampSeconds = captureFrameFiniteNumber(args.timestampSeconds, "timestampSeconds", { minimum: 0 });
@@ -2931,6 +2982,14 @@ async function getVisualMapTask(taskId) {
   if (typeof taskId !== "string" || !taskId.trim()) throw localAgentError("INVALID_ARGUMENT", "taskId must be a non-empty string.");
   const document = await agentJsonRequest(`/tasks/visual-map/${encodeURIComponent(taskId)}`, { timeoutMs: AGENT_TASK_TIMEOUT_MS });
   return normalizeVisualMapTask(document);
+}
+async function cancelVisualMapTask(taskId) {
+  if (typeof taskId !== "string" || !taskId.trim()) throw localAgentError("INVALID_ARGUMENT", "taskId must be a non-empty string.");
+  const document = await agentJsonRequest(`/tasks/visual-map/${encodeURIComponent(taskId)}/cancel`, { method: "POST", body: {}, timeoutMs: AGENT_TASK_TIMEOUT_MS });
+  if (!document || typeof document !== "object" || document.accepted !== true) {
+    throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent did not confirm visual-map cancellation.");
+  }
+  return { taskId, accepted: true, message: "Cancellation request accepted. Poll media_visual_map_get_task for the terminal status." };
 }
 function normalizeScreenCaptureInput(argumentsValue = {}) {
   const args = captureFrameObject(argumentsValue, "media_capture_screen", /* @__PURE__ */ new Set(["outputPath", "image", "showInChat"]));
@@ -3404,26 +3463,26 @@ async function handleMcpRequest(request) {
     const input = request.params.arguments ?? {};
     return executeToolCall(request.id, "youtube_download", input, () => startYouTubeDownload(input));
   }
-  if (request?.method === "tools/call" && request.params?.name === "youtube_get_download_formats") {
+  if (request?.method === "tools/call" && request.params?.name === "youtube_download_get_formats") {
     const videoId = String(request.params.arguments?.videoId ?? "").trim();
-    if (!videoId) return { jsonrpc: "2.0", id: request.id, error: { code: -32602, message: "videoId is required" } };
-    return executeToolCall(request.id, "youtube_get_download_formats", { videoId }, () => getYouTubeDownloadFormats(videoId));
+    if (!videoId) return toolError(request.id, localAgentError("INVALID_ARGUMENT", "videoId is required."));
+    return executeToolCall(request.id, "youtube_download_get_formats", { videoId }, () => getYouTubeDownloadFormats(videoId));
   }
-  if (request?.method === "tools/call" && request.params?.name === "youtube_get_download_task") {
+  if (request?.method === "tools/call" && request.params?.name === "youtube_download_get_task") {
     const taskId = String(request.params.arguments?.taskId ?? "").trim();
-    if (!taskId) return { jsonrpc: "2.0", id: request.id, error: { code: -32602, message: "taskId is required" } };
-    return executeToolCall(request.id, "youtube_get_download_task", { taskId }, () => getYouTubeDownloadTask(taskId));
+    if (!taskId) return toolError(request.id, localAgentError("INVALID_ARGUMENT", "taskId is required."));
+    return executeToolCall(request.id, "youtube_download_get_task", { taskId }, () => getYouTubeDownloadTask(taskId));
   }
-  if (request?.method === "tools/call" && request.params?.name === "youtube_get_download_task_diagnostics") {
+  if (request?.method === "tools/call" && request.params?.name === "youtube_download_task_diagnostics") {
     const args = request.params.arguments ?? {};
     const taskId = String(args.taskId ?? "").trim();
-    if (!taskId) return { jsonrpc: "2.0", id: request.id, error: { code: -32602, message: "taskId is required" } };
-    return executeToolCall(request.id, "youtube_get_download_task_diagnostics", { taskId, afterEventId: args.afterEventId ?? 0, limit: args.limit ?? 100 }, () => getYouTubeDownloadTaskDiagnostics(taskId, args));
+    if (!taskId) return toolError(request.id, localAgentError("INVALID_ARGUMENT", "taskId is required."));
+    return executeToolCall(request.id, "youtube_download_task_diagnostics", { taskId, afterEventId: args.afterEventId ?? 0, limit: args.limit ?? 100 }, () => getYouTubeDownloadTaskDiagnostics(taskId, args));
   }
-  if (request?.method === "tools/call" && request.params?.name === "youtube_cancel_download_task") {
+  if (request?.method === "tools/call" && request.params?.name === "youtube_download_cancel_task") {
     const taskId = String(request.params.arguments?.taskId ?? "").trim();
-    if (!taskId) return { jsonrpc: "2.0", id: request.id, error: { code: -32602, message: "taskId is required" } };
-    return executeToolCall(request.id, "youtube_cancel_download_task", { taskId }, () => cancelYouTubeDownloadTask(taskId));
+    if (!taskId) return toolError(request.id, localAgentError("INVALID_ARGUMENT", "taskId is required."));
+    return executeToolCall(request.id, "youtube_download_cancel_task", { taskId }, () => cancelYouTubeDownloadTask(taskId));
   }
   if (request?.method === "tools/call" && request.params?.name === "system_agent_status") {
     return executeToolCall(request.id, "system_agent_status", {}, () => getAgentStatus());
@@ -3437,12 +3496,12 @@ async function handleMcpRequest(request) {
   }
   if (request?.method === "tools/call" && request.params?.name === "library_store_status") {
     const taskId = String(request.params.arguments?.taskId ?? "").trim();
-    if (!taskId) return { jsonrpc: "2.0", id: request.id, error: { code: -32602, message: "taskId is required" } };
+    if (!taskId) return toolError(request.id, localAgentError("INVALID_ARGUMENT", "taskId is required."));
     return executeToolCall(request.id, "library_store_status", { taskId }, () => libraryStoreStatus(taskId));
   }
   if (request?.method === "tools/call" && request.params?.name === "library_store_cancel") {
     const taskId = String(request.params.arguments?.taskId ?? "").trim();
-    if (!taskId) return { jsonrpc: "2.0", id: request.id, error: { code: -32602, message: "taskId is required" } };
+    if (!taskId) return toolError(request.id, localAgentError("INVALID_ARGUMENT", "taskId is required."));
     return executeToolCall(request.id, "library_store_cancel", { taskId }, () => libraryStoreCancel(taskId));
   }
   if (request?.method === "tools/call" && request.params?.name === "workspace_list") {
@@ -3450,7 +3509,7 @@ async function handleMcpRequest(request) {
     const path = args.path === void 0 ? "" : args.path;
     const limit = args.limit === void 0 ? 100 : args.limit;
     if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
-      return { jsonrpc: "2.0", id: request.id, error: { code: -32602, message: "limit must be an integer from 1 to 500" } };
+      return toolError(request.id, localAgentError("INVALID_ARGUMENT", "limit must be an integer from 1 to 500."));
     }
     return executeToolCall(request.id, "workspace_list", { path, limit }, () => workspaceList(path, limit));
   }
@@ -3470,16 +3529,16 @@ async function handleMcpRequest(request) {
     const path = request.params.arguments?.path;
     return executeToolCall(request.id, "workspace_delete", { path }, () => workspaceDelete(path));
   }
-  if (request?.method === "tools/call" && request.params?.name === "workspace_share_start") {
+  if (request?.method === "tools/call" && request.params?.name === "online_share_start") {
     const args = request.params.arguments ?? {};
-    return executeToolCall(request.id, "workspace_share_start", args, () => workspaceShareStart(args));
+    return executeToolCall(request.id, "online_share_start", args, () => workspaceShareStart(args));
   }
-  if (request?.method === "tools/call" && request.params?.name === "workspace_share_status") {
+  if (request?.method === "tools/call" && request.params?.name === "online_share_status") {
     const args = request.params.arguments ?? {};
-    return executeToolCall(request.id, "workspace_share_status", args, () => workspaceShareStatus(args.verifyExternal));
+    return executeToolCall(request.id, "online_share_status", args, () => workspaceShareStatus(args.verifyExternal));
   }
-  if (request?.method === "tools/call" && request.params?.name === "workspace_share_stop") {
-    return executeToolCall(request.id, "workspace_share_stop", {}, workspaceShareStop);
+  if (request?.method === "tools/call" && request.params?.name === "online_share_stop") {
+    return executeToolCall(request.id, "online_share_stop", {}, workspaceShareStop);
   }
   if (request?.method === "tools/call" && request.params?.name === "media_probe") {
     const path = request.params.arguments?.path;
@@ -3498,6 +3557,10 @@ async function handleMcpRequest(request) {
     const taskId = request.params.arguments?.taskId;
     return executeToolCall(request.id, "media_visual_map_get_task", { taskId }, () => getVisualMapTask(taskId));
   }
+  if (request?.method === "tools/call" && request.params?.name === "media_visual_map_cancel_task") {
+    const taskId = request.params.arguments?.taskId;
+    return executeToolCall(request.id, "media_visual_map_cancel_task", { taskId }, () => cancelVisualMapTask(taskId));
+  }
   if (request?.method === "tools/call" && request.params?.name === "media_capture_screen") {
     const args = request.params.arguments ?? {};
     return executeToolCall(request.id, "media_capture_screen", args, () => captureScreen(args));
@@ -3506,12 +3569,12 @@ async function handleMcpRequest(request) {
     const args = request.params.arguments ?? {};
     return executeToolCall(request.id, "media_image_crop", args, () => imageCrop(args));
   }
-  if (request?.method === "tools/call" && request.params?.name === "media_show_workspace_image") {
+  if (request?.method === "tools/call" && request.params?.name === "media_image_show") {
     return executeShowWorkspaceImageToolCall(request.id, request.params.arguments?.path);
   }
-  if (request?.method === "tools/call" && request.params?.name === "media_inspect_image") {
+  if (request?.method === "tools/call" && request.params?.name === "media_image_inspect") {
     const path = request.params.arguments?.path;
-    return executeToolCall(request.id, "media_inspect_image", { path }, () => mediaInspectImage(path));
+    return executeToolCall(request.id, "media_image_inspect", { path }, () => mediaInspectImage(path));
   }
   if (request?.method === "tools/call" && request.params?.name === "clipboard_status") {
     return executeToolCall(request.id, "clipboard_status", request.params.arguments ?? {}, () => clipboardStatus(request.params.arguments ?? {}));
@@ -3533,7 +3596,7 @@ async function handleMcpRequest(request) {
     const query = String(request.params.arguments?.query ?? "").trim();
     const limit = boundedInt(request.params.arguments?.limit, 10, 1, 50);
     if (!query) {
-      return { jsonrpc: "2.0", id: request.id, error: { code: -32602, message: "query is required" } };
+      return toolError(request.id, localAgentError("INVALID_ARGUMENT", "query is required."));
     }
     return executeToolCall(request.id, "youtube_search", { query, limit }, () => youtubeSearch(query, limit), "YouTube search failed");
   }
@@ -3582,7 +3645,7 @@ async function handleMcpRequest(request) {
     const args = request.params.arguments ?? {};
     const videoId = requireVideoId(args);
     const commentId = String(args.commentId ?? "").trim();
-    if (!commentId) return { jsonrpc: "2.0", id: request.id, error: { code: -32602, message: "commentId is required" } };
+    if (!commentId) return toolError(request.id, localAgentError("INVALID_ARGUMENT", "commentId is required."));
     const limit = boundedInt(args.limit, 20, 1, 100);
     return executeToolCall(request.id, "youtube_get_comment_replies", { videoId, commentId, limit }, () => youtubeGetCommentReplies(videoId, commentId, limit));
   }
@@ -3636,10 +3699,10 @@ async function executeShowWorkspaceImageToolCall(id, path) {
   const startedAt = Date.now();
   try {
     const result = await showWorkspaceImage(path);
-    void recordCommandDiagnostic("succeeded", { tool: "media_show_workspace_image", elapsed_ms: Date.now() - startedAt, output: result.metadata });
+    void recordCommandDiagnostic("succeeded", { tool: "media_image_show", elapsed_ms: Date.now() - startedAt, output: result.metadata });
     return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(result.metadata) }], structuredContent: result.metadata, _meta: { researchtube: { localAgentImageUrl: result.localAgentImageUrl } }, isError: false } };
   } catch (error) {
-    void recordCommandDiagnostic("failed", { tool: "media_show_workspace_image", elapsed_ms: Date.now() - startedAt, error_code: error?.code || null, error: searchDiagnosticMessage(error) });
+    void recordCommandDiagnostic("failed", { tool: "media_image_show", elapsed_ms: Date.now() - startedAt, error_code: error?.code || null, error: searchDiagnosticMessage(error) });
     return toolError(id, error);
   }
 }
@@ -3691,6 +3754,7 @@ function summarizeCommandInput(tool, input) {
   if (tool === "media_capture_frame") return { path: typeof input.path === "string" ? input.path : null, youtube: input.youtube && typeof input.youtube === "object" ? { videoId: input.youtube.videoId ?? null, formatId: input.youtube.formatId ?? null } : null, timestampSeconds: input.timestampSeconds ?? null, videoStreamIndex: input.videoStreamIndex ?? null, seekMode: input.seekMode ?? null, outputPath: typeof input.outputPath === "string" ? input.outputPath : null };
   if (tool === "media_visual_map_create") return { workspacePath: typeof input.workspacePath === "string" ? input.workspacePath : null, columns: input.columns ?? null, rows: input.rows ?? null, maxTotalFrames: input.maxTotalFrames ?? null, selection: input.selection ?? "uniform" };
   if (tool === "media_visual_map_get_task") return { taskId: typeof input.taskId === "string" ? input.taskId : null };
+  if (tool === "media_visual_map_cancel_task") return { taskId: typeof input.taskId === "string" ? input.taskId : null };
   if (tool === "media_capture_screen") return { outputPath: typeof input.outputPath === "string" ? input.outputPath : null, format: input.image?.format ?? null };
   if (tool === "media_image_crop") return { path: typeof input.path === "string" ? input.path : null, crop: input.crop ?? null, outputPath: typeof input.outputPath === "string" ? input.outputPath : null, format: input.image?.format ?? null };
   if (tool === "clipboard_status") return { sinceRevisionProvided: typeof input.sinceRevision === "string" };
@@ -3718,8 +3782,17 @@ function toolError(id, error) {
   const code = error?.code;
   const message = String(error?.message ?? error);
   const text = typeof code === "string" ? `[${code}] ${message}` : message;
-  const structuredError = { error: { code: typeof code === "string" ? code : "TOOL_ERROR", message, ...typeof error?.detail === "string" ? { detail: error.detail } : {} } };
-  return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text }], structuredContent: structuredError, isError: true } };
+  const errorDocument = { code: typeof code === "string" ? code : "TOOL_ERROR", message, detail: typeof error?.detail === "string" ? error.detail : null };
+  if (isExpectedToolError(errorDocument.code)) {
+    const rejected = { status: "rejected", error: errorDocument };
+    return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text }], structuredContent: rejected, isError: false } };
+  }
+  return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text }], structuredContent: { error: errorDocument }, isError: true } };
+}
+function isExpectedToolError(code) {
+  if (typeof code !== "string") return false;
+  if ((/* @__PURE__ */ new Set(["INVALID_ARGUMENT", "INVALID_REQUEST", "INVALID_VIDEO_ID", "NOT_FOUND", "TOOL_DISABLED", "CLIPBOARD_CHANGED", "CLIPBOARD_EMPTY", "CLIPBOARD_TOO_LARGE", "DESTINATION_EXISTS", "DIRECTORY_NOT_EMPTY", "FORMAT_NOT_AVAILABLE", "CAPTURE_VIDEO_FORMAT_NOT_AVAILABLE", "REQUEST_TOO_LARGE", "WORKSPACE_PATH_OUTSIDE_SANDBOX", "PUBLIC_SHARE_NOT_ACTIVE"])).has(code)) return true;
+  return code.endsWith("_INVALID") || code.endsWith("_NOT_FOUND") || code.endsWith("_DESTINATION_EXISTS");
 }
 function disabledMcpToolError(id, name) {
   return toolError(id, Object.assign(new Error(`ResearchTube tool ${name} is disabled in Extension Settings. Enable it, then open ChatGPT Plugins, find ResearchTube, choose Manage, and click Refresh to reload the MCP tool schema.`), { code: "TOOL_DISABLED" }));

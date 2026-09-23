@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 
 const background = await readFile(new URL("../background.js", import.meta.url), "utf8");
 
-for (const tool of ["system_agent_status", "system_check_debug_banner", "workspace_list", "workspace_stat", "workspace_mkdir", "workspace_move", "workspace_delete", "workspace_share_start", "workspace_share_status", "workspace_share_stop", "media_probe", "media_capture_frame", "media_visual_map_create", "media_visual_map_get_task", "media_capture_screen", "media_image_crop", "media_show_workspace_image", "media_inspect_image", "clipboard_status", "clipboard_get", "clipboard_set", "media_load_workspace_image", "media_copy_workspace_path"]) {
+for (const tool of ["system_agent_status", "system_check_debug_banner", "workspace_list", "workspace_stat", "workspace_mkdir", "workspace_move", "workspace_delete", "online_share_start", "online_share_status", "online_share_stop", "media_probe", "media_capture_frame", "media_visual_map_create", "media_visual_map_get_task", "media_visual_map_cancel_task", "media_capture_screen", "media_image_crop", "media_image_show", "media_image_inspect", "clipboard_status", "clipboard_get", "clipboard_set", "media_load_workspace_image", "media_copy_workspace_path"]) {
   assert.match(background, new RegExp(`name: "${tool}"`), `${tool} must be published in tools/list`);
 }
 for (const tool of ["library_store_start", "library_store_status", "library_store_cancel"]) {
@@ -17,20 +17,22 @@ assert.match(background, /"\/media\/capture-frame"/);
 assert.match(background, /"\/media\/image-crop"/);
 assert.doesNotMatch(background, /"\/media\/workspace-image"/);
 assert.match(background, /"\/media\/workspace-image-info"/, "the widget must obtain bounded metadata without image bytes");
-for (const tool of ["youtube_get_download_formats", "youtube_get_download_task_diagnostics"]) {
+for (const tool of ["youtube_download_get_formats", "youtube_download_get_task", "youtube_download_task_diagnostics", "youtube_download_cancel_task"]) {
   assert.match(background, new RegExp(`name: "${tool}"`), `${tool} must be published in tools/list`);
 }
 assert.match(background, /youtubeFormats: youtubeFormatsSchema/);
-assert.match(background, /youtube_get_download_formats\.downloadFormats/);
+assert.match(background, /youtube_download_get_formats\.downloadFormats/);
 assert.match(background, /afterEventId/);
-assert.match(background, /const REQUIRED_AGENT_INTERFACE_VERSION = 41;/);
+assert.match(background, /const REQUIRED_AGENT_INTERFACE_VERSION = 43;/);
 assert.match(background, /selection: \{ type: "string", enum: \["uniform"\]/, "visual maps must publish only the Iteration 1 uniform selector");
 assert.match(background, /"\/tasks\/visual-map"/, "visual maps must use the Agent task endpoint");
 assert.match(background, /const RESEARCHTUBE_SERVER_DESCRIPTION =/, "the server must expose a bootstrap discovery description");
 assert.match(background, /description: RESEARCHTUBE_SERVER_DESCRIPTION/, "serverInfo must publish its bootstrap discovery description");
+assert.match(background, /ResearchTube is discoverable through functions\.exec lazy MCP-tool discovery/, "server description must name the bootstrap discovery path");
 assert.match(background, /const RESEARCHTUBE_MCP_INSTRUCTIONS =/, "the MCP server must publish lazy-discovery guidance");
 assert.match(background, /instructions: RESEARCHTUBE_MCP_INSTRUCTIONS/, "initialize must expose server-level MCP instructions");
 assert.match(background, /do not infer that ResearchTube is unavailable/, "instructions must forbid inferring unavailability from tool visibility");
+assert.match(background, /ResearchTube is available through functions\.exec with lazy MCP-tool discovery/, "instructions must name the client's deferred-tool discovery path");
 assert.match(background, /tool === "library_store_status"/, "the Extension-local Library status poll must report an outcome to the Agent log");
 assert.match(background, /\/mcp\/log\/\$\{tool\}/, "status reports must identify the tool without sending its inputs");
 assert.match(background, /availableBytes/);
@@ -52,7 +54,7 @@ assert.match(background, /newToolsEnabledByDefault/, "new MCP tools must have a 
 assert.match(background, /TOOL_DISABLED/, "a stale ChatGPT tool schema must receive a clear disabled-tool result");
 assert.match(background, /showInChat defaults to false/);
 assert.match(background, /never render a widget themselves/, "creation tools must not create blank static-template iframes");
-assert.match(background, /After a successful result, call media_show_workspace_image/, "showInChat must route presentation through the dedicated display tool");
+assert.match(background, /After a successful result, call media_image_show/, "showInChat must route presentation through the dedicated display tool");
 assert.match(background, /Independently validate one PNG, JPEG, or WebP image/, "image inspection must be distinct from generic workspace stat");
 assert.equal((background.match(/"openai\/outputTemplate": CAPTURE_FRAME_WIDGET_URI/g) || []).length, 1, "only the explicit workspace-image display tool may declare the widget template");
 assert.doesNotMatch(background, /researchtube_copy_capture_frame_image/);
@@ -64,9 +66,10 @@ assert.match(background, /saves only the image in the workspace/);
 assert.doesNotMatch(background, /Public HTTPS URL served only by the Agent's image-only Cloudflare Quick Tunnel/);
 assert.match(background, /outputPath/);
 assert.match(background, /cloudflared/);
-assert.match(background, /workspace_share_start/);
-assert.match(background, /workspace_share_status/);
-assert.match(background, /workspace_share_stop/);
+assert.match(background, /online_share_start/);
+assert.match(background, /online_share_status/);
+assert.match(background, /online_share_stop/);
+assert.match(background, /online: \{ title: "Online Share"/, "online sharing must have its own Settings group");
 assert.match(background, /verifyExternal=true/, "the public share must expose explicit external probing");
 assert.match(background, /probePath/, "a verified folder share must use a selected image probe path");
 assert.match(background, /externallyReachable/, "the public share must distinguish tunnel start from external reachability");
@@ -75,5 +78,8 @@ assert.match(background, /single-file share/, "the public share must support an 
 assert.doesNotMatch(background, /saveToLibrary/);
 assert.doesNotMatch(background, /delivery\.workspacePath/);
 assert.match(background, /--download-sections/);
-assert.match(background, /youtube_get_download_formats/);
+assert.match(background, /youtube_download_get_formats/);
+assert.doesNotMatch(background, /name: "youtube_get_download_formats"/);
+assert.match(background, /status: "rejected"/, "expected input and state errors must be ordinary structured results");
+assert.match(background, /isError: false/, "expected input and state errors must not be raised as MCP errors");
 console.log("workspace tools contract: ok");

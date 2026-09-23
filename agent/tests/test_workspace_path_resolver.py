@@ -183,6 +183,19 @@ class VisualMapContractTests(unittest.TestCase):
         self.assertEqual(snapshot["completedFrames"], 3)
         self.assertEqual(agent.response_log_suffix("/tasks/visual-map/vismap_example", snapshot), " 42.5%")
 
+    def test_visual_map_cancel_marks_a_running_task_for_cancellation(self) -> None:
+        async def check() -> None:
+            manager = agent.VisualMapTaskManager()
+            task = agent.VisualMapTask("vismap_cancel", {}, "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z")
+            task.runner = asyncio.create_task(asyncio.sleep(60))
+            manager.tasks[task.task_id] = task
+            await manager.cancel(task.task_id)
+            await asyncio.sleep(0)
+            self.assertTrue(task.runner.cancelled())
+            self.assertEqual(task.status_message, "Visual-map cancellation requested.")
+
+        asyncio.run(check())
+
     def test_uniform_timestamps_use_range_boundaries(self) -> None:
         self.assertEqual(agent.uniform_visual_map_timestamps(1, 10, 4), [1, 4, 7, 10])
         self.assertEqual(agent.uniform_visual_map_timestamps(1, 10, 1), [1])

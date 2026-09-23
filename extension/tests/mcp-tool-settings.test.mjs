@@ -17,6 +17,7 @@ assert.match(background, /updateNewToolsEnabledByDefault/);
 assert.match(background, /enabledByName/);
 assert.match(background, /name: tool\.name/);
 assert.match(background, /tools: await enabledMcpToolDefinitions\(\)/);
+assert.doesNotMatch(background, /localWorkspaceReadAnnotations/, "all tool annotation constants must be defined");
 assert.match(html, /MCP tool availability/);
 assert.match(html, /id="new-tools-enabled"/);
 assert.match(html, /ChatGPT Plugins/);

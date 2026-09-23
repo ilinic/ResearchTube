@@ -31,8 +31,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote, unquote, urlparse
 from urllib.request import Request, urlopen
 
-AGENT_VERSION = "1.69.0"
-INTERFACE_VERSION = 41
+AGENT_VERSION = "1.71.0"
+INTERFACE_VERSION = 43
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
 TASK_POLL_INTERVAL_MS = 1_000
@@ -438,7 +438,7 @@ class DownloadSelection:
 
     The Agent never accepts an arbitrary yt-dlp selector or command-line
     fragment. Exact numeric IDs are expected to come from the Local Agent's
-    youtube_get_download_formats workflow, not the advisory YouTube snapshot.
+    youtube_download_get_formats workflow, not the advisory YouTube snapshot.
     """
 
     combined: str | None = None
@@ -593,7 +593,7 @@ def normalize_yt_dlp_formats(document: Any) -> dict[str, Any]:
 async def youtube_download_formats(payload: Any) -> dict[str, Any]:
     """Read formats from the exact local yt-dlp installation used for downloads."""
     if not isinstance(payload, dict):
-        raise AgentApiError("INVALID_REQUEST", "youtube_get_download_formats requires a JSON object.")
+        raise AgentApiError("INVALID_REQUEST", "youtube_download_get_formats requires a JSON object.")
     video_id = validate_video_id(payload.get("videoId"))
     yt_dlp = find_component("ytDlp", COMPONENTS["ytDlp"][0])
     if yt_dlp.error:
@@ -1050,7 +1050,7 @@ def capture_frame_options(payload: Any) -> dict[str, Any]:
             "formatId": parse_format_selection({"video": youtube_item["formatId"]}).video or "",
         }
         if not re.fullmatch(r"[0-9]+", youtube["formatId"]):
-            raise AgentApiError("CAPTURE_FRAME_INVALID", "youtube.formatId must be a numeric ID returned by youtube_get_download_formats.")
+            raise AgentApiError("CAPTURE_FRAME_INVALID", "youtube.formatId must be a numeric ID returned by youtube_download_get_formats.")
     timestamp = finite_number(payload.get("timestampSeconds"), field_name="timestampSeconds", minimum=0)
     stream_index = payload.get("videoStreamIndex")
     if stream_index is not None:
@@ -1642,6 +1642,11 @@ async def run_visual_map_ffmpeg(command: list[str], timeout: float) -> tuple[int
             process.kill()
             await process.communicate()
         raise
+    except asyncio.CancelledError:
+        if process is not None and process.returncode is None:
+            process.kill()
+            await process.communicate()
+        raise
     except OSError:
         raise
     return process.returncode, stderr
@@ -1804,6 +1809,14 @@ class VisualMapTaskManager:
         if task.error is not None:
             document["error"] = task.error
         return document
+
+    async def cancel(self, task_id: str) -> None:
+        task = self.get(task_id)
+        if task.status in {"completed", "failed", "cancelled"}:
+            return
+        task.touch("Visual-map cancellation requested.")
+        if task.runner is not None and not task.runner.done():
+            task.runner.cancel()
 
     async def create(self, payload: Any) -> dict[str, Any]:
         options = visual_map_options(payload)
@@ -2006,7 +2019,7 @@ async def capture_youtube_frame(options: dict[str, Any]) -> dict[str, Any]:
         if isinstance(entry, dict) and isinstance(entry.get("formatId"), str)
     }
     if youtube["formatId"] not in selectable_video_ids:
-        raise AgentApiError("CAPTURE_VIDEO_FORMAT_NOT_AVAILABLE", "youtube.formatId must be a currently available video or combined format from youtube_get_download_formats.")
+        raise AgentApiError("CAPTURE_VIDEO_FORMAT_NOT_AVAILABLE", "youtube.formatId must be a currently available video or combined format from youtube_download_get_formats.")
 
     timestamp = options["timestampSeconds"]
     section_start = max(0.0, timestamp - YOUTUBE_CAPTURE_PRE_ROLL_SECONDS)
@@ -3092,42 +3105,42 @@ class WorkspaceShareOptions:
 
 def workspace_share_options(payload: Any) -> WorkspaceShareOptions:
     if not isinstance(payload, dict) or not set(payload).issubset({"folder", "file", "fileTypes", "verifyExternal", "probePath"}):
-        raise AgentApiError("WORKSPACE_SHARE_INVALID", "workspace_share_start received unsupported fields.")
+        raise AgentApiError("ONLINE_SHARE_INVALID", "online_share_start received unsupported fields.")
     has_folder, has_file = "folder" in payload, "file" in payload
     if has_folder == has_file:
-        raise AgentApiError("WORKSPACE_SHARE_INVALID", "Specify exactly one of folder or file.")
+        raise AgentApiError("ONLINE_SHARE_INVALID", "Specify exactly one of folder or file.")
     verify_external = payload.get("verifyExternal", False)
     if not isinstance(verify_external, bool):
-        raise AgentApiError("WORKSPACE_SHARE_INVALID", "verifyExternal must be a boolean.")
+        raise AgentApiError("ONLINE_SHARE_INVALID", "verifyExternal must be a boolean.")
     resolver = WorkspacePathResolver()
     if has_file:
         if "fileTypes" in payload or "probePath" in payload:
-            raise AgentApiError("WORKSPACE_SHARE_INVALID", "A single-file share does not accept fileTypes or probePath.")
+            raise AgentApiError("ONLINE_SHARE_INVALID", "A single-file share does not accept fileTypes or probePath.")
         shared_file = resolver.resolve_existing(payload["file"], field_name="file", expected_type="file")
         if verify_external and public_share_file_type(shared_file.physical_path) != "images":
-            raise AgentApiError("WORKSPACE_SHARE_INVALID", "verifyExternal requires an image file for wsrv.nl.")
+            raise AgentApiError("ONLINE_SHARE_INVALID", "verifyExternal requires an image file for wsrv.nl.")
         return WorkspaceShareOptions(None, shared_file, (), verify_external, shared_file if verify_external else None)
     if "fileTypes" not in payload:
-        raise AgentApiError("WORKSPACE_SHARE_INVALID", "A folder share requires fileTypes.")
+        raise AgentApiError("ONLINE_SHARE_INVALID", "A folder share requires fileTypes.")
     folder = resolver.resolve_existing(payload["folder"], field_name="folder", expected_type="directory", allow_root=True)
     file_types = payload["fileTypes"]
     if not isinstance(file_types, list) or not file_types or len(file_types) > len(PUBLIC_SHARE_FILE_TYPE_NAMES) or len(set(file_types)) != len(file_types):
-        raise AgentApiError("WORKSPACE_SHARE_INVALID", "fileTypes must be a non-empty array of unique supported file categories.")
+        raise AgentApiError("ONLINE_SHARE_INVALID", "fileTypes must be a non-empty array of unique supported file categories.")
     if any(not isinstance(item, str) or item not in PUBLIC_SHARE_FILE_TYPE_NAMES for item in file_types):
-        raise AgentApiError("WORKSPACE_SHARE_INVALID", "fileTypes contains an unsupported file category.")
+        raise AgentApiError("ONLINE_SHARE_INVALID", "fileTypes contains an unsupported file category.")
     if "all" in file_types and len(file_types) != 1:
-        raise AgentApiError("WORKSPACE_SHARE_INVALID", "fileTypes all cannot be combined with other categories.")
+        raise AgentApiError("ONLINE_SHARE_INVALID", "fileTypes all cannot be combined with other categories.")
     if not verify_external:
         if "probePath" in payload:
-            raise AgentApiError("WORKSPACE_SHARE_INVALID", "probePath is only valid when verifyExternal is true.")
+            raise AgentApiError("ONLINE_SHARE_INVALID", "probePath is only valid when verifyExternal is true.")
         return WorkspaceShareOptions(folder, None, tuple(file_types), False, None)
     if "probePath" not in payload:
-        raise AgentApiError("WORKSPACE_SHARE_INVALID", "A verified folder share requires probePath.")
+        raise AgentApiError("ONLINE_SHARE_INVALID", "A verified folder share requires probePath.")
     probe_file = resolver.resolve_existing(payload["probePath"], field_name="probePath", expected_type="file")
     if not path_is_within(probe_file.physical_path, folder.physical_path):
-        raise AgentApiError("WORKSPACE_SHARE_INVALID", "probePath must be inside the shared folder.")
+        raise AgentApiError("ONLINE_SHARE_INVALID", "probePath must be inside the shared folder.")
     if public_share_file_type(probe_file.physical_path) != "images" or ("all" not in file_types and "images" not in file_types):
-        raise AgentApiError("WORKSPACE_SHARE_INVALID", "probePath must be an allowed image file for wsrv.nl.")
+        raise AgentApiError("ONLINE_SHARE_INVALID", "probePath must be an allowed image file for wsrv.nl.")
     return WorkspaceShareOptions(folder, None, tuple(file_types), True, probe_file)
 
 
@@ -3426,10 +3439,10 @@ def workspace_share_status_document() -> dict[str, Any]:
 
 async def workspace_share_status(payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict) or set(payload) - {"verifyExternal"}:
-        raise AgentApiError("WORKSPACE_SHARE_INVALID", "workspace_share_status received unsupported fields.")
+        raise AgentApiError("ONLINE_SHARE_INVALID", "online_share_status received unsupported fields.")
     verify_external = payload.get("verifyExternal", False)
     if not isinstance(verify_external, bool):
-        raise AgentApiError("WORKSPACE_SHARE_INVALID", "verifyExternal must be a boolean.")
+        raise AgentApiError("ONLINE_SHARE_INVALID", "verifyExternal must be a boolean.")
     async with PUBLIC_SHARE_LOCK:
         if verify_external and (PUBLIC_SHARE_FOLDER is not None or PUBLIC_SHARE_FILE is not None):
             if PUBLIC_SHARE_FILE is not None:
@@ -3438,7 +3451,7 @@ async def workspace_share_status(payload: Any) -> dict[str, Any]:
                 probe_path = PUBLIC_SHARE_EXTERNAL_PROBE.get("probePath")
                 probe_file = WorkspacePathResolver().resolve_existing(probe_path, field_name="probePath", expected_type="file") if isinstance(probe_path, str) else None
             if probe_file is None:
-                raise AgentApiError("WORKSPACE_SHARE_INVALID", "This share has no image probePath. Restart it with verifyExternal and a probePath.")
+                raise AgentApiError("ONLINE_SHARE_INVALID", "This share has no image probePath. Restart it with verifyExternal and a probePath.")
             await run_external_share_probe(probe_file)
         return workspace_share_status_document()
 
@@ -3540,6 +3553,10 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             response_status, response_body = "200 OK", await youtube_download_formats(parse_json_body(body))
         elif method == "POST" and path == "/tasks/youtube-download":
             response_status, response_body = "201 Created", await TASKS.create_download(parse_json_body(body))
+        elif method == "POST" and path.startswith("/tasks/visual-map/") and path.endswith("/cancel"):
+            task_id = path.removeprefix("/tasks/visual-map/").removesuffix("/cancel").rstrip("/")
+            await VISUAL_MAP_TASKS.cancel(task_id)
+            response_status, response_body = "202 Accepted", {"accepted": True}
         elif method == "POST" and path.startswith("/tasks/") and path.endswith("/diagnostics"):
             task_id = path.removeprefix("/tasks/").removesuffix("/diagnostics").rstrip("/")
             response_status, response_body = "200 OK", TASKS.diagnostics_snapshot(task_id, parse_json_body(body))
