@@ -68,8 +68,8 @@ var MCP_TOOL_SETTINGS = Object.freeze({
   online_share_status: { group: "online" },
   online_share_stop: { group: "online" }
 });
-var EXTENSION_VERSION = "1.80.0";
-var REQUIRED_AGENT_INTERFACE_VERSION = 44;
+var EXTENSION_VERSION = "1.83.0";
+var REQUIRED_AGENT_INTERFACE_VERSION = 47;
 var CAPTURE_FRAME_WIDGET_URI = "ui://researchtube/capture-frame-v37.html";
 var RESEARCHTUBE_SERVER_DESCRIPTION = "ResearchTube provides YouTube research, local media and image operations, workspace management, screenshots, clipboard, and Library integration. Search this server when the user refers to ResearchTube, YouTube analysis, a previously created workspace file, captured frame, screenshot, crop, clipboard, or asks to continue a previous ResearchTube operation. In clients with deferred tools, ResearchTube is discoverable through functions.exec lazy MCP-tool discovery; search there before treating the capability as unavailable.";
 var RESEARCHTUBE_MCP_INSTRUCTIONS = "ResearchTube exposes MCP tools that may be loaded or discovered lazily by the client. When the user mentions ResearchTube, invokes @ResearchTube, asks to repeat a ResearchTube operation, or requests a capability previously provided by ResearchTube, do not infer that ResearchTube is unavailable merely because its tools are not currently visible as a top-level tool namespace. In this client, ResearchTube is available through functions.exec with lazy MCP-tool discovery: search there for the appropriate ResearchTube tool before reporting that the capability is unavailable. Only report ResearchTube as unavailable if tool discovery actually fails, the required tool cannot be found after discovery, or an actual ResearchTube tool invocation returns an availability, connection, compatibility, or transport error. Successful use earlier in the conversation is evidence that the tools may be discoverable again; rediscover them rather than assuming access has disappeared. media_capture_frame, media_capture_screen, and media_image_crop never render a widget themselves: when showInChat is true, after the successful creation result immediately call media_image_show with the returned workspace image path. When showInChat is false, do not call the display tool.";
@@ -664,7 +664,8 @@ var visualMapSchema = {
   additionalProperties: false,
   properties: {
     sourcePath: { type: "string", minLength: 1 },
-    selection: { type: "string", const: "uniform" },
+    selection: { type: "string", enum: ["uniform", "sceneDetect", "hybrid"] },
+    sceneDetectThreshold: { anyOf: [{ type: "number", minimum: 0, maximum: 100 }, { type: "null" }] },
     range: { type: "object", additionalProperties: false, properties: { startSeconds: { type: "number", minimum: 0 }, endSeconds: { type: "number", minimum: 0 } }, required: ["startSeconds", "endSeconds"] },
     columns: { type: "integer", minimum: 1 },
     rows: { type: "integer", minimum: 1 },
@@ -673,7 +674,7 @@ var visualMapSchema = {
     actualTotalFrames: { type: "integer", minimum: 1 },
     maps: { type: "array", minItems: 1, items: { type: "object", additionalProperties: false, properties: { workspacePath: { type: "string", minLength: 1 }, frameCount: { type: "integer", minimum: 1 }, timestampsSeconds: { type: "array", minItems: 1, items: { type: "number", minimum: 0 } } }, required: ["workspacePath", "frameCount", "timestampsSeconds"] } }
   },
-  required: ["sourcePath", "selection", "range", "columns", "rows", "mapCapacity", "maxTotalFrames", "actualTotalFrames", "maps"]
+  required: ["sourcePath", "selection", "sceneDetectThreshold", "range", "columns", "rows", "mapCapacity", "maxTotalFrames", "actualTotalFrames", "maps"]
 };
 var visualMapTaskSchema = {
   type: "object",
@@ -682,7 +683,7 @@ var visualMapTaskSchema = {
     taskId: { type: "string", minLength: 1 },
     status: { type: "string", enum: ["working", "completed", "failed", "cancelled"] },
     statusMessage: { type: "string" },
-    phase: { type: "string", enum: ["preparing", "extractingFrames", "assemblingMaps", "completed", "failed", "cancelled"] },
+    phase: { type: "string", enum: ["preparing", "detectingScenes", "extractingFrames", "assemblingMaps", "completed", "failed", "cancelled"] },
     progressPercent: { type: "number", minimum: 0, maximum: 100 },
     completedFrames: { type: "integer", minimum: 0 },
     totalFrames: { type: "integer", minimum: 0 },
@@ -1054,8 +1055,8 @@ function toolDefinitions() {
     },
     {
       name: "media_visual_map_create",
-      title: "Start a uniform video visual map",
-      description: "Start an asynchronous task that creates chronological PNG contact sheets from an existing Workspace video. Iteration 1 supports only deterministic uniform selection and never downloads media. Poll media_visual_map_get_task no faster than pollIntervalMs until it completes; then display a specific map with media_image_show if needed.",
+      title: "Start a video visual map",
+      description: "Start an asynchronous task that creates chronological PNG contact sheets from an existing Workspace video. selection=uniform samples evenly. selection=sceneDetect uses FFmpeg's native scdet filter; sceneDetectThreshold is its percentage threshold from 0 to 100 and defaults to 10. It de-duplicates changes closer than two seconds and retains the strongest maxTotalFrames. selection=hybrid also uses scdet, but divides the requested range into maxTotalFrames equal intervals and chooses each interval's strongest detected change; an empty interval uses its midpoint. Results are chronological. Never downloads media. Poll media_visual_map_get_task no faster than pollIntervalMs until it completes; then display a specific map with media_image_show if needed.",
       annotations: localWorkspaceWriteAnnotations,
       inputSchema: {
         type: "object",
@@ -1065,7 +1066,8 @@ function toolDefinitions() {
           columns: { type: "integer", minimum: 1 },
           rows: { type: "integer", minimum: 1 },
           maxTotalFrames: { type: "integer", minimum: 1, maximum: 120 },
-          selection: { type: "string", enum: ["uniform"], default: "uniform" },
+          selection: { type: "string", enum: ["uniform", "sceneDetect", "hybrid"], default: "uniform" },
+          sceneDetectThreshold: { type: "number", minimum: 0, maximum: 100, default: 10, description: "FFmpeg scdet threshold percentage. Use only with selection=sceneDetect or hybrid." },
           startSeconds: { type: "number", minimum: 0, default: 0 },
           endSeconds: { type: "number", minimum: 0 },
           maxMapDimension: { type: "integer", minimum: 1, default: 4096 },
@@ -2928,27 +2930,32 @@ async function captureFrame(argumentsValue) {
   return normalizeCaptureFrameResult(document, input);
 }
 function normalizeVisualMapInput(argumentsValue = {}) {
-  const args = captureFrameObject(argumentsValue, "media_visual_map_create", /* @__PURE__ */ new Set(["workspacePath", "columns", "rows", "maxTotalFrames", "selection", "startSeconds", "endSeconds", "maxMapDimension", "frameTimestampPosition"]));
+  const args = captureFrameObject(argumentsValue, "media_visual_map_create", /* @__PURE__ */ new Set(["workspacePath", "columns", "rows", "maxTotalFrames", "selection", "sceneDetectThreshold", "startSeconds", "endSeconds", "maxMapDimension", "frameTimestampPosition"]));
   const workspacePath = normalizeWorkspacePath(args.workspacePath, "workspacePath");
   const columns = captureFrameInteger(args.columns, "columns", 1);
   const rows = captureFrameInteger(args.rows, "rows", 1);
   const maxTotalFrames = captureFrameInteger(args.maxTotalFrames, "maxTotalFrames", 1);
   if (maxTotalFrames > 120) throw localAgentError("VISUAL_MAP_INVALID", "maxTotalFrames must not exceed 120.");
   const selection = args.selection === void 0 ? "uniform" : args.selection;
-  if (selection !== "uniform") throw localAgentError("VISUAL_MAP_INVALID", "Iteration 1 supports only selection=uniform.");
+  if (!(/* @__PURE__ */ new Set(["uniform", "sceneDetect", "hybrid"])).has(selection)) throw localAgentError("VISUAL_MAP_INVALID", "selection must be uniform, sceneDetect, or hybrid.");
+  if (!(/* @__PURE__ */ new Set(["sceneDetect", "hybrid"])).has(selection) && args.sceneDetectThreshold !== void 0) throw localAgentError("VISUAL_MAP_INVALID", "sceneDetectThreshold is available only when selection is sceneDetect or hybrid.");
+  const sceneDetectThreshold = (/* @__PURE__ */ new Set(["sceneDetect", "hybrid"])).has(selection) ? args.sceneDetectThreshold === void 0 ? 10 : args.sceneDetectThreshold : null;
+  if ((/* @__PURE__ */ new Set(["sceneDetect", "hybrid"])).has(selection) && (typeof sceneDetectThreshold !== "number" || !Number.isFinite(sceneDetectThreshold) || sceneDetectThreshold < 0 || sceneDetectThreshold > 100)) {
+    throw localAgentError("VISUAL_MAP_INVALID", "sceneDetectThreshold must be a finite number from 0 to 100.");
+  }
   const startSeconds = args.startSeconds === void 0 ? 0 : captureFrameFiniteNumber(args.startSeconds, "startSeconds", { minimum: 0 });
   const endSeconds = args.endSeconds === void 0 ? void 0 : captureFrameFiniteNumber(args.endSeconds, "endSeconds", { minimum: 0 });
   if (endSeconds !== void 0 && startSeconds >= endSeconds) throw localAgentError("VISUAL_MAP_INVALID", "startSeconds must be less than endSeconds.");
   const maxMapDimension = args.maxMapDimension === void 0 ? 4096 : captureFrameInteger(args.maxMapDimension, "maxMapDimension", 1);
   const frameTimestampPosition = args.frameTimestampPosition === void 0 ? "bottomRight" : args.frameTimestampPosition;
   if (!(/* @__PURE__ */ new Set(["none", "topLeft", "topRight", "bottomLeft", "bottomRight"])).has(frameTimestampPosition)) throw localAgentError("VISUAL_MAP_INVALID", "frameTimestampPosition is invalid.");
-  return { workspacePath, columns, rows, maxTotalFrames, selection, startSeconds, ...endSeconds === void 0 ? {} : { endSeconds }, maxMapDimension, frameTimestampPosition };
+  return { workspacePath, columns, rows, maxTotalFrames, selection, ...sceneDetectThreshold === null ? {} : { sceneDetectThreshold }, startSeconds, ...endSeconds === void 0 ? {} : { endSeconds }, maxMapDimension, frameTimestampPosition };
 }
 function normalizeVisualMapResult(document, input) {
-  if (!document || typeof document !== "object" || Array.isArray(document) || typeof document.sourcePath !== "string" || !document.sourcePath || document.selection !== "uniform" || !document.range || !Number.isFinite(document.range.startSeconds) || !Number.isFinite(document.range.endSeconds) || !Number.isInteger(document.columns) || document.columns < 1 || !Number.isInteger(document.rows) || document.rows < 1 || document.mapCapacity !== document.columns * document.rows || !Number.isInteger(document.maxTotalFrames) || document.maxTotalFrames < 1 || !Number.isInteger(document.actualTotalFrames) || document.actualTotalFrames < 1 || document.actualTotalFrames > document.maxTotalFrames || !Array.isArray(document.maps) || !document.maps.length) {
+  if (!document || typeof document !== "object" || Array.isArray(document) || typeof document.sourcePath !== "string" || !document.sourcePath || !(/* @__PURE__ */ new Set(["uniform", "sceneDetect", "hybrid"])).has(document.selection) || !(document.sceneDetectThreshold === null || Number.isFinite(document.sceneDetectThreshold) && document.sceneDetectThreshold >= 0 && document.sceneDetectThreshold <= 100) || document.selection === "uniform" && document.sceneDetectThreshold !== null || (/* @__PURE__ */ new Set(["sceneDetect", "hybrid"])).has(document.selection) && document.sceneDetectThreshold === null || !document.range || !Number.isFinite(document.range.startSeconds) || !Number.isFinite(document.range.endSeconds) || !Number.isInteger(document.columns) || document.columns < 1 || !Number.isInteger(document.rows) || document.rows < 1 || document.mapCapacity !== document.columns * document.rows || !Number.isInteger(document.maxTotalFrames) || document.maxTotalFrames < 1 || !Number.isInteger(document.actualTotalFrames) || document.actualTotalFrames < 1 || document.actualTotalFrames > document.maxTotalFrames || document.selection === "hybrid" && document.actualTotalFrames !== document.maxTotalFrames || !Array.isArray(document.maps) || !document.maps.length) {
     throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid visual-map result.");
   }
-  if (input && (document.sourcePath !== input.workspacePath || document.range.startSeconds !== input.startSeconds || document.columns !== input.columns || document.rows !== input.rows || document.maxTotalFrames !== input.maxTotalFrames || document.actualTotalFrames > input.maxTotalFrames)) {
+  if (input && (document.sourcePath !== input.workspacePath || document.selection !== input.selection || document.sceneDetectThreshold !== (input.sceneDetectThreshold ?? null) || document.range.startSeconds !== input.startSeconds || document.columns !== input.columns || document.rows !== input.rows || document.maxTotalFrames !== input.maxTotalFrames || document.actualTotalFrames > input.maxTotalFrames)) {
     throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned a visual-map result that does not match the requested task.");
   }
   let count = 0;
@@ -2960,10 +2967,10 @@ function normalizeVisualMapResult(document, input) {
     return { workspacePath: normalizeWorkspacePath(map.workspacePath, "maps.workspacePath"), frameCount: map.frameCount, timestampsSeconds: map.timestampsSeconds };
   });
   if (count !== document.actualTotalFrames) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned inconsistent visual-map frame counts.");
-  return { sourcePath: document.sourcePath, selection: "uniform", range: { startSeconds: document.range.startSeconds, endSeconds: document.range.endSeconds }, columns: document.columns, rows: document.rows, mapCapacity: document.mapCapacity, maxTotalFrames: document.maxTotalFrames, actualTotalFrames: count, maps };
+  return { sourcePath: document.sourcePath, selection: document.selection, sceneDetectThreshold: document.sceneDetectThreshold, range: { startSeconds: document.range.startSeconds, endSeconds: document.range.endSeconds }, columns: document.columns, rows: document.rows, mapCapacity: document.mapCapacity, maxTotalFrames: document.maxTotalFrames, actualTotalFrames: count, maps };
 }
 function normalizeVisualMapTask(document, input = null) {
-  if (!document || typeof document !== "object" || Array.isArray(document) || typeof document.taskId !== "string" || !document.taskId || !(/* @__PURE__ */ new Set(["working", "completed", "failed", "cancelled"])).has(document.status) || typeof document.statusMessage !== "string" || !(/* @__PURE__ */ new Set(["preparing", "extractingFrames", "assemblingMaps", "completed", "failed", "cancelled"])).has(document.phase) || !Number.isFinite(document.progressPercent) || document.progressPercent < 0 || document.progressPercent > 100 || !["completedFrames", "totalFrames", "completedMaps", "totalMaps", "pollIntervalMs"].every((key) => Number.isInteger(document[key]) && document[key] >= 0) || typeof document.createdAt !== "string" || typeof document.lastUpdatedAt !== "string" || document.pollIntervalMs < 100) {
+  if (!document || typeof document !== "object" || Array.isArray(document) || typeof document.taskId !== "string" || !document.taskId || !(/* @__PURE__ */ new Set(["working", "completed", "failed", "cancelled"])).has(document.status) || typeof document.statusMessage !== "string" || !(/* @__PURE__ */ new Set(["preparing", "detectingScenes", "extractingFrames", "assemblingMaps", "completed", "failed", "cancelled"])).has(document.phase) || !Number.isFinite(document.progressPercent) || document.progressPercent < 0 || document.progressPercent > 100 || !["completedFrames", "totalFrames", "completedMaps", "totalMaps", "pollIntervalMs"].every((key) => Number.isInteger(document[key]) && document[key] >= 0) || typeof document.createdAt !== "string" || typeof document.lastUpdatedAt !== "string" || document.pollIntervalMs < 100) {
     throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid visual-map task.");
   }
   if (document.status === "completed" && (!document.result || document.error)) throw localAgentError("AGENT_INVALID_RESPONSE", "A completed visual-map task must contain only its result.");

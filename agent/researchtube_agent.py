@@ -31,8 +31,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote, unquote, urlparse
 from urllib.request import Request, urlopen
 
-AGENT_VERSION = "1.72.0"
-INTERFACE_VERSION = 44
+AGENT_VERSION = "1.75.0"
+INTERFACE_VERSION = 47
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
 TASK_POLL_INTERVAL_MS = 1_000
@@ -61,6 +61,8 @@ VISUAL_MAP_MAX_CELLS = 120
 DEFAULT_VISUAL_MAP_MAX_DIMENSION = 4096
 DEFAULT_TIMESTAMP_FONT_SIZE_PX = 24
 DEFAULT_VISUAL_MAP_TIMESTAMP_FONT = "DejaVuSans.ttf"
+DEFAULT_VISUAL_MAP_SCENE_DETECT_THRESHOLD = 10.0
+VISUAL_MAP_SCENE_MIN_DISTANCE_SECONDS = 2.0
 YOUTUBE_CAPTURE_FRAME_TIMEOUT_SECONDS = 90
 YOUTUBE_CAPTURE_PRE_ROLL_SECONDS = 12.0
 YOUTUBE_CAPTURE_POST_ROLL_SECONDS = 3.0
@@ -1103,7 +1105,7 @@ def image_crop_options(payload: Any) -> dict[str, Any]:
 
 
 def visual_map_options(payload: Any) -> dict[str, Any]:
-    allowed = {"workspacePath", "columns", "rows", "maxTotalFrames", "selection", "startSeconds", "endSeconds", "maxMapDimension", "frameTimestampPosition"}
+    allowed = {"workspacePath", "columns", "rows", "maxTotalFrames", "selection", "sceneDetectThreshold", "startSeconds", "endSeconds", "maxMapDimension", "frameTimestampPosition"}
     if not isinstance(payload, dict) or set(payload) - allowed:
         raise AgentApiError("VISUAL_MAP_INVALID", "media_visual_map_create requires only documented fields.")
     path = payload.get("workspacePath")
@@ -1118,8 +1120,14 @@ def visual_map_options(payload: Any) -> dict[str, Any]:
         raise AgentApiError("VISUAL_MAP_INVALID", "The visual-map grid is too large.")
     if max_total_frames > VISUAL_MAP_MAX_TOTAL_FRAMES:
         raise AgentApiError("VISUAL_MAP_INVALID", f"maxTotalFrames must not exceed {VISUAL_MAP_MAX_TOTAL_FRAMES}.")
-    if payload.get("selection", "uniform") != "uniform":
-        raise AgentApiError("VISUAL_MAP_INVALID", "Iteration 1 supports only selection=uniform.")
+    selection = payload.get("selection", "uniform")
+    if selection not in {"uniform", "sceneDetect", "hybrid"}:
+        raise AgentApiError("VISUAL_MAP_INVALID", "selection must be uniform, sceneDetect, or hybrid.")
+    threshold = payload.get("sceneDetectThreshold", DEFAULT_VISUAL_MAP_SCENE_DETECT_THRESHOLD)
+    if not isinstance(threshold, (int, float)) or isinstance(threshold, bool) or not math.isfinite(threshold) or threshold < 0 or threshold > 100:
+        raise AgentApiError("VISUAL_MAP_INVALID", "sceneDetectThreshold must be a finite number from 0 to 100.")
+    if selection not in {"sceneDetect", "hybrid"} and "sceneDetectThreshold" in payload:
+        raise AgentApiError("VISUAL_MAP_INVALID", "sceneDetectThreshold is available only when selection is sceneDetect or hybrid.")
     start, end = payload.get("startSeconds", 0), payload.get("endSeconds")
     if not isinstance(start, (int, float)) or isinstance(start, bool) or not math.isfinite(start) or start < 0:
         raise AgentApiError("VISUAL_MAP_INVALID", "startSeconds must be a finite number greater than or equal to zero.")
@@ -1131,7 +1139,7 @@ def visual_map_options(payload: Any) -> dict[str, Any]:
     timestamp_position = payload.get("frameTimestampPosition", "bottomRight")
     if timestamp_position not in {"none", "topLeft", "topRight", "bottomLeft", "bottomRight"}:
         raise AgentApiError("VISUAL_MAP_INVALID", "frameTimestampPosition is invalid.")
-    return {"workspacePath": path, "columns": columns, "rows": rows, "maxTotalFrames": max_total_frames, "selection": "uniform", "startSeconds": float(start), "endSeconds": None if end is None else float(end), "maxMapDimension": maximum, "frameTimestampPosition": timestamp_position}
+    return {"workspacePath": path, "columns": columns, "rows": rows, "maxTotalFrames": max_total_frames, "selection": selection, "sceneDetectThreshold": float(threshold) if selection in {"sceneDetect", "hybrid"} else None, "startSeconds": float(start), "endSeconds": None if end is None else float(end), "maxMapDimension": maximum, "frameTimestampPosition": timestamp_position}
 
 
 def uniform_visual_map_timestamps(start: float, end: float, count: int) -> list[float]:
@@ -1139,6 +1147,74 @@ def uniform_visual_map_timestamps(start: float, end: float, count: int) -> list[
         return [start]
     step = (end - start) / (count - 1)
     return [start + index * step for index in range(count - 1)] + [end]
+
+
+@dataclass(frozen=True)
+class VisualMapSceneCandidate:
+    timestamp_seconds: float
+    delta: float
+
+
+def visual_map_scene_candidates(metadata: bytes, start: float, end: float) -> list[VisualMapSceneCandidate]:
+    """Parse native scdet metadata without exposing FFmpeg process output."""
+    candidates: list[VisualMapSceneCandidate] = []
+    timestamp: float | None = None
+    score: float | None = None
+
+    def append_candidate() -> None:
+        nonlocal timestamp, score
+        if timestamp is not None and score is not None and start <= timestamp <= end:
+            candidates.append(VisualMapSceneCandidate(timestamp, score))
+        timestamp, score = None, None
+
+    for raw_line in metadata.decode("utf-8", "replace").splitlines():
+        if raw_line.startswith("frame:"):
+            append_candidate()
+            continue
+        time_match = re.fullmatch(r"lavfi\.scd\.time=([-+]?\d+(?:\.\d+)?)", raw_line.strip())
+        if time_match:
+            try:
+                value = float(time_match.group(1))
+            except ValueError:
+                timestamp = None
+            else:
+                timestamp = value if math.isfinite(value) else None
+            continue
+        score_match = re.fullmatch(r"lavfi\.scd\.score=([-+]?\d+(?:\.\d+)?)", raw_line.strip())
+        if score_match:
+            try:
+                value = float(score_match.group(1))
+            except ValueError:
+                continue
+            score = value if math.isfinite(value) and value > 0 else None
+    append_candidate()
+    return candidates
+
+
+def select_visual_map_scene_candidates(candidates: list[VisualMapSceneCandidate], maximum: int) -> list[VisualMapSceneCandidate]:
+    """Keep the strongest scene changes at least two seconds apart, then order them chronologically."""
+    strongest_first = sorted(candidates, key=lambda candidate: (-candidate.delta, candidate.timestamp_seconds))
+    spaced: list[VisualMapSceneCandidate] = []
+    for candidate in strongest_first:
+        if all(abs(candidate.timestamp_seconds - kept.timestamp_seconds) >= VISUAL_MAP_SCENE_MIN_DISTANCE_SECONDS for kept in spaced):
+            spaced.append(candidate)
+    return sorted(spaced[:maximum], key=lambda candidate: candidate.timestamp_seconds)
+
+
+def hybrid_visual_map_timestamps(candidates: list[VisualMapSceneCandidate], start: float, end: float, count: int) -> list[float]:
+    """Pick one strongest detected scene per equal interval, or its midpoint if empty."""
+    interval = (end - start) / count
+    timestamps: list[float] = []
+    for index in range(count):
+        left = start + interval * index
+        right = end if index == count - 1 else start + interval * (index + 1)
+        in_interval = [candidate for candidate in candidates if left <= candidate.timestamp_seconds and (candidate.timestamp_seconds < right or index == count - 1)]
+        if in_interval:
+            strongest = min(in_interval, key=lambda candidate: (-candidate.delta, candidate.timestamp_seconds))
+            timestamps.append(strongest.timestamp_seconds)
+        else:
+            timestamps.append((left + right) / 2)
+    return sorted(timestamps)
 
 
 def visual_map_timestamp_label(value: float) -> str:
@@ -1652,6 +1728,36 @@ async def run_visual_map_ffmpeg(command: list[str], timeout: float) -> tuple[int
     return process.returncode, stderr
 
 
+def visual_map_scene_detect_filter(start: float, end: float, threshold: float) -> str:
+    """Use FFmpeg's native scdet percentage threshold, passing only detected frames."""
+    return f"trim=start={start:.9f}:end={end:.9f},scdet=threshold={threshold:.6f}:sc_pass=1,metadata=print:file=-:direct=1"
+
+
+async def detect_visual_map_scenes(source: ResolvedWorkspacePath, executable: str, stream_index: int, start: float, end: float, threshold: float) -> list[VisualMapSceneCandidate]:
+    """Ask FFmpeg scdet for scene-change timestamps and scores in the requested range."""
+    filters = visual_map_scene_detect_filter(start, end, threshold)
+    command = [executable, "-hide_banner", "-nostdin", "-v", "error", "-i", str(source.physical_path), "-map", f"0:{stream_index}", "-an", "-vf", filters, "-f", "null", "-"]
+    process: asyncio.subprocess.Process | None = None
+    try:
+        process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        stdout, _stderr = await asyncio.wait_for(process.communicate(), timeout=VISUAL_MAP_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError as error:
+        if process is not None and process.returncode is None:
+            process.kill()
+            await process.communicate()
+        raise AgentApiError("VISUAL_MAP_FAILED", "ffmpeg scene detection timed out.") from error
+    except asyncio.CancelledError:
+        if process is not None and process.returncode is None:
+            process.kill()
+            await process.communicate()
+        raise
+    except OSError as error:
+        raise AgentApiError("VISUAL_MAP_FAILED", "ffmpeg scene detection could not be started.") from error
+    if process.returncode != 0:
+        raise AgentApiError("VISUAL_MAP_FAILED", "ffmpeg scene detection failed.")
+    return visual_map_scene_candidates(stdout, start, end)
+
+
 VisualMapProgressReporter = Callable[[str, float, str, int, int, int, int], None]
 
 
@@ -1674,7 +1780,17 @@ async def media_create_visual_map(payload: Any, progress: VisualMapProgressRepor
     end = duration if options["endSeconds"] is None else options["endSeconds"]
     if end is None or end > duration or start >= end:
         raise AgentApiError("VISUAL_MAP_INVALID", "The requested range must be within the video and have startSeconds less than endSeconds.")
-    timestamps = uniform_visual_map_timestamps(start, end, options["maxTotalFrames"])
+    if options["selection"] == "uniform":
+        timestamps = uniform_visual_map_timestamps(start, end, options["maxTotalFrames"])
+    else:
+        report("detectingScenes", 2.0, "Detecting scene changes.", 0, 0, 0, 0)
+        candidates = await detect_visual_map_scenes(source, ffmpeg.executable, stream_index, start, end, options["sceneDetectThreshold"])
+        if options["selection"] == "sceneDetect":
+            timestamps = [candidate.timestamp_seconds for candidate in select_visual_map_scene_candidates(candidates, options["maxTotalFrames"])]
+            if not timestamps:
+                raise AgentApiError("VISUAL_MAP_NO_SCENES", "No scene changes exceeded the FFmpeg scene-detection threshold in the requested range.")
+        else:
+            timestamps = hybrid_visual_map_timestamps(candidates, start, end, options["maxTotalFrames"])
     thumbnail_width, thumbnail_height = visual_map_thumbnail_size(source_width, source_height, options["columns"], options["rows"], options["maxMapDimension"])
     temporary_directory = resolver.resolve_destination(f".researchtube-visual-map-tmp/{secrets.token_urlsafe(8)}", field_name="temporary directory", error_code="WORKSPACE_PATH_INVALID")
     temporary_directory.physical_path.mkdir(parents=True, exist_ok=True)
@@ -1686,7 +1802,7 @@ async def media_create_visual_map(payload: Any, progress: VisualMapProgressRepor
         seen_decoded: set[float] = set()
         for frame_number, timestamp in enumerate(timestamps):
             frame_path = temporary_directory.physical_path / f"frame-{frame_number:03d}.png"
-            final_full_range_frame = options["endSeconds"] is None and len(timestamps) > 1 and frame_number == len(timestamps) - 1
+            final_full_range_frame = options["selection"] == "uniform" and options["endSeconds"] is None and len(timestamps) > 1 and frame_number == len(timestamps) - 1
             extraction_timestamp = visual_map_extract_timestamp(timestamp, duration, frame_rate)
             filters = (["reverse"] if final_full_range_frame else [f"select=gte(t\\,{extraction_timestamp:.9f})"])
             filters.extend([f"scale={thumbnail_width}:{thumbnail_height}:force_original_aspect_ratio=decrease", f"pad={thumbnail_width}:{thumbnail_height}:(ow-iw)/2:(oh-ih):color=black"])
@@ -1745,7 +1861,7 @@ async def media_create_visual_map(payload: Any, progress: VisualMapProgressRepor
                 raise AgentApiError("VISUAL_MAP_FAILED", "ffmpeg could not assemble a visual map.")
             maps.append({"workspacePath": destination.logical_path, "frameCount": len(group), "timestampsSeconds": [timestamp for timestamp, _frame in group]})
             report("assemblingMaps", 80.0 + 20.0 * map_number / total_maps, "Assembling visual maps.", len(frames), len(timestamps), map_number, total_maps)
-        result = {"sourcePath": source.logical_path, "selection": "uniform", "range": {"startSeconds": start, "endSeconds": end}, "columns": options["columns"], "rows": options["rows"], "mapCapacity": capacity, "maxTotalFrames": options["maxTotalFrames"], "actualTotalFrames": len(frames), "maps": maps}
+        result = {"sourcePath": source.logical_path, "selection": options["selection"], "sceneDetectThreshold": options["sceneDetectThreshold"], "range": {"startSeconds": start, "endSeconds": end}, "columns": options["columns"], "rows": options["rows"], "mapCapacity": capacity, "maxTotalFrames": options["maxTotalFrames"], "actualTotalFrames": len(frames), "maps": maps}
         log(f"media_visual_map_create path={source.logical_path} frames={len(frames)} maps={len(maps)} -> ok")
         return result
     except AgentApiError:

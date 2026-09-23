@@ -227,14 +227,56 @@ class VisualMapContractTests(unittest.TestCase):
                 agent.configured_visual_map_timestamp_font()
         self.assertEqual(raised.exception.code, "VISUAL_MAP_TIMESTAMP_FONT_INVALID")
 
-    def test_visual_map_options_reject_other_selection_modes(self) -> None:
+    def test_scene_detect_keeps_the_strongest_candidates_two_seconds_apart_then_sorts_them(self) -> None:
+        candidates = [
+            agent.VisualMapSceneCandidate(1.0, 12.0),
+            agent.VisualMapSceneCandidate(2.5, 22.0),
+            agent.VisualMapSceneCandidate(4.4, 18.0),
+            agent.VisualMapSceneCandidate(8.0, 30.0),
+            agent.VisualMapSceneCandidate(12.0, 16.0),
+        ]
+        selected = agent.select_visual_map_scene_candidates(candidates, 3)
+        self.assertEqual([(candidate.timestamp_seconds, candidate.delta) for candidate in selected], [(2.5, 22.0), (8.0, 30.0), (12.0, 16.0)])
+
+    def test_scene_detect_parses_only_valid_ffmpeg_scene_metadata_in_the_requested_range(self) -> None:
+        metadata = b"frame:0 pts:1500 pts_time:1.5\nlavfi.scd.mafd=54.000\nlavfi.scd.score=12.500\nlavfi.scd.time=1.5\nframe:1 pts:9000 pts_time:9\nlavfi.scd.score=25.000\nlavfi.scd.time=9\nframe:2 pts:12000 pts_time:12\nlavfi.scd.score=99.000\nlavfi.scd.time=12\n"
+        candidates = agent.visual_map_scene_candidates(metadata, 1, 10)
+        self.assertEqual(candidates, [agent.VisualMapSceneCandidate(1.5, 12.5), agent.VisualMapSceneCandidate(9.0, 25.0)])
+
+    def test_scene_detect_filter_uses_native_scdet_percentage_threshold(self) -> None:
+        self.assertEqual(
+            agent.visual_map_scene_detect_filter(1, 10, 12.5),
+            "trim=start=1.000000000:end=10.000000000,scdet=threshold=12.500000:sc_pass=1,metadata=print:file=-:direct=1",
+        )
+
+    def test_hybrid_selects_strongest_scene_per_interval_or_its_midpoint(self) -> None:
+        timestamps = agent.hybrid_visual_map_timestamps([
+            agent.VisualMapSceneCandidate(2.0, 15.0),
+            agent.VisualMapSceneCandidate(12.0, 20.0),
+            agent.VisualMapSceneCandidate(18.0, 12.0),
+            agent.VisualMapSceneCandidate(35.0, 16.0),
+        ], 0, 40, 4)
+        self.assertEqual(timestamps, [2.0, 12.0, 25.0, 35.0])
+
+    def test_visual_map_options_support_scene_detect_and_reject_other_selection_modes(self) -> None:
+        scene_detect = agent.visual_map_options({"workspacePath": "downloads/video.mp4", "columns": 3, "rows": 2, "maxTotalFrames": 6, "selection": "sceneDetect"})
+        self.assertEqual(scene_detect["selection"], "sceneDetect")
+        self.assertEqual(scene_detect["sceneDetectThreshold"], 10.0)
+        self.assertEqual(agent.visual_map_options({"workspacePath": "downloads/video.mp4", "columns": 3, "rows": 2, "maxTotalFrames": 6, "selection": "sceneDetect", "sceneDetectThreshold": 15.5})["sceneDetectThreshold"], 15.5)
+        hybrid = agent.visual_map_options({"workspacePath": "downloads/video.mp4", "columns": 3, "rows": 2, "maxTotalFrames": 6, "selection": "hybrid"})
+        self.assertEqual(hybrid["sceneDetectThreshold"], 10.0)
         with self.assertRaises(agent.AgentApiError) as raised:
             agent.visual_map_options({"workspacePath": "downloads/video.mp4", "columns": 3, "rows": 2, "maxTotalFrames": 6, "selection": "scdet"})
         self.assertEqual(raised.exception.code, "VISUAL_MAP_INVALID")
+        with self.assertRaises(agent.AgentApiError):
+            agent.visual_map_options({"workspacePath": "downloads/video.mp4", "columns": 3, "rows": 2, "maxTotalFrames": 6, "selection": "sceneDetect", "sceneDetectThreshold": 100.1})
+        with self.assertRaises(agent.AgentApiError):
+            agent.visual_map_options({"workspacePath": "downloads/video.mp4", "columns": 3, "rows": 2, "maxTotalFrames": 6, "sceneDetectThreshold": 10})
 
     def test_visual_map_options_default_to_uniform_and_timestamp_labels(self) -> None:
         result = agent.visual_map_options({"workspacePath": "downloads/video.mp4", "columns": 3, "rows": 2, "maxTotalFrames": 6})
         self.assertEqual(result["selection"], "uniform")
+        self.assertIsNone(result["sceneDetectThreshold"])
         self.assertEqual(result["frameTimestampPosition"], "bottomRight")
         self.assertEqual(result["startSeconds"], 0)
 
