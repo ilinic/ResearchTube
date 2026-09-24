@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 
 const background = await readFile(new URL("../background.js", import.meta.url), "utf8");
 
-for (const tool of ["system_agent_status", "workspace_list", "workspace_stat", "workspace_mkdir", "workspace_move", "workspace_delete", "online_share_start", "online_share_status", "online_share_stop", "media_probe", "media_capture_frame", "media_visual_map_create", "media_visual_map_get_task", "media_visual_map_cancel_task", "media_camera_list", "media_camera_capture_frame", "media_camera_record_video", "media_camera_record_status", "media_camera_record_stop", "media_capture_screen", "media_image_crop", "media_image_show", "media_image_inspect", "clipboard_status", "clipboard_get", "clipboard_set", "media_load_workspace_image", "media_copy_workspace_path"]) {
+for (const tool of ["system_agent_status", "workspace_list", "workspace_stat", "workspace_mkdir", "workspace_move", "workspace_delete", "online_share_start", "online_share_status", "online_share_stop", "media_probe", "media_capture_frame", "media_visual_map_create", "media_visual_map_get_task", "media_visual_map_cancel_task", "media_camera_list", "media_camera_capture_frame", "media_camera_record_video", "media_camera_record_audio", "media_camera_record_status", "media_camera_record_stop", "media_capture_screen", "media_image_crop", "media_show_in_chat", "media_image_inspect", "clipboard_status", "clipboard_get", "clipboard_set", "media_load_workspace_media", "media_copy_workspace_path"]) {
   assert.match(background, new RegExp(`name: "${tool}"`), `${tool} must be published in tools/list`);
 }
 for (const tool of ["library_store_start", "library_store_status", "library_store_cancel"]) {
@@ -16,14 +16,14 @@ assert.match(background, /"\/internal\/library-store-files"/, "only the Agent ma
 assert.match(background, /"\/media\/capture-frame"/);
 assert.match(background, /"\/media\/image-crop"/);
 assert.doesNotMatch(background, /"\/media\/workspace-image"/);
-assert.match(background, /"\/media\/workspace-image-info"/, "the widget must obtain bounded metadata without image bytes");
+assert.match(background, /"\/media\/workspace-media-info"/, "the widget must obtain bounded metadata without media bytes");
 for (const tool of ["youtube_download_get_formats", "youtube_download_get_task", "youtube_download_task_diagnostics", "youtube_download_cancel_task"]) {
   assert.match(background, new RegExp(`name: "${tool}"`), `${tool} must be published in tools/list`);
 }
 assert.match(background, /youtubeFormats: youtubeFormatsSchema/);
 assert.match(background, /youtube_download_get_formats\.downloadFormats/);
 assert.match(background, /afterEventId/);
-assert.match(background, /const REQUIRED_AGENT_INTERFACE_VERSION = 49;/);
+assert.match(background, /const REQUIRED_AGENT_INTERFACE_VERSION = 50;/);
 assert.match(background, /selection: \{ type: "string", enum: \["uniform", "sceneDetect", "hybrid"\]/, "visual maps must publish uniform, scene-detect, and hybrid selectors");
 assert.match(background, /sceneDetectThreshold: \{ type: "number", minimum: 0, maximum: 100, default: 10/, "visual maps must publish the native scdet percentage threshold");
 assert.match(background, /FFmpeg's native scdet filter/, "the visual-map description must name native scdet");
@@ -55,17 +55,17 @@ assert.match(background, /CAPTURE_FRAME_WIDGET_URI/);
 assert.match(background, /resources\/read/);
 assert.match(background, /text\/html;profile=mcp-app/);
 assert.doesNotMatch(background, /captureFrameImageBase64/);
-assert.match(background, /localAgentImageUrl/, "the widget must keep image bytes out of MCP metadata");
+assert.match(background, /localAgentMediaUrl/, "the widget must keep media bytes out of MCP metadata");
 assert.match(background, /\$\{port\}\/\$\{encodedWorkspacePath\}/, "local image URL must place the logical workspace path directly after the Agent port");
 assert.doesNotMatch(background, /widget-image\?path=/, "the local image URL must not use a query-string path parameter");
 assert.match(background, /mcpToolPreferences/, "tool availability must be persisted by exact MCP tool name");
 assert.match(background, /newToolsEnabledByDefault/, "new MCP tools must have a configurable default state");
 assert.match(background, /TOOL_DISABLED/, "a stale ChatGPT tool schema must receive a clear disabled-tool result");
 assert.match(background, /showInChat defaults to false/);
-assert.match(background, /never render a widget themselves/, "creation tools must not create blank static-template iframes");
-assert.match(background, /After a successful result, call media_image_show/, "showInChat must route presentation through the dedicated display tool");
-assert.match(background, /A successful result means the image card has already been shown; do not call this tool again for the same image/, "the display tool must prevent duplicate retries");
-assert.match(background, /text: "Workspace image shown\."/, "the display tool must return an explicit compact success result to the model");
+assert.match(background, /create workspace images only/, "creation tools must not create blank static-template iframes");
+assert.match(background, /After a successful result, call media_show_in_chat/, "showInChat must route presentation through the dedicated display tool");
+assert.match(background, /A successful result means the card is already shown; do not repeat it for the same file/, "the display tool must prevent duplicate retries");
+assert.match(background, /text: "Workspace media shown\."/, "the display tool must return an explicit compact success result to the model");
 assert.match(background, /Independently validate one PNG, JPEG, or WebP image/, "image inspection must be distinct from generic workspace stat");
 assert.equal((background.match(/"openai\/outputTemplate": CAPTURE_FRAME_WIDGET_URI/g) || []).length, 1, "only the explicit workspace-image display tool may declare the widget template");
 assert.doesNotMatch(background, /researchtube_copy_capture_frame_image/);

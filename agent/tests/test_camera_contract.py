@@ -32,10 +32,11 @@ class CameraContractTests(unittest.TestCase):
         )
 
     def test_public_camera_document_advertises_recording_tradeoffs_without_native_identity(self) -> None:
-        device = agent.CameraDevice("cam_test", "Example Camera", "v4l2", "/dev/video99", (agent.CameraMode(2304, 1536, 2), agent.CameraMode(1920, 1080, 30), agent.CameraMode(1280, 720, 60.0002)), agent.CameraMode(1280, 720, 60.0002))
+        device = agent.CameraDevice("cam_test", "Example Camera", "v4l2", "/dev/video99", None, (agent.CameraMode(2304, 1536, 2), agent.CameraMode(1920, 1080, 30), agent.CameraMode(1280, 720, 60.0002)), agent.CameraMode(1280, 720, 60.0002))
         document = agent.camera_public_device(device)
         self.assertEqual(document["cameraId"], "cam_test")
         self.assertNotIn("/dev/video99", str(document))
+        self.assertFalse(document["audioAvailable"])
         self.assertEqual(document["videoModes"], {
             "30": {"width": 1920, "height": 1080, "fps": 30},
             "60": {"width": 1280, "height": 720, "fps": 60.0002},
@@ -59,8 +60,9 @@ class CameraContractTests(unittest.TestCase):
                 '[in#0] "C922 Pro Stream Webcam" (video)',
                 '[in#0]   Alternative name "@device_pnp_webcam"',
                 '[in#0] "Microphone (C922 Pro Stream Webcam)" (audio)',
+                '[in#0]   Alternative name "@device_cm_microphone"',
             ]
 
         with patch.object(agent, "camera_ffmpeg_lines", lines), patch.object(agent.platform, "system", return_value="Windows"):
             candidates = __import__("asyncio").run(agent.enumerate_camera_candidates("ffmpeg.exe"))
-        self.assertEqual(candidates, [("dshow", "C922 Pro Stream Webcam", "@device_pnp_webcam")])
+        self.assertEqual(candidates, [("dshow", "C922 Pro Stream Webcam", "@device_pnp_webcam", "@device_cm_microphone")])

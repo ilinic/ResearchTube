@@ -38575,7 +38575,7 @@ ${getNsigProcessorFn(eval_args.n, eval_args.sp, eval_args.sig)}`;
       const apiKey = window.ytcfg?.get?.("INNERTUBE_API_KEY") || null;
       return {
         url: location.href,
-        title: document.title,
+        title: player?.videoDetails?.title || document.title,
         ready: Boolean(player || apiKey && document.readyState !== "loading" && document.title),
         innertubeConfigured: Boolean(apiKey),
         playerAvailable: Boolean(player),

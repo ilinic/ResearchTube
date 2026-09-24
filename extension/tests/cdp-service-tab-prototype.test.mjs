@@ -40,6 +40,9 @@ assert.match(background, /Suppressed duplicate video-description request/, "dupl
 assert.match(background, /url: "https:\/\/chatgpt\.com\/", active: false/, "Describe this video must keep the user on the active YouTube tab");
 assert.match(background, /canonicalYouTubeVideoUrl/, "the shortcut must accept only a canonical single-video URL");
 assert.match(background, /describeYouTubeVideoTitle/, "the shortcut must add the current YouTube title to make automatic chat titles meaningful");
+assert.match(background, /action: "page-state"/, "Describe this video must query the live YouTube page on click");
+assert.match(background, /playlist can advance between popup opening and the click/, "Describe this video must not reuse a stale popup tab snapshot");
+assert.match(background, /current\?\.videoId/, "the live page video ID must override the popup snapshot");
 assert.match(background, /shortMatch = url\.pathname\.match/, "the shortcut must normalize a YouTube Short to its video ID");
 assert.match(background, /Open one YouTube video or Short/, "the shortcut must describe ordinary videos and Shorts");
 assert.match(background, /@ResearchTube \$\{videoTitle\} \$\{videoUrl\} Study the video and tell me what it is about in my language\./, "the shortcut must use the requested title-first one-line prompt without URL punctuation");
