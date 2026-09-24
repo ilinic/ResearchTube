@@ -10,7 +10,7 @@ const messages = {
 async function call(message) { return chrome.runtime.sendMessage(message); }
 function escapeHtml(value) { const element = document.createElement("span"); element.textContent = value; return element.innerHTML; }
 function renderResult(result) { const box = $("test-result"); box.hidden = false; box.className = result.ok ? "ok" : "error"; if (result.ok) box.innerHTML = "<strong>Connection successful.</strong><br>✓ API key accepted<br>✓ Tunnel found<br>✓ ResearchTube can access the tunnel"; else { const message = messages[result.errorCode] || result.message || "Connection test failed."; box.innerHTML = `<strong>${escapeHtml(message)}</strong>${result.detail ? `<details><summary>Technical details</summary>${escapeHtml(result.detail)}</details>` : ""}`; } }
-function componentLabel(name) { return name === "ytDlp" ? "yt-dlp" : name; }
+function componentLabel(name) { return name === "ytDlp" ? "yt-dlp" : name === "youtubePoTokenProvider" ? "YouTube PO-token provider" : name; }
 function componentDetail(component) {
   const version = component.version ? ` — ${component.version}` : "";
   const resolved = component.source && component.path ? ` (${component.source === "path" ? "PATH" : "local"}: ${component.path})` : "";

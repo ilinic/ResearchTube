@@ -34,7 +34,7 @@ const MCP_TOOL_GROUPS = Object.freeze({
 const MCP_TOOL_SETTINGS = Object.freeze({
   system_agent_status: { group: "system", alwaysEnabled: true },
   workspace_list: { group: "workspace" }, workspace_stat: { group: "workspace" }, workspace_mkdir: { group: "workspace" }, workspace_move: { group: "workspace" }, workspace_delete: { group: "workspace" },
-  media_probe: { group: "media" }, media_capture_frame: { group: "media" }, media_capture_screen: { group: "media" }, media_image_crop: { group: "media" }, media_image_show: { group: "media" }, media_image_inspect: { group: "media" },
+  media_probe: { group: "media" }, media_capture_frame: { group: "media" }, media_capture_frame_get_task: { group: "media" }, media_capture_frame_task_diagnostics: { group: "media" }, media_capture_frame_cancel_task: { group: "media" }, media_capture_screen: { group: "media" }, media_image_crop: { group: "media" }, media_image_show: { group: "media" }, media_image_inspect: { group: "media" },
   visual_map_create: { group: "visualMaps" }, visual_map_get_task: { group: "visualMaps" }, visual_map_cancel_task: { group: "visualMaps" },
   camera_list: { group: "camera" }, camera_capture_frame: { group: "camera" }, camera_record_video: { group: "camera" }, camera_record_audio: { group: "camera" }, camera_record_status: { group: "camera" }, camera_record_stop: { group: "camera" },
   youtube_search: { group: "youtube" }, youtube_get_video: { group: "youtube" }, youtube_get_channel_videos: { group: "youtube" }, youtube_get_channel_playlists: { group: "youtube" }, youtube_get_playlist_videos: { group: "youtube" }, youtube_get_transcript: { group: "youtube" }, youtube_get_comments: { group: "youtube" }, youtube_get_comment_replies: { group: "youtube" },
@@ -42,13 +42,13 @@ const MCP_TOOL_SETTINGS = Object.freeze({
   clipboard_status: { group: "clipboard" }, clipboard_get: { group: "clipboard" }, clipboard_set: { group: "clipboard" },
   library_store_start: { group: "library" }, library_store_status: { group: "library" }, library_store_cancel: { group: "library" }, online_share_start: { group: "online" }, online_share_status: { group: "online" }, online_share_stop: { group: "online" }
 });
-const EXTENSION_VERSION = "1.95.0";
-const REQUIRED_AGENT_INTERFACE_VERSION = 52;
+const EXTENSION_VERSION = "2.0.6";
+const REQUIRED_AGENT_INTERFACE_VERSION = 59;
 // A UI resource URI is a cache key in MCP Apps. Increment it whenever the
 // rendered template changes so ChatGPT does not reuse a stale iframe bundle.
 const CAPTURE_FRAME_WIDGET_URI = "ui://researchtube/capture-frame-v43.html";
 const RESEARCHTUBE_SERVER_DESCRIPTION = "ResearchTube provides YouTube research, local media and image operations, workspace management, screenshots, clipboard, and Library integration. Search this server when the user refers to ResearchTube, YouTube analysis, a previously created workspace file, captured frame, screenshot, crop, clipboard, or asks to continue a previous ResearchTube operation. In clients with deferred tools, ResearchTube is discoverable through functions.exec lazy MCP-tool discovery; search there before treating the capability as unavailable.";
-const RESEARCHTUBE_MCP_INSTRUCTIONS = "ResearchTube exposes MCP tools that may be loaded or discovered lazily by the client. When the user mentions ResearchTube, invokes @ResearchTube, asks to repeat a ResearchTube operation, or requests a capability previously provided by ResearchTube, do not infer that ResearchTube is unavailable merely because its tools are not currently visible as a top-level tool namespace. In this client, ResearchTube is available through functions.exec with lazy MCP-tool discovery: search there for the appropriate ResearchTube tool before reporting that the capability is unavailable. Only report ResearchTube as unavailable if tool discovery actually fails, the required tool cannot be found after discovery, or an actual ResearchTube tool invocation returns an availability, connection, compatibility, or transport error. Successful use earlier in the conversation is evidence that the tools may be discoverable again; rediscover them rather than assuming access has disappeared. media_capture_frame, media_capture_screen, and media_image_crop never render a widget themselves: when showInChat is true, after the successful creation result immediately call media_image_show with the returned workspace image path. When showInChat is false, do not call the display tool.";
+const RESEARCHTUBE_MCP_INSTRUCTIONS = "ResearchTube exposes MCP tools that may be loaded or discovered lazily by the client. When the user mentions ResearchTube, invokes @ResearchTube, asks to repeat a ResearchTube operation, or requests a capability previously provided by ResearchTube, do not infer that ResearchTube is unavailable merely because its tools are not currently visible as a top-level tool namespace. In this client, ResearchTube is available through functions.exec with lazy MCP-tool discovery: search there for the appropriate ResearchTube tool before reporting that the capability is unavailable. Only report ResearchTube as unavailable if tool discovery actually fails, the required tool cannot be found after discovery, or an actual ResearchTube tool invocation returns an availability, connection, compatibility, or transport error. Successful use earlier in the conversation is evidence that the tools may be discoverable again; rediscover them rather than assuming access has disappeared. media_capture_frame, media_capture_screen, and media_image_crop never render a widget themselves. media_capture_frame is asynchronous: poll its task and call media_image_show only for specific completed frame paths the user asks to see. For media_capture_screen and media_image_crop, when showInChat is true, after the successful creation result call media_image_show once with the returned workspace image path; otherwise do not call the display tool.";
 const CAPTURE_FRAME_OFFSCREEN_DOCUMENT = "capture-frame-offscreen.html";
 const AGENT_HEALTH_TIMEOUT_MS = 5_000;
 const AGENT_TASK_TIMEOUT_MS = 10_000;
@@ -314,8 +314,8 @@ const agentStatusSchema = {
     components: {
       anyOf: [{
         type: "object", additionalProperties: false,
-        properties: { ytDlp: agentComponentSchema, deno: agentComponentSchema, ffmpeg: agentComponentSchema, ffprobe: agentComponentSchema, cloudflared: agentComponentSchema },
-        required: ["ytDlp", "deno", "ffmpeg", "ffprobe", "cloudflared"]
+        properties: { ytDlp: agentComponentSchema, deno: agentComponentSchema, ffmpeg: agentComponentSchema, ffprobe: agentComponentSchema, cloudflared: agentComponentSchema, youtubePoTokenProvider: agentComponentSchema },
+        required: ["ytDlp", "deno", "ffmpeg", "ffprobe", "cloudflared", "youtubePoTokenProvider"]
       }, { type: "null" }]
     }
   },
@@ -429,9 +429,10 @@ const workspaceListSchema = {
     path: { type: "string", description: "The listed logical workspace directory; an empty string represents the workspace root." },
     entries: { type: "array", maxItems: 500, items: workspaceEntrySchema },
     returned: { type: "integer", minimum: 0 },
-    limit: { type: "integer", minimum: 1, maximum: 500 }
+    limit: { type: "integer", minimum: 1, maximum: 500 },
+    extensions: { type: ["array", "null"], items: { type: "string" } }
   },
-  required: ["path", "entries", "returned", "limit"]
+  required: ["path", "entries", "returned", "limit", "extensions"]
 };
 const workspaceStatSchema = {
   type: "object", additionalProperties: false,
@@ -570,6 +571,30 @@ const captureFrameSchema = {
     }
   },
   required: ["sourcePath", "requestedTimestampSeconds", "actualTimestampSeconds", "selectedVideoStreamIndex", "seekMode", "displayRotationApplied", "showInChat", "image"]
+};
+const captureFrameTaskSchema = {
+  type: "object", additionalProperties: false,
+  properties: {
+    taskId: { type: "string", minLength: 1 }, status: { type: "string", enum: ["working", "completed", "failed", "cancelled"] }, statusMessage: { type: "string" },
+    progressPercent: { type: "number", minimum: 0, maximum: 100 }, completedFrames: { type: "integer", minimum: 0 }, totalFrames: { type: "integer", minimum: 1 },
+    frames: { type: "array", items: captureFrameSchema }, error: { type: "object", additionalProperties: false, properties: { code: { type: "string" }, message: { type: "string" } }, required: ["code", "message"] },
+    failedSection: { type: "object", additionalProperties: false, properties: { sectionIndex: { type: "integer", minimum: 1 }, startSeconds: { type: "number", minimum: 0 }, endSeconds: { type: "number", minimum: 0 }, frameCount: { type: "integer", minimum: 1 }, attemptCount: { type: "integer", minimum: 1, maximum: 3 } }, required: ["sectionIndex", "startSeconds", "endSeconds", "frameCount", "attemptCount"] },
+    createdAt: { type: "string" }, lastUpdatedAt: { type: "string" }, pollIntervalMs: { type: "integer", minimum: 100 }
+  }, required: ["taskId", "status", "statusMessage", "progressPercent", "completedFrames", "totalFrames", "frames", "createdAt", "lastUpdatedAt", "pollIntervalMs"]
+};
+const captureFrameCancelTaskSchema = { type: "object", additionalProperties: false, properties: { taskId: { type: "string" }, accepted: { type: "boolean" }, message: { type: "string" } }, required: ["taskId", "accepted", "message"] };
+const captureFrameTaskDiagnosticsSchema = {
+  type: "object", additionalProperties: false,
+  properties: {
+    taskId: { type: "string", minLength: 1 }, status: { type: "string", enum: ["working", "completed", "failed", "cancelled"] },
+    error: { anyOf: [{ type: "object", additionalProperties: false, properties: { code: { type: "string" }, message: { type: "string" } }, required: ["code", "message"] }, { type: "null" }] },
+    youtube: { anyOf: [{ type: "object", additionalProperties: false, properties: {
+      formatId: { type: "string" }, sectionCount: { type: "integer", minimum: 1 }, sections: { type: "array", items: { type: "object", additionalProperties: false, properties: { startSeconds: { type: "number", minimum: 0 }, endSeconds: { type: "number", minimum: 0 }, frameCount: { type: "integer", minimum: 1 } }, required: ["startSeconds", "endSeconds", "frameCount"] } },
+      poTokenProvider: { type: "object", additionalProperties: false, properties: { state: { type: "string", enum: ["ready", "notInstalled", "incomplete", "notReady", "runtimeMissing"] }, provider: { type: "string", enum: ["bgutil"] } }, required: ["state", "provider"] },
+      ytDlpExitCode: { type: ["integer", "null"] }, output: { type: "array", maxItems: 20, items: { type: "string", maxLength: 240 } },
+      failedSection: { type: "object", additionalProperties: false, properties: { sectionIndex: { type: "integer", minimum: 1 }, startSeconds: { type: "number", minimum: 0 }, endSeconds: { type: "number", minimum: 0 }, frameCount: { type: "integer", minimum: 1 }, attemptCount: { type: "integer", minimum: 1, maximum: 3 } }, required: ["sectionIndex", "startSeconds", "endSeconds", "frameCount", "attemptCount"] }
+    }, required: ["formatId", "sectionCount", "sections", "poTokenProvider", "ytDlpExitCode", "output"] }, { type: "null" }] }
+  }, required: ["taskId", "status", "error", "youtube"]
 };
 const visualMapTimestampPositionSchema = { type: "string", enum: ["none", "topLeft", "topRight", "bottomLeft", "bottomRight"] };
 const visualMapSchema = {
@@ -819,9 +844,9 @@ function toolDefinitions() {
     {
       name: "workspace_list",
       title: "List a ResearchTube workspace directory",
-      description: "List one directory inside the Local Agent's ResearchTube workspace. path uses only logical POSIX-style workspace-relative paths; pass an empty string to list the workspace root. Results are bounded by limit and never reveal a host filesystem path. This tool cannot read outside the workspace.",
+      description: "List one directory inside the Local Agent's ResearchTube workspace. Use extensions to find only files with those suffixes, such as [\"mp4\", \"webm\"]. path uses only logical POSIX-style workspace-relative paths; pass an empty string to list the workspace root. Results are bounded by limit and never reveal a host filesystem path. This tool cannot read outside the workspace.",
       annotations: localAgentReadAnnotations,
-      inputSchema: { type: "object", additionalProperties: false, properties: { path: { type: "string", default: "", description: "Logical workspace directory path. Use an empty string only for the workspace root; otherwise use / separators and no . or .. components." }, limit: { type: "integer", minimum: 1, maximum: 500, default: 100 } }, required: [] },
+      inputSchema: { type: "object", additionalProperties: false, properties: { path: { type: "string", default: "", description: "Logical workspace directory path. Use an empty string only for the workspace root; otherwise use / separators and no . or .. components." }, extensions: { type: "array", minItems: 1, items: { type: "string", pattern: "^[A-Za-z0-9]{1,16}$" }, description: "Optional file extensions without dots, for example [\"mp4\", \"webm\"]." }, limit: { type: "integer", minimum: 1, maximum: 500, default: 100 } }, required: [] },
       outputSchema: workspaceListSchema
     },
     {
@@ -897,32 +922,56 @@ function toolDefinitions() {
     },
     {
       name: "media_capture_frame",
-      title: "Extract one frame from workspace or YouTube",
-      description: "Extract one frame either from an existing workspace media path, or directly from YouTube without downloading the full video. For direct YouTube capture, first call youtube_download_get_formats and pass its exact numeric video formatId as youtube.formatId; the browser-side youtubeFormats list is not accepted because it can differ from local yt-dlp. The Local Agent uses yt-dlp --download-sections with ffmpeg to download only a short window around timestampSeconds, deletes that temporary section, and saves only the image in the workspace. The image filename uses the title returned by that same yt-dlp operation plus [yt_<videoId>], timestamp, and unique capture ID. path and youtube are mutually exclusive. videoStreamIndex is only for path sources. showInChat defaults to false: set it true only when the user needs to see this particular frame inline. Inline display is presentation only; it does not make image pixels a reliable visual input to ChatGPT. No media URLs or host paths are exposed.",
+      title: "Start frame extraction from workspace or YouTube",
+      description: "Start an asynchronous extraction of 1–20 frames from an existing workspace video or a selected YouTube video stream. For YouTube, first call youtube_download_get_formats and pass its exact numeric video formatId. The Agent groups nearby timestamps into partial yt-dlp --download-sections ranges instead of downloading the full video, then downloads each range separately with a two-second gap. A transient failed range is retried after 3 and 6 seconds; completed frames remain available if a later range still fails. Poll media_capture_frame_get_task no faster than pollIntervalMs. A failed task may contain completed frames and failedSection with attemptCount. Frames are saved in captures/ and are never shown automatically; use media_image_show only for specific completed frames the user asks to see.",
       annotations: localWorkspaceWriteAnnotations,
       inputSchema: {
         type: "object", additionalProperties: false,
         properties: {
-          path: { type: "string", minLength: 1, description: "Logical workspace-relative path of the source media file." },
-          youtube: captureFrameYoutubeInputSchema,
-          timestampSeconds: { type: "number", minimum: 0, description: "Required media timestamp, in seconds." },
-          videoStreamIndex: { type: "integer", minimum: 0, description: "Optional ffprobe streams[].index of the video stream to capture." },
-          seekMode: { type: "string", enum: ["accurate", "fast"], default: "accurate" },
-          applyDisplayRotation: { type: "boolean", default: true, description: "Apply display rotation metadata before cropping and resizing." },
-          crop: captureFrameCropSchema,
-          resize: captureFrameResizeSchema,
-          image: captureFrameImageInputSchema,
-          outputPath: { type: "string", minLength: 1, description: "Optional logical workspace-relative output image path. If omitted, media_capture_frame writes a uniquely named image to captures/. Use this only to choose a different workspace folder or filename; media_capture_frame never overwrites an existing file." },
-          showInChat: { type: "boolean", default: false, description: "Set true only when the user needs this resulting frame displayed inline. After a successful result, call media_image_show for its returned image.workspacePath. Default false keeps the chat compact and must not create a display widget." }
+          path: { description: "Logical workspace-relative path of the source media file." },
+          youtube: { description: "YouTube source object with videoId and numeric formatId from youtube_download_get_formats." },
+          timestampsSeconds: { description: "Array of 1–20 unique non-negative frame timestamps in seconds. Results are ordered by timestamp." },
+          videoStreamIndex: { description: "Optional non-negative ffprobe video-stream index; allowed only for path." },
+          seekMode: { description: "accurate or fast; defaults to accurate." },
+          applyDisplayRotation: { description: "Boolean; defaults to true." },
+          crop: { description: "Optional crop object: x, y, width, height." },
+          resize: { description: "Optional resize object with width and/or height, mode, anchor, and padColor." },
+          image: { description: "Optional image object: png/jpeg/webp format and compatible quality or compressionLevel." }
         },
-        required: ["timestampSeconds"],
-        oneOf: [{ required: ["path"] }, { required: ["youtube"] }]
+        required: []
       },
-      outputSchema: captureFrameSchema,
+      outputSchema: captureFrameTaskSchema,
       _meta: {
-        "openai/toolInvocation/invoking": "Capturing frame…",
-        "openai/toolInvocation/invoked": "Frame captured."
+        "openai/toolInvocation/invoking": "Starting frame extraction…",
+        "openai/toolInvocation/invoked": "Frame-extraction task started."
       }
+    },
+    {
+      name: "media_capture_frame_get_task",
+      title: "Get frame-extraction progress",
+      description: "Get progress and completed frame metadata for a frame-extraction task. Poll no faster than pollIntervalMs. A completed task contains all saved Workspace image paths; a failed YouTube task preserves earlier completed frames and identifies failedSection with attemptCount when applicable.",
+      annotations: localAgentReadAnnotations,
+      inputSchema: { type: "object", additionalProperties: false, properties: { taskId: { type: "string", minLength: 1 } }, required: ["taskId"] },
+      outputSchema: captureFrameTaskSchema,
+      _meta: { "openai/toolInvocation/invoking": "Checking frame extraction…", "openai/toolInvocation/invoked": "Frame-extraction progress checked." }
+    },
+    {
+      name: "media_capture_frame_task_diagnostics",
+      title: "Get YouTube frame-extraction diagnostics",
+      description: "After a YouTube frame-extraction task fails, return bounded yt-dlp diagnostic output for that task. It reports partial-section ranges, failedSection with attemptCount, PO-token-provider state, the final failed invocation's exit code, and at most 20 sanitized lines. Signed media URLs, PO Tokens, cookies, host paths, and unbounded process output are never returned.",
+      annotations: localAgentReadAnnotations,
+      inputSchema: { type: "object", additionalProperties: false, properties: { taskId: { type: "string", minLength: 1 } }, required: ["taskId"] },
+      outputSchema: captureFrameTaskDiagnosticsSchema,
+      _meta: { "openai/toolInvocation/invoking": "Reading frame diagnostics…", "openai/toolInvocation/invoked": "Frame diagnostics read." }
+    },
+    {
+      name: "media_capture_frame_cancel_task",
+      title: "Cancel frame extraction",
+      description: "Request cancellation of a working frame-extraction task. Poll media_capture_frame_get_task afterwards for its terminal state.",
+      annotations: localWorkspaceWriteAnnotations,
+      inputSchema: { type: "object", additionalProperties: false, properties: { taskId: { type: "string", minLength: 1 } }, required: ["taskId"] },
+      outputSchema: captureFrameCancelTaskSchema,
+      _meta: { "openai/toolInvocation/invoking": "Cancelling frame extraction…", "openai/toolInvocation/invoked": "Frame-extraction cancellation requested." }
     },
     {
       name: "visual_map_create",
@@ -2232,7 +2281,8 @@ function normalizeAgentComponents(components) {
     deno: normalizeAgentComponent(components.deno),
     ffmpeg: normalizeAgentComponent(components.ffmpeg),
     ffprobe: normalizeAgentComponent(components.ffprobe),
-    cloudflared: normalizeAgentComponent(components.cloudflared)
+    cloudflared: normalizeAgentComponent(components.cloudflared),
+    youtubePoTokenProvider: normalizeAgentComponent(components.youtubePoTokenProvider)
   };
 }
 
@@ -2579,18 +2629,26 @@ function normalizeWorkspaceStat(value) {
   };
 }
 
-async function workspaceList(path = "", limit = 100) {
+function normalizeWorkspaceExtensions(value) {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || !value.length || value.some((entry) => typeof entry !== "string" || !/^[A-Za-z0-9]{1,16}$/.test(entry))) throw localAgentError("INVALID_ARGUMENT", "extensions must be a non-empty array of extension names without dots.");
+  return [...new Set(value.map((entry) => entry.toLowerCase()))];
+}
+
+async function workspaceList(path = "", limit = 100, extensions = undefined) {
   const normalizedPath = normalizeWorkspacePath(path, "path", { allowRoot: true });
-  const document = await agentJsonRequest("/workspace/list", { method: "POST", body: { path: normalizedPath, limit } });
+  const normalizedExtensions = normalizeWorkspaceExtensions(extensions);
+  const document = await agentJsonRequest("/workspace/list", { method: "POST", body: { path: normalizedPath, limit, ...(normalizedExtensions === undefined ? {} : { extensions: normalizedExtensions }) } });
   if (!document || typeof document !== "object" || !Array.isArray(document.entries) || document.entries.length > 500
     || !Number.isInteger(document.returned) || !Number.isInteger(document.limit)) {
     throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid workspace listing.");
   }
   const entries = document.entries.map(normalizeWorkspaceEntry);
-  if (document.returned !== entries.length || document.limit !== limit) {
+  if (document.returned !== entries.length || document.limit !== limit || !Array.isArray(document.extensions) && document.extensions !== null) {
     throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid workspace listing.");
   }
-  return { path: normalizeWorkspacePath(document.path, "path", { allowRoot: true }), entries, returned: entries.length, limit };
+  if (normalizedExtensions && (document.extensions.length !== normalizedExtensions.length || document.extensions.some((entry, index) => entry !== [...normalizedExtensions].sort()[index]))) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid workspace extension filter.");
+  return { path: normalizeWorkspacePath(document.path, "path", { allowRoot: true }), entries, returned: entries.length, limit, extensions: document.extensions };
 }
 
 async function workspaceStat(path) {
@@ -2839,6 +2897,111 @@ function normalizeCaptureFrameInput(argumentsValue = {}) {
     image: { format: imageFormat, ...(quality === undefined ? {} : { quality }), ...(compressionLevel === undefined ? {} : { compressionLevel }) },
     ...(outputPath === undefined ? {} : { outputPath }), showInChat
   };
+}
+
+function normalizeCaptureFrameBatchInput(argumentsValue = {}) {
+  const args = captureFrameObject(argumentsValue, "media_capture_frame", new Set(["path", "youtube", "timestampsSeconds", "videoStreamIndex", "seekMode", "applyDisplayRotation", "crop", "resize", "image"]));
+  if (!Array.isArray(args.timestampsSeconds) || args.timestampsSeconds.length < 1 || args.timestampsSeconds.length > 20) throw localAgentError("CAPTURE_FRAME_INVALID", "timestampsSeconds must contain from 1 to 20 timestamps.");
+  const timestampsSeconds = args.timestampsSeconds.map((value) => captureFrameFiniteNumber(value, "timestampsSeconds", { minimum: 0 })).sort((left, right) => left - right);
+  if (new Set(timestampsSeconds).size !== timestampsSeconds.length) throw localAgentError("CAPTURE_FRAME_INVALID", "timestampsSeconds must not contain duplicates.");
+  const { timestampsSeconds: _timestampsSeconds, ...singleArgs } = args;
+  const single = normalizeCaptureFrameInput({ ...singleArgs, timestampSeconds: timestampsSeconds[0], showInChat: false });
+  const { timestampSeconds: _timestampSeconds, outputPath: _outputPath, showInChat: _showInChat, ...source } = single;
+  return { ...source, timestampsSeconds };
+}
+
+function normalizeCaptureFrameTask(document, input = null) {
+  if (!document || typeof document !== "object" || Array.isArray(document) || typeof document.taskId !== "string" || !document.taskId
+    || !new Set(["working", "completed", "failed", "cancelled"]).has(document.status) || typeof document.statusMessage !== "string"
+    || !Number.isFinite(document.progressPercent) || document.progressPercent < 0 || document.progressPercent > 100
+    || !Number.isInteger(document.completedFrames) || !Number.isInteger(document.totalFrames) || document.completedFrames < 0 || document.totalFrames < 1 || document.completedFrames > document.totalFrames
+    || !Array.isArray(document.frames) || typeof document.createdAt !== "string" || typeof document.lastUpdatedAt !== "string" || !Number.isInteger(document.pollIntervalMs) || document.pollIntervalMs < 100) {
+    throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid frame-extraction task.");
+  }
+  if (document.frames.length !== document.completedFrames) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned inconsistent frame-extraction progress.");
+  const task = { taskId: document.taskId, status: document.status, statusMessage: document.statusMessage, progressPercent: document.progressPercent, completedFrames: document.completedFrames, totalFrames: document.totalFrames, createdAt: document.createdAt, lastUpdatedAt: document.lastUpdatedAt, pollIntervalMs: document.pollIntervalMs };
+  task.frames = document.frames.map((frame) => {
+    const inferredSource = input || (typeof frame.sourcePath === "string" && frame.sourcePath.startsWith("youtube:")
+      ? { youtube: { videoId: frame.sourceVideoId, formatId: frame.sourceVideoFormatId }, seekMode: frame.seekMode, showInChat: false }
+      : { path: frame.sourcePath, seekMode: frame.seekMode, showInChat: false });
+    return normalizeCaptureFrameResult(frame, { ...inferredSource, timestampSeconds: frame.requestedTimestampSeconds, showInChat: false }).metadata;
+  });
+  if (document.error) {
+    if (typeof document.error !== "object" || typeof document.error.code !== "string" || typeof document.error.message !== "string") throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid frame-extraction error.");
+    task.error = { code: document.error.code, message: document.error.message };
+  }
+  if (document.failedSection !== undefined) {
+    const section = document.failedSection;
+    if (!section || typeof section !== "object" || !Number.isInteger(section.sectionIndex) || section.sectionIndex < 1
+      || !Number.isFinite(section.startSeconds) || section.startSeconds < 0 || !Number.isFinite(section.endSeconds) || section.endSeconds < section.startSeconds
+      || !Number.isInteger(section.frameCount) || section.frameCount < 1 || !Number.isInteger(section.attemptCount) || section.attemptCount < 1 || section.attemptCount > 3 || section.sectionIndex > task.totalFrames) {
+      throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid failed frame section.");
+    }
+    task.failedSection = { sectionIndex: section.sectionIndex, startSeconds: section.startSeconds, endSeconds: section.endSeconds, frameCount: section.frameCount, attemptCount: section.attemptCount };
+  }
+  if (task.failedSection && document.status !== "failed") throw localAgentError("AGENT_INVALID_RESPONSE", "Only a failed frame-extraction task may contain failedSection.");
+  if (document.status === "completed" && (task.completedFrames !== task.totalFrames || task.error)) throw localAgentError("AGENT_INVALID_RESPONSE", "The completed frame-extraction task is inconsistent.");
+  return task;
+}
+
+async function createCaptureFrameTask(argumentsValue) {
+  const input = normalizeCaptureFrameBatchInput(argumentsValue);
+  const document = await agentJsonRequest("/tasks/capture-frame", { method: "POST", body: input, timeoutMs: AGENT_TASK_TIMEOUT_MS });
+  return normalizeCaptureFrameTask(document, input);
+}
+
+async function getCaptureFrameTask(taskId) {
+  if (typeof taskId !== "string" || !taskId.trim()) throw localAgentError("INVALID_ARGUMENT", "taskId must be a non-empty string.");
+  return normalizeCaptureFrameTask(await agentJsonRequest(`/tasks/capture-frame/${encodeURIComponent(taskId)}`, { timeoutMs: AGENT_TASK_TIMEOUT_MS }));
+}
+
+function normalizeCaptureFrameTaskDiagnostics(document) {
+  if (!document || typeof document !== "object" || typeof document.taskId !== "string" || !["working", "completed", "failed", "cancelled"].includes(document.status)) {
+    throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid frame-extraction diagnostics.");
+  }
+  const error = document.error === null ? null : document.error;
+  if (error !== null && (!error || typeof error !== "object" || typeof error.code !== "string" || typeof error.message !== "string")) {
+    throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid frame-extraction diagnostics.");
+  }
+  if (document.youtube === null) return { taskId: document.taskId, status: document.status, error, youtube: null };
+  const youtube = document.youtube;
+  if (!youtube || typeof youtube !== "object" || typeof youtube.formatId !== "string" || !Number.isInteger(youtube.sectionCount) || youtube.sectionCount < 1
+    || !Array.isArray(youtube.sections) || !youtube.poTokenProvider || typeof youtube.poTokenProvider !== "object"
+    || !["ready", "notInstalled", "incomplete", "notReady", "runtimeMissing"].includes(youtube.poTokenProvider.state)
+    || youtube.poTokenProvider.provider !== "bgutil" || !(youtube.ytDlpExitCode === null || Number.isInteger(youtube.ytDlpExitCode))
+    || !Array.isArray(youtube.output) || youtube.output.length > 20 || youtube.output.some((line) => typeof line !== "string" || line.length > 240)) {
+    throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid frame-extraction diagnostics.");
+  }
+  const sections = youtube.sections.map((section) => {
+    if (!section || typeof section !== "object" || !Number.isFinite(section.startSeconds) || !Number.isFinite(section.endSeconds)
+      || section.startSeconds < 0 || section.endSeconds < section.startSeconds || !Number.isInteger(section.frameCount) || section.frameCount < 1) {
+      throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid frame-extraction diagnostics.");
+    }
+    return { startSeconds: section.startSeconds, endSeconds: section.endSeconds, frameCount: section.frameCount };
+  });
+  let failedSection;
+  if (youtube.failedSection !== undefined) {
+    const section = youtube.failedSection;
+    if (!section || typeof section !== "object" || !Number.isInteger(section.sectionIndex) || section.sectionIndex < 1 || section.sectionIndex > youtube.sectionCount
+      || !Number.isFinite(section.startSeconds) || section.startSeconds < 0 || !Number.isFinite(section.endSeconds) || section.endSeconds < section.startSeconds
+      || !Number.isInteger(section.frameCount) || section.frameCount < 1 || !Number.isInteger(section.attemptCount) || section.attemptCount < 1 || section.attemptCount > 3) {
+      throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid failed frame section.");
+    }
+    failedSection = { sectionIndex: section.sectionIndex, startSeconds: section.startSeconds, endSeconds: section.endSeconds, frameCount: section.frameCount, attemptCount: section.attemptCount };
+  }
+  return { taskId: document.taskId, status: document.status, error, youtube: { formatId: youtube.formatId, sectionCount: youtube.sectionCount, sections, ...(failedSection === undefined ? {} : { failedSection }), poTokenProvider: { state: youtube.poTokenProvider.state, provider: "bgutil" }, ytDlpExitCode: youtube.ytDlpExitCode, output: youtube.output } };
+}
+
+async function getCaptureFrameTaskDiagnostics(taskId) {
+  if (typeof taskId !== "string" || !taskId.trim()) throw localAgentError("INVALID_ARGUMENT", "taskId must be a non-empty string.");
+  return normalizeCaptureFrameTaskDiagnostics(await agentJsonRequest(`/tasks/capture-frame/${encodeURIComponent(taskId)}/diagnostics`, { method: "POST", body: {}, timeoutMs: AGENT_TASK_TIMEOUT_MS }));
+}
+
+async function cancelCaptureFrameTask(taskId) {
+  if (typeof taskId !== "string" || !taskId.trim()) throw localAgentError("INVALID_ARGUMENT", "taskId must be a non-empty string.");
+  const document = await agentJsonRequest(`/tasks/capture-frame/${encodeURIComponent(taskId)}/cancel`, { method: "POST", body: {}, timeoutMs: AGENT_TASK_TIMEOUT_MS });
+  if (!document || document.accepted !== true) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent did not confirm frame-extraction cancellation.");
+  return { taskId, accepted: true, message: "Cancellation request accepted. Poll media_capture_frame_get_task for the terminal status." };
 }
 
 function normalizeCaptureFrameResult(document, input) {
@@ -3417,16 +3580,22 @@ async function postResponse(config, command, result) {
 }
 
 async function setActionBadge(state) {
+  // A recording is a stronger, ongoing privacy signal than a short MCP call.
+  // Never replace its CAM/MIC blink with the general working indicator.
+  if (state === "working" && cameraRecordingBadgeKind) return paintCameraRecordingBadge();
   const appearance = {
-    ready: { text: "", color: "#6e7781", title: "ResearchTube: ready" },
-    setup: { text: "", color: "#6e7781", title: "ResearchTube: setup required" },
-    working: { text: "…", color: "#0969da", title: "ResearchTube: working" },
-    "youtube-rate-limited": { text: "!", color: "#b7791f", title: "ResearchTube: YouTube search is temporarily limited" },
-    "connection-error": { text: "×", color: "#cf222e", title: "ResearchTube: connection needs attention" }
-  }[state] ?? { text: "", color: "#6e7781", title: "ResearchTube" };
+    ready: { text: "", color: [0, 0, 0, 0], title: "ResearchTube: ready" },
+    setup: { text: "", color: [0, 0, 0, 0], title: "ResearchTube: setup required" },
+    // Keep the original toolbar icon. The neutral transparent badge makes a
+    // routine MCP call visible without competing with a CAM/MIC recording.
+    working: { text: "...", color: [0, 0, 0, 0], title: "ResearchTube: working" },
+    "youtube-rate-limited": { text: "!", color: "#b7791f", textColor: "#ffffff", title: "ResearchTube: YouTube search is temporarily limited" },
+    "connection-error": { text: "×", color: "#cf222e", textColor: "#ffffff", title: "ResearchTube: connection needs attention" }
+  }[state] ?? { text: "", color: [0, 0, 0, 0], title: "ResearchTube" };
   try {
     await chrome.action.setBadgeBackgroundColor({ color: appearance.color });
     await chrome.action.setBadgeText({ text: appearance.text });
+    if (appearance.textColor && typeof chrome.action.setBadgeTextColor === "function") await chrome.action.setBadgeTextColor({ color: appearance.textColor });
     await chrome.action.setTitle({ title: appearance.title });
   } catch (error) {
     // The extension remains functional even if Chrome is restarting or the
@@ -3439,7 +3608,10 @@ async function paintCameraRecordingBadge() {
   if (!cameraRecordingBadgeKind) return;
   const isVideo = cameraRecordingBadgeKind === "video";
   try {
+    // Recording has a dedicated text badge and always takes precedence over
+    // the general working indicator.
     await chrome.action.setBadgeBackgroundColor({ color: isVideo ? "#b42318" : "#7a3e9d" });
+    if (typeof chrome.action.setBadgeTextColor === "function") await chrome.action.setBadgeTextColor({ color: "#ffffff" });
     await chrome.action.setBadgeText({ text: cameraRecordingBadgeVisible ? (isVideo ? "CAM" : "MIC") : "" });
     await chrome.action.setTitle({ title: isVideo ? "ResearchTube: camera video recording" : "ResearchTube: camera audio recording" });
   } catch (error) {
@@ -3655,10 +3827,11 @@ async function handleMcpRequest(request) {
     const args = request.params.arguments ?? {};
     const path = args.path === undefined ? "" : args.path;
     const limit = args.limit === undefined ? 100 : args.limit;
+    const extensions = args.extensions;
     if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
       return toolError(request.id, localAgentError("INVALID_ARGUMENT", "limit must be an integer from 1 to 500."));
     }
-    return executeToolCall(request.id, "workspace_list", { path, limit }, () => workspaceList(path, limit));
+    return executeToolCall(request.id, "workspace_list", { path, limit, extensions }, () => workspaceList(path, limit, extensions));
   }
   if (request?.method === "tools/call" && request.params?.name === "workspace_stat") {
     const path = request.params.arguments?.path;
@@ -3694,7 +3867,19 @@ async function handleMcpRequest(request) {
   }
   if (request?.method === "tools/call" && request.params?.name === "media_capture_frame") {
     const args = request.params.arguments ?? {};
-    return executeCaptureFrameToolCall(request.id, args);
+    return executeToolCall(request.id, "media_capture_frame", args, () => createCaptureFrameTask(args));
+  }
+  if (request?.method === "tools/call" && request.params?.name === "media_capture_frame_get_task") {
+    const taskId = request.params.arguments?.taskId;
+    return executeToolCall(request.id, "media_capture_frame_get_task", { taskId }, () => getCaptureFrameTask(taskId));
+  }
+  if (request?.method === "tools/call" && request.params?.name === "media_capture_frame_task_diagnostics") {
+    const taskId = request.params.arguments?.taskId;
+    return executeToolCall(request.id, "media_capture_frame_task_diagnostics", { taskId }, () => getCaptureFrameTaskDiagnostics(taskId));
+  }
+  if (request?.method === "tools/call" && request.params?.name === "media_capture_frame_cancel_task") {
+    const taskId = request.params.arguments?.taskId;
+    return executeToolCall(request.id, "media_capture_frame_cancel_task", { taskId }, () => cancelCaptureFrameTask(taskId));
   }
   if (request?.method === "tools/call" && request.params?.name === "visual_map_create") {
     const args = request.params.arguments ?? {};

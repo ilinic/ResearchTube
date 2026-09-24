@@ -159,7 +159,7 @@ class WorkspacePathResolverTests(unittest.TestCase):
 
     def test_startup_log_explains_interface_version_requirement(self) -> None:
         messages: list[str] = []
-        with patch.object(agent, "log", side_effect=lambda message, error=False: messages.append(message)):
+        with patch.object(agent, "log", side_effect=lambda message, error=False, color=None: messages.append(message)):
             agent.log_startup_health({
                 "interfaceVersion": 1,
                 "platform": {"operatingSystem": "Windows", "release": "11", "version": "10.0", "architecture": "AMD64"},
@@ -587,7 +587,7 @@ class CaptureFrameTests(unittest.IsolatedAsyncioTestCase):
             stdout = f'__RESEARCHTUBE_CAPTURE_TITLE__:Народу было много,строили долго."(С)Официальные историки\n__RESEARCHTUBE_CAPTURE_PARTIAL__:{partial}\n'.encode()
             return type("Process", (), {"returncode": 0, "communicate": staticmethod(lambda: _bytes_result(stdout, b""))})()
 
-        with patch.object(agent, "PUBLIC_TUNNEL_URL", "https://example.trycloudflare.com"), patch.object(agent, "find_component", side_effect=self.discovery), patch.object(asyncio, "create_subprocess_exec", side_effect=youtube_subprocess):
+        with patch.object(agent, "PUBLIC_TUNNEL_URL", "https://example.trycloudflare.com"), patch.object(agent, "find_component", side_effect=self.discovery), patch.object(agent, "youtube_pot_provider_status", return_value={"state": "ready", "provider": "bgutil"}), patch.object(asyncio, "create_subprocess_exec", side_effect=youtube_subprocess):
             result = await agent.capture_frame({
                 "youtube": {"videoId": "aqz-KE-bpKQ", "formatId": "136"}, "timestampSeconds": 24.0,
                 "image": {"format": "png"},
@@ -602,6 +602,76 @@ class CaptureFrameTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("--encoding", capture_commands[0])
         self.assertIn("utf-8", capture_commands[0])
         self.assertFalse((agent.WORKSPACE_PATH / ".researchtube-capture-tmp").exists())
+
+    async def test_youtube_batch_downloads_each_partial_section_independently(self) -> None:
+        commands: list[tuple[str, ...]] = []
+
+        async def youtube_subprocess(*command, **_kwargs):
+            commands.append(command)
+            directory = Path(command[command.index("--paths") + 1])
+            template = command[command.index("--output") + 1]
+            partial = directory / template.replace("%(ext)s", "mp4")
+            directory.mkdir(parents=True, exist_ok=True)
+            partial.write_bytes(b"partial-media")
+            stdout = f"__RESEARCHTUBE_CAPTURE_TITLE__:Example video\n__RESEARCHTUBE_CAPTURE_PARTIAL__:{partial}\n".encode()
+            return type("Process", (), {"returncode": 0, "communicate": staticmethod(lambda: _bytes_result(stdout, b""))})()
+
+        extracted = AsyncMock(side_effect=lambda options: {
+            "actualTimestampSeconds": options["timestampSeconds"],
+            "image": {"workspacePath": f"captures/frame-{options['timestampSeconds']}.png"},
+        })
+        progress: list[tuple[int, int]] = []
+        options = agent.capture_frames_options({
+            "youtube": {"videoId": "aqz-KE-bpKQ", "formatId": "136"},
+            "timestampsSeconds": [30, 130], "image": {"format": "png"},
+        })
+        formats = {"downloadFormats": {"combined": [], "video": [{"formatId": "136"}], "audio": []}}
+        with patch.object(agent, "find_component", side_effect=self.discovery), patch.object(agent, "youtube_pot_provider_status", return_value={"state": "ready", "provider": "bgutil"}), patch.object(agent, "youtube_download_formats", new=AsyncMock(return_value=formats)), patch.object(agent, "capture_frame_from_workspace_options", new=extracted), patch.object(asyncio, "create_subprocess_exec", side_effect=youtube_subprocess), patch.object(asyncio, "sleep", new=AsyncMock()):
+            results = await agent.capture_youtube_frames(options, lambda completed, total, _frame: progress.append((completed, total)), {})
+        self.assertEqual(len(commands), 2)
+        self.assertEqual([command[command.index("--download-sections") + 1] for command in commands], ["*18.000-33.000", "*118.000-133.000"])
+        self.assertTrue(all(command.count("--download-sections") == 1 for command in commands))
+        self.assertEqual(progress, [(1, 2), (2, 2)])
+        self.assertEqual([result["requestedTimestampSeconds"] for result in results], [30, 130])
+
+    async def test_youtube_batch_retries_only_the_failed_section(self) -> None:
+        commands: list[tuple[str, ...]] = []
+
+        async def youtube_subprocess(*command, **_kwargs):
+            commands.append(command)
+            if len(commands) == 1:
+                return type("Process", (), {"returncode": 1, "communicate": staticmethod(lambda: _bytes_result(b"", b"ERROR: ffmpeg exited with code 1"))})()
+            directory = Path(command[command.index("--paths") + 1])
+            partial = directory / command[command.index("--output") + 1].replace("%(ext)s", "mp4")
+            directory.mkdir(parents=True, exist_ok=True)
+            partial.write_bytes(b"partial-media")
+            stdout = f"__RESEARCHTUBE_CAPTURE_TITLE__:Example video\n__RESEARCHTUBE_CAPTURE_PARTIAL__:{partial}\n".encode()
+            return type("Process", (), {"returncode": 0, "communicate": staticmethod(lambda: _bytes_result(stdout, b""))})()
+
+        options = agent.capture_frames_options({"youtube": {"videoId": "aqz-KE-bpKQ", "formatId": "136"}, "timestampsSeconds": [130], "image": {"format": "png"}})
+        formats = {"downloadFormats": {"combined": [], "video": [{"formatId": "136"}], "audio": []}}
+        extracted = AsyncMock(return_value={"actualTimestampSeconds": 12.0, "image": {"workspacePath": "captures/frame.png"}})
+        sleeper = AsyncMock()
+        diagnostics: dict[str, object] = {}
+        with patch.object(agent, "find_component", side_effect=self.discovery), patch.object(agent, "youtube_pot_provider_status", return_value={"state": "ready", "provider": "bgutil"}), patch.object(agent, "youtube_download_formats", new=AsyncMock(return_value=formats)), patch.object(agent, "capture_frame_from_workspace_options", new=extracted), patch.object(asyncio, "create_subprocess_exec", side_effect=youtube_subprocess), patch.object(asyncio, "sleep", new=sleeper):
+            results = await agent.capture_youtube_frames(options, lambda *_args: None, diagnostics)
+        self.assertEqual(len(commands), 2)
+        self.assertEqual([command[command.index("--download-sections") + 1] for command in commands], ["*118.000-133.000", "*118.000-133.000"])
+        sleeper.assert_awaited_once_with(3.0)
+        self.assertEqual(len(results), 1)
+        self.assertNotIn("failedSection", diagnostics["youtube"])
+
+    def test_failed_frame_task_snapshot_preserves_completed_frames_and_section(self) -> None:
+        manager = agent.CaptureFrameTaskManager()
+        task = agent.CaptureFrameTask("frame_test", {}, "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z", total_frames=9)
+        task.status = "failed"
+        task.completed_frames = 4
+        task.frames = [{"sourcePath": "youtube:example"}] * 4
+        task.error = {"code": "YOUTUBE_CAPTURE_FRAME_FAILED", "message": "yt-dlp could not download a required frame section."}
+        task.failed_section = {"sectionIndex": 5, "startSeconds": 418, "endSeconds": 433, "frameCount": 1, "attemptCount": 3}
+        snapshot = manager.snapshot(task)
+        self.assertEqual(snapshot["completedFrames"], 4)
+        self.assertEqual(snapshot["failedSection"], task.failed_section)
 
     async def test_workspace_image_metadata_never_returns_encoded_bytes(self) -> None:
         image = agent.WORKSPACE_PATH / "captures" / "frame.png"

@@ -59,6 +59,7 @@ class DownloadTaskTests(unittest.IsolatedAsyncioTestCase):
         self.root = Path(self.temp.name)
         self.old_workspace = agent.WORKSPACE_PATH
         self.old_find_component = agent.find_component
+        self.old_pot_provider_status = agent.youtube_pot_provider_status
         self.old_create_subprocess_exec = asyncio.create_subprocess_exec
         agent.WORKSPACE_PATH = self.root / "workspace"
         self.executable = self.root / "fake-yt-dlp"
@@ -89,6 +90,7 @@ print(f'__RESEARCHTUBE_FINAL_FILE__:{output}', flush=True)
         )
         self.executable.chmod(self.executable.stat().st_mode | stat.S_IXUSR)
         agent.find_component = lambda _name, _candidates: agent.ComponentDiscovery("local", str(self.executable))
+        agent.youtube_pot_provider_status = lambda _deno=None: {"state": "ready", "provider": "bgutil"}
         self.command: tuple[str, ...] | None = None
 
         async def capture_command(*args: str, **kwargs: object):
@@ -100,6 +102,7 @@ print(f'__RESEARCHTUBE_FINAL_FILE__:{output}', flush=True)
     async def asyncTearDown(self) -> None:
         asyncio.create_subprocess_exec = self.old_create_subprocess_exec
         agent.find_component = self.old_find_component
+        agent.youtube_pot_provider_status = self.old_pot_provider_status
         agent.WORKSPACE_PATH = self.old_workspace
         self.temp.cleanup()
 
@@ -130,7 +133,9 @@ print(f'__RESEARCHTUBE_FINAL_FILE__:{output}', flush=True)
         self.assertIn("--no-js-runtimes", self.command)
         deno_runtime_index = self.command.index("--js-runtimes")
         self.assertEqual(self.command[deno_runtime_index + 1], f"deno:{self.executable}")
-        self.assertNotIn("--extractor-args", self.command)
+        self.assertIn("--extractor-args", self.command)
+        provider_index = self.command.index("--extractor-args")
+        self.assertIn("youtube-bgutilscript:server_home=", self.command[provider_index + 1])
         ffmpeg_location_index = self.command.index("--ffmpeg-location")
         self.assertEqual(self.command[ffmpeg_location_index + 1], str(self.executable.parent))
         self.assertIn("after_move:__RESEARCHTUBE_FINAL_FILE__:%(filepath)s", self.command)

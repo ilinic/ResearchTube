@@ -32,8 +32,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote, unquote, urlparse
 from urllib.request import Request, urlopen
 
-AGENT_VERSION = "1.86.0"
-INTERFACE_VERSION = 52
+AGENT_VERSION = "1.94.0"
+INTERFACE_VERSION = 59
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
 TASK_POLL_INTERVAL_MS = 1_000
@@ -48,6 +48,10 @@ CONFIG_PATH = ROOT / "agent-config.json"
 WORKSPACE_PATH = ROOT / "workspace"
 TOOLS_PATH = ROOT / "tools"
 FONTS_PATH = TOOLS_PATH / "fonts"
+YOUTUBE_POT_PROVIDER_PATH = TOOLS_PATH / "youtube-pot-provider"
+YOUTUBE_POT_PROVIDER_SERVER_PATH = YOUTUBE_POT_PROVIDER_PATH / "server"
+YOUTUBE_POT_PLUGIN_PATH = TOOLS_PATH / "yt-dlp" / "yt-dlp-plugins" / "bgutil-ytdlp-pot-provider.zip"
+YOUTUBE_POT_PROVIDER_READY_PATH = YOUTUBE_POT_PROVIDER_PATH / ".researchtube-provider-ready.json"
 DEFAULT_DOWNLOAD_DIRECTORY = "downloads"
 MAX_LOGICAL_PATH_LENGTH = 1_024
 MAX_LOGICAL_COMPONENT_LENGTH = 240
@@ -73,6 +77,9 @@ VISUAL_MAP_SCENE_MIN_DISTANCE_SECONDS = 2.0
 YOUTUBE_CAPTURE_FRAME_TIMEOUT_SECONDS = 90
 YOUTUBE_CAPTURE_PRE_ROLL_SECONDS = 12.0
 YOUTUBE_CAPTURE_POST_ROLL_SECONDS = 3.0
+YOUTUBE_CAPTURE_SECTION_DELAY_SECONDS = 2.0
+YOUTUBE_CAPTURE_SECTION_RETRY_DELAYS_SECONDS = (3.0, 6.0)
+CAPTURE_FRAME_MAX_FRAMES = 20
 DEBUG_BANNER_SWITCH = "--silent-debugger-extension-api"
 MAX_CLIPBOARD_TEXT_BYTES = 2 * 1024 * 1024
 MAX_CLIPBOARD_IMAGE_FILE_BYTES = 20 * 1024 * 1024
@@ -128,7 +135,7 @@ COMPONENTS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "ffprobe": (executable_names("ffprobe"), ("-version",)),
     "cloudflared": (executable_names("cloudflared"), ("--version",)),
 }
-COMPONENT_LABELS = {"ytDlp": "yt-dlp", "deno": "Deno", "ffmpeg": "ffmpeg", "ffprobe": "ffprobe", "cloudflared": "cloudflared"}
+COMPONENT_LABELS = {"ytDlp": "yt-dlp", "deno": "Deno", "ffmpeg": "ffmpeg", "ffprobe": "ffprobe", "cloudflared": "cloudflared", "youtubePoTokenProvider": "YouTube PO-token provider"}
 COMPONENT_TOOL_DIRECTORIES = {"ytDlp": "yt-dlp", "deno": "deno", "ffmpeg": "ffmpeg", "ffprobe": "ffmpeg", "cloudflared": "cloudflared"}
 PUBLIC_TUNNEL_URL: str | None = None
 PUBLIC_TUNNEL_PROCESS: asyncio.subprocess.Process | None = None
@@ -157,9 +164,15 @@ class ComponentDiscovery:
     error: str | None = None
 
 
-def log(message: str, *, error: bool = False) -> None:
+def log(message: str, *, error: bool = False, color: str | None = None) -> None:
     prefix = datetime.now().strftime("[%H:%M:%S]")
-    print(f"{prefix} {'ERROR ' if error else ''}{message}", file=sys.stderr if error else sys.stdout, flush=True)
+    stream = sys.stderr if error else sys.stdout
+    line = f"{prefix} {'ERROR ' if error else ''}{message}"
+    # Keep redirected logs plain, while making the first interactive startup
+    # line easy to spot in the Agent console.
+    if color == "red" and stream.isatty():
+        line = f"\x1b[31m{line}\x1b[0m"
+    print(line, file=stream, flush=True)
 
 
 def clear_console() -> None:
@@ -292,6 +305,63 @@ def yt_dlp_js_runtime_arguments(deno_executable: str | None) -> list[str]:
     return ["--no-js-runtimes", "--js-runtimes", f"deno:{deno_executable}"]
 
 
+def youtube_pot_provider_status(deno_executable: str | None = None) -> dict[str, str]:
+    """Describe the mandatory local BgUtils provider without exposing paths."""
+    if not YOUTUBE_POT_PLUGIN_PATH.is_file():
+        return {"state": "notInstalled", "provider": "bgutil"}
+    if not YOUTUBE_POT_PROVIDER_SERVER_PATH.is_dir():
+        return {"state": "incomplete", "provider": "bgutil"}
+    if not YOUTUBE_POT_PROVIDER_READY_PATH.is_file():
+        return {"state": "notReady", "provider": "bgutil"}
+    if deno_executable is None:
+        try:
+            deno_executable = resolve_deno_runtime()
+        except AgentApiError:
+            deno_executable = None
+    if not deno_executable:
+        return {"state": "runtimeMissing", "provider": "bgutil"}
+    return {"state": "ready", "provider": "bgutil"}
+
+
+async def youtube_pot_provider_health() -> tuple[str, dict[str, str | None]]:
+    """Expose the installed provider as a first-class mandatory Agent tool."""
+    state = youtube_pot_provider_status()
+    base = {"source": "local", "privatePath": str(YOUTUBE_POT_PROVIDER_PATH)}
+    if state["state"] == "ready":
+        try:
+            marker = json.loads(YOUTUBE_POT_PROVIDER_READY_PATH.read_text(encoding="utf-8"))
+            version = marker.get("version") if isinstance(marker, dict) else None
+        except (OSError, json.JSONDecodeError):
+            version = None
+        return "youtubePoTokenProvider", {"status": "available", "version": version if isinstance(version, str) else "bgutil", **base, "message": None}
+    if state["state"] == "notInstalled":
+        return "youtubePoTokenProvider", {"status": "missing", "version": None, **base, "message": "Run install-youtube-po-token-provider.ps1."}
+    messages = {
+        "incomplete": "Provider files are incomplete. Run install-youtube-po-token-provider.ps1 again.",
+        "notReady": "Provider dependencies are not approved. Re-run install-youtube-po-token-provider.ps1.",
+        "runtimeMissing": "Deno is required by the YouTube PO-token provider.",
+    }
+    return "youtubePoTokenProvider", {"status": "error", "version": None, **base, "message": messages.get(state["state"], "Provider is unavailable.")}
+
+
+def yt_dlp_youtube_arguments(deno_executable: str | None) -> list[str]:
+    """Use the same runtime/client/provider setup for every YouTube call."""
+    arguments = yt_dlp_js_runtime_arguments(deno_executable)
+    provider = youtube_pot_provider_status(deno_executable)
+    if provider["state"] != "ready":
+        raise AgentApiError("YOUTUBE_POT_PROVIDER_NOT_AVAILABLE", "The mandatory YouTube PO-token provider is not ready. Run install-youtube-po-token-provider.ps1 and restart the Local Agent.")
+    if provider["state"] == "ready":
+        # Keep yt-dlp's normal client selection. Forcing mweb makes the token
+        # path work on some videos but can remove high-resolution DASH formats,
+        # which defeats ResearchTube's exact stream selection. The provider
+        # hooks into whichever normal YouTube client yt-dlp selects.
+        arguments.extend([
+            "--extractor-args",
+            f"youtube-bgutilscript:server_home={YOUTUBE_POT_PROVIDER_SERVER_PATH}",
+        ])
+    return arguments
+
+
 async def component_health(name: str, definition: tuple[tuple[str, ...], tuple[str, ...]]) -> tuple[str, dict[str, str | None]]:
     candidates, version_args = definition
     discovery = find_component(name, candidates)
@@ -312,7 +382,7 @@ async def component_health(name: str, definition: tuple[tuple[str, ...], tuple[s
 
 async def health_snapshot() -> dict[str, Any]:
     component_results, chrome_automation = await asyncio.gather(
-        asyncio.gather(*(component_health(name, definition) for name, definition in COMPONENTS.items())),
+        asyncio.gather(*(component_health(name, definition) for name, definition in COMPONENTS.items()), youtube_pot_provider_health()),
         chrome_automation_status(),
     )
     return {
@@ -454,7 +524,7 @@ def public_health_document(snapshot: dict[str, Any]) -> dict[str, Any]:
 
 
 def log_startup_health(health: dict[str, Any], port: int) -> None:
-    log(f"ResearchTube Agent {AGENT_VERSION} started")
+    log(f"ResearchTube Agent {AGENT_VERSION} started", color="red")
     log(f"Agent interface version: {health['interfaceVersion']} — it must match the ResearchTube Extension interface version.")
     platform_metadata = health["platform"]
     log(f"Platform: {platform_metadata['operatingSystem']} {platform_metadata['release']} ({platform_metadata['architecture']})")
@@ -656,7 +726,7 @@ async def youtube_download_formats(payload: Any) -> dict[str, Any]:
         raise AgentApiError("YTDLP_NOT_AVAILABLE", "yt-dlp is not available. Place it in tools/yt-dlp or install it on PATH.")
     deno_executable = resolve_deno_runtime()
     command = [
-        yt_dlp.executable, *yt_dlp_js_runtime_arguments(deno_executable),
+        yt_dlp.executable, *yt_dlp_youtube_arguments(deno_executable),
         "--no-playlist", "--skip-download", "--no-warnings", "--dump-single-json",
         f"https://www.youtube.com/watch?v={video_id}",
     ]
@@ -803,12 +873,15 @@ def workspace_list(payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise AgentApiError("INVALID_REQUEST", "workspace_list requires a JSON object.")
     path = payload.get("path", "")
-    limit = payload.get("limit", 100)
+    limit, extensions = payload.get("limit", 100), payload.get("extensions")
     if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= MAX_WORKSPACE_LIST_ENTRIES:
         raise AgentApiError("INVALID_REQUEST", f"limit must be an integer from 1 to {MAX_WORKSPACE_LIST_ENTRIES}.")
+    if extensions is not None and (not isinstance(extensions, list) or not extensions or any(not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9]{1,16}", value) for value in extensions)):
+        raise AgentApiError("INVALID_REQUEST", "extensions must be a non-empty array of extension names without dots.")
+    extension_filter = {value.casefold() for value in extensions} if extensions is not None else None
     directory = WorkspacePathResolver().resolve_existing(path, field_name="path", expected_type="directory", allow_root=True)
     try:
-        children = sorted(directory.physical_path.iterdir(), key=lambda item: (item.name.casefold(), item.name))[:limit]
+        children = sorted(directory.physical_path.iterdir(), key=lambda item: (item.name.casefold(), item.name))
     except OSError as error:
         raise AgentApiError("PERMISSION_DENIED", "The workspace directory could not be listed.") from error
     entries: list[dict[str, Any]] = []
@@ -822,10 +895,14 @@ def workspace_list(payload: Any) -> dict[str, Any]:
                 size = child.stat().st_size if entry_type == "file" else None
             except OSError:
                 entry_type, size = "other", None
+        if extension_filter is not None and (entry_type != "file" or child.suffix.removeprefix(".").casefold() not in extension_filter):
+            continue
         logical_path = f"{directory.logical_path}/{child.name}" if directory.logical_path else child.name
         entries.append({"name": child.name, "path": logical_path, "type": entry_type, "size": size})
+        if len(entries) >= limit:
+            break
     log(f"workspace_list path={directory.logical_path or '<root>'} -> ok")
-    return {"path": directory.logical_path, "entries": entries, "returned": len(entries), "limit": limit}
+    return {"path": directory.logical_path, "entries": entries, "returned": len(entries), "limit": limit, "extensions": sorted(extension_filter) if extension_filter is not None else None}
 
 
 def workspace_stat(payload: Any) -> dict[str, Any]:
@@ -1121,6 +1198,24 @@ def capture_frame_options(payload: Any) -> dict[str, Any]:
         "applyDisplayRotation": rotation, "crop": capture_crop(payload.get("crop")), "resize": capture_resize(payload.get("resize")),
         "image": image, "outputPath": capture_output_path(payload.get("outputPath"), path if isinstance(path, str) else "", timestamp, image["format"]),
     }
+
+
+def capture_frames_options(payload: Any) -> dict[str, Any]:
+    allowed = {"path", "youtube", "timestampsSeconds", "videoStreamIndex", "seekMode", "applyDisplayRotation", "crop", "resize", "image"}
+    if not isinstance(payload, dict) or set(payload) - allowed:
+        raise AgentApiError("CAPTURE_FRAME_INVALID", "media_capture_frame requires only documented fields.")
+    path, youtube_value = payload.get("path"), payload.get("youtube")
+    if (path is None) == (youtube_value is None):
+        raise AgentApiError("CAPTURE_FRAME_INVALID", "media_capture_frame requires exactly one source: path or youtube.")
+    timestamps_value = payload.get("timestampsSeconds")
+    if not isinstance(timestamps_value, list) or not 1 <= len(timestamps_value) <= CAPTURE_FRAME_MAX_FRAMES:
+        raise AgentApiError("CAPTURE_FRAME_INVALID", f"timestampsSeconds must contain from 1 to {CAPTURE_FRAME_MAX_FRAMES} timestamps.")
+    timestamps = [finite_number(value, field_name="timestampsSeconds", minimum=0) for value in timestamps_value]
+    if len(set(timestamps)) != len(timestamps):
+        raise AgentApiError("CAPTURE_FRAME_INVALID", "timestampsSeconds must not contain duplicates.")
+    single_payload = {key: value for key, value in payload.items() if key != "timestampsSeconds"}
+    first = capture_frame_options({**single_payload, "timestampSeconds": timestamps[0]})
+    return {**first, "timestampsSeconds": sorted(timestamps)}
 
 
 def image_crop_default_workspace_path(source_path: str, crop: dict[str, int], image_format: str) -> str:
@@ -2740,7 +2835,7 @@ async def capture_youtube_frame(options: dict[str, Any]) -> dict[str, Any]:
     temporary_directory = resolver.resolve_destination(temporary_directory.logical_path, field_name="temporary directory", error_code="WORKSPACE_PATH_INVALID")
     output_template = f"partial [yt_%(id)s] [cap_{capture_token}].%(ext)s"
     command = [
-        yt_dlp.executable, *yt_dlp_js_runtime_arguments(resolve_deno_runtime()), "--ignore-config", "--no-playlist", "--no-part", "--encoding", "utf-8",
+        yt_dlp.executable, *yt_dlp_youtube_arguments(resolve_deno_runtime()), "--ignore-config", "--no-playlist", "--no-part", "--encoding", "utf-8",
         # Do not use --windows-filenames here: yt-dlp also applies it to the
         # %(title)s value printed below, which would discard Cyrillic before
         # safe_capture_title can make the final Windows-safe filename. The
@@ -2809,6 +2904,254 @@ async def capture_frame(payload: Any) -> dict[str, Any]:
     if options["youtube"] is not None:
         return await capture_youtube_frame(options)
     return await capture_frame_from_workspace_options(options)
+
+
+def youtube_capture_sections(timestamps: list[float]) -> list[tuple[float, float, list[float]]]:
+    """Create the smallest practical partial-download windows for frame points."""
+    sections: list[tuple[float, float, list[float]]] = []
+    for timestamp in timestamps:
+        start, end = max(0.0, timestamp - YOUTUBE_CAPTURE_PRE_ROLL_SECONDS), timestamp + YOUTUBE_CAPTURE_POST_ROLL_SECONDS
+        if sections and start <= sections[-1][1]:
+            previous_start, previous_end, points = sections[-1]
+            sections[-1] = (previous_start, max(previous_end, end), [*points, timestamp])
+        else:
+            sections.append((start, end, [timestamp]))
+    return sections
+
+
+def youtube_capture_many_stdout(stdout: bytes) -> tuple[str | None, list[Path]]:
+    title: str | None = None
+    paths: list[Path] = []
+    for raw_line in stdout.decode("utf-8", errors="replace").splitlines():
+        if raw_line.startswith("__RESEARCHTUBE_CAPTURE_TITLE__:"):
+            title = raw_line.removeprefix("__RESEARCHTUBE_CAPTURE_TITLE__:").strip() or title
+        elif raw_line.startswith("__RESEARCHTUBE_CAPTURE_PARTIAL__:"):
+            value = raw_line.removeprefix("__RESEARCHTUBE_CAPTURE_PARTIAL__:").strip()
+            if value:
+                paths.append(Path(value))
+    return title, paths
+
+
+def sanitized_ytdlp_diagnostic_lines(stdout: bytes | None, stderr: bytes | None) -> list[str]:
+    """Return bounded yt-dlp output without signed URLs, tokens, or host paths."""
+    text = ((stdout or b"") + b"\n" + (stderr or b"")).decode("utf-8", errors="replace")
+    lines: list[str] = []
+    for raw_line in text.splitlines():
+        # Signed googlevideo URLs can contain short-lived access signatures and
+        # PO Tokens; diagnostic output must never export either one.
+        line = re.sub(r"https?://[^\s'\"]+", "[redacted URL]", raw_line)
+        line = re.sub(r"(?i)\b(?:pot|po_token|signature|sig|lsig)=[^\s&]+", "[redacted token]", line)
+        line = re.sub(r"(?:[A-Za-z]:\\|/)[^\s'\"]+", "[private path]", line)
+        line = line.strip()
+        if line:
+            lines.append(line[:MAX_DIAGNOSTIC_LINE_LENGTH])
+    return lines[-MAX_DIAGNOSTIC_LINES:]
+
+
+async def capture_youtube_frames(
+    options: dict[str, Any], progress: Callable[[int, int, dict[str, Any] | None], None],
+    diagnostics: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    youtube = options["youtube"]
+    assert isinstance(youtube, dict)
+    yt_dlp, ffmpeg = find_component("ytDlp", COMPONENTS["ytDlp"][0]), find_component("ffmpeg", COMPONENTS["ffmpeg"][0])
+    if yt_dlp.error:
+        raise AgentApiError("YTDLP_DISCOVERY_ERROR", "yt-dlp discovery is ambiguous.", yt_dlp.error)
+    if ffmpeg.error:
+        raise AgentApiError("FFMPEG_DISCOVERY_ERROR", "ffmpeg discovery is ambiguous.", ffmpeg.error)
+    if not yt_dlp.executable or not ffmpeg.executable:
+        raise AgentApiError("YTDLP_NOT_AVAILABLE", "yt-dlp and ffmpeg are required for partial YouTube frame capture.")
+    formats = (await youtube_download_formats({"videoId": youtube["videoId"]}))["downloadFormats"]
+    available = {entry["formatId"] for kind in ("combined", "video") for entry in formats.get(kind, []) if isinstance(entry, dict) and isinstance(entry.get("formatId"), str)}
+    if youtube["formatId"] not in available:
+        raise AgentApiError("CAPTURE_VIDEO_FORMAT_NOT_AVAILABLE", "youtube.formatId must be a currently available video or combined format from youtube_download_get_formats.")
+    sections = youtube_capture_sections(options["timestampsSeconds"])
+    deno_executable = resolve_deno_runtime()
+    if diagnostics is not None:
+        diagnostics["youtube"] = {
+            "formatId": youtube["formatId"],
+            "sectionCount": len(sections),
+            "sections": [{"startSeconds": start, "endSeconds": end, "frameCount": len(points)} for start, end, points in sections],
+            "poTokenProvider": youtube_pot_provider_status(deno_executable),
+            "ytDlpExitCode": None,
+            "output": [],
+        }
+    resolver = WorkspacePathResolver()
+    temporary_directory = resolver.resolve_destination(f".researchtube-capture-tmp/{secrets.token_urlsafe(8)}", field_name="temporary directory", error_code="WORKSPACE_PATH_INVALID")
+    temporary_directory.physical_path.mkdir(parents=True, exist_ok=True)
+    def record_failed_section(section_index: int, start: float, end: float, timestamps: list[float], attempt_count: int) -> dict[str, Any]:
+        section = {"sectionIndex": section_index, "startSeconds": start, "endSeconds": end, "frameCount": len(timestamps), "attemptCount": attempt_count}
+        if diagnostics is not None:
+            diagnostics["youtube"]["failedSection"] = section
+        return section
+
+    try:
+        results: list[dict[str, Any]] = []
+        total = len(options["timestampsSeconds"])
+        title: str | None = None
+        # Do not pass multiple --download-sections values to one yt-dlp process.
+        # A failure in a late FFmpeg section otherwise discards every earlier
+        # section and prevents the task from reporting useful incremental work.
+        for section_index, (start, end, timestamps) in enumerate(sections, start=1):
+            partial_path: Path | None = None
+            section_title: str | None = None
+            section_error: AgentApiError | None = None
+            for attempt_count in range(1, len(YOUTUBE_CAPTURE_SECTION_RETRY_DELAYS_SECONDS) + 2):
+                command = [
+                    yt_dlp.executable, *yt_dlp_youtube_arguments(deno_executable), "--verbose", "--ignore-config", "--no-playlist", "--no-part", "--encoding", "utf-8",
+                    "--download-sections", f"*{start:.3f}-{end:.3f}", "--downloader", "ffmpeg",
+                    "--ffmpeg-location", str(Path(ffmpeg.executable).parent), "--format", youtube["formatId"],
+                    "--paths", str(temporary_directory.physical_path), "--output", f"partial [section_{section_index:03d}].%(ext)s",
+                    "--print", "before_dl:__RESEARCHTUBE_CAPTURE_TITLE__:%(title)s",
+                    "--print", "after_move:__RESEARCHTUBE_CAPTURE_PARTIAL__:%(filepath)s",
+                    f"https://www.youtube.com/watch?v={youtube['videoId']}",
+                ]
+                try:
+                    process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+                    stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=YOUTUBE_CAPTURE_FRAME_TIMEOUT_SECONDS)
+                except asyncio.TimeoutError as error:
+                    process.kill(); await process.communicate()
+                    section_error = AgentApiError("YOUTUBE_CAPTURE_FRAME_FAILED", "yt-dlp timed out while downloading a required frame section.")
+                except OSError:
+                    section_error = AgentApiError("YOUTUBE_CAPTURE_FRAME_FAILED", "yt-dlp could not be started for a partial frame section.")
+                else:
+                    if diagnostics is not None:
+                        diagnostics["youtube"]["ytDlpExitCode"] = process.returncode
+                        diagnostics["youtube"]["output"] = sanitized_ytdlp_diagnostic_lines(stdout, stderr)
+                    if process.returncode != 0:
+                        section_error = AgentApiError("FORMAT_NOT_AVAILABLE" if b"requested format is not available" in stderr.lower() else "YOUTUBE_CAPTURE_FRAME_FAILED", "The selected YouTube format is unavailable." if b"requested format is not available" in stderr.lower() else "yt-dlp could not download a required frame section.")
+                    else:
+                        section_title, paths = youtube_capture_many_stdout(stdout)
+                        if len(paths) == 1:
+                            partial_path = paths[0]
+                            break
+                        section_error = AgentApiError("YOUTUBE_CAPTURE_FRAME_FAILED", "yt-dlp did not return the requested temporary frame section.")
+                # A permanently unavailable selected format cannot be repaired by
+                # waiting. FFmpeg/transport failures receive two paced retries.
+                if section_error.code == "FORMAT_NOT_AVAILABLE" or attempt_count > len(YOUTUBE_CAPTURE_SECTION_RETRY_DELAYS_SECONDS):
+                    record_failed_section(section_index, start, end, timestamps, attempt_count)
+                    raise section_error
+                await asyncio.sleep(YOUTUBE_CAPTURE_SECTION_RETRY_DELAYS_SECONDS[attempt_count - 1])
+            title = section_title or title
+            assert partial_path is not None
+            actual_path = partial_path if partial_path.is_absolute() else temporary_directory.physical_path / partial_path
+            try:
+                item = resolver.resolve_existing(resolver.logical_existing_file(actual_path, error_code="YOUTUBE_CAPTURE_FRAME_FAILED"), field_name="path", expected_type="file")
+            except AgentApiError:
+                record_failed_section(section_index, start, end, timestamps, attempt_count)
+                raise
+            try:
+                for timestamp in timestamps:
+                    local = dict(options)
+                    local.update({"path": item.logical_path, "youtube": None, "timestampSeconds": timestamp - start, "videoStreamIndex": None, "outputPath": {"path": youtube_capture_default_workspace_path(title or "YouTube frame", youtube["videoId"], timestamp, options["image"]["format"]), "provided": False}})
+                    result = await capture_frame_from_workspace_options(local)
+                    result.update({"sourcePath": f"youtube:{youtube['videoId']}", "sourceVideoId": youtube["videoId"], "sourceVideoFormatId": youtube["formatId"], "sourceTitle": title or "YouTube video", "requestedTimestampSeconds": timestamp, "partialDownload": {"startSeconds": start, "endSeconds": end}})
+                    actual = result.get("actualTimestampSeconds")
+                    result["actualTimestampSeconds"] = start + actual if isinstance(actual, (int, float)) else None
+                    results.append(result)
+                    progress(len(results), total, result)
+            except AgentApiError:
+                record_failed_section(section_index, start, end, timestamps, attempt_count)
+                raise
+            finally:
+                try:
+                    item.physical_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            if section_index < len(sections):
+                await asyncio.sleep(YOUTUBE_CAPTURE_SECTION_DELAY_SECONDS)
+        return results
+    finally:
+        shutil.rmtree(temporary_directory.physical_path, ignore_errors=True)
+
+
+async def capture_frames(
+    options: dict[str, Any], progress: Callable[[int, int, dict[str, Any] | None], None],
+    diagnostics: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    if options["youtube"] is not None:
+        return await capture_youtube_frames(options, progress, diagnostics)
+    results: list[dict[str, Any]] = []
+    for timestamp in options["timestampsSeconds"]:
+        local = dict(options)
+        local.update({"timestampSeconds": timestamp, "outputPath": capture_output_path(None, options["path"], timestamp, options["image"]["format"])})
+        result = await capture_frame_from_workspace_options(local)
+        results.append(result)
+        progress(len(results), len(options["timestampsSeconds"]), result)
+    return results
+
+
+@dataclass
+class CaptureFrameTask:
+    task_id: str
+    payload: dict[str, Any]
+    created_at: str
+    last_updated_at: str
+    status: str = "working"
+    status_message: str = "Preparing frame extraction."
+    progress_percent: float = 0.0
+    completed_frames: int = 0
+    total_frames: int = 0
+    frames: list[dict[str, Any]] = field(default_factory=list)
+    error: dict[str, str] | None = None
+    failed_section: dict[str, Any] | None = None
+    diagnostics: dict[str, Any] = field(default_factory=dict)
+    runner: asyncio.Task[None] | None = None
+
+
+class CaptureFrameTaskManager:
+    def __init__(self) -> None: self.tasks: dict[str, CaptureFrameTask] = {}
+    def get(self, task_id: str) -> CaptureFrameTask:
+        if not isinstance(task_id, str) or task_id not in self.tasks: raise AgentApiError("CAPTURE_FRAME_TASK_NOT_FOUND", "The requested frame-extraction task does not exist.")
+        return self.tasks[task_id]
+    def snapshot(self, task: CaptureFrameTask) -> dict[str, Any]:
+        value: dict[str, Any] = {"taskId": task.task_id, "status": task.status, "statusMessage": task.status_message, "progressPercent": task.progress_percent, "completedFrames": task.completed_frames, "totalFrames": task.total_frames, "frames": task.frames, "createdAt": task.created_at, "lastUpdatedAt": task.last_updated_at, "pollIntervalMs": TASK_POLL_INTERVAL_MS}
+        if task.error is not None: value["error"] = task.error
+        if task.failed_section is not None: value["failedSection"] = task.failed_section
+        return value
+    def diagnostics_snapshot(self, task_id: str) -> dict[str, Any]:
+        task = self.get(task_id)
+        youtube = task.diagnostics.get("youtube")
+        return {
+            "taskId": task.task_id,
+            "status": task.status,
+            "error": task.error,
+            "youtube": youtube if isinstance(youtube, dict) else None,
+        }
+    async def create(self, payload: Any) -> dict[str, Any]:
+        options = capture_frames_options(payload)
+        if options["path"] is not None: WorkspacePathResolver().resolve_existing(options["path"], field_name="path", expected_type="file")
+        task_id = f"frame_{secrets.token_urlsafe(7)}"
+        now = utc_now(); task = CaptureFrameTask(task_id, options, now, now, total_frames=len(options["timestampsSeconds"]))
+        self.tasks[task_id] = task; task.runner = asyncio.create_task(self.run(task), name=f"researchtube-capture-frame-{task_id}")
+        return self.snapshot(task)
+    async def run(self, task: CaptureFrameTask) -> None:
+        def progress(completed: int, total: int, frame: dict[str, Any] | None = None) -> None:
+            task.completed_frames, task.total_frames = completed, total; task.progress_percent = completed * 100.0 / total; task.status_message = f"Extracted {completed} of {total} frames."; task.last_updated_at = utc_now()
+            if frame is not None:
+                task.frames.append(frame)
+        try:
+            await capture_frames(task.payload, progress, task.diagnostics); task.status = "completed"; task.progress_percent = 100.0; task.status_message = "Frame extraction completed."; task.last_updated_at = utc_now()
+        except AgentApiError as error:
+            youtube = task.diagnostics.get("youtube")
+            failed_section = youtube.get("failedSection") if isinstance(youtube, dict) else None
+            task.failed_section = failed_section if isinstance(failed_section, dict) else None
+            detail = f" at section {task.failed_section['sectionIndex']}" if task.failed_section is not None else ""
+            task.status, task.error, task.status_message, task.last_updated_at = "failed", {"code": error.code, "message": error.message}, f"Frame extraction failed{detail}.", utc_now()
+        except asyncio.CancelledError:
+            task.status, task.status_message, task.last_updated_at = "cancelled", "Frame-extraction task cancelled.", utc_now(); raise
+        except Exception as error:
+            log(f"capture-frame task {task.task_id} failed unexpectedly: {error.__class__.__name__}", error=True); task.status, task.error, task.status_message, task.last_updated_at = "failed", {"code": "CAPTURE_FRAME_INTERNAL_ERROR", "message": "The frame-extraction task encountered an unexpected error."}, "Frame extraction failed.", utc_now()
+    async def cancel(self, task_id: str) -> None:
+        task = self.get(task_id)
+        if task.status == "working" and task.runner and not task.runner.done(): task.status_message = "Frame-extraction cancellation requested."; task.last_updated_at = utc_now(); task.runner.cancel()
+    async def shutdown(self) -> None:
+        runners = [task.runner for task in self.tasks.values() if task.runner and not task.runner.done()]
+        for runner in runners: runner.cancel()
+        if runners: await asyncio.gather(*runners, return_exceptions=True)
+
+
+CAPTURE_FRAME_TASKS = CaptureFrameTaskManager()
 
 
 IMAGE_MIME_TYPES = {
@@ -3578,7 +3921,7 @@ class DownloadTaskManager:
                 # --print below is required for the final workspace file path,
                 # but yt-dlp documents that it implies --quiet.  Re-enable
                 # progress explicitly so the progress template is emitted.
-                executable, *yt_dlp_js_runtime_arguments(deno),
+                executable, *yt_dlp_youtube_arguments(deno),
                 "--no-playlist", "--windows-filenames", "--trim-filenames", "180", "--newline", "--progress", "--progress-delta", "1",
                 "--format", task.selection.format_selector(),
             ]
@@ -4269,8 +4612,8 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             response_status, response_body = "200 OK", await workspace_share_stop()
         elif method == "POST" and path == "/media/probe":
             response_status, response_body = "200 OK", await media_probe(parse_json_body(body))
-        elif method == "POST" and path == "/media/capture-frame":
-            response_status, response_body = "200 OK", await capture_frame(parse_json_body(body))
+        elif method == "POST" and path == "/tasks/capture-frame":
+            response_status, response_body = "201 Created", await CAPTURE_FRAME_TASKS.create(parse_json_body(body))
         elif method == "POST" and path == "/media/camera/list":
             response_status, response_body = "200 OK", {"cameras": [camera_public_device(device) for device in await camera_devices()]}
         elif method == "POST" and path == "/media/camera/capture-frame":
@@ -4308,6 +4651,13 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             task_id = path.removeprefix("/tasks/visual-map/").removesuffix("/cancel").rstrip("/")
             await VISUAL_MAP_TASKS.cancel(task_id)
             response_status, response_body = "202 Accepted", {"accepted": True}
+        elif method == "POST" and path.startswith("/tasks/capture-frame/") and path.endswith("/cancel"):
+            task_id = path.removeprefix("/tasks/capture-frame/").removesuffix("/cancel").rstrip("/")
+            await CAPTURE_FRAME_TASKS.cancel(task_id)
+            response_status, response_body = "202 Accepted", {"accepted": True}
+        elif method == "POST" and path.startswith("/tasks/capture-frame/") and path.endswith("/diagnostics"):
+            task_id = path.removeprefix("/tasks/capture-frame/").removesuffix("/diagnostics").rstrip("/")
+            response_status, response_body = "200 OK", CAPTURE_FRAME_TASKS.diagnostics_snapshot(task_id)
         elif method == "POST" and path.startswith("/tasks/camera-record/") and path.endswith("/stop"):
             task_id = path.removeprefix("/tasks/camera-record/").removesuffix("/stop").rstrip("/")
             response_status, response_body = "202 Accepted", await CAMERA_RECORD_TASKS.stop(task_id)
@@ -4320,6 +4670,8 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             response_status, response_body = "202 Accepted", {"accepted": True}
         elif method == "GET" and path.startswith("/tasks/visual-map/"):
             response_status, response_body = "200 OK", VISUAL_MAP_TASKS.snapshot(VISUAL_MAP_TASKS.get(path.removeprefix("/tasks/visual-map/")))
+        elif method == "GET" and path.startswith("/tasks/capture-frame/"):
+            response_status, response_body = "200 OK", CAPTURE_FRAME_TASKS.snapshot(CAPTURE_FRAME_TASKS.get(path.removeprefix("/tasks/capture-frame/")))
         elif method == "GET" and path.startswith("/tasks/camera-record/"):
             response_status, response_body = "200 OK", CAMERA_RECORD_TASKS.snapshot(CAMERA_RECORD_TASKS.get(path.removeprefix("/tasks/camera-record/")))
         elif method == "GET" and path.startswith("/tasks/"):
@@ -4350,7 +4702,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
         await writer.drain()
         log(f"{method or 'INVALID'} {path or '/'} -> {response_status.split()[0]}{response_log_suffix(path, response_body)}")
     except AgentApiError as error:
-        status = "404 Not Found" if error.code in {"TASK_NOT_FOUND", "VISUAL_MAP_TASK_NOT_FOUND", "CAMERA_RECORD_TASK_NOT_FOUND"} else "400 Bad Request"
+        status = "404 Not Found" if error.code in {"TASK_NOT_FOUND", "VISUAL_MAP_TASK_NOT_FOUND", "CAMERA_RECORD_TASK_NOT_FOUND", "CAPTURE_FRAME_TASK_NOT_FOUND"} else "400 Bad Request"
         writer.write(http_response(status, error_document(error)))
         await writer.drain()
         log(f"{method or 'INVALID'} {path or '/'} -> {status.split()[0]}")
@@ -4374,6 +4726,7 @@ async def serve(port: int) -> None:
     finally:
         async with PUBLIC_SHARE_LOCK:
             await stop_public_share_unlocked()
+        await CAPTURE_FRAME_TASKS.shutdown()
         await VISUAL_MAP_TASKS.shutdown()
         await CAMERA_RECORD_TASKS.shutdown()
         await TASKS.shutdown()

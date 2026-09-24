@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 
 const background = await readFile(new URL("../background.js", import.meta.url), "utf8");
 
-for (const tool of ["system_agent_status", "workspace_list", "workspace_stat", "workspace_mkdir", "workspace_move", "workspace_delete", "online_share_start", "online_share_status", "online_share_stop", "media_probe", "media_capture_frame", "visual_map_create", "visual_map_get_task", "visual_map_cancel_task", "camera_list", "camera_capture_frame", "camera_record_video", "camera_record_audio", "camera_record_status", "camera_record_stop", "media_capture_screen", "media_image_crop", "media_image_show", "media_image_inspect", "clipboard_status", "clipboard_get", "clipboard_set", "media_load_workspace_image", "media_copy_workspace_path"]) {
+for (const tool of ["system_agent_status", "workspace_list", "workspace_stat", "workspace_mkdir", "workspace_move", "workspace_delete", "online_share_start", "online_share_status", "online_share_stop", "media_probe", "media_capture_frame", "media_capture_frame_get_task", "media_capture_frame_task_diagnostics", "media_capture_frame_cancel_task", "visual_map_create", "visual_map_get_task", "visual_map_cancel_task", "camera_list", "camera_capture_frame", "camera_record_video", "camera_record_audio", "camera_record_status", "camera_record_stop", "media_capture_screen", "media_image_crop", "media_image_show", "media_image_inspect", "clipboard_status", "clipboard_get", "clipboard_set", "media_load_workspace_image", "media_copy_workspace_path"]) {
   assert.match(background, new RegExp(`name: "${tool}"`), `${tool} must be published in tools/list`);
 }
 for (const tool of ["library_store_start", "library_store_status", "library_store_cancel"]) {
@@ -13,7 +13,7 @@ assert.match(background, /maxItems: 5/, "Library upload batches must be capped a
 assert.match(background, /libraryAvailability = "not_verified"/, "Library completion must not be claimed after ChatGPT submission");
 assert.match(background, /presses Send without inserting any text into the Composer/, "Library storage must not create a second text instruction");
 assert.match(background, /"\/internal\/library-store-files"/, "only the Agent may resolve workspace paths for CDP");
-assert.match(background, /"\/media\/capture-frame"/);
+assert.match(background, /"\/tasks\/capture-frame"/);
 assert.match(background, /"\/media\/image-crop"/);
 assert.doesNotMatch(background, /"\/media\/workspace-image"/);
 assert.match(background, /"\/media\/workspace-image-info"/, "the widget must obtain bounded metadata without image bytes");
@@ -23,7 +23,7 @@ for (const tool of ["youtube_download_get_formats", "youtube_download_get_task",
 assert.match(background, /youtubeFormats: youtubeFormatsSchema/);
 assert.match(background, /youtube_download_get_formats\.downloadFormats/);
 assert.match(background, /afterEventId/);
-assert.match(background, /const REQUIRED_AGENT_INTERFACE_VERSION = 52;/);
+assert.match(background, /const REQUIRED_AGENT_INTERFACE_VERSION = 59;/);
 assert.match(background, /targetFps is optional/, "camera recording must choose a default FPS when none is supplied");
 assert.match(background, /name: "camera_record_audio"/, "audio-only camera recording must be published through the MCP tool registry");
 assert.match(background, /enum: \["working", "stopping", "completed", "failed"\]/, "camera task schema must expose the graceful-stop state");
@@ -67,6 +67,9 @@ assert.doesNotMatch(background, /widget-image\?path=/, "the local image URL must
 assert.match(background, /mcpToolPreferences/, "tool availability must be persisted by exact MCP tool name");
 assert.match(background, /newToolsEnabledByDefault/, "new MCP tools must have a configurable default state");
 assert.match(background, /TOOL_DISABLED/, "a stale ChatGPT tool schema must receive a clear disabled-tool result");
+assert.match(background, /working: \{ text: "\.\.\.", color: \[0, 0, 0, 0\]/, "ordinary MCP work must use a transparent three-dot badge");
+assert.doesNotMatch(background, /researchtube-busy-/, "ordinary MCP work must retain the original toolbar icon");
+assert.match(background, /state === "working" && cameraRecordingBadgeKind/, "a camera recording badge must take precedence over the general MCP hourglass");
 assert.match(background, /showInChat defaults to false/);
 assert.match(background, /never render a widget themselves/, "creation tools must not create blank static-template iframes");
 assert.match(background, /After a successful result, call media_image_show/, "showInChat must route presentation through the dedicated display tool");
@@ -79,7 +82,11 @@ assert.doesNotMatch(background, /researchtube_download_capture_frame/);
 assert.doesNotMatch(background, /chrome\.downloads\.download/);
 assert.match(background, /chrome\.offscreen\.createDocument/);
 assert.match(background, /capture-frame-offscreen\.html/);
-assert.match(background, /saves only the image in the workspace/);
+assert.match(background, /Frames are saved in captures/, "batch frame extraction must save files in Workspace without automatic display");
+assert.match(background, /name: "media_capture_frame_task_diagnostics"/, "failed YouTube frame batches must expose bounded diagnostics");
+assert.match(background, /failedSection/, "failed YouTube frame batches must identify the failed partial section");
+assert.match(background, /PO-token-provider state/, "frame diagnostics must identify PO-token-provider availability");
+assert.match(background, /Signed media URLs, PO Tokens, cookies, host paths/, "frame diagnostics must redact sensitive yt-dlp output");
 assert.doesNotMatch(background, /Public HTTPS URL served only by the Agent's image-only Cloudflare Quick Tunnel/);
 assert.match(background, /outputPath/);
 assert.match(background, /cloudflared/);

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ResearchTube — YouTube Research for ChatGPT",
-  "version": "1.95.0",
+  "version": "2.0.6",
   "description": "Public YouTube research tools for ChatGPT through a local MCP connection.",
   "icons": {
     "16": "icons/researchtube-16.png",
