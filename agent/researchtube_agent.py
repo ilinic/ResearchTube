@@ -32,8 +32,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote, unquote, urlparse
 from urllib.request import Request, urlopen
 
-AGENT_VERSION = "1.94.0"
-INTERFACE_VERSION = 59
+AGENT_VERSION = "1.96.1"
+INTERFACE_VERSION = 61
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
 TASK_POLL_INTERVAL_MS = 1_000
@@ -77,8 +77,11 @@ VISUAL_MAP_SCENE_MIN_DISTANCE_SECONDS = 2.0
 YOUTUBE_CAPTURE_FRAME_TIMEOUT_SECONDS = 90
 YOUTUBE_CAPTURE_PRE_ROLL_SECONDS = 12.0
 YOUTUBE_CAPTURE_POST_ROLL_SECONDS = 3.0
+YOUTUBE_CAPTURE_SECTION_MERGE_GAP_SECONDS = 10.0
+YOUTUBE_CAPTURE_MAX_SECTION_SECONDS = 60.0
 YOUTUBE_CAPTURE_SECTION_DELAY_SECONDS = 2.0
 YOUTUBE_CAPTURE_SECTION_RETRY_DELAYS_SECONDS = (3.0, 6.0)
+YOUTUBE_CAPTURE_FILE_PROGRESS_INTERVAL_SECONDS = 0.5
 CAPTURE_FRAME_MAX_FRAMES = 20
 DEBUG_BANNER_SWITCH = "--silent-debugger-extension-api"
 MAX_CLIPBOARD_TEXT_BYTES = 2 * 1024 * 1024
@@ -2907,11 +2910,11 @@ async def capture_frame(payload: Any) -> dict[str, Any]:
 
 
 def youtube_capture_sections(timestamps: list[float]) -> list[tuple[float, float, list[float]]]:
-    """Create the smallest practical partial-download windows for frame points."""
+    """Group nearby frame windows without creating an oversized partial download."""
     sections: list[tuple[float, float, list[float]]] = []
     for timestamp in timestamps:
         start, end = max(0.0, timestamp - YOUTUBE_CAPTURE_PRE_ROLL_SECONDS), timestamp + YOUTUBE_CAPTURE_POST_ROLL_SECONDS
-        if sections and start <= sections[-1][1]:
+        if sections and start <= sections[-1][1] + YOUTUBE_CAPTURE_SECTION_MERGE_GAP_SECONDS and end - sections[-1][0] <= YOUTUBE_CAPTURE_MAX_SECTION_SECONDS:
             previous_start, previous_end, points = sections[-1]
             sections[-1] = (previous_start, max(previous_end, end), [*points, timestamp])
         else:
@@ -2948,8 +2951,91 @@ def sanitized_ytdlp_diagnostic_lines(stdout: bytes | None, stderr: bytes | None)
     return lines[-MAX_DIAGNOSTIC_LINES:]
 
 
+_YTDLP_DOWNLOAD_PERCENT_RE = re.compile(rb"\[download\]\s+(\d+(?:\.\d+)?)%")
+_FFMPEG_DOWNLOAD_TIME_RE = re.compile(rb"\btime=(\d{1,2}):(\d{2}):(\d{2}(?:\.\d+)?)")
+
+
+def youtube_section_download_progress(line: bytes, section_duration_seconds: float) -> float | None:
+    """Extract a bounded approximate section-download percentage from tool output."""
+    match = _YTDLP_DOWNLOAD_PERCENT_RE.search(line)
+    if match:
+        return min(100.0, max(0.0, float(match.group(1))))
+    match = _FFMPEG_DOWNLOAD_TIME_RE.search(line)
+    if not match or section_duration_seconds <= 0:
+        return None
+    hours, minutes, seconds = match.groups()
+    elapsed = int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+    return min(100.0, max(0.0, elapsed * 100.0 / section_duration_seconds))
+
+
+def youtube_section_expected_bytes(format_record: dict[str, Any] | None, section_duration_seconds: float) -> int | None:
+    """Estimate a partial-range size from yt-dlp's advertised source bitrate."""
+    if not isinstance(format_record, dict) or section_duration_seconds <= 0:
+        return None
+    bitrate = format_record.get("bitrateBps")
+    if isinstance(bitrate, bool) or not isinstance(bitrate, int) or bitrate <= 0:
+        return None
+    return max(1, math.ceil(bitrate * section_duration_seconds / 8.0))
+
+
+def youtube_section_written_bytes(directory: Path, section_index: int) -> int:
+    """Read bytes currently written for one ASCII-only temporary section name."""
+    prefix = f"partial [section_{section_index:03d}]."
+    total = 0
+    try:
+        for candidate in directory.iterdir():
+            if candidate.is_file() and candidate.name.startswith(prefix):
+                try:
+                    total += candidate.stat().st_size
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return total
+
+
+async def collect_process_output_with_progress(
+    process: Any, *, timeout_seconds: float, on_line: Callable[[bytes], None] | None = None,
+) -> tuple[bytes, bytes]:
+    """Drain both subprocess streams while exposing newline/carriage-return progress updates.
+
+    A small fallback keeps the lightweight fake process objects used by unit tests
+    compatible with the real asyncio subprocess implementation.
+    """
+    stdout_stream, stderr_stream = getattr(process, "stdout", None), getattr(process, "stderr", None)
+    if stdout_stream is None or stderr_stream is None or not hasattr(process, "wait"):
+        return await asyncio.wait_for(process.communicate(), timeout=timeout_seconds)
+
+    async def drain(stream: asyncio.StreamReader, chunks: list[bytes]) -> None:
+        pending = b""
+        while chunk := await stream.read(4096):
+            chunks.append(chunk)
+            pending += chunk
+            pieces = re.split(rb"[\r\n]+", pending)
+            pending = pieces.pop()
+            if on_line is not None:
+                for piece in pieces:
+                    if piece:
+                        on_line(piece)
+        if pending and on_line is not None:
+            on_line(pending)
+
+    stdout_chunks: list[bytes] = []
+    stderr_chunks: list[bytes] = []
+    readers = [asyncio.create_task(drain(stdout_stream, stdout_chunks)), asyncio.create_task(drain(stderr_stream, stderr_chunks))]
+    try:
+        await asyncio.wait_for(process.wait(), timeout=timeout_seconds)
+    except asyncio.TimeoutError:
+        process.kill()
+        await process.wait()
+        raise
+    finally:
+        await asyncio.gather(*readers, return_exceptions=True)
+    return b"".join(stdout_chunks), b"".join(stderr_chunks)
+
+
 async def capture_youtube_frames(
-    options: dict[str, Any], progress: Callable[[int, int, dict[str, Any] | None], None],
+    options: dict[str, Any], progress: Callable[..., None],
     diagnostics: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     youtube = options["youtube"]
@@ -2962,8 +3048,9 @@ async def capture_youtube_frames(
     if not yt_dlp.executable or not ffmpeg.executable:
         raise AgentApiError("YTDLP_NOT_AVAILABLE", "yt-dlp and ffmpeg are required for partial YouTube frame capture.")
     formats = (await youtube_download_formats({"videoId": youtube["videoId"]}))["downloadFormats"]
-    available = {entry["formatId"] for kind in ("combined", "video") for entry in formats.get(kind, []) if isinstance(entry, dict) and isinstance(entry.get("formatId"), str)}
-    if youtube["formatId"] not in available:
+    available = [entry for kind in ("combined", "video") for entry in formats.get(kind, []) if isinstance(entry, dict) and isinstance(entry.get("formatId"), str)]
+    selected_format = next((entry for entry in available if entry["formatId"] == youtube["formatId"]), None)
+    if selected_format is None:
         raise AgentApiError("CAPTURE_VIDEO_FORMAT_NOT_AVAILABLE", "youtube.formatId must be a currently available video or combined format from youtube_download_get_formats.")
     sections = youtube_capture_sections(options["timestampsSeconds"])
     deno_executable = resolve_deno_runtime()
@@ -2996,9 +3083,10 @@ async def capture_youtube_frames(
             partial_path: Path | None = None
             section_title: str | None = None
             section_error: AgentApiError | None = None
+            expected_section_bytes = youtube_section_expected_bytes(selected_format, end - start)
             for attempt_count in range(1, len(YOUTUBE_CAPTURE_SECTION_RETRY_DELAYS_SECONDS) + 2):
                 command = [
-                    yt_dlp.executable, *yt_dlp_youtube_arguments(deno_executable), "--verbose", "--ignore-config", "--no-playlist", "--no-part", "--encoding", "utf-8",
+                    yt_dlp.executable, *yt_dlp_youtube_arguments(deno_executable), "--verbose", "--newline", "--ignore-config", "--no-playlist", "--no-part", "--encoding", "utf-8",
                     "--download-sections", f"*{start:.3f}-{end:.3f}", "--downloader", "ffmpeg",
                     "--ffmpeg-location", str(Path(ffmpeg.executable).parent), "--format", youtube["formatId"],
                     "--paths", str(temporary_directory.physical_path), "--output", f"partial [section_{section_index:03d}].%(ext)s",
@@ -3008,7 +3096,37 @@ async def capture_youtube_frames(
                 ]
                 try:
                     process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-                    stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=YOUTUBE_CAPTURE_FRAME_TIMEOUT_SECONDS)
+                    file_progress_stopped = asyncio.Event()
+
+                    def report_download_progress(line: bytes) -> None:
+                        percent = youtube_section_download_progress(line, end - start)
+                        if percent is not None:
+                            progress(len(results), total, None, percent, len(timestamps))
+
+                    async def report_partial_file_progress() -> None:
+                        # yt-dlp delegates --download-sections to its external
+                        # FFmpeg downloader and does not relay that child's
+                        # standard progress events. The partial file itself is
+                        # the actual download destination, so its growing size
+                        # gives us a non-invasive, real transfer indicator.
+                        if expected_section_bytes is None:
+                            return
+                        while not file_progress_stopped.is_set():
+                            await asyncio.sleep(YOUTUBE_CAPTURE_FILE_PROGRESS_INTERVAL_SECONDS)
+                            written = youtube_section_written_bytes(temporary_directory.physical_path, section_index)
+                            if written > 0:
+                                percent = min(95.0, written * 100.0 / expected_section_bytes)
+                                progress(len(results), total, None, percent, len(timestamps))
+
+                    file_progress = asyncio.create_task(report_partial_file_progress())
+                    try:
+                        stdout, stderr = await collect_process_output_with_progress(
+                            process, timeout_seconds=YOUTUBE_CAPTURE_FRAME_TIMEOUT_SECONDS, on_line=report_download_progress,
+                        )
+                    finally:
+                        file_progress_stopped.set()
+                        file_progress.cancel()
+                        await asyncio.gather(file_progress, return_exceptions=True)
                 except asyncio.TimeoutError as error:
                     process.kill(); await process.communicate()
                     section_error = AgentApiError("YOUTUBE_CAPTURE_FRAME_FAILED", "yt-dlp timed out while downloading a required frame section.")
@@ -3066,7 +3184,7 @@ async def capture_youtube_frames(
 
 
 async def capture_frames(
-    options: dict[str, Any], progress: Callable[[int, int, dict[str, Any] | None], None],
+    options: dict[str, Any], progress: Callable[..., None],
     diagnostics: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     if options["youtube"] is not None:
@@ -3126,8 +3244,18 @@ class CaptureFrameTaskManager:
         self.tasks[task_id] = task; task.runner = asyncio.create_task(self.run(task), name=f"researchtube-capture-frame-{task_id}")
         return self.snapshot(task)
     async def run(self, task: CaptureFrameTask) -> None:
-        def progress(completed: int, total: int, frame: dict[str, Any] | None = None) -> None:
-            task.completed_frames, task.total_frames = completed, total; task.progress_percent = completed * 100.0 / total; task.status_message = f"Extracted {completed} of {total} frames."; task.last_updated_at = utc_now()
+        def progress(completed: int, total: int, frame: dict[str, Any] | None = None, section_download_percent: float | None = None, section_frame_count: int = 0) -> None:
+            task.completed_frames, task.total_frames = completed, total
+            if section_download_percent is not None and section_frame_count > 0:
+                estimated = ((completed + (section_download_percent / 100.0) * section_frame_count) * 100.0 / total)
+                # Retried downloaders can restart their own progress at zero. Do
+                # not make the task's externally visible progress move backwards.
+                task.progress_percent = max(task.progress_percent, min(99.0, estimated))
+                task.status_message = f"Downloading frame section: {section_download_percent:.0f}% (extracted {completed} of {total} frames)."
+            else:
+                task.progress_percent = completed * 100.0 / total
+                task.status_message = f"Extracted {completed} of {total} frames."
+            task.last_updated_at = utc_now()
             if frame is not None:
                 task.frames.append(frame)
         try:

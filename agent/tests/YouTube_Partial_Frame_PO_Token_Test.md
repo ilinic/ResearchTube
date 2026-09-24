@@ -15,8 +15,9 @@ private, age-restricted, members-only, live, Premiere, or login-required video.
    exact numeric ID from `downloadFormats.video`; do not use the browser-side
    advisory format list.
 
-4. Start exactly one `media_capture_frame` task. The Agent creates one short
-partial-section yt-dlp/FFmpeg invocation at a time, with a 2-second pause between
+4. Start exactly one `media_capture_frame` task. The Agent merges frame windows
+whose gap is no more than 10 seconds, but caps one partial section at 60 seconds.
+It creates one yt-dlp/FFmpeg invocation at a time, with a 2-second pause between
 separate sections. A temporary failed section is retried after 3 seconds and then
 after 6 seconds; it does not send all sections to one FFmpeg process:
 

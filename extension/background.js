@@ -42,8 +42,8 @@ const MCP_TOOL_SETTINGS = Object.freeze({
   clipboard_status: { group: "clipboard" }, clipboard_get: { group: "clipboard" }, clipboard_set: { group: "clipboard" },
   library_store_start: { group: "library" }, library_store_status: { group: "library" }, library_store_cancel: { group: "library" }, online_share_start: { group: "online" }, online_share_status: { group: "online" }, online_share_stop: { group: "online" }
 });
-const EXTENSION_VERSION = "2.0.6";
-const REQUIRED_AGENT_INTERFACE_VERSION = 59;
+const EXTENSION_VERSION = "2.0.9";
+const REQUIRED_AGENT_INTERFACE_VERSION = 61;
 // A UI resource URI is a cache key in MCP Apps. Increment it whenever the
 // rendered template changes so ChatGPT does not reuse a stale iframe bundle.
 const CAPTURE_FRAME_WIDGET_URI = "ui://researchtube/capture-frame-v43.html";
@@ -923,7 +923,7 @@ function toolDefinitions() {
     {
       name: "media_capture_frame",
       title: "Start frame extraction from workspace or YouTube",
-      description: "Start an asynchronous extraction of 1–20 frames from an existing workspace video or a selected YouTube video stream. For YouTube, first call youtube_download_get_formats and pass its exact numeric video formatId. The Agent groups nearby timestamps into partial yt-dlp --download-sections ranges instead of downloading the full video, then downloads each range separately with a two-second gap. A transient failed range is retried after 3 and 6 seconds; completed frames remain available if a later range still fails. Poll media_capture_frame_get_task no faster than pollIntervalMs. A failed task may contain completed frames and failedSection with attemptCount. Frames are saved in captures/ and are never shown automatically; use media_image_show only for specific completed frames the user asks to see.",
+      description: "Start an asynchronous extraction of 1–20 frames from an existing workspace video or a selected YouTube video stream. For YouTube, first call youtube_download_get_formats and pass its exact numeric video formatId. The Agent groups nearby timestamps into partial yt-dlp --download-sections ranges instead of downloading the full video: windows with a gap of at most 10 seconds are merged, but one range never exceeds 60 seconds. Each resulting range is downloaded separately with a two-second gap. During an active YouTube range, progress is derived from bytes actually written to its partial download; after frames are extracted it is exact. A transient failed range is retried after 3 and 6 seconds; completed frames remain available if a later range still fails. Poll media_capture_frame_get_task no faster than pollIntervalMs. A failed task may contain completed frames and failedSection with attemptCount. Frames are saved in captures/ and are never shown automatically; use media_image_show only for specific completed frames the user asks to see.",
       annotations: localWorkspaceWriteAnnotations,
       inputSchema: {
         type: "object", additionalProperties: false,
@@ -949,7 +949,7 @@ function toolDefinitions() {
     {
       name: "media_capture_frame_get_task",
       title: "Get frame-extraction progress",
-      description: "Get progress and completed frame metadata for a frame-extraction task. Poll no faster than pollIntervalMs. A completed task contains all saved Workspace image paths; a failed YouTube task preserves earlier completed frames and identifies failedSection with attemptCount when applicable.",
+      description: "Get progress and completed frame metadata for a frame-extraction task. While a YouTube section is downloading, progressPercent is a monotonic estimate derived from bytes actually written to that partial range and statusMessage identifies that phase; after extraction it is exact. Poll no faster than pollIntervalMs. A completed task contains all saved Workspace image paths; a failed YouTube task preserves earlier completed frames and identifies failedSection with attemptCount when applicable.",
       annotations: localAgentReadAnnotations,
       inputSchema: { type: "object", additionalProperties: false, properties: { taskId: { type: "string", minLength: 1 } }, required: ["taskId"] },
       outputSchema: captureFrameTaskSchema,

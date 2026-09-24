@@ -23,7 +23,8 @@ for (const tool of ["youtube_download_get_formats", "youtube_download_get_task",
 assert.match(background, /youtubeFormats: youtubeFormatsSchema/);
 assert.match(background, /youtube_download_get_formats\.downloadFormats/);
 assert.match(background, /afterEventId/);
-assert.match(background, /const REQUIRED_AGENT_INTERFACE_VERSION = 59;/);
+assert.match(background, /const REQUIRED_AGENT_INTERFACE_VERSION = 61;/);
+assert.match(background, /gap of at most 10 seconds are merged, but one range never exceeds 60 seconds/, "YouTube frame batches must use bounded hybrid section grouping");
 assert.match(background, /targetFps is optional/, "camera recording must choose a default FPS when none is supplied");
 assert.match(background, /name: "camera_record_audio"/, "audio-only camera recording must be published through the MCP tool registry");
 assert.match(background, /enum: \["working", "stopping", "completed", "failed"\]/, "camera task schema must expose the graceful-stop state");

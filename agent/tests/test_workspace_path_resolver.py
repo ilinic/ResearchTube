@@ -634,6 +634,28 @@ class CaptureFrameTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(progress, [(1, 2), (2, 2)])
         self.assertEqual([result["requestedTimestampSeconds"] for result in results], [30, 130])
 
+    def test_youtube_batch_merges_nearby_windows_but_caps_one_section_at_sixty_seconds(self) -> None:
+        sections = agent.youtube_capture_sections([30, 50, 70, 80, 230])
+        self.assertEqual(sections, [
+            (18.0, 73.0, [30, 50, 70]),
+            (68.0, 83.0, [80]),
+            (218.0, 233.0, [230]),
+        ])
+        self.assertTrue(all(end - start <= 60 for start, end, _timestamps in sections))
+
+    def test_youtube_batch_merges_a_gap_of_ten_seconds_but_not_more(self) -> None:
+        self.assertEqual(agent.youtube_capture_sections([30, 55]), [(18.0, 58.0, [30, 55])])
+        self.assertEqual(agent.youtube_capture_sections([30, 56]), [(18.0, 33.0, [30]), (44.0, 59.0, [56])])
+
+    def test_youtube_section_progress_parses_ytdlp_and_ffmpeg_output(self) -> None:
+        self.assertEqual(agent.youtube_section_download_progress(b"[download]  42.7% of 10.00MiB", 15.0), 42.7)
+        self.assertAlmostEqual(agent.youtube_section_download_progress(b"frame=  42 fps=0.0 time=00:00:07.50 bitrate=0.0kbits/s", 15.0), 50.0)
+        self.assertIsNone(agent.youtube_section_download_progress(b"unrelated output", 15.0))
+
+    def test_youtube_section_size_estimate_uses_advertised_bitrate(self) -> None:
+        self.assertEqual(agent.youtube_section_expected_bytes({"bitrateBps": 800_000}, 15.0), 1_500_000)
+        self.assertIsNone(agent.youtube_section_expected_bytes({"bitrateBps": None}, 15.0))
+
     async def test_youtube_batch_retries_only_the_failed_section(self) -> None:
         commands: list[tuple[str, ...]] = []
 
