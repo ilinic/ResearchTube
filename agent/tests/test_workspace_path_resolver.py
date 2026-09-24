@@ -117,8 +117,20 @@ class WorkspacePathResolverTests(unittest.TestCase):
         image.parent.mkdir(parents=True, exist_ok=True)
         image.write_bytes(b"image-bytes")
         _item, metadata = agent.workspace_image_metadata({"path": "captures/frame.png"})
-        self.assertEqual(metadata, {"path": "captures/frame.png", "mimeType": "image/png", "imageSizeBytes": 11})
+        self.assertEqual(metadata, {"path": "captures/frame.png", "mediaKind": "image", "mimeType": "image/png", "sizeBytes": 11})
         self.assertNotIn("inlineImageBase64", metadata)
+
+    def test_workspace_media_metadata_accepts_camera_video_and_audio(self) -> None:
+        video = agent.WORKSPACE_PATH / "webcamera" / "C922 2026-09-24T01_11_26Z [cam_abcdefghij].mp4"
+        audio = agent.WORKSPACE_PATH / "sound" / "C922 2026-09-24T01_11_26Z [cam_abcdefghij].m4a"
+        video.parent.mkdir(parents=True, exist_ok=True)
+        audio.parent.mkdir(parents=True, exist_ok=True)
+        video.write_bytes(b"video")
+        audio.write_bytes(b"audio")
+        _item, video_metadata = agent.workspace_image_metadata({"path": "webcamera/C922 2026-09-24T01_11_26Z [cam_abcdefghij].mp4"})
+        _item, audio_metadata = agent.workspace_image_metadata({"path": "sound/C922 2026-09-24T01_11_26Z [cam_abcdefghij].m4a"})
+        self.assertEqual(video_metadata, {"path": "webcamera/C922 2026-09-24T01_11_26Z [cam_abcdefghij].mp4", "mediaKind": "video", "mimeType": "video/mp4", "sizeBytes": 5})
+        self.assertEqual(audio_metadata, {"path": "sound/C922 2026-09-24T01_11_26Z [cam_abcdefghij].m4a", "mediaKind": "audio", "mimeType": "audio/mp4", "sizeBytes": 5})
 
     def test_health_serialization_omits_host_paths(self) -> None:
         snapshot = {
@@ -365,7 +377,7 @@ class CaptureFrameTests(unittest.IsolatedAsyncioTestCase):
     def test_capture_title_preserves_cyrillic_while_replacing_windows_invalid_characters(self) -> None:
         self.assertEqual(
             agent.safe_capture_title('Народу было много,строили долго."(С)Официальные историки'),
-            "Народу было много,строили долго. (С)Официальные историки",
+            "Народу было много,строили долго._(С)Официальные историки",
         )
 
     async def asyncSetUp(self) -> None:
@@ -445,7 +457,7 @@ class CaptureFrameTests(unittest.IsolatedAsyncioTestCase):
 
     def test_youtube_capture_name_sanitizes_the_ytdlp_title(self) -> None:
         path = agent.youtube_capture_default_workspace_path('A: title / with * invalid?', "aqz-KE-bpKQ", 2.0, "png")
-        self.assertRegex(path, r"^captures/A title with invalid \[yt_aqz-KE-bpKQ\] \[t_2\.000\] \[cap_[A-Za-z0-9_-]{8}\]\.png$")
+        self.assertRegex(path, r"^captures/A_ title _ with _ invalid_ \[yt_aqz-KE-bpKQ\] \[t_2\.000\] \[cap_[A-Za-z0-9_-]{8}\]\.png$")
 
     def discovery(self, name, _candidates):
         return agent.ComponentDiscovery("local", f"/private/{name}")
@@ -585,8 +597,10 @@ class CaptureFrameTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["sourceTitle"], 'Народу было много,строили долго."(С)Официальные историки')
         self.assertEqual(result["partialDownload"], {"startSeconds": 12.0, "endSeconds": 27.0})
         self.assertEqual(result["actualTimestampSeconds"], 24.5)
-        self.assertTrue(result["image"]["workspacePath"].startswith("captures/Народу было много,строили долго. (С)Официальные историки [yt_aqz-KE-bpKQ] [t_24.000] [cap_"))
+        self.assertTrue(result["image"]["workspacePath"].startswith("captures/Народу было много,строили долго._(С)Официальные историки [yt_aqz-KE-bpKQ] [t_24.000] [cap_"))
         self.assertNotIn("--windows-filenames", capture_commands[0])
+        self.assertIn("--encoding", capture_commands[0])
+        self.assertIn("utf-8", capture_commands[0])
         self.assertFalse((agent.WORKSPACE_PATH / ".researchtube-capture-tmp").exists())
 
     async def test_workspace_image_metadata_never_returns_encoded_bytes(self) -> None:
@@ -594,7 +608,7 @@ class CaptureFrameTests(unittest.IsolatedAsyncioTestCase):
         image.parent.mkdir(parents=True, exist_ok=True)
         image.write_bytes(b"image-bytes")
         _item, result = agent.workspace_image_metadata({"path": "captures/frame.png"})
-        self.assertEqual(result, {"path": "captures/frame.png", "mimeType": "image/png", "imageSizeBytes": 11})
+        self.assertEqual(result, {"path": "captures/frame.png", "mediaKind": "image", "mimeType": "image/png", "sizeBytes": 11})
         self.assertNotIn(str(self.root), json.dumps(result))
         self.assertNotIn("base64", json.dumps(result).lower())
 

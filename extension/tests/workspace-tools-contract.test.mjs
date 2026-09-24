@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 
 const background = await readFile(new URL("../background.js", import.meta.url), "utf8");
 
-for (const tool of ["system_agent_status", "workspace_list", "workspace_stat", "workspace_mkdir", "workspace_move", "workspace_delete", "online_share_start", "online_share_status", "online_share_stop", "media_probe", "media_capture_frame", "media_visual_map_create", "media_visual_map_get_task", "media_visual_map_cancel_task", "media_camera_list", "media_camera_capture_frame", "media_camera_record_video", "media_camera_record_status", "media_camera_record_stop", "media_capture_screen", "media_image_crop", "media_image_show", "media_image_inspect", "clipboard_status", "clipboard_get", "clipboard_set", "media_load_workspace_image", "media_copy_workspace_path"]) {
+for (const tool of ["system_agent_status", "workspace_list", "workspace_stat", "workspace_mkdir", "workspace_move", "workspace_delete", "online_share_start", "online_share_status", "online_share_stop", "media_probe", "media_capture_frame", "visual_map_create", "visual_map_get_task", "visual_map_cancel_task", "camera_list", "camera_capture_frame", "camera_record_video", "camera_record_audio", "camera_record_status", "camera_record_stop", "media_capture_screen", "media_image_crop", "media_image_show", "media_image_inspect", "clipboard_status", "clipboard_get", "clipboard_set", "media_load_workspace_image", "media_copy_workspace_path"]) {
   assert.match(background, new RegExp(`name: "${tool}"`), `${tool} must be published in tools/list`);
 }
 for (const tool of ["library_store_start", "library_store_status", "library_store_cancel"]) {
@@ -23,7 +23,13 @@ for (const tool of ["youtube_download_get_formats", "youtube_download_get_task",
 assert.match(background, /youtubeFormats: youtubeFormatsSchema/);
 assert.match(background, /youtube_download_get_formats\.downloadFormats/);
 assert.match(background, /afterEventId/);
-assert.match(background, /const REQUIRED_AGENT_INTERFACE_VERSION = 49;/);
+assert.match(background, /const REQUIRED_AGENT_INTERFACE_VERSION = 52;/);
+assert.match(background, /targetFps is optional/, "camera recording must choose a default FPS when none is supplied");
+assert.match(background, /name: "camera_record_audio"/, "audio-only camera recording must be published through the MCP tool registry");
+assert.match(background, /enum: \["working", "stopping", "completed", "failed"\]/, "camera task schema must expose the graceful-stop state");
+assert.doesNotMatch(background, /Before calling this tool, clearly tell the user that webcam video recording is about to begin\./, "camera recording must use the extension badge instead of an unseen chat warning");
+assert.match(background, /exclusiveMinimum: 25, maximum: 120/, "camera recording FPS must accept native rates strictly above 25 through 120");
+assert.match(background, /keys and fps preserve native rates such as 29\.97 or 59\.94/, "camera listing must preserve native non-integer rates");
 assert.match(background, /selection: \{ type: "string", enum: \["uniform", "sceneDetect", "hybrid"\]/, "visual maps must publish uniform, scene-detect, and hybrid selectors");
 assert.match(background, /sceneDetectThreshold: \{ type: "number", minimum: 0, maximum: 100, default: 10/, "visual maps must publish the native scdet percentage threshold");
 assert.match(background, /FFmpeg's native scdet filter/, "the visual-map description must name native scdet");
@@ -64,8 +70,8 @@ assert.match(background, /TOOL_DISABLED/, "a stale ChatGPT tool schema must rece
 assert.match(background, /showInChat defaults to false/);
 assert.match(background, /never render a widget themselves/, "creation tools must not create blank static-template iframes");
 assert.match(background, /After a successful result, call media_image_show/, "showInChat must route presentation through the dedicated display tool");
-assert.match(background, /A successful result means the image card has already been shown; do not call this tool again for the same image/, "the display tool must prevent duplicate retries");
-assert.match(background, /text: "Workspace image shown\."/, "the display tool must return an explicit compact success result to the model");
+assert.match(background, /A successful result means the card has already been shown; do not call it again for the same file/, "the display tool must prevent duplicate retries");
+assert.match(background, /text: "Workspace media shown\."/, "the display tool must return an explicit compact success result to the model");
 assert.match(background, /Independently validate one PNG, JPEG, or WebP image/, "image inspection must be distinct from generic workspace stat");
 assert.equal((background.match(/"openai\/outputTemplate": CAPTURE_FRAME_WIDGET_URI/g) || []).length, 1, "only the explicit workspace-image display tool may declare the widget template");
 assert.doesNotMatch(background, /researchtube_copy_capture_frame_image/);

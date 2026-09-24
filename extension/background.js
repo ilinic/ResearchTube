@@ -20,29 +20,33 @@ const MCP_TOOL_GROUPS = Object.freeze({
   system: { title: "System", order: 10 },
   workspace: { title: "Workspace", order: 20 },
   media: { title: "Media and images", order: 30 },
-  youtube: { title: "YouTube", order: 40 },
-  downloads: { title: "Downloads", order: 50 },
-  clipboard: { title: "Clipboard", order: 60 },
-  library: { title: "Library and sharing", order: 70 },
-  online: { title: "Online Share", order: 80 },
-  custom: { title: "Custom", order: 90 }
+  visualMaps: { title: "Visual Maps", order: 40 },
+  camera: { title: "Camera", order: 50 },
+  youtube: { title: "YouTube", order: 60 },
+  downloads: { title: "Downloads", order: 70 },
+  clipboard: { title: "Clipboard", order: 80 },
+  library: { title: "Library and sharing", order: 90 },
+  online: { title: "Online Share", order: 100 },
+  custom: { title: "Custom", order: 110 }
 });
 // This is deliberately explicit metadata, rather than a rule inferred from a
 // tool name. New third-party tools without an entry land safely in Custom.
 const MCP_TOOL_SETTINGS = Object.freeze({
   system_agent_status: { group: "system", alwaysEnabled: true },
   workspace_list: { group: "workspace" }, workspace_stat: { group: "workspace" }, workspace_mkdir: { group: "workspace" }, workspace_move: { group: "workspace" }, workspace_delete: { group: "workspace" },
-  media_probe: { group: "media" }, media_capture_frame: { group: "media" }, media_visual_map_create: { group: "media" }, media_visual_map_get_task: { group: "media" }, media_visual_map_cancel_task: { group: "media" }, media_camera_list: { group: "media" }, media_camera_capture_frame: { group: "media" }, media_camera_record_video: { group: "media" }, media_camera_record_status: { group: "media" }, media_camera_record_stop: { group: "media" }, media_capture_screen: { group: "media" }, media_image_crop: { group: "media" }, media_image_show: { group: "media" }, media_image_inspect: { group: "media" },
+  media_probe: { group: "media" }, media_capture_frame: { group: "media" }, media_capture_screen: { group: "media" }, media_image_crop: { group: "media" }, media_image_show: { group: "media" }, media_image_inspect: { group: "media" },
+  visual_map_create: { group: "visualMaps" }, visual_map_get_task: { group: "visualMaps" }, visual_map_cancel_task: { group: "visualMaps" },
+  camera_list: { group: "camera" }, camera_capture_frame: { group: "camera" }, camera_record_video: { group: "camera" }, camera_record_audio: { group: "camera" }, camera_record_status: { group: "camera" }, camera_record_stop: { group: "camera" },
   youtube_search: { group: "youtube" }, youtube_get_video: { group: "youtube" }, youtube_get_channel_videos: { group: "youtube" }, youtube_get_channel_playlists: { group: "youtube" }, youtube_get_playlist_videos: { group: "youtube" }, youtube_get_transcript: { group: "youtube" }, youtube_get_comments: { group: "youtube" }, youtube_get_comment_replies: { group: "youtube" },
   youtube_download_get_formats: { group: "downloads" }, youtube_download: { group: "downloads" }, youtube_download_get_task: { group: "downloads" }, youtube_download_task_diagnostics: { group: "downloads" }, youtube_download_cancel_task: { group: "downloads" },
   clipboard_status: { group: "clipboard" }, clipboard_get: { group: "clipboard" }, clipboard_set: { group: "clipboard" },
   library_store_start: { group: "library" }, library_store_status: { group: "library" }, library_store_cancel: { group: "library" }, online_share_start: { group: "online" }, online_share_status: { group: "online" }, online_share_stop: { group: "online" }
 });
-const EXTENSION_VERSION = "1.88.2";
-const REQUIRED_AGENT_INTERFACE_VERSION = 49;
+const EXTENSION_VERSION = "1.95.0";
+const REQUIRED_AGENT_INTERFACE_VERSION = 52;
 // A UI resource URI is a cache key in MCP Apps. Increment it whenever the
 // rendered template changes so ChatGPT does not reuse a stale iframe bundle.
-const CAPTURE_FRAME_WIDGET_URI = "ui://researchtube/capture-frame-v38.html";
+const CAPTURE_FRAME_WIDGET_URI = "ui://researchtube/capture-frame-v43.html";
 const RESEARCHTUBE_SERVER_DESCRIPTION = "ResearchTube provides YouTube research, local media and image operations, workspace management, screenshots, clipboard, and Library integration. Search this server when the user refers to ResearchTube, YouTube analysis, a previously created workspace file, captured frame, screenshot, crop, clipboard, or asks to continue a previous ResearchTube operation. In clients with deferred tools, ResearchTube is discoverable through functions.exec lazy MCP-tool discovery; search there before treating the capability as unavailable.";
 const RESEARCHTUBE_MCP_INSTRUCTIONS = "ResearchTube exposes MCP tools that may be loaded or discovered lazily by the client. When the user mentions ResearchTube, invokes @ResearchTube, asks to repeat a ResearchTube operation, or requests a capability previously provided by ResearchTube, do not infer that ResearchTube is unavailable merely because its tools are not currently visible as a top-level tool namespace. In this client, ResearchTube is available through functions.exec with lazy MCP-tool discovery: search there for the appropriate ResearchTube tool before reporting that the capability is unavailable. Only report ResearchTube as unavailable if tool discovery actually fails, the required tool cannot be found after discovery, or an actual ResearchTube tool invocation returns an availability, connection, compatibility, or transport error. Successful use earlier in the conversation is evidence that the tools may be discoverable again; rediscover them rather than assuming access has disappeared. media_capture_frame, media_capture_screen, and media_image_crop never render a widget themselves: when showInChat is true, after the successful creation result immediately call media_image_show with the returned workspace image path. When showInChat is false, do not call the display tool.";
 const CAPTURE_FRAME_OFFSCREEN_DOCUMENT = "capture-frame-offscreen.html";
@@ -69,6 +73,10 @@ const SEARCH_DIAGNOSTIC_MAX_ENTRIES = 250;
 const SEARCH_DIAGNOSTIC_MAX_QUERY_LENGTH = 360;
 const COMMAND_DIAGNOSTIC_MAX_ENTRIES = 300;
 const DESCRIBE_VIDEO_DUPLICATE_WINDOW_MS = 8_000;
+let cameraRecordingBadgeKind = null;
+let cameraRecordingBadgeTaskId = null;
+let cameraRecordingBadgeVisible = false;
+let cameraRecordingBadgeTimer = null;
 
 let polling = false;
 let currentPollPromise = null;
@@ -603,23 +611,23 @@ const cameraModeSchema = {
 const cameraListSchema = {
   type: "object", additionalProperties: false,
   properties: {
-    cameras: { type: "array", items: { type: "object", additionalProperties: false, properties: { cameraId: { type: "string", minLength: 1 }, name: { type: "string", minLength: 1 }, videoModes: { type: "object", additionalProperties: false, minProperties: 1, properties: { "30": cameraModeSchema, "60": cameraModeSchema } } }, required: ["cameraId", "name", "videoModes"] } }
+    cameras: { type: "array", items: { type: "object", additionalProperties: false, properties: { cameraId: { type: "string", minLength: 1 }, name: { type: "string", minLength: 1 }, videoModes: { type: "object", minProperties: 1, additionalProperties: cameraModeSchema } }, required: ["cameraId", "name", "videoModes"] } }
   }, required: ["cameras"]
 };
 const cameraFrameSchema = {
   type: "object", additionalProperties: false,
-  properties: { cameraId: { type: "string", minLength: 1 }, workspacePath: { type: "string", minLength: 1 }, format: { type: "string", enum: ["png", "jpeg", "webp"] }, mimeType: { type: "string", enum: ["image/png", "image/jpeg", "image/webp"] }, width: { type: "integer", minimum: 1 }, height: { type: "integer", minimum: 1 }, imageSizeBytes: { type: "integer", minimum: 0 } },
-  required: ["cameraId", "workspacePath", "format", "mimeType", "width", "height", "imageSizeBytes"]
+  properties: { cameraId: { type: "string", minLength: 1 }, taskId: { type: "string", pattern: "^cam_[A-Za-z0-9_-]{10}$" }, workspacePath: { type: "string", minLength: 1 }, format: { type: "string", enum: ["png", "jpeg", "webp"] }, mimeType: { type: "string", enum: ["image/png", "image/jpeg", "image/webp"] }, width: { type: "integer", minimum: 1 }, height: { type: "integer", minimum: 1 }, imageSizeBytes: { type: "integer", minimum: 0 } },
+  required: ["cameraId", "taskId", "workspacePath", "format", "mimeType", "width", "height", "imageSizeBytes"]
 };
 const cameraRecordResultSchema = {
   type: "object", additionalProperties: false,
-  properties: { cameraId: { type: "string", minLength: 1 }, filePath: { type: "string", minLength: 1 }, format: { type: "string", const: "mp4" }, width: { type: "integer", minimum: 1 }, height: { type: "integer", minimum: 1 }, fps: { type: "number", exclusiveMinimum: 0 }, durationSeconds: { type: "number", minimum: 0 }, stoppedEarly: { type: "boolean" } },
-  required: ["cameraId", "filePath", "format", "width", "height", "fps", "durationSeconds"]
+  properties: { cameraId: { type: "string", minLength: 1 }, filePath: { type: "string", minLength: 1 }, format: { type: "string", enum: ["mp4", "m4a"] }, width: { type: "integer", minimum: 1 }, height: { type: "integer", minimum: 1 }, fps: { type: "number", exclusiveMinimum: 0 }, hasAudio: { type: "boolean" }, durationSeconds: { type: "number", minimum: 0 }, stoppedEarly: { type: "boolean" } },
+  required: ["cameraId", "filePath", "format", "durationSeconds"]
 };
 const cameraRecordTaskSchema = {
   type: "object", additionalProperties: false,
-  properties: { taskId: { type: "string", minLength: 1 }, status: { type: "string", enum: ["working", "completed", "failed"] }, phase: { type: "string", enum: ["starting", "recording", "finalizing", "completed", "failed"] }, statusMessage: { type: "string" }, progressPercent: { type: "number", minimum: 0, maximum: 100 }, elapsedSeconds: { type: "number", minimum: 0 }, requestedDurationSeconds: { type: "integer", minimum: 1, maximum: 60 }, targetFps: { type: "integer", enum: [30, 60] }, maxDurationSeconds: { type: "integer", const: 60 }, createdAt: { type: "string" }, lastUpdatedAt: { type: "string" }, pollIntervalMs: { type: "integer", minimum: 100 }, result: cameraRecordResultSchema, error: { type: "object", additionalProperties: false, properties: { code: { type: "string" }, message: { type: "string" } }, required: ["code", "message"] } },
-  required: ["taskId", "status", "phase", "statusMessage", "progressPercent", "elapsedSeconds", "requestedDurationSeconds", "targetFps", "maxDurationSeconds", "createdAt", "lastUpdatedAt", "pollIntervalMs"]
+  properties: { taskId: { type: "string", minLength: 1 }, recordingKind: { type: "string", enum: ["video", "audio"] }, status: { type: "string", enum: ["working", "stopping", "completed", "failed"] }, phase: { type: "string", enum: ["starting", "recording", "finalizing", "completed", "failed"] }, statusMessage: { type: "string" }, progressPercent: { type: "number", minimum: 0, maximum: 100 }, elapsedSeconds: { type: "number", minimum: 0 }, requestedDurationSeconds: { type: "integer", minimum: 1, maximum: 600 }, targetFps: { type: ["number", "null"], exclusiveMinimum: 25, maximum: 120 }, maxDurationSeconds: { type: "integer", enum: [60, 600] }, createdAt: { type: "string" }, lastUpdatedAt: { type: "string" }, pollIntervalMs: { type: "integer", minimum: 100 }, result: cameraRecordResultSchema, error: { type: "object", additionalProperties: false, properties: { code: { type: "string" }, message: { type: "string" } }, required: ["code", "message"] } },
+  required: ["taskId", "recordingKind", "status", "phase", "statusMessage", "progressPercent", "elapsedSeconds", "requestedDurationSeconds", "targetFps", "maxDurationSeconds", "createdAt", "lastUpdatedAt", "pollIntervalMs"]
 };
 const cameraStopSchema = { type: "object", additionalProperties: false, properties: { taskId: { type: "string", minLength: 1 }, accepted: { type: "boolean" }, message: { type: "string" } }, required: ["taskId", "accepted", "message"] };
 const captureFrameWidgetActionSchema = {
@@ -676,12 +684,13 @@ const imageCropSchema = {
 const showWorkspaceImageSchema = {
   type: "object", additionalProperties: false,
   properties: {
-    workspacePath: { type: "string", minLength: 1, description: "Logical workspace-relative path of the displayed image." },
-    mimeType: { type: "string", enum: ["image/png", "image/jpeg", "image/webp"] },
-    imageSizeBytes: { type: "integer", minimum: 0 },
+    workspacePath: { type: "string", minLength: 1, description: "Logical workspace-relative path of the displayed media file." },
+    mediaKind: { type: "string", enum: ["image", "video", "audio"] },
+    mimeType: { type: "string", enum: ["image/png", "image/jpeg", "image/webp", "video/mp4", "video/webm", "video/ogg", "video/quicktime", "audio/mpeg", "audio/mp4", "audio/wav", "audio/ogg", "audio/webm"] },
+    sizeBytes: { type: "integer", minimum: 0 },
     showInChat: { type: "boolean", const: true }
   },
-  required: ["workspacePath", "mimeType", "imageSizeBytes", "showInChat"]
+  required: ["workspacePath", "mediaKind", "mimeType", "sizeBytes", "showInChat"]
 };
 const mediaInspectImageSchema = {
   type: "object", additionalProperties: false,
@@ -916,9 +925,9 @@ function toolDefinitions() {
       }
     },
     {
-      name: "media_visual_map_create",
+      name: "visual_map_create",
       title: "Start a video visual map",
-      description: "Start an asynchronous task that creates chronological PNG contact sheets from an existing Workspace video. selection=uniform samples evenly. selection=sceneDetect uses FFmpeg's native scdet filter; sceneDetectThreshold is its percentage threshold from 0 to 100 and defaults to 10. It de-duplicates changes closer than two seconds and retains the strongest maxTotalFrames. selection=hybrid also uses scdet, but divides the requested range into maxTotalFrames equal intervals and chooses each interval's strongest detected change; an empty interval uses its midpoint. Results are chronological. Never downloads media. Poll media_visual_map_get_task no faster than pollIntervalMs until it completes; then display a specific map with media_image_show if needed.",
+      description: "Start an asynchronous task that creates chronological PNG contact sheets from an existing Workspace video. selection=uniform samples evenly. selection=sceneDetect uses FFmpeg's native scdet filter; sceneDetectThreshold is its percentage threshold from 0 to 100 and defaults to 10. It de-duplicates changes closer than two seconds and retains the strongest maxTotalFrames. selection=hybrid also uses scdet, but divides the requested range into maxTotalFrames equal intervals and chooses each interval's strongest detected change; an empty interval uses its midpoint. Results are chronological. Never downloads media. Poll visual_map_get_task no faster than pollIntervalMs until it completes; then display a specific map with media_image_show if needed.",
       annotations: localWorkspaceWriteAnnotations,
       inputSchema: {
         type: "object", additionalProperties: false,
@@ -934,7 +943,7 @@ function toolDefinitions() {
       _meta: { "openai/toolInvocation/invoking": "Starting visual map…", "openai/toolInvocation/invoked": "Visual-map task started." }
     },
     {
-      name: "media_visual_map_get_task",
+      name: "visual_map_get_task",
       title: "Get visual-map task progress",
       description: "Get the current phase, percentage, and final result or error for a visual-map task. Poll no faster than the returned pollIntervalMs. When completed, maps are Workspace images and are not displayed automatically.",
       annotations: localAgentReadAnnotations,
@@ -946,9 +955,9 @@ function toolDefinitions() {
       _meta: { "openai/toolInvocation/invoking": "Checking visual-map progress…", "openai/toolInvocation/invoked": "Visual-map progress checked." }
     },
     {
-      name: "media_visual_map_cancel_task",
+      name: "visual_map_cancel_task",
       title: "Cancel visual-map task",
-      description: "Request cancellation of a working visual-map task. Pass taskId unchanged, then call media_visual_map_get_task to observe its terminal state.",
+      description: "Request cancellation of a working visual-map task. Pass taskId unchanged, then call visual_map_get_task to observe its terminal state.",
       annotations: localWorkspaceWriteAnnotations,
       inputSchema: {
         type: "object", additionalProperties: false,
@@ -958,37 +967,44 @@ function toolDefinitions() {
       _meta: { "openai/toolInvocation/invoking": "Cancelling visual map…", "openai/toolInvocation/invoked": "Visual-map cancellation requested." }
     },
     {
-      name: "media_camera_list",
+      name: "camera_list",
       title: "List local cameras",
-      description: "List currently available local video cameras. cameraId is opaque and valid only while the Local Agent remains running. videoModes returns the largest native mode for each available 30 or 60 FPS recording choice; never returns native device paths or identifiers.",
+      description: "List currently available local video cameras. cameraId is opaque and valid only while the Local Agent remains running. videoModes returns the largest native mode for every available FPS strictly above 25 and no greater than 120; keys and fps preserve native rates such as 29.97 or 59.94. Never returns native device paths or identifiers.",
       annotations: localAgentReadAnnotations,
       inputSchema: { type: "object", additionalProperties: false, properties: {} }, outputSchema: cameraListSchema
     },
     {
-      name: "media_camera_capture_frame",
+      name: "camera_capture_frame",
       title: "Capture a camera frame",
-      description: "Capture one current frame from a camera returned by media_camera_list, using its automatically selected maximum native mode. Stores a PNG by default under captures/camera/. This does not display the image; call media_image_show once afterwards only when the user asks to see it.",
+      description: "Capture one current frame from a camera returned by camera_list, using its automatically selected maximum native mode. Stores a PNG by default directly under captures/. This does not display the image; call media_image_show once afterwards only when the user asks to see it.",
       annotations: localWorkspaceWriteAnnotations,
       inputSchema: { type: "object", additionalProperties: false, properties: { cameraId: { type: "string", minLength: 1 }, targetPath: { type: "string", minLength: 1 }, targetFormat: { type: "string", enum: ["png", "jpeg", "webp"], default: "png" } }, required: ["cameraId"] }, outputSchema: cameraFrameSchema
     },
     {
-      name: "media_camera_record_video",
+      name: "camera_record_video",
       title: "Record a camera video",
-      description: "Start an asynchronous video-only H.264 MP4 recording from a listed local camera. Choose targetFps from that camera's videoModes; durationSeconds is limited to 1–60. The terminal result reports the actual width, height, and FPS used. Poll media_camera_record_status until terminal; recording never exposes a partial output file.",
+      description: "Start an asynchronous H.264 MP4 recording with video and the microphone paired with a listed local camera. targetFps is optional; when supplied, the largest native resolution close to that FPS is used. When omitted, the Agent prefers a mode near 60 FPS, then one near 30 FPS. The terminal result reports ffprobe-verified width, height, duration, and actual file FPS. Poll camera_record_status until terminal; recording never exposes a partial output file.",
       annotations: localWorkspaceWriteAnnotations,
-      inputSchema: { type: "object", additionalProperties: false, properties: { cameraId: { type: "string", minLength: 1 }, durationSeconds: { type: "integer", minimum: 1, maximum: 60 }, targetFps: { type: "integer", enum: [30, 60] } }, required: ["cameraId", "durationSeconds", "targetFps"] }, outputSchema: cameraRecordTaskSchema
+      inputSchema: { type: "object", additionalProperties: false, properties: { cameraId: { type: "string", minLength: 1 }, durationSeconds: { type: "integer", minimum: 1, maximum: 60 }, targetFps: { type: "number", exclusiveMinimum: 25, maximum: 120 } }, required: ["cameraId", "durationSeconds"] }, outputSchema: cameraRecordTaskSchema
     },
     {
-      name: "media_camera_record_status",
+      name: "camera_record_audio",
+      title: "Record camera audio",
+      description: "Start an asynchronous audio-only recording from the microphone paired with a listed local camera. Stores an M4A file under sound/. The maximum duration is 10 minutes. Poll camera_record_status until terminal; use camera_record_stop for an early graceful stop.",
+      annotations: localWorkspaceWriteAnnotations,
+      inputSchema: { type: "object", additionalProperties: false, properties: { cameraId: { type: "string", minLength: 1 }, durationSeconds: { type: "integer", minimum: 1, maximum: 600 } }, required: ["cameraId", "durationSeconds"] }, outputSchema: cameraRecordTaskSchema
+    },
+    {
+      name: "camera_record_status",
       title: "Get camera recording status",
       description: "Get the current progress or terminal result of a camera-recording task. Poll no faster than pollIntervalMs.",
       annotations: localAgentReadAnnotations,
       inputSchema: { type: "object", additionalProperties: false, properties: { taskId: { type: "string", minLength: 1 } }, required: ["taskId"] }, outputSchema: cameraRecordTaskSchema
     },
     {
-      name: "media_camera_record_stop",
+      name: "camera_record_stop",
       title: "Stop a camera recording",
-      description: "Request a graceful early stop for a working camera-recording task. Then poll media_camera_record_status until it becomes completed or failed.",
+      description: "Request a graceful early stop for a working camera-recording task. Then poll camera_record_status until it becomes completed or failed.",
       annotations: localWorkspaceWriteAnnotations,
       inputSchema: { type: "object", additionalProperties: false, properties: { taskId: { type: "string", minLength: 1 } }, required: ["taskId"] }, outputSchema: cameraStopSchema
     },
@@ -1035,16 +1051,16 @@ function toolDefinitions() {
     },
     {
       name: "media_image_show",
-      title: "Show a workspace image in chat",
-      description: "Show a previously created ResearchTube workspace image inline in ChatGPT. Use this after media_capture_frame, media_capture_screen, or media_image_crop when showInChat was requested, or whenever the user asks to show a prior capture, screenshot, crop, or workspace image. A successful result means the image card has already been shown; do not call this tool again for the same image. This tool is for user presentation only; it does not make the image pixels a reliable visual input to ChatGPT. It reads the local image but never exposes a host filesystem path or image bytes to the model.",
+      title: "Show workspace media in chat",
+      description: "Show a supported ResearchTube Workspace image, video, or audio file inline in ChatGPT. Use this after a creation tool only when inline display was requested, or whenever the user asks to show a prior capture, recording, screenshot, crop, or Workspace media file. A successful result means the card has already been shown; do not call it again for the same file. It uses the Local Agent only and never exposes host paths or media bytes to the model.",
       annotations: localAgentReadAnnotations,
-      inputSchema: { type: "object", additionalProperties: false, properties: { path: { type: "string", minLength: 1, description: "Logical workspace-relative path of an existing PNG, JPEG, or WebP image." } }, required: ["path"] },
+      inputSchema: { type: "object", additionalProperties: false, properties: { path: { type: "string", minLength: 1, description: "Logical workspace-relative path of an existing supported image, video, or audio file." } }, required: ["path"] },
       outputSchema: showWorkspaceImageSchema,
       _meta: {
         ui: { resourceUri: CAPTURE_FRAME_WIDGET_URI },
         "openai/outputTemplate": CAPTURE_FRAME_WIDGET_URI,
-        "openai/toolInvocation/invoking": "Loading workspace image…",
-        "openai/toolInvocation/invoked": "Workspace image shown."
+        "openai/toolInvocation/invoking": "Loading workspace media…",
+        "openai/toolInvocation/invoked": "Workspace media shown."
       }
     },
     {
@@ -1087,8 +1103,8 @@ function toolDefinitions() {
       inputSchema: { type: "object", additionalProperties: false, properties: { path: { type: "string", minLength: 1, description: "Logical workspace-relative path returned by media_capture_frame.image.workspacePath." } }, required: ["path"] },
       outputSchema: {
         type: "object", additionalProperties: false,
-        properties: { path: { type: "string" }, mimeType: { type: "string", enum: ["image/png", "image/jpeg", "image/webp"] }, imageSizeBytes: { type: "integer", minimum: 0 } },
-        required: ["path", "mimeType", "imageSizeBytes"]
+        properties: { path: { type: "string" }, mediaKind: { type: "string", enum: ["image", "video", "audio"] }, mimeType: { type: "string" }, sizeBytes: { type: "integer", minimum: 0 } },
+        required: ["path", "mediaKind", "mimeType", "sizeBytes"]
       },
       _meta: {
         ui: { visibility: ["app"] },
@@ -2874,7 +2890,7 @@ async function captureFrame(argumentsValue) {
 }
 
 function normalizeVisualMapInput(argumentsValue = {}) {
-  const args = captureFrameObject(argumentsValue, "media_visual_map_create", new Set(["workspacePath", "columns", "rows", "maxTotalFrames", "selection", "sceneDetectThreshold", "startSeconds", "endSeconds", "maxMapDimension", "frameTimestampPosition"]));
+  const args = captureFrameObject(argumentsValue, "visual_map_create", new Set(["workspacePath", "columns", "rows", "maxTotalFrames", "selection", "sceneDetectThreshold", "startSeconds", "endSeconds", "maxMapDimension", "frameTimestampPosition"]));
   const workspacePath = normalizeWorkspacePath(args.workspacePath, "workspacePath");
   const columns = captureFrameInteger(args.columns, "columns", 1);
   const rows = captureFrameInteger(args.rows, "rows", 1);
@@ -2958,7 +2974,7 @@ async function cancelVisualMapTask(taskId) {
   if (!document || typeof document !== "object" || document.accepted !== true) {
     throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent did not confirm visual-map cancellation.");
   }
-  return { taskId, accepted: true, message: "Cancellation request accepted. Poll media_visual_map_get_task for the terminal status." };
+  return { taskId, accepted: true, message: "Cancellation request accepted. Poll visual_map_get_task for the terminal status." };
 }
 
 function normalizeCameraMode(value, field) {
@@ -2973,9 +2989,9 @@ function normalizeCameraList(document) {
   return { cameras: document.cameras.map((camera) => {
     if (!camera || typeof camera !== "object" || Array.isArray(camera) || typeof camera.cameraId !== "string" || !camera.cameraId || typeof camera.name !== "string" || !camera.name || !camera.videoModes || typeof camera.videoModes !== "object" || Array.isArray(camera.videoModes)) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid camera metadata.");
     const keys = Object.keys(camera.videoModes);
-    if (!keys.length || keys.some((key) => !["30", "60"].includes(key))) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid camera video modes.");
+    if (!keys.length || keys.some((key) => !Number.isFinite(Number(key)) || Number(key) <= 25 || Number(key) > 120)) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid camera video modes.");
     const videoModes = Object.fromEntries(keys.map((key) => [key, normalizeCameraMode(camera.videoModes[key], `camera videoModes.${key}`)]));
-    if (Object.entries(videoModes).some(([key, mode]) => !Number.isFinite(mode.fps) || Math.abs(mode.fps - Number(key)) > 1)) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned inconsistent camera video modes.");
+    if (Object.entries(videoModes).some(([key, mode]) => !Number.isFinite(mode.fps) || Math.abs(mode.fps - Number(key)) > 0.01)) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned inconsistent camera video modes.");
     return { cameraId: camera.cameraId, name: camera.name, videoModes };
   }) };
 }
@@ -2983,7 +2999,7 @@ function normalizeCameraList(document) {
 async function cameraList() { return normalizeCameraList(await agentJsonRequest("/media/camera/list", { method: "POST", body: {} })); }
 
 function normalizeCameraCaptureInput(argumentsValue = {}) {
-  const args = captureFrameObject(argumentsValue, "media_camera_capture_frame", new Set(["cameraId", "targetPath", "targetFormat"]));
+  const args = captureFrameObject(argumentsValue, "camera_capture_frame", new Set(["cameraId", "targetPath", "targetFormat"]));
   if (typeof args.cameraId !== "string" || !args.cameraId.trim()) throw localAgentError("CAMERA_CAPTURE_INVALID", "cameraId must be a non-empty string.");
   const targetFormat = args.targetFormat === undefined ? "png" : args.targetFormat;
   if (!new Set(["png", "jpeg", "webp"]).has(targetFormat)) throw localAgentError("CAMERA_CAPTURE_INVALID", "targetFormat must be png, jpeg, or webp.");
@@ -2991,31 +3007,37 @@ function normalizeCameraCaptureInput(argumentsValue = {}) {
 }
 
 function normalizeCameraFrame(document, input) {
-  if (!document || typeof document !== "object" || Array.isArray(document) || document.cameraId !== input.cameraId || typeof document.workspacePath !== "string" || !new Set(["png", "jpeg", "webp"]).has(document.format) || !new Set(["image/png", "image/jpeg", "image/webp"]).has(document.mimeType) || !Number.isInteger(document.width) || document.width < 1 || !Number.isInteger(document.height) || document.height < 1 || !Number.isInteger(document.imageSizeBytes) || document.imageSizeBytes < 0) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid camera frame.");
-  return { cameraId: document.cameraId, workspacePath: normalizeWorkspacePath(document.workspacePath, "workspacePath"), format: document.format, mimeType: document.mimeType, width: document.width, height: document.height, imageSizeBytes: document.imageSizeBytes };
+  if (!document || typeof document !== "object" || Array.isArray(document) || document.cameraId !== input.cameraId || typeof document.taskId !== "string" || !/^cam_[A-Za-z0-9_-]{10}$/.test(document.taskId) || typeof document.workspacePath !== "string" || !new Set(["png", "jpeg", "webp"]).has(document.format) || !new Set(["image/png", "image/jpeg", "image/webp"]).has(document.mimeType) || !Number.isInteger(document.width) || document.width < 1 || !Number.isInteger(document.height) || document.height < 1 || !Number.isInteger(document.imageSizeBytes) || document.imageSizeBytes < 0) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid camera frame.");
+  return { cameraId: document.cameraId, taskId: document.taskId, workspacePath: normalizeWorkspacePath(document.workspacePath, "workspacePath"), format: document.format, mimeType: document.mimeType, width: document.width, height: document.height, imageSizeBytes: document.imageSizeBytes };
 }
 
 async function cameraCaptureFrame(argumentsValue) { const input = normalizeCameraCaptureInput(argumentsValue); return normalizeCameraFrame(await agentJsonRequest("/media/camera/capture-frame", { method: "POST", body: input, timeoutMs: AGENT_CAPTURE_FRAME_TIMEOUT_MS }), input); }
 
 function cameraTaskId(taskId) { if (typeof taskId !== "string" || !taskId.trim()) throw localAgentError("INVALID_ARGUMENT", "taskId must be a non-empty string."); return taskId; }
 function normalizeCameraRecordInput(argumentsValue = {}) {
-  const args = captureFrameObject(argumentsValue, "media_camera_record_video", new Set(["cameraId", "durationSeconds", "targetFps"]));
+  const args = captureFrameObject(argumentsValue, "camera_record_video", new Set(["cameraId", "durationSeconds", "targetFps"]));
   if (typeof args.cameraId !== "string" || !args.cameraId.trim() || !Number.isInteger(args.durationSeconds) || args.durationSeconds < 1 || args.durationSeconds > 60) throw localAgentError("CAMERA_RECORD_INVALID", "cameraId and durationSeconds from 1 to 60 are required.");
-  if (![30, 60].includes(args.targetFps)) throw localAgentError("CAMERA_RECORD_INVALID", "targetFps must be 30 or 60.");
-  return { cameraId: args.cameraId, durationSeconds: args.durationSeconds, targetFps: args.targetFps };
+  if (args.targetFps !== undefined && (!Number.isFinite(args.targetFps) || args.targetFps <= 25 || args.targetFps > 120)) throw localAgentError("CAMERA_RECORD_INVALID", "targetFps, when supplied, must be greater than 25 and no greater than 120.");
+  return { cameraId: args.cameraId, durationSeconds: args.durationSeconds, ...(args.targetFps === undefined ? {} : { targetFps: args.targetFps }) };
+}
+function normalizeCameraAudioRecordInput(argumentsValue = {}) {
+  const args = captureFrameObject(argumentsValue, "camera_record_audio", new Set(["cameraId", "durationSeconds"]));
+  if (typeof args.cameraId !== "string" || !args.cameraId.trim() || !Number.isInteger(args.durationSeconds) || args.durationSeconds < 1 || args.durationSeconds > 600) throw localAgentError("CAMERA_RECORD_INVALID", "cameraId and durationSeconds from 1 to 600 are required.");
+  return { cameraId: args.cameraId, durationSeconds: args.durationSeconds };
 }
 function normalizeCameraRecordTask(document, input = null) {
-  if (!document || typeof document !== "object" || Array.isArray(document) || typeof document.taskId !== "string" || !document.taskId || !new Set(["working", "completed", "failed"]).has(document.status) || !new Set(["starting", "recording", "finalizing", "completed", "failed"]).has(document.phase) || typeof document.statusMessage !== "string" || !Number.isFinite(document.progressPercent) || document.progressPercent < 0 || document.progressPercent > 100 || !Number.isFinite(document.elapsedSeconds) || document.elapsedSeconds < 0 || !Number.isInteger(document.requestedDurationSeconds) || document.requestedDurationSeconds < 1 || document.requestedDurationSeconds > 60 || ![30, 60].includes(document.targetFps) || document.maxDurationSeconds !== 60 || typeof document.createdAt !== "string" || typeof document.lastUpdatedAt !== "string" || !Number.isInteger(document.pollIntervalMs) || document.pollIntervalMs < 100) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid camera recording task.");
+  if (!document || typeof document !== "object" || Array.isArray(document) || typeof document.taskId !== "string" || !/^cam_[A-Za-z0-9_-]{10}$/.test(document.taskId) || !new Set(["video", "audio"]).has(document.recordingKind) || !new Set(["working", "stopping", "completed", "failed"]).has(document.status) || !new Set(["starting", "recording", "finalizing", "completed", "failed"]).has(document.phase) || typeof document.statusMessage !== "string" || !Number.isFinite(document.progressPercent) || document.progressPercent < 0 || document.progressPercent > 100 || !Number.isFinite(document.elapsedSeconds) || document.elapsedSeconds < 0 || !Number.isInteger(document.requestedDurationSeconds) || document.requestedDurationSeconds < 1 || document.requestedDurationSeconds > 600 || (document.recordingKind === "video" && (!Number.isFinite(document.targetFps) || document.targetFps <= 25 || document.targetFps > 120 || document.maxDurationSeconds !== 60)) || (document.recordingKind === "audio" && (document.targetFps !== null || document.maxDurationSeconds !== 600)) || typeof document.createdAt !== "string" || typeof document.lastUpdatedAt !== "string" || !Number.isInteger(document.pollIntervalMs) || document.pollIntervalMs < 100) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid camera recording task.");
   if (input && document.requestedDurationSeconds !== input.durationSeconds) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned a camera task that does not match the requested duration.");
-  if (input && document.targetFps !== input.targetFps) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned a camera task that does not match the requested targetFps.");
-  const task = { taskId: document.taskId, status: document.status, phase: document.phase, statusMessage: document.statusMessage, progressPercent: document.progressPercent, elapsedSeconds: document.elapsedSeconds, requestedDurationSeconds: document.requestedDurationSeconds, targetFps: document.targetFps, maxDurationSeconds: document.maxDurationSeconds, createdAt: document.createdAt, lastUpdatedAt: document.lastUpdatedAt, pollIntervalMs: document.pollIntervalMs };
-  if (document.result) { const result = document.result; if (!result || typeof result !== "object" || (input && result.cameraId !== input.cameraId) || typeof result.cameraId !== "string" || typeof result.filePath !== "string" || result.format !== "mp4" || !Number.isInteger(result.width) || result.width < 1 || !Number.isInteger(result.height) || result.height < 1 || !Number.isFinite(result.fps) || result.fps <= 0 || !Number.isFinite(result.durationSeconds) || result.durationSeconds < 0 || (result.stoppedEarly !== undefined && typeof result.stoppedEarly !== "boolean")) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid camera recording result."); task.result = { cameraId: result.cameraId, filePath: normalizeWorkspacePath(result.filePath, "result.filePath"), format: "mp4", width: result.width, height: result.height, fps: result.fps, durationSeconds: result.durationSeconds, ...(result.stoppedEarly === undefined ? {} : { stoppedEarly: result.stoppedEarly }) }; }
+  if (input?.targetFps !== undefined && Math.abs(document.targetFps - input.targetFps) > 1) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned a camera task that does not match the requested targetFps.");
+  const task = { taskId: document.taskId, recordingKind: document.recordingKind, status: document.status, phase: document.phase, statusMessage: document.statusMessage, progressPercent: document.progressPercent, elapsedSeconds: document.elapsedSeconds, requestedDurationSeconds: document.requestedDurationSeconds, targetFps: document.targetFps, maxDurationSeconds: document.maxDurationSeconds, createdAt: document.createdAt, lastUpdatedAt: document.lastUpdatedAt, pollIntervalMs: document.pollIntervalMs };
+  if (document.result) { const result = document.result; const video = document.recordingKind === "video"; if (!result || typeof result !== "object" || (input && result.cameraId !== input.cameraId) || typeof result.cameraId !== "string" || typeof result.filePath !== "string" || result.format !== (video ? "mp4" : "m4a") || !Number.isFinite(result.durationSeconds) || result.durationSeconds < 0 || (video && (!Number.isInteger(result.width) || result.width < 1 || !Number.isInteger(result.height) || result.height < 1 || !Number.isFinite(result.fps) || result.fps <= 0 || result.hasAudio !== true)) || (result.stoppedEarly !== undefined && typeof result.stoppedEarly !== "boolean")) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid camera recording result."); task.result = { cameraId: result.cameraId, filePath: normalizeWorkspacePath(result.filePath, "result.filePath"), format: result.format, durationSeconds: result.durationSeconds, ...(video ? { width: result.width, height: result.height, fps: result.fps, hasAudio: true } : {}), ...(result.stoppedEarly === undefined ? {} : { stoppedEarly: result.stoppedEarly }) }; }
   if (document.error) { if (!document.error || typeof document.error.code !== "string" || typeof document.error.message !== "string") throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid camera recording error."); task.error = { code: document.error.code, message: document.error.message }; }
   if ((task.status === "completed") !== Boolean(task.result) || (task.status === "failed") !== Boolean(task.error)) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an inconsistent camera recording task.");
   return task;
 }
-async function cameraRecordVideo(argumentsValue) { const input = normalizeCameraRecordInput(argumentsValue); return normalizeCameraRecordTask(await agentJsonRequest("/tasks/camera-record", { method: "POST", body: input, timeoutMs: AGENT_TASK_TIMEOUT_MS }), input); }
-async function cameraRecordStatus(taskId) { taskId = cameraTaskId(taskId); return normalizeCameraRecordTask(await agentJsonRequest(`/tasks/camera-record/${encodeURIComponent(taskId)}`, { timeoutMs: AGENT_TASK_TIMEOUT_MS })); }
+async function cameraRecordVideo(argumentsValue) { const input = normalizeCameraRecordInput(argumentsValue); const task = normalizeCameraRecordTask(await agentJsonRequest("/tasks/camera-record", { method: "POST", body: input, timeoutMs: AGENT_TASK_TIMEOUT_MS }), input); updateCameraRecordingBadge(task); return task; }
+async function cameraRecordAudio(argumentsValue) { const input = normalizeCameraAudioRecordInput(argumentsValue); const task = normalizeCameraRecordTask(await agentJsonRequest("/tasks/camera-record-audio", { method: "POST", body: input, timeoutMs: AGENT_TASK_TIMEOUT_MS }), input); updateCameraRecordingBadge(task); return task; }
+async function cameraRecordStatus(taskId) { taskId = cameraTaskId(taskId); const task = normalizeCameraRecordTask(await agentJsonRequest(`/tasks/camera-record/${encodeURIComponent(taskId)}`, { timeoutMs: AGENT_TASK_TIMEOUT_MS })); updateCameraRecordingBadge(task); return task; }
 async function cameraRecordStop(taskId) { taskId = cameraTaskId(taskId); const document = await agentJsonRequest(`/tasks/camera-record/${encodeURIComponent(taskId)}/stop`, { method: "POST", body: {}, timeoutMs: AGENT_TASK_TIMEOUT_MS }); if (!document || typeof document !== "object" || document.taskId !== taskId || typeof document.accepted !== "boolean" || typeof document.message !== "string") throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent did not confirm the camera recording stop request."); return document; }
 
 function normalizeScreenCaptureInput(argumentsValue = {}) {
@@ -3110,11 +3132,12 @@ async function getWorkspaceImageMetadata(path) {
   const logicalPath = normalizeWorkspacePath(path, "path");
   const document = await agentJsonRequest("/media/workspace-image-info", { method: "POST", body: { path: logicalPath }, timeoutMs: AGENT_CAPTURE_FRAME_TIMEOUT_MS });
   if (!document || typeof document !== "object" || document.path !== logicalPath
-    || !new Set(["image/png", "image/jpeg", "image/webp"]).has(document.mimeType)
-    || !Number.isInteger(document.imageSizeBytes) || document.imageSizeBytes < 0) {
-    throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid workspace image metadata.");
+    || !new Set(["image", "video", "audio"]).has(document.mediaKind)
+    || !new Set(["image/png", "image/jpeg", "image/webp", "video/mp4", "video/webm", "video/ogg", "video/quicktime", "audio/mpeg", "audio/mp4", "audio/wav", "audio/ogg", "audio/webm"]).has(document.mimeType)
+    || !Number.isInteger(document.sizeBytes) || document.sizeBytes < 0) {
+    throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid workspace media metadata.");
   }
-  return { path: logicalPath, mimeType: document.mimeType, imageSizeBytes: document.imageSizeBytes };
+  return { path: logicalPath, mediaKind: document.mediaKind, mimeType: document.mimeType, sizeBytes: document.sizeBytes };
 }
 
 async function localAgentWorkspaceImageUrl(path) {
@@ -3129,7 +3152,7 @@ async function localAgentWorkspaceImageUrl(path) {
 async function showWorkspaceImage(path) {
   const metadata = await getWorkspaceImageMetadata(path);
   return {
-    metadata: { workspacePath: metadata.path, mimeType: metadata.mimeType, imageSizeBytes: metadata.imageSizeBytes, showInChat: true },
+    metadata: { workspacePath: metadata.path, mediaKind: metadata.mediaKind, mimeType: metadata.mimeType, sizeBytes: metadata.sizeBytes, showInChat: true },
     localAgentImageUrl: await localAgentWorkspaceImageUrl(metadata.path)
   };
 }
@@ -3412,7 +3435,56 @@ async function setActionBadge(state) {
   }
 }
 
+async function paintCameraRecordingBadge() {
+  if (!cameraRecordingBadgeKind) return;
+  const isVideo = cameraRecordingBadgeKind === "video";
+  try {
+    await chrome.action.setBadgeBackgroundColor({ color: isVideo ? "#b42318" : "#7a3e9d" });
+    await chrome.action.setBadgeText({ text: cameraRecordingBadgeVisible ? (isVideo ? "CAM" : "MIC") : "" });
+    await chrome.action.setTitle({ title: isVideo ? "ResearchTube: camera video recording" : "ResearchTube: camera audio recording" });
+  } catch (error) {
+    console.debug("ResearchTube camera recording badge update failed:", error);
+  }
+}
+
+function clearCameraRecordingBadge() {
+  cameraRecordingBadgeKind = null;
+  cameraRecordingBadgeTaskId = null;
+  cameraRecordingBadgeVisible = false;
+  if (cameraRecordingBadgeTimer !== null) clearTimeout(cameraRecordingBadgeTimer);
+  cameraRecordingBadgeTimer = null;
+  void refreshActionBadge();
+}
+
+function scheduleCameraRecordingBadgePhase() {
+  if (!cameraRecordingBadgeKind) return;
+  const delayMs = cameraRecordingBadgeVisible ? 500 : 300;
+  cameraRecordingBadgeTimer = setTimeout(() => {
+    cameraRecordingBadgeTimer = null;
+    if (!cameraRecordingBadgeKind) return;
+    cameraRecordingBadgeVisible = !cameraRecordingBadgeVisible;
+    void paintCameraRecordingBadge();
+    scheduleCameraRecordingBadgePhase();
+  }, delayMs);
+}
+
+function updateCameraRecordingBadge(task) {
+  if (!task || !["video", "audio"].includes(task.recordingKind)) return;
+  if (!new Set(["working", "stopping"]).has(task.status)) {
+    if (cameraRecordingBadgeTaskId === task.taskId) clearCameraRecordingBadge();
+    return;
+  }
+  if (cameraRecordingBadgeTaskId === task.taskId && cameraRecordingBadgeKind === task.recordingKind && cameraRecordingBadgeTimer !== null) return;
+  if (cameraRecordingBadgeTimer !== null) clearTimeout(cameraRecordingBadgeTimer);
+  cameraRecordingBadgeKind = task.recordingKind;
+  cameraRecordingBadgeTaskId = task.taskId;
+  cameraRecordingBadgeVisible = true;
+  void paintCameraRecordingBadge();
+  scheduleCameraRecordingBadgePhase();
+}
+
 async function refreshActionBadge() {
+  if (cameraRecordingBadgeKind) return paintCameraRecordingBadge();
   const config = await getConfig();
   if (Number(config.youtubeSearchCooldownUntil || 0) > Date.now()) {
     return setActionBadge("youtube-rate-limited");
@@ -3482,7 +3554,7 @@ function captureFrameWidgetResource() {
   return {
     uri: CAPTURE_FRAME_WIDGET_URI,
     name: "ResearchTube workspace-image viewer",
-    description: "Displays a requested frame, screenshot, cropped image, or existing workspace image.",
+    description: "Displays a requested frame, screenshot, recording, cropped image, or existing Workspace media file.",
     mimeType: "text/html;profile=mcp-app"
   };
 }
@@ -3502,7 +3574,7 @@ async function readMcpResource(id, uri) {
           ...captureFrameWidgetResource(), text,
           _meta: {
             ui: { prefersBorder: true, csp: { connectDomains: [loopbackOrigin], resourceDomains: [loopbackOrigin] } },
-            "openai/widgetDescription": "Displays a requested workspace image with context-specific provenance."
+            "openai/widgetDescription": "Displays a requested Workspace media file with context-specific provenance."
           }
         }]
       }
@@ -3624,36 +3696,40 @@ async function handleMcpRequest(request) {
     const args = request.params.arguments ?? {};
     return executeCaptureFrameToolCall(request.id, args);
   }
-  if (request?.method === "tools/call" && request.params?.name === "media_visual_map_create") {
+  if (request?.method === "tools/call" && request.params?.name === "visual_map_create") {
     const args = request.params.arguments ?? {};
-    return executeToolCall(request.id, "media_visual_map_create", args, () => createVisualMap(args));
+    return executeToolCall(request.id, "visual_map_create", args, () => createVisualMap(args));
   }
-  if (request?.method === "tools/call" && request.params?.name === "media_visual_map_get_task") {
+  if (request?.method === "tools/call" && request.params?.name === "visual_map_get_task") {
     const taskId = request.params.arguments?.taskId;
-    return executeToolCall(request.id, "media_visual_map_get_task", { taskId }, () => getVisualMapTask(taskId));
+    return executeToolCall(request.id, "visual_map_get_task", { taskId }, () => getVisualMapTask(taskId));
   }
-  if (request?.method === "tools/call" && request.params?.name === "media_visual_map_cancel_task") {
+  if (request?.method === "tools/call" && request.params?.name === "visual_map_cancel_task") {
     const taskId = request.params.arguments?.taskId;
-    return executeToolCall(request.id, "media_visual_map_cancel_task", { taskId }, () => cancelVisualMapTask(taskId));
+    return executeToolCall(request.id, "visual_map_cancel_task", { taskId }, () => cancelVisualMapTask(taskId));
   }
-  if (request?.method === "tools/call" && request.params?.name === "media_camera_list") {
-    return executeToolCall(request.id, "media_camera_list", {}, cameraList);
+  if (request?.method === "tools/call" && request.params?.name === "camera_list") {
+    return executeToolCall(request.id, "camera_list", {}, cameraList);
   }
-  if (request?.method === "tools/call" && request.params?.name === "media_camera_capture_frame") {
+  if (request?.method === "tools/call" && request.params?.name === "camera_capture_frame") {
     const args = request.params.arguments ?? {};
-    return executeToolCall(request.id, "media_camera_capture_frame", args, () => cameraCaptureFrame(args));
+    return executeToolCall(request.id, "camera_capture_frame", args, () => cameraCaptureFrame(args));
   }
-  if (request?.method === "tools/call" && request.params?.name === "media_camera_record_video") {
+  if (request?.method === "tools/call" && request.params?.name === "camera_record_video") {
     const args = request.params.arguments ?? {};
-    return executeToolCall(request.id, "media_camera_record_video", args, () => cameraRecordVideo(args));
+    return executeToolCall(request.id, "camera_record_video", args, () => cameraRecordVideo(args));
   }
-  if (request?.method === "tools/call" && request.params?.name === "media_camera_record_status") {
-    const taskId = request.params.arguments?.taskId;
-    return executeToolCall(request.id, "media_camera_record_status", { taskId }, () => cameraRecordStatus(taskId));
+  if (request?.method === "tools/call" && request.params?.name === "camera_record_audio") {
+    const args = request.params.arguments ?? {};
+    return executeToolCall(request.id, "camera_record_audio", args, () => cameraRecordAudio(args));
   }
-  if (request?.method === "tools/call" && request.params?.name === "media_camera_record_stop") {
+  if (request?.method === "tools/call" && request.params?.name === "camera_record_status") {
     const taskId = request.params.arguments?.taskId;
-    return executeToolCall(request.id, "media_camera_record_stop", { taskId }, () => cameraRecordStop(taskId));
+    return executeToolCall(request.id, "camera_record_status", { taskId }, () => cameraRecordStatus(taskId));
+  }
+  if (request?.method === "tools/call" && request.params?.name === "camera_record_stop") {
+    const taskId = request.params.arguments?.taskId;
+    return executeToolCall(request.id, "camera_record_stop", { taskId }, () => cameraRecordStop(taskId));
   }
   if (request?.method === "tools/call" && request.params?.name === "media_capture_screen") {
     const args = request.params.arguments ?? {};
@@ -3782,7 +3858,7 @@ async function executeCaptureFrameImageToolCall(id, path) {
       _meta: { researchtube: { localAgentImageUrl: result.localAgentImageUrl } },
       isError: false
     };
-    void recordCommandDiagnostic("succeeded", { tool: "media_load_workspace_image", elapsed_ms: Date.now() - startedAt, output: { path: result.metadata.path, imageSizeBytes: result.metadata.imageSizeBytes } });
+    void recordCommandDiagnostic("succeeded", { tool: "media_load_workspace_image", elapsed_ms: Date.now() - startedAt, output: { path: result.metadata.path, mediaKind: result.metadata.mediaKind, sizeBytes: result.metadata.sizeBytes } });
     return { jsonrpc: "2.0", id, result: mcpResult };
   } catch (error) {
     void recordCommandDiagnostic("failed", { tool: "media_load_workspace_image", elapsed_ms: Date.now() - startedAt, error_code: error?.code || null, error: searchDiagnosticMessage(error) });
@@ -3795,7 +3871,7 @@ async function executeShowWorkspaceImageToolCall(id, path) {
   try {
     const result = await showWorkspaceImage(path);
     void recordCommandDiagnostic("succeeded", { tool: "media_image_show", elapsed_ms: Date.now() - startedAt, output: result.metadata });
-    return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: "Workspace image shown." }], structuredContent: result.metadata, _meta: { researchtube: { localAgentImageUrl: result.localAgentImageUrl } }, isError: false } };
+    return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: "Workspace media shown." }], structuredContent: result.metadata, _meta: { researchtube: { localAgentImageUrl: result.localAgentImageUrl } }, isError: false } };
   } catch (error) {
     void recordCommandDiagnostic("failed", { tool: "media_image_show", elapsed_ms: Date.now() - startedAt, error_code: error?.code || null, error: searchDiagnosticMessage(error) });
     return toolError(id, error);
@@ -3859,13 +3935,14 @@ async function executeToolCall(id, tool, input, work, operation = null) {
 
 function summarizeCommandInput(tool, input) {
   if (tool === "media_capture_frame") return { path: typeof input.path === "string" ? input.path : null, youtube: input.youtube && typeof input.youtube === "object" ? { videoId: input.youtube.videoId ?? null, formatId: input.youtube.formatId ?? null } : null, timestampSeconds: input.timestampSeconds ?? null, videoStreamIndex: input.videoStreamIndex ?? null, seekMode: input.seekMode ?? null, outputPath: typeof input.outputPath === "string" ? input.outputPath : null };
-  if (tool === "media_visual_map_create") return { workspacePath: typeof input.workspacePath === "string" ? input.workspacePath : null, columns: input.columns ?? null, rows: input.rows ?? null, maxTotalFrames: input.maxTotalFrames ?? null, selection: input.selection ?? "uniform" };
-  if (tool === "media_visual_map_get_task") return { taskId: typeof input.taskId === "string" ? input.taskId : null };
-  if (tool === "media_visual_map_cancel_task") return { taskId: typeof input.taskId === "string" ? input.taskId : null };
-  if (tool === "media_camera_list") return {};
-  if (tool === "media_camera_capture_frame") return { cameraId: typeof input.cameraId === "string" ? input.cameraId : null, targetFormat: input.targetFormat ?? "png" };
-  if (tool === "media_camera_record_video") return { cameraId: typeof input.cameraId === "string" ? input.cameraId : null, durationSeconds: input.durationSeconds ?? null, targetFps: input.targetFps ?? null };
-  if (tool === "media_camera_record_status" || tool === "media_camera_record_stop") return { taskId: typeof input.taskId === "string" ? input.taskId : null };
+  if (tool === "visual_map_create") return { workspacePath: typeof input.workspacePath === "string" ? input.workspacePath : null, columns: input.columns ?? null, rows: input.rows ?? null, maxTotalFrames: input.maxTotalFrames ?? null, selection: input.selection ?? "uniform" };
+  if (tool === "visual_map_get_task") return { taskId: typeof input.taskId === "string" ? input.taskId : null };
+  if (tool === "visual_map_cancel_task") return { taskId: typeof input.taskId === "string" ? input.taskId : null };
+  if (tool === "camera_list") return {};
+  if (tool === "camera_capture_frame") return { cameraId: typeof input.cameraId === "string" ? input.cameraId : null, targetFormat: input.targetFormat ?? "png" };
+  if (tool === "camera_record_video") return { cameraId: typeof input.cameraId === "string" ? input.cameraId : null, durationSeconds: input.durationSeconds ?? null, targetFps: input.targetFps ?? null };
+  if (tool === "camera_record_audio") return { cameraId: typeof input.cameraId === "string" ? input.cameraId : null, durationSeconds: input.durationSeconds ?? null };
+  if (tool === "camera_record_status" || tool === "camera_record_stop") return { taskId: typeof input.taskId === "string" ? input.taskId : null };
   if (tool === "media_capture_screen") return { outputPath: typeof input.outputPath === "string" ? input.outputPath : null, format: input.image?.format ?? null };
   if (tool === "media_image_crop") return { path: typeof input.path === "string" ? input.path : null, crop: input.crop ?? null, outputPath: typeof input.outputPath === "string" ? input.outputPath : null, format: input.image?.format ?? null };
   if (tool === "clipboard_status") return { sinceRevisionProvided: typeof input.sinceRevision === "string" };

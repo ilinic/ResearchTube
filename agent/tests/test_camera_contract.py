@@ -32,25 +32,44 @@ class CameraContractTests(unittest.TestCase):
         )
 
     def test_public_camera_document_advertises_recording_tradeoffs_without_native_identity(self) -> None:
-        device = agent.CameraDevice("cam_test", "Example Camera", "v4l2", "/dev/video99", (agent.CameraMode(2304, 1536, 2), agent.CameraMode(1920, 1080, 30), agent.CameraMode(1280, 720, 60.0002)), agent.CameraMode(1280, 720, 60.0002))
+        device = agent.CameraDevice("Ab3xY9", "Example Camera", "v4l2", "/dev/video99", None, (agent.CameraMode(2304, 1536, 25), agent.CameraMode(1920, 1080, 29.97), agent.CameraMode(1280, 720, 59.94), agent.CameraMode(640, 480, 120)), agent.CameraMode(1280, 720, 59.94))
         document = agent.camera_public_device(device)
-        self.assertEqual(document["cameraId"], "cam_test")
+        self.assertEqual(document["cameraId"], "Ab3xY9")
         self.assertNotIn("/dev/video99", str(document))
         self.assertEqual(document["videoModes"], {
-            "30": {"width": 1920, "height": 1080, "fps": 30},
-            "60": {"width": 1280, "height": 720, "fps": 60.0002},
+            "29.97": {"width": 1920, "height": 1080, "fps": 29.97},
+            "59.94": {"width": 1280, "height": 720, "fps": 59.94},
+            "120": {"width": 640, "height": 480, "fps": 120},
         })
 
     def test_target_fps_mode_requires_a_matching_rate(self) -> None:
-        modes = (agent.CameraMode(1920, 1080, 30), agent.CameraMode(1280, 720, 60.0002))
-        self.assertEqual(agent.camera_mode_for_target_fps(modes, 30), agent.CameraMode(1920, 1080, 30))
-        self.assertEqual(agent.camera_mode_for_target_fps(modes, 60), agent.CameraMode(1280, 720, 60.0002))
+        modes = (agent.CameraMode(1920, 1080, 29.97), agent.CameraMode(1280, 720, 59.94))
+        self.assertEqual(agent.camera_mode_for_target_fps(modes, 30), agent.CameraMode(1920, 1080, 29.97))
+        self.assertEqual(agent.camera_mode_for_target_fps(modes, 60), agent.CameraMode(1280, 720, 59.94))
         self.assertIsNone(agent.camera_mode_for_target_fps(modes, 24))
 
     def test_camera_task_uses_shared_task_identifier_shape(self) -> None:
         manager = agent.CameraRecordTaskManager()
         task_id = manager.new_task_id()
-        self.assertRegex(task_id, r"^tsk_[A-Za-z0-9_-]{10}$")
+        self.assertRegex(task_id, r"^cam_[A-Za-z0-9_-]{10}$")
+
+    def test_audio_task_exposes_no_video_fps_and_can_be_stopping(self) -> None:
+        manager = agent.CameraRecordTaskManager()
+        task = agent.CameraRecordTask("cam_abcdefghij", "Ab3xY9", "audio", 8, None, "2026-09-24T00:00:00Z", "2026-09-24T00:00:00Z")
+        task.status, task.phase = "stopping", "finalizing"
+        document = manager.snapshot(task)
+        self.assertEqual(document["recordingKind"], "audio")
+        self.assertIsNone(document["targetFps"])
+        self.assertEqual(document["status"], "stopping")
+        self.assertEqual(document["maxDurationSeconds"], 600)
+
+    def test_camera_recording_path_uses_friendly_name_windows_safe_iso8601_and_task_id(self) -> None:
+        path = agent.camera_recording_default_path('C922: Pro Stream Webcam', 'cam_abcdefghij')
+        self.assertRegex(path, r"^webcamera/C922 Pro Stream Webcam \d{4}-\d{2}-\d{2}T\d{2}_\d{2}_\d{2}Z \[cam_abcdefghij\]\.mp4$")
+
+    def test_camera_frame_path_uses_the_same_filename_contract(self) -> None:
+        path = agent.camera_capture_default_path('C922: Pro Stream Webcam', 'cam_abcdefghij', 'png')
+        self.assertRegex(path, r"^captures/C922 Pro Stream Webcam \d{4}-\d{2}-\d{2}T\d{2}_\d{2}_\d{2}Z \[cam_abcdefghij\]\.png$")
 
     def test_dshow_ffmpeg_9_entry_format_is_recognized(self) -> None:
         async def lines(_command: list[str], *, operation: str) -> list[str]:
@@ -63,4 +82,4 @@ class CameraContractTests(unittest.TestCase):
 
         with patch.object(agent, "camera_ffmpeg_lines", lines), patch.object(agent.platform, "system", return_value="Windows"):
             candidates = __import__("asyncio").run(agent.enumerate_camera_candidates("ffmpeg.exe"))
-        self.assertEqual(candidates, [("dshow", "C922 Pro Stream Webcam", "@device_pnp_webcam")])
+        self.assertEqual(candidates, [("dshow", "C922 Pro Stream Webcam", "@device_pnp_webcam", "Microphone (C922 Pro Stream Webcam)")])
