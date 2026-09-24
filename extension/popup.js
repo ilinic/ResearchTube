@@ -56,7 +56,12 @@ $("describe-video").addEventListener("click", () => {
   if (!activeYouTubeVideoTab) return;
   // Start the background request first.  It owns the full CDP lifecycle, so the
   // popup can close without waiting for ChatGPT to become ready.
-  void call({ type: "describe-youtube-video", tab: { url: activeYouTubeVideoTab.url, title: activeYouTubeVideoTab.title, index: activeYouTubeVideoTab.index } }).catch(() => {});
+  void call({ type: "describe-youtube-video", tab: {
+    id: activeYouTubeVideoTab.id,
+    url: activeYouTubeVideoTab.url,
+    title: activeYouTubeVideoTab.title,
+    index: activeYouTubeVideoTab.index
+  } }).catch((error) => console.warn("[ResearchTube] Describe this video request failed", error));
   window.close();
 });
 $("settings").addEventListener("click", () => chrome.runtime.openOptionsPage());

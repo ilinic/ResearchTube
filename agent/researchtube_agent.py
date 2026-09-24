@@ -31,8 +31,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote, unquote, urlparse
 from urllib.request import Request, urlopen
 
-AGENT_VERSION = "1.81.0"
-INTERFACE_VERSION = 50
+AGENT_VERSION = "1.80.0"
+INTERFACE_VERSION = 49
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
 TASK_POLL_INTERVAL_MS = 1_000
@@ -56,7 +56,6 @@ MEDIA_PROBE_TIMEOUT_SECONDS = 15
 CAPTURE_FRAME_TIMEOUT_SECONDS = 60
 CAMERA_CAPTURE_TIMEOUT_SECONDS = 20
 CAMERA_RECORD_MAX_DURATION_SECONDS = 60
-CAMERA_AUDIO_RECORD_MAX_DURATION_SECONDS = 600
 CAMERA_RECORD_TARGET_FPS = (60, 30)
 CAMERA_TARGET_FPS_TOLERANCE = 1.0
 VISUAL_MAP_TIMEOUT_SECONDS = 180
@@ -107,7 +106,6 @@ class CameraDevice:
     name: str
     backend: str
     native_identity: str
-    audio_identity: str | None
     modes: tuple[CameraMode, ...]
     selected_mode: CameraMode | None
 
@@ -2038,7 +2036,6 @@ def camera_public_device(device: CameraDevice) -> dict[str, Any]:
     return {
         "cameraId": device.camera_id,
         "name": device.name,
-        "audioAvailable": device.audio_identity is not None,
         "videoModes": video_modes,
     }
 
@@ -2118,65 +2115,60 @@ def camera_modes_from_lines(lines: list[str]) -> tuple[CameraMode, ...]:
     return tuple(sorted(found.values(), key=lambda mode: (mode.width * mode.height, mode.fps or 0.0), reverse=True))
 
 
-async def enumerate_camera_candidates(ffmpeg_executable: str) -> list[tuple[str, str, str, str | None]]:
-    """Return video devices and a best-effort matching microphone, without logging identities."""
+async def enumerate_camera_candidates(ffmpeg_executable: str) -> list[tuple[str, str, str]]:
+    """Return backend, friendly name and internal identity; never log identities."""
     system = platform.system()
     if system == "Windows":
         lines = await camera_ffmpeg_lines([ffmpeg_executable, "-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "dummy"], operation="list-dshow-devices")
-        videos: list[tuple[str, str]] = []
-        audios: list[tuple[str, str]] = []
-        kind: str | None = None
+        candidates: list[tuple[str, str, str]] = []
+        in_video = False
         friendly: str | None = None
         for line in lines:
             lower = line.lower()
             if "directshow video devices" in lower:
-                kind, friendly = "video", None
+                in_video = True
                 continue
             if "directshow audio devices" in lower:
-                kind, friendly = "audio", None
-                continue
+                break
             quoted = re.findall(r'"([^"]+)"', line)
             if not quoted:
                 continue
             value = quoted[-1]
+            # FFmpeg 9 prints individual entries as `"name" (video)` / `(audio)`
+            # without the older DirectShow section headings.  Support both
+            # layouts, retaining only the currently selected video entry.
             if "(video)" in lower:
-                kind, friendly = "video", value
+                in_video, friendly = True, value
                 continue
             if "(audio)" in lower:
-                kind, friendly = "audio", value
+                in_video, friendly = False, None
                 continue
-            if "alternative name" in lower and kind is not None and friendly is not None:
-                (videos if kind == "video" else audios).append((friendly, value))
+            if "alternative name" in lower and in_video and friendly is not None:
+                candidates.append(("dshow", friendly, value))
                 friendly = None
-            elif kind == "video":
+            elif in_video and "alternative name" not in lower:
                 friendly = value
-        if kind == "video" and friendly is not None:
-            videos.append((friendly, friendly))
-        return [
-            ("dshow", name, identity, next((audio_identity for audio_name, audio_identity in audios if name.casefold() in audio_name.casefold()), None))
-            for name, identity in videos
-        ]
+        if friendly is not None:
+            candidates.append(("dshow", friendly, friendly))
+        return candidates
     if system == "Darwin":
         lines = await camera_ffmpeg_lines([ffmpeg_executable, "-hide_banner", "-f", "avfoundation", "-list_devices", "true", "-i", ""], operation="list-avfoundation-devices")
-        videos: list[tuple[str, str]] = []
-        audios: list[tuple[str, str]] = []
-        kind: str | None = None
+        candidates = []
+        in_video = False
         for line in lines:
             lower = line.lower()
             if "avfoundation video devices" in lower:
-                kind = "video"
+                in_video = True
                 continue
             if "avfoundation audio devices" in lower:
-                kind = "audio"
+                break
+            if not in_video:
                 continue
             match = re.search(r"\[(\d+)\]\s+(.+)$", line)
-            if match and kind is not None:
-                (videos if kind == "video" else audios).append((match.group(2).strip(), match.group(1)))
-        return [
-            ("avfoundation", name, identity, next((audio_identity for audio_name, audio_identity in audios if name.casefold() in audio_name.casefold() or audio_name.casefold() in name.casefold()), None))
-            for name, identity in videos
-        ]
-    candidates: list[tuple[str, str, str, str | None]] = []
+            if match:
+                candidates.append(("avfoundation", match.group(2).strip(), match.group(1)))
+        return candidates
+    candidates = []
     try:
         for item in sorted(Path("/dev").glob("video*"), key=lambda path: path.name):
             if not re.fullmatch(r"video\d+", item.name):
@@ -2186,7 +2178,7 @@ async def enumerate_camera_candidates(ffmpeg_executable: str) -> list[tuple[str,
                 name = name_path.read_text(encoding="utf-8", errors="replace").strip() or "Camera"
             except OSError:
                 name = "Camera"
-            candidates.append(("v4l2", name, str(item), None))
+            candidates.append(("v4l2", name, str(item)))
     except OSError:
         pass
     return candidates
@@ -2213,33 +2205,6 @@ def camera_input_arguments(device: CameraDevice, mode: CameraMode | None = None)
     return [*arguments, "-i", device.native_identity]
 
 
-def camera_record_input_arguments(device: CameraDevice, mode: CameraMode) -> list[str]:
-    """Open one camera's video and matched microphone in one FFmpeg input."""
-    if not device.audio_identity:
-        raise AgentApiError("CAMERA_AUDIO_NOT_AVAILABLE", "This camera has no matched microphone available for recording.")
-    if device.backend == "dshow":
-        arguments = ["-f", "dshow", "-video_size", f"{mode.width}x{mode.height}"]
-        if mode.fps is not None:
-            arguments.extend(["-framerate", f"{mode.fps:g}"])
-        return [*arguments, "-i", f"video={device.native_identity}:audio={device.audio_identity}"]
-    if device.backend == "avfoundation":
-        arguments = ["-f", "avfoundation", "-video_size", f"{mode.width}x{mode.height}"]
-        if mode.fps is not None:
-            arguments.extend(["-framerate", f"{mode.fps:g}"])
-        return [*arguments, "-i", f"{device.native_identity}:{device.audio_identity}"]
-    raise AgentApiError("CAMERA_AUDIO_NOT_AVAILABLE", "This platform could not match a microphone to the selected camera.")
-
-
-def camera_audio_input_arguments(device: CameraDevice) -> list[str]:
-    if not device.audio_identity:
-        raise AgentApiError("CAMERA_AUDIO_NOT_AVAILABLE", "This camera has no matched microphone available for recording.")
-    if device.backend == "dshow":
-        return ["-f", "dshow", "-i", f"audio={device.audio_identity}"]
-    if device.backend == "avfoundation":
-        return ["-f", "avfoundation", "-i", f":{device.audio_identity}"]
-    raise AgentApiError("CAMERA_AUDIO_NOT_AVAILABLE", "This platform could not match a microphone to the selected camera.")
-
-
 async def camera_modes(ffmpeg_executable: str, backend: str, identity: str) -> tuple[CameraMode, ...]:
     if backend == "dshow":
         command = [ffmpeg_executable, "-hide_banner", "-list_options", "true", "-f", "dshow", "-i", f"video={identity}"]
@@ -2257,15 +2222,15 @@ async def camera_devices() -> list[CameraDevice]:
     if not ffmpeg.executable:
         raise AgentApiError("FFMPEG_NOT_AVAILABLE", "ffmpeg is required for camera operations.")
     discovered: list[CameraDevice] = []
-    for backend, name, identity, audio_identity in await enumerate_camera_candidates(ffmpeg.executable):
+    for backend, name, identity in await enumerate_camera_candidates(ffmpeg.executable):
         key = (backend, identity)
         modes = await camera_modes(ffmpeg.executable, backend, identity)
         device = CAMERA_DEVICES_BY_NATIVE.get(key)
         if device is None:
-            device = CameraDevice(f"cam_{secrets.token_urlsafe(9)}", name, backend, identity, audio_identity, modes, select_camera_mode(modes))
+            device = CameraDevice(f"cam_{secrets.token_urlsafe(9)}", name, backend, identity, modes, select_camera_mode(modes))
             CAMERA_DEVICES_BY_NATIVE[key] = device
         else:
-            device.name, device.audio_identity, device.modes, device.selected_mode = name, audio_identity, modes, select_camera_mode(modes)
+            device.name, device.modes, device.selected_mode = name, modes, select_camera_mode(modes)
         discovered.append(device)
     return discovered
 
@@ -2337,8 +2302,7 @@ class CameraRecordTask:
     task_id: str
     camera_id: str
     requested_duration_seconds: int
-    recording_type: str
-    target_fps: int | None
+    target_fps: int
     created_at: str
     last_updated_at: str
     status: str = "working"
@@ -2375,12 +2339,11 @@ class CameraRecordTaskManager:
                 return task_id
 
     def snapshot(self, task: CameraRecordTask) -> dict[str, Any]:
-        maximum_duration = CAMERA_RECORD_MAX_DURATION_SECONDS if task.recording_type == "video" else CAMERA_AUDIO_RECORD_MAX_DURATION_SECONDS
         if task.status == "working" and task.started_monotonic is not None:
             task.elapsed_seconds = min(float(task.requested_duration_seconds), max(0.0, time.monotonic() - task.started_monotonic))
             if task.phase == "recording":
                 task.progress_percent = min(99.0, task.elapsed_seconds * 100.0 / task.requested_duration_seconds)
-        document: dict[str, Any] = {"taskId": task.task_id, "status": task.status, "phase": task.phase, "statusMessage": task.status_message, "progressPercent": task.progress_percent, "elapsedSeconds": task.elapsed_seconds, "recordingType": task.recording_type, "requestedDurationSeconds": task.requested_duration_seconds, "targetFps": task.target_fps, "maxDurationSeconds": maximum_duration, "createdAt": task.created_at, "lastUpdatedAt": task.last_updated_at, "pollIntervalMs": TASK_POLL_INTERVAL_MS}
+        document: dict[str, Any] = {"taskId": task.task_id, "status": task.status, "phase": task.phase, "statusMessage": task.status_message, "progressPercent": task.progress_percent, "elapsedSeconds": task.elapsed_seconds, "requestedDurationSeconds": task.requested_duration_seconds, "targetFps": task.target_fps, "maxDurationSeconds": CAMERA_RECORD_MAX_DURATION_SECONDS, "createdAt": task.created_at, "lastUpdatedAt": task.last_updated_at, "pollIntervalMs": TASK_POLL_INTERVAL_MS}
         if task.result is not None:
             document["result"] = task.result
         if task.error is not None:
@@ -2403,25 +2366,7 @@ class CameraRecordTaskManager:
         if camera_mode_for_target_fps(device.modes, target_fps) is None:
             raise AgentApiError("CAMERA_MODE_NOT_AVAILABLE", f"This camera does not provide a {target_fps} FPS mode. Call media_camera_list and choose an advertised videoModes rate.")
         now = utc_now()
-        task = CameraRecordTask(self.new_task_id(), payload["cameraId"], duration, "video", target_fps, now, now)
-        self.tasks[task.task_id] = task
-        task.runner = asyncio.create_task(self.run(task), name=f"researchtube-camera-record-{task.task_id}")
-        return self.snapshot(task)
-
-    async def create_audio(self, payload: Any) -> dict[str, Any]:
-        if not isinstance(payload, dict) or set(payload) != {"cameraId", "durationSeconds"}:
-            raise AgentApiError("CAMERA_AUDIO_RECORD_INVALID", "media_camera_record_audio requires cameraId and durationSeconds.")
-        duration = payload.get("durationSeconds")
-        if not isinstance(duration, int) or isinstance(duration, bool) or not 1 <= duration <= CAMERA_AUDIO_RECORD_MAX_DURATION_SECONDS:
-            raise AgentApiError("CAMERA_AUDIO_RECORD_INVALID", f"durationSeconds must be an integer from 1 to {CAMERA_AUDIO_RECORD_MAX_DURATION_SECONDS}.")
-        for task in self.tasks.values():
-            if task.camera_id == payload.get("cameraId") and task.status == "working":
-                raise AgentApiError("CAMERA_BUSY", "That camera already has an active recording task.")
-        device = await camera_device(payload.get("cameraId"))
-        if not device.audio_identity:
-            raise AgentApiError("CAMERA_AUDIO_NOT_AVAILABLE", "This camera has no matched microphone available for recording.")
-        now = utc_now()
-        task = CameraRecordTask(self.new_task_id(), payload["cameraId"], duration, "audio", None, now, now)
+        task = CameraRecordTask(self.new_task_id(), payload["cameraId"], duration, target_fps, now, now)
         self.tasks[task.task_id] = task
         task.runner = asyncio.create_task(self.run(task), name=f"researchtube-camera-record-{task.task_id}")
         return self.snapshot(task)
@@ -2445,44 +2390,32 @@ class CameraRecordTaskManager:
         final_path: Path | None = None
         try:
             device = await camera_device(task.camera_id)
-            mode = camera_mode_for_target_fps(device.modes, task.target_fps) if task.recording_type == "video" and task.target_fps is not None else None
-            if task.recording_type == "video" and mode is None:
+            mode = camera_mode_for_target_fps(device.modes, task.target_fps)
+            if mode is None:
                 raise AgentApiError("CAMERA_MODE_NOT_AVAILABLE", f"This camera no longer provides a {task.target_fps} FPS mode.")
             ffmpeg = find_component("ffmpeg", COMPONENTS["ffmpeg"][0])
             assert ffmpeg.executable
             resolver = WorkspacePathResolver()
-            if task.recording_type == "video":
-                final = resolver.resolve_destination(f"webcamera/camera_video_{datetime.now().strftime('%Y%m%d_%H%M%S')} [{device.camera_id}] [{secrets.token_urlsafe(6)}].mp4", field_name="camera recording output", error_code="WORKSPACE_PATH_INVALID")
-            else:
-                final = resolver.resolve_destination(f"sound/camera_audio_{datetime.now().strftime('%Y%m%d_%H%M%S')} [{device.camera_id}] [{secrets.token_urlsafe(6)}].m4a", field_name="camera audio output", error_code="WORKSPACE_PATH_INVALID")
+            final = resolver.resolve_destination(camera_default_path("camera_recording", device.camera_id, "mp4"), field_name="camera recording output", error_code="WORKSPACE_PATH_INVALID")
             final.physical_path.parent.mkdir(parents=True, exist_ok=True)
-            final_path = final.physical_path
-            temporary_path = final.physical_path.with_suffix(".tmp.mp4" if task.recording_type == "video" else ".tmp.m4a")
-            if task.recording_type == "video":
-                assert mode is not None
-                command = [ffmpeg.executable, "-hide_banner", "-v", "info", *camera_record_input_arguments(device, mode), "-map", "0:v:0", "-map", "0:a:0", "-t", str(task.requested_duration_seconds), "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", "-y", str(temporary_path)]
-            else:
-                command = [ffmpeg.executable, "-hide_banner", "-v", "info", *camera_audio_input_arguments(device), "-vn", "-t", str(task.requested_duration_seconds), "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", "-y", str(temporary_path)]
-            log(f"camera ffmpeg record-{task.recording_type} taskId={task.task_id} command: {json.dumps(command, ensure_ascii=False)}")
+            final_path, temporary_path = final.physical_path, final.physical_path.with_suffix(".tmp.mp4")
+            command = [ffmpeg.executable, "-hide_banner", "-v", "info", *camera_input_arguments(device, mode), "-an", "-t", str(task.requested_duration_seconds), "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-y", str(temporary_path)]
+            log(f"camera ffmpeg record-video taskId={task.task_id} command: {json.dumps(command, ensure_ascii=False)}")
             task.process = await asyncio.create_subprocess_exec(*command, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
             task.phase, task.started_monotonic = "recording", time.monotonic()
-            task.touch(f"Recording camera {task.recording_type}.")
+            task.touch("Recording camera video.")
             await asyncio.wait_for(task.process.wait(), timeout=task.requested_duration_seconds + CAMERA_CAPTURE_TIMEOUT_SECONDS)
             stderr = await task.process.stderr.read() if task.process.stderr is not None else b""
-            camera_log_ffmpeg_output(f"record-{task.recording_type} taskId={task.task_id}", task.process.returncode, b"", stderr)
+            camera_log_ffmpeg_output(f"record-video taskId={task.task_id}", task.process.returncode, b"", stderr)
             task.elapsed_seconds = min(float(task.requested_duration_seconds), time.monotonic() - task.started_monotonic)
             if task.process.returncode != 0 or not temporary_path.is_file() or temporary_path.stat().st_size == 0:
-                raise AgentApiError("CAMERA_RECORD_FAILED", f"ffmpeg could not record {task.recording_type} from the camera.")
+                raise AgentApiError("CAMERA_RECORD_FAILED", "ffmpeg could not record video from the camera.")
             task.phase = "finalizing"; task.touch("Finalizing camera recording.")
             temporary_path.replace(final_path)
-            result = {"cameraId": device.camera_id, "filePath": resolver.logical_existing_file(final_path, error_code="CAMERA_RECORD_FAILED"), "format": "mp4" if task.recording_type == "video" else "m4a", "mimeType": "video/mp4" if task.recording_type == "video" else "audio/mp4", "durationSeconds": task.elapsed_seconds, **({"stoppedEarly": True} if task.stopped_early else {})}
-            if task.recording_type == "video":
-                assert mode is not None
-                result.update({"width": mode.width, "height": mode.height, "fps": mode.fps, "audioIncluded": True})
-            task.result = result
+            task.result = {"cameraId": device.camera_id, "filePath": resolver.logical_existing_file(final_path, error_code="CAMERA_RECORD_FAILED"), "format": "mp4", "width": mode.width, "height": mode.height, "fps": mode.fps, "durationSeconds": task.elapsed_seconds, **({"stoppedEarly": True} if task.stopped_early else {})}
             task.status, task.phase, task.progress_percent = "completed", "completed", 100.0
             task.touch("Camera recording completed.")
-            log(f"media_camera_record_{task.recording_type} taskId={task.task_id} cameraId={task.camera_id} -> completed")
+            log(f"media_camera_record_video taskId={task.task_id} cameraId={task.camera_id} -> completed")
         except AgentApiError as error:
             task.status, task.phase, task.error = "failed", "failed", {"code": error.code, "message": error.message}
             task.touch("Camera recording failed.")
@@ -2836,41 +2769,35 @@ async def image_crop(payload: Any) -> dict[str, Any]:
         raise
 
 
-WORKSPACE_MEDIA_MIME_TYPES = {
-    **IMAGE_MIME_TYPES,
-    ".m4a": "audio/mp4", ".mp3": "audio/mpeg", ".ogg": "audio/ogg", ".opus": "audio/ogg", ".wav": "audio/wav", ".weba": "audio/webm",
-}
-
-
-def workspace_media_metadata(payload: Any) -> tuple[ResolvedWorkspacePath, dict[str, Any]]:
-    """Resolve compact metadata for one playable workspace image or audio file."""
+def workspace_image_metadata(payload: Any) -> tuple[ResolvedWorkspacePath, dict[str, Any]]:
+    """Resolve compact metadata for one workspace image without reading pixels."""
     if not isinstance(payload, dict) or set(payload) != {"path"}:
-        raise AgentApiError("WORKSPACE_MEDIA_INVALID", "workspace media retrieval requires only path.")
+        raise AgentApiError("WORKSPACE_IMAGE_INVALID", "workspace image retrieval requires only path.")
     item = WorkspacePathResolver().resolve_existing(payload.get("path"), field_name="path", expected_type="file")
-    mime_type = WORKSPACE_MEDIA_MIME_TYPES.get(item.physical_path.suffix.lower())
+    mime_type = IMAGE_MIME_TYPES.get(item.physical_path.suffix.lower())
     if mime_type is None:
-        raise AgentApiError("WORKSPACE_MEDIA_INVALID", "path must identify a supported workspace image or audio file.")
+        raise AgentApiError("WORKSPACE_IMAGE_INVALID", "path must identify a PNG, JPEG, or WebP image in the workspace.")
     try:
         size = item.physical_path.stat().st_size
     except OSError as error:
-        raise AgentApiError("WORKSPACE_MEDIA_UNAVAILABLE", "The workspace media file could not be inspected.") from error
-    return item, {"path": item.logical_path, "mimeType": mime_type, "mediaType": "image" if mime_type.startswith("image/") else "audio", "sizeBytes": size}
+        raise AgentApiError("WORKSPACE_IMAGE_UNAVAILABLE", "The workspace image could not be inspected.") from error
+    return item, {"path": item.logical_path, "mimeType": mime_type, "imageSizeBytes": size}
 
 
-def widget_media_file(logical_path: str) -> tuple[Path, str]:
-    """Resolve one direct Workspace-relative GET path for the media widget."""
+def widget_image_file(logical_path: str) -> tuple[Path, str]:
+    """Resolve one direct Workspace-relative GET path for the image widget."""
     if not isinstance(logical_path, str) or not logical_path:
-        raise AgentApiError("WORKSPACE_MEDIA_INVALID", "workspace media path is required.")
+        raise AgentApiError("WORKSPACE_IMAGE_INVALID", "workspace image path is required.")
     item = WorkspacePathResolver().resolve_existing(logical_path, field_name="path", expected_type="file")
-    mime_type = WORKSPACE_MEDIA_MIME_TYPES.get(item.physical_path.suffix.lower())
+    mime_type = IMAGE_MIME_TYPES.get(item.physical_path.suffix.lower())
     if mime_type is None:
-        raise AgentApiError("WORKSPACE_MEDIA_INVALID", "path must identify a supported workspace image or audio file.")
+        raise AgentApiError("WORKSPACE_IMAGE_INVALID", "path must identify a PNG, JPEG, or WebP image in the workspace.")
     return item.physical_path, mime_type
 
 
 async def copy_widget_workspace_path(logical_path: str) -> dict[str, bool]:
     """Copy one image-widget URL path after resolving it inside the Workspace."""
-    widget_media_file(logical_path)
+    widget_image_file(logical_path)
     await clipboard_set({"text": logical_path})
     return {"success": True}
 
@@ -4189,16 +4116,14 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             response_status, response_body = "200 OK", await camera_capture_frame(parse_json_body(body))
         elif method == "POST" and path == "/tasks/camera-record":
             response_status, response_body = "201 Created", await CAMERA_RECORD_TASKS.create(parse_json_body(body))
-        elif method == "POST" and path == "/tasks/camera-audio":
-            response_status, response_body = "201 Created", await CAMERA_RECORD_TASKS.create_audio(parse_json_body(body))
         elif method == "POST" and path == "/tasks/visual-map":
             response_status, response_body = "201 Created", await VISUAL_MAP_TASKS.create(parse_json_body(body))
         elif method == "POST" and path == "/media/capture-screen":
             response_status, response_body = "200 OK", await capture_screen(parse_json_body(body))
         elif method == "POST" and path == "/media/image-crop":
             response_status, response_body = "200 OK", await image_crop(parse_json_body(body))
-        elif method == "POST" and path == "/media/workspace-media-info":
-            _item, response_body = workspace_media_metadata(parse_json_body(body))
+        elif method == "POST" and path == "/media/workspace-image-info":
+            _item, response_body = workspace_image_metadata(parse_json_body(body))
             response_status = "200 OK"
         elif method == "POST" and path == "/media/inspect-image":
             response_status, response_body = "200 OK", await inspect_workspace_image(parse_json_body(body))
@@ -4244,10 +4169,10 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             log("POST /<workspace-image> -> 200 copied")
             return
         elif method == "GET":
-            media_file, mime_type = widget_media_file(unquote(path.removeprefix("/")))
-            size = media_file.stat().st_size
+            image_file, mime_type = widget_image_file(unquote(path.removeprefix("/")))
+            size = image_file.stat().st_size
             writer.write(widget_image_response_headers("200 OK", size, mime_type))
-            with media_file.open("rb") as source:
+            with image_file.open("rb") as source:
                 while chunk := source.read(64 * 1024):
                     writer.write(chunk)
                     await writer.drain()

@@ -102,6 +102,9 @@ import { Innertube, Parser } from "youtubei.js";
     const apiKey = window.ytcfg?.get?.("INNERTUBE_API_KEY") || null;
     return {
       url: location.href,
+      // document.title can lag behind the currently playing item in a
+      // playlist. The player response is the authoritative title for the
+      // active video when it is available.
       title: player?.videoDetails?.title || document.title,
       ready: Boolean(player || (apiKey && document.readyState !== "loading" && document.title)),
       innertubeConfigured: Boolean(apiKey),

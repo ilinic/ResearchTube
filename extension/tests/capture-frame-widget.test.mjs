@@ -3,21 +3,20 @@ import { readFile } from "node:fs/promises";
 
 const widget = await readFile(new URL("../ui/capture-frame-widget-v27.html", import.meta.url), "utf8");
 
-assert.match(widget, /media_load_workspace_media/);
+assert.match(widget, /media_load_workspace_image/);
 assert.match(widget, /workspacePath/);
 assert.match(widget, /window\.openai/);
 assert.match(widget, /openai:set_globals/);
 assert.match(widget, /toolResponseMetadata/);
-assert.match(widget, /Waiting for media data/, "the iframe must stay visible while ChatGPT publishes the initial tool output");
+assert.match(widget, /Waiting for image data/, "the iframe must stay visible while ChatGPT publishes the initial tool output");
 assert.match(widget, /for \(let attempt = 1; attempt <= 24;/, "the initial tool output must be retried during the short ChatGPT bootstrap window");
 assert.match(widget, /parseToolOutput/, "serialized tool output must be accepted as well as structured output");
-assert.match(widget, /localAgentMediaUrl/);
+assert.match(widget, /localAgentImageUrl/);
 assert.match(widget, /http:\/\/127\.0\.0\.1:/);
 assert.match(widget, /LOCAL_AGENT_RETRY_DELAYS_MS = \[0, 1000, 2000, 4000\]/, "Local Agent image retries must back off and stop after four attempts");
-assert.match(widget, /Local Agent is unavailable\. Start it, then click Refresh\./, "a stopped Local Agent must end in a clear non-looping error");
+assert.match(widget, /Local Agent is unavailable\. Start it, then click Refresh image\./, "a stopped Local Agent must end in a clear non-looping error");
 assert.match(widget, /info\.workspacePath === lastWorkspacePath\) return/, "bootstrap polling must not restart a failed image load");
 assert.match(widget, /<img id="image"/);
-assert.match(widget, /<audio id="audio" controls/, "recorded audio must use native controls");
 assert.doesNotMatch(widget, /createImageBitmap/);
 assert.doesNotMatch(widget, /getContext\("2d"\)/);
 assert.doesNotMatch(widget, /base64/i, "the active widget must load images only from the Local Agent URL");
@@ -29,8 +28,8 @@ assert.match(widget, /youtube-timestamp-link.*timestampSeconds/s, "the filename 
 assert.match(widget, /watch\?v=.*&t=/, "the timestamp marker must link to the same YouTube video at that time");
 assert.match(widget, /const isPartial = .*partial_/, "partial-download provenance must be recognized");
 assert.match(widget, /videoId && !isPartial/, "a partial-file local timestamp must not become a YouTube timestamp link");
-assert.match(widget, /fetch\(displayedLocalAgentMediaUrl, \{ method: "POST", cache: "no-store" \}\)/, "path copying must POST to the already-known Local Agent media URL");
-assert.match(widget, /displayedLocalAgentMediaUrl = localAgentMediaUrl/, "copying must reuse the same local URL that loaded the media");
+assert.match(widget, /fetch\(displayedLocalAgentImageUrl, \{ method: "POST", cache: "no-store" \}\)/, "path copying must POST to the already-known Local Agent image URL");
+assert.match(widget, /displayedLocalAgentImageUrl = localAgentImageUrl/, "copying must reuse the same local URL that loaded the image");
 assert.doesNotMatch(widget, /navigator\.clipboard/, "the sandboxed widget must not access the clipboard directly");
 assert.doesNotMatch(widget, /callTool\("media_copy_workspace_path"/, "path copying must not invoke an unavailable ChatGPT backend MCP call");
 assert.doesNotMatch(widget, /local-action-request/, "the widget must not post non-JSON-RPC local-action messages into the MCP Apps transport");

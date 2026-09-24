@@ -28,6 +28,7 @@ assert.match(script, /currentYouTubeVideoTab/);
 assert.match(script, /const isShort =/, "Describe this video must be available on YouTube Shorts too");
 assert.match(script, /describe-youtube-video/);
 assert.match(script, /void call\(\{ type: "describe-youtube-video"/, "Describe this video must hand the work to the background service worker");
+assert.match(script, /id: activeYouTubeVideoTab\.id/, "Describe this video must identify the live source tab, not only its popup snapshot");
 assert.match(script, /title: activeYouTubeVideoTab\.title/, "Describe this video must pass the current YouTube title to the prompt builder");
 assert.match(script, /window\.close\(\)/, "Describe this video must close the popup immediately");
 assert.match(script, /const activeTabPromise = chrome\.tabs\.query/, "video-button visibility must start before the Agent status request resolves");

@@ -101,23 +101,23 @@ class WorkspacePathResolverTests(unittest.TestCase):
             agent.workspace_list({"path": "external"})
         self.assertEqual(raised.exception.code, "WORKSPACE_PATH_INVALID")
 
-    def test_widget_media_url_resolves_only_a_workspace_media_file(self) -> None:
+    def test_widget_image_url_resolves_only_a_workspace_image(self) -> None:
         image = agent.WORKSPACE_PATH / "captures" / "frame.png"
         image.parent.mkdir(parents=True, exist_ok=True)
         image.write_bytes(b"png")
-        physical, mime_type = agent.widget_media_file("captures/frame.png")
+        physical, mime_type = agent.widget_image_file("captures/frame.png")
         self.assertEqual(physical, image)
         self.assertEqual(mime_type, "image/png")
         with self.assertRaises(agent.AgentApiError) as raised:
-            agent.widget_media_file("../outside.png")
+            agent.widget_image_file("../outside.png")
         self.assertEqual(raised.exception.code, "WORKSPACE_PATH_INVALID")
 
-    def test_workspace_media_metadata_does_not_read_or_return_media_bytes(self) -> None:
+    def test_workspace_image_metadata_does_not_read_or_return_image_bytes(self) -> None:
         image = agent.WORKSPACE_PATH / "captures" / "frame.png"
         image.parent.mkdir(parents=True, exist_ok=True)
         image.write_bytes(b"image-bytes")
-        _item, metadata = agent.workspace_media_metadata({"path": "captures/frame.png"})
-        self.assertEqual(metadata, {"path": "captures/frame.png", "mimeType": "image/png", "mediaType": "image", "sizeBytes": 11})
+        _item, metadata = agent.workspace_image_metadata({"path": "captures/frame.png"})
+        self.assertEqual(metadata, {"path": "captures/frame.png", "mimeType": "image/png", "imageSizeBytes": 11})
         self.assertNotIn("inlineImageBase64", metadata)
 
     def test_health_serialization_omits_host_paths(self) -> None:
@@ -589,12 +589,12 @@ class CaptureFrameTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("--windows-filenames", capture_commands[0])
         self.assertFalse((agent.WORKSPACE_PATH / ".researchtube-capture-tmp").exists())
 
-    async def test_workspace_media_metadata_never_returns_encoded_bytes(self) -> None:
+    async def test_workspace_image_metadata_never_returns_encoded_bytes(self) -> None:
         image = agent.WORKSPACE_PATH / "captures" / "frame.png"
         image.parent.mkdir(parents=True, exist_ok=True)
         image.write_bytes(b"image-bytes")
-        _item, result = agent.workspace_media_metadata({"path": "captures/frame.png"})
-        self.assertEqual(result, {"path": "captures/frame.png", "mimeType": "image/png", "mediaType": "image", "sizeBytes": 11})
+        _item, result = agent.workspace_image_metadata({"path": "captures/frame.png"})
+        self.assertEqual(result, {"path": "captures/frame.png", "mimeType": "image/png", "imageSizeBytes": 11})
         self.assertNotIn(str(self.root), json.dumps(result))
         self.assertNotIn("base64", json.dumps(result).lower())
 
