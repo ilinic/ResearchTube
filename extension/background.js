@@ -38,7 +38,7 @@ const MCP_TOOL_SETTINGS = Object.freeze({
   clipboard_status: { group: "clipboard" }, clipboard_get: { group: "clipboard" }, clipboard_set: { group: "clipboard" },
   library_store_start: { group: "library" }, library_store_status: { group: "library" }, library_store_cancel: { group: "library" }, online_share_start: { group: "online" }, online_share_status: { group: "online" }, online_share_stop: { group: "online" }
 });
-const EXTENSION_VERSION = "1.88.1";
+const EXTENSION_VERSION = "1.88.2";
 const REQUIRED_AGENT_INTERFACE_VERSION = 49;
 // A UI resource URI is a cache key in MCP Apps. Increment it whenever the
 // rendered template changes so ChatGPT does not reuse a stale iframe bundle.
@@ -1579,43 +1579,11 @@ function describeYouTubeVideoTitle(value) {
   return title || "YouTube video";
 }
 
-async function currentDescribeYouTubeVideo(sourceTab) {
-  // The popup is a snapshot. A YouTube playlist can move to its next item
-  // before the user presses the button, so obtain the live tab and then the
-  // page bridge's current player state immediately before composing the prompt.
-  let tab = sourceTab || {};
-  if (Number.isInteger(sourceTab?.id)) {
-    try {
-      tab = await chrome.tabs.get(sourceTab.id);
-    } catch (error) {
-      cdpLog("Describe source tab was no longer available", { tabId: sourceTab.id, error: safeErrorMessage(error) });
-    }
-  }
-
-  let pageState = null;
-  if (Number.isInteger(tab?.id)) {
-    try {
-      const response = await sendYouTubePageTool(tab.id, { type: "youtube-ui-tool", action: "page-state" });
-      if (response?.ok && response.data?.videoId) pageState = response.data;
-    } catch (error) {
-      // The ordinary tab URL remains a valid fallback if a page has not yet
-      // received the content bridge (or is navigating while the popup closes).
-      cdpLog("Describe source page-state refresh unavailable", { tabId: tab.id, error: safeErrorMessage(error) });
-    }
-  }
-
-  const sourceUrl = pageState?.videoId
-    ? `https://www.youtube.com/watch?v=${pageState.videoId}`
-    : (tab?.url || sourceTab?.url);
-  return {
-    videoUrl: canonicalYouTubeVideoUrl(sourceUrl),
-    videoTitle: describeYouTubeVideoTitle(pageState?.title || tab?.title || sourceTab?.title),
-    tabIndex: Number.isInteger(tab?.index) ? tab.index : sourceTab?.index
-  };
-}
-
 async function describeYouTubeVideoInChatGPT(sourceTab) {
-  const { videoUrl, videoTitle, tabIndex } = await currentDescribeYouTubeVideo(sourceTab);
+  // URL and title deliberately come directly from the popup's fresh
+  // chrome.tabs.query at click time. Do not replace them with player state.
+  const videoUrl = canonicalYouTubeVideoUrl(sourceTab?.url);
+  const videoTitle = describeYouTubeVideoTitle(sourceTab?.title);
   const now = Date.now();
   const previous = recentDescribeVideoRequests.get(videoUrl) || 0;
   if (now - previous < DESCRIBE_VIDEO_DUPLICATE_WINDOW_MS) {
@@ -1626,7 +1594,7 @@ async function describeYouTubeVideoInChatGPT(sourceTab) {
   const prompt = `@ResearchTube ${videoTitle} ${videoUrl} Study the video and tell me what it is about in my language.`;
   // Keep the user on the current YouTube page while ChatGPT works in its new
   // adjacent background tab. The Library flow already uses this CDP mode.
-  const created = await chrome.tabs.create({ url: "https://chatgpt.com/", active: false, ...(Number.isInteger(tabIndex) ? { index: tabIndex + 1 } : {}) });
+  const created = await chrome.tabs.create({ url: "https://chatgpt.com/", active: false, ...(Number.isInteger(sourceTab?.index) ? { index: sourceTab.index + 1 } : {}) });
   if (!created?.id) throw cdpError("Chrome could not open a ChatGPT tab.");
   const chatTab = await waitForChatGPTTab(created.id);
   let attached = false;

@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
-const [background, manifest, pageBridge] = await Promise.all([
+const [background, manifest] = await Promise.all([
   readFile(new URL("../background.js", import.meta.url), "utf8"),
-  readFile(new URL("../manifest.json", import.meta.url), "utf8"),
-  readFile(new URL("../youtube-page-bridge.src.js", import.meta.url), "utf8")
+  readFile(new URL("../manifest.json", import.meta.url), "utf8")
 ]);
 const parsedManifest = JSON.parse(manifest);
 
@@ -41,10 +40,7 @@ assert.match(background, /Suppressed duplicate video-description request/, "dupl
 assert.match(background, /url: "https:\/\/chatgpt\.com\/", active: false/, "Describe this video must keep the user on the active YouTube tab");
 assert.match(background, /canonicalYouTubeVideoUrl/, "the shortcut must accept only a canonical single-video URL");
 assert.match(background, /describeYouTubeVideoTitle/, "the shortcut must add the current YouTube title to make automatic chat titles meaningful");
-assert.match(background, /currentDescribeYouTubeVideo/, "the shortcut must refresh the live YouTube source before building its prompt");
-assert.match(background, /action: "page-state"/, "the shortcut must obtain the current player state for playlist navigation");
-assert.match(background, /sourceTab\?\.id/, "the shortcut must resolve the live source tab from its tab ID");
-assert.match(pageBridge, /player\?\.videoDetails\?\.title \|\| document\.title/, "the current player title must take precedence over a playlist's stale document title");
+assert.doesNotMatch(background, /currentDescribeYouTubeVideo/, "the shortcut must not replace the popup's current-tab snapshot with player state");
 assert.match(background, /shortMatch = url\.pathname\.match/, "the shortcut must normalize a YouTube Short to its video ID");
 assert.match(background, /Open one YouTube video or Short/, "the shortcut must describe ordinary videos and Shorts");
 assert.match(background, /@ResearchTube \$\{videoTitle\} \$\{videoUrl\} Study the video and tell me what it is about in my language\./, "the shortcut must use the requested title-first one-line prompt without URL punctuation");

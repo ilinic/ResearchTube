@@ -72,7 +72,7 @@ var MCP_TOOL_SETTINGS = Object.freeze({
   online_share_status: { group: "online" },
   online_share_stop: { group: "online" }
 });
-var EXTENSION_VERSION = "1.88.1";
+var EXTENSION_VERSION = "1.88.2";
 var REQUIRED_AGENT_INTERFACE_VERSION = 49;
 var CAPTURE_FRAME_WIDGET_URI = "ui://researchtube/capture-frame-v38.html";
 var RESEARCHTUBE_SERVER_DESCRIPTION = "ResearchTube provides YouTube research, local media and image operations, workspace management, screenshots, clipboard, and Library integration. Search this server when the user refers to ResearchTube, YouTube analysis, a previously created workspace file, captured frame, screenshot, crop, clipboard, or asks to continue a previous ResearchTube operation. In clients with deferred tools, ResearchTube is discoverable through functions.exec lazy MCP-tool discovery; search there before treating the capability as unavailable.";
@@ -1750,33 +1750,9 @@ function describeYouTubeVideoTitle(value) {
   const title = String(value || "").replace(/\s+/g, " ").trim().replace(/\s*-\s*YouTube(?:\s+Shorts)?$/i, "").trim();
   return title || "YouTube video";
 }
-async function currentDescribeYouTubeVideo(sourceTab) {
-  let tab = sourceTab || {};
-  if (Number.isInteger(sourceTab?.id)) {
-    try {
-      tab = await chrome.tabs.get(sourceTab.id);
-    } catch (error) {
-      cdpLog("Describe source tab was no longer available", { tabId: sourceTab.id, error: safeErrorMessage(error) });
-    }
-  }
-  let pageState = null;
-  if (Number.isInteger(tab?.id)) {
-    try {
-      const response = await sendYouTubePageTool(tab.id, { type: "youtube-ui-tool", action: "page-state" });
-      if (response?.ok && response.data?.videoId) pageState = response.data;
-    } catch (error) {
-      cdpLog("Describe source page-state refresh unavailable", { tabId: tab.id, error: safeErrorMessage(error) });
-    }
-  }
-  const sourceUrl = pageState?.videoId ? `https://www.youtube.com/watch?v=${pageState.videoId}` : tab?.url || sourceTab?.url;
-  return {
-    videoUrl: canonicalYouTubeVideoUrl(sourceUrl),
-    videoTitle: describeYouTubeVideoTitle(pageState?.title || tab?.title || sourceTab?.title),
-    tabIndex: Number.isInteger(tab?.index) ? tab.index : sourceTab?.index
-  };
-}
 async function describeYouTubeVideoInChatGPT(sourceTab) {
-  const { videoUrl, videoTitle, tabIndex } = await currentDescribeYouTubeVideo(sourceTab);
+  const videoUrl = canonicalYouTubeVideoUrl(sourceTab?.url);
+  const videoTitle = describeYouTubeVideoTitle(sourceTab?.title);
   const now = Date.now();
   const previous = recentDescribeVideoRequests.get(videoUrl) || 0;
   if (now - previous < DESCRIBE_VIDEO_DUPLICATE_WINDOW_MS) {
@@ -1785,7 +1761,7 @@ async function describeYouTubeVideoInChatGPT(sourceTab) {
   }
   recentDescribeVideoRequests.set(videoUrl, now);
   const prompt = `@ResearchTube ${videoTitle} ${videoUrl} Study the video and tell me what it is about in my language.`;
-  const created = await chrome.tabs.create({ url: "https://chatgpt.com/", active: false, ...Number.isInteger(tabIndex) ? { index: tabIndex + 1 } : {} });
+  const created = await chrome.tabs.create({ url: "https://chatgpt.com/", active: false, ...Number.isInteger(sourceTab?.index) ? { index: sourceTab.index + 1 } : {} });
   if (!created?.id) throw cdpError("Chrome could not open a ChatGPT tab.");
   const chatTab = await waitForChatGPTTab(created.id);
   let attached = false;

@@ -52,15 +52,18 @@ async function load() {
   $("chrome-automation-status").className = chromeAutomation.className;
 }
 $("chatgpt").addEventListener("click", () => call({ type: "open-external", target: "chatgptNewChat" }));
-$("describe-video").addEventListener("click", () => {
-  if (!activeYouTubeVideoTab) return;
-  // Start the background request first.  It owns the full CDP lifecycle, so the
+$("describe-video").addEventListener("click", async () => {
+  // Do not reuse the tab snapshot collected when the popup opened. A playlist
+  // can advance while it is open. Chrome supplies the URL from the address bar
+  // and the tab title at this exact click time.
+  const liveTab = currentYouTubeVideoTab(await chrome.tabs.query({ active: true, lastFocusedWindow: true }));
+  if (!liveTab) return;
+  // Start the background request first. It owns the full CDP lifecycle, so the
   // popup can close without waiting for ChatGPT to become ready.
   void call({ type: "describe-youtube-video", tab: {
-    id: activeYouTubeVideoTab.id,
-    url: activeYouTubeVideoTab.url,
-    title: activeYouTubeVideoTab.title,
-    index: activeYouTubeVideoTab.index
+    url: liveTab.url,
+    title: liveTab.title,
+    index: liveTab.index
   } }).catch((error) => console.warn("[ResearchTube] Describe this video request failed", error));
   window.close();
 });
