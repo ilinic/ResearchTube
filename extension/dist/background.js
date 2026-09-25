@@ -1,3 +1,136 @@
+// storyboards.js
+var object = (properties, required = Object.keys(properties)) => ({ type: "object", additionalProperties: false, properties, required });
+var integer = { type: "integer", minimum: 0 };
+var positive = { type: "integer", minimum: 1 };
+var videoId = { type: "string", pattern: "^[A-Za-z0-9_-]{11}$" };
+var taskId = { type: "string", pattern: "^tsk_[A-Za-z0-9_-]{10}$" };
+var variantId = { type: "string", pattern: "^storyboard_[1-9][0-9]*$" };
+var reasons = ["STORYBOARD_NOT_AVAILABLE", "STORYBOARD_VIDEO_LIVE", "STORYBOARD_CONTEXT_UNAVAILABLE"];
+var messages = {
+  STORYBOARD_INVALID: "Check videoId, variantId, selection and taskId against the documented input.",
+  STORYBOARD_NOT_AVAILABLE: "YouTube has no usable storyboards for this video.",
+  STORYBOARD_VIDEO_LIVE: "Storyboards currently support finite videos, not live or upcoming streams.",
+  STORYBOARD_CONTEXT_UNAVAILABLE: "Open the video in YouTube or check the Local Agent's yt-dlp installation, then retry.",
+  STORYBOARD_VARIANT_NOT_FOUND: "Discover the available variants with youtube_storyboard_get_info.",
+  STORYBOARD_SHEET_NOT_FOUND: "Every sheet index must be within the selected variant's sheetCount.",
+  STORYBOARD_DOWNLOAD_FAILED: "A sheet could not be downloaded or safely published. Check availability, free space, and conflicting files.",
+  TASK_NOT_FOUND: "The storyboard task does not exist in this Agent session."
+};
+var errorSchema = object({ code: { type: "string", enum: Object.keys(messages) }, message: { type: "string" } });
+var variantSchema = object({
+  variantId,
+  cellWidth: positive,
+  cellHeight: positive,
+  columns: positive,
+  rows: positive,
+  framesPerSheet: positive,
+  frameIntervalEstimated: { type: "boolean" },
+  frameIntervalSeconds: { type: "number", exclusiveMinimum: 0 },
+  sheetCount: positive,
+  format: { const: "jpeg" }
+});
+var selectionSchema = { oneOf: [
+  object({ mode: { const: "all" } }),
+  object({ mode: { const: "range" }, startSeconds: { type: "number", minimum: 0 }, endSeconds: { type: "number", minimum: 0 } }),
+  object({ mode: { const: "sheets" }, sheetIndexes: { type: "array", minItems: 1, items: integer } })
+] };
+var rejected = object({ status: { const: "rejected" }, error: errorSchema });
+var infoSchema = { type: "object", oneOf: [
+  object({ videoId, durationSeconds: { type: "number", exclusiveMinimum: 0 }, available: { const: true }, variants: { type: "array", minItems: 1, items: variantSchema } }),
+  object({ videoId, available: { const: false }, reason: { enum: reasons } }),
+  rejected
+] };
+var statuses = ["working", "completed", "cancelled", "failed"];
+var taskSchema = object(
+  {
+    taskId,
+    status: { enum: statuses },
+    phase: { enum: ["resolving", "downloading", "publishing", "completed", "cancelled", "failed"] },
+    progressPercent: { type: "number", minimum: 0, maximum: 100 },
+    completedSheets: integer,
+    totalSheets: positive,
+    downloadedSheets: integer,
+    reusedSheets: integer,
+    workspaceDirectory: { const: "storyboards" },
+    pollIntervalMs: { type: "integer", minimum: 1e3 },
+    failedSheetIndex: integer,
+    error: errorSchema
+  },
+  ["taskId", "status", "phase", "progressPercent", "completedSheets", "totalSheets", "downloadedSheets", "reusedSheets", "workspaceDirectory", "pollIntervalMs"]
+);
+var cancelSchema = object({ taskId, status: { enum: statuses } });
+var STORYBOARD_TOOL_NAMES = Object.freeze(["youtube_storyboard_get_info", "youtube_storyboard_download", "youtube_storyboard_get_task", "youtube_storyboard_cancel_task"]);
+function storyboardDefinitions(readAnnotations, writeAnnotations) {
+  const make = (name, title, description, inputSchema, outputSchema, write = false) => ({
+    name,
+    title,
+    description,
+    inputSchema,
+    outputSchema,
+    annotations: { ...write ? writeAnnotations : readAnnotations, openWorldHint: name.endsWith("get_info") || name.endsWith("download") }
+  });
+  return [
+    make(STORYBOARD_TOOL_NAMES[0], "Get YouTube storyboard variants", "Discover pre-generated timeline-preview sheet variants. Returns cell geometry, interval and sheet count. frameIntervalEstimated marks timing inferred when YouTube has no nonzero interval or the last yt-dlp fallback only provides average fps; range boundaries then use that estimate. Reads the matching open YouTube tab first, then yt-dlp metadata. Creates no files and downloads no media or sheets. variantId is opaque; retain it unchanged.", object({ videoId }), infoSchema),
+    make(STORYBOARD_TOOL_NAMES[1], "Download YouTube storyboard sheets", "Start one asynchronous task for all sheets, an inclusive time range within video duration, or zero-based sheet indexes of one discovered variant. Downloads preview JPEG sheets only, never video/audio. Files are directly in storyboards/ with video ID, sz_widthxheight, tstp_seconds, mesh_columnsxrows and sheet index tags in each filename. Never displays an image automatically. Poll youtube_storyboard_get_task at pollIntervalMs; use workspace_list on workspaceDirectory to find files.", object({ videoId, variantId, selection: selectionSchema }), { type: "object", oneOf: [taskSchema, rejected] }, true),
+    make(STORYBOARD_TOOL_NAMES[2], "Get storyboard task progress", "Get compact sheet counts and monotonic progress. Poll no faster than pollIntervalMs. Complete sheets remain in storyboards/ after failure or cancellation. Does not return images or a sheet-path array.", object({ taskId }), { type: "object", oneOf: [taskSchema, rejected] }),
+    make(STORYBOARD_TOOL_NAMES[3], "Cancel storyboard download", "Stop current and queued transfers for one storyboard task. Preserves all completely published sheets. Repeating cancellation returns the existing terminal status.", object({ taskId }), { type: "object", oneOf: [cancelSchema, rejected] }, true)
+  ];
+}
+function fail(code = "STORYBOARD_INVALID") {
+  throw Object.assign(new Error(messages[code] || "The Agent returned invalid storyboard metadata."), { code });
+}
+var plain = (value) => value && typeof value === "object" && !Array.isArray(value);
+var matches = (schema, value) => typeof value === "string" && new RegExp(schema.pattern).test(value);
+var finite = (value) => typeof value === "number" && Number.isFinite(value);
+function validateStoryboardInput(name, args) {
+  const keys = name.endsWith("get_info") ? ["videoId"] : name.endsWith("download") ? ["videoId", "variantId", "selection"] : ["taskId"];
+  if (!plain(args) || Object.keys(args).length !== keys.length || keys.some((k) => !Object.hasOwn(args, k))) fail();
+  if (keys.includes("taskId")) {
+    if (!matches(taskId, args.taskId)) fail();
+    return { taskId: args.taskId };
+  }
+  if (!matches(videoId, args.videoId)) fail();
+  if (name.endsWith("get_info")) return { videoId: args.videoId };
+  if (!matches(variantId, args.variantId) || !plain(args.selection)) fail();
+  const s = args.selection;
+  if (s.mode === "all" && Object.keys(s).length === 1) return { ...args, selection: { mode: "all" } };
+  if (s.mode === "range" && Object.keys(s).length === 3 && finite(s.startSeconds) && finite(s.endSeconds) && 0 <= s.startSeconds && s.startSeconds <= s.endSeconds) return { ...args, selection: { mode: "range", startSeconds: s.startSeconds, endSeconds: s.endSeconds } };
+  if (s.mode === "sheets" && Object.keys(s).length === 2 && Array.isArray(s.sheetIndexes) && s.sheetIndexes.length && s.sheetIndexes.every((i) => Number.isInteger(i) && i >= 0)) return { ...args, selection: { mode: "sheets", sheetIndexes: [...new Set(s.sheetIndexes)] } };
+  fail();
+}
+function normalizeStoryboardResult(name, data) {
+  const bad = () => fail("AGENT_INVALID_RESPONSE");
+  if (!plain(data)) bad();
+  if (data.status === "rejected") {
+    if (!messages[data.error?.code]) bad();
+    return { status: "rejected", error: { code: data.error.code, message: messages[data.error.code] } };
+  }
+  if (name.endsWith("get_info")) {
+    if (!matches(videoId, data.videoId)) bad();
+    if (data.available === false && reasons.includes(data.reason)) return { videoId: data.videoId, available: false, reason: data.reason };
+    if (data.available !== true || !finite(data.durationSeconds) || data.durationSeconds <= 0 || !Array.isArray(data.variants) || !data.variants.length) bad();
+    const variants = data.variants.map((v) => {
+      if (!plain(v) || !matches(variantId, v.variantId) || v.format !== "jpeg" || typeof v.frameIntervalEstimated !== "boolean" || !finite(v.frameIntervalSeconds) || v.frameIntervalSeconds <= 0 || !["cellWidth", "cellHeight", "columns", "rows", "framesPerSheet", "sheetCount"].every((k) => Number.isInteger(v[k]) && v[k] > 0) || v.framesPerSheet !== v.columns * v.rows) bad();
+      return Object.fromEntries(Object.keys(variantSchema.properties).map((k) => [k, v[k]]));
+    });
+    if (new Set(variants.map((v) => v.variantId)).size !== variants.length) bad();
+    return { videoId: data.videoId, durationSeconds: data.durationSeconds, available: true, variants };
+  }
+  if (!matches(taskId, data.taskId) || !statuses.includes(data.status)) bad();
+  if (name.endsWith("cancel_task")) return { taskId: data.taskId, status: data.status };
+  if (!taskSchema.properties.phase.enum.includes(data.phase) || !finite(data.progressPercent) || data.progressPercent < 0 || data.progressPercent > 100 || !["completedSheets", "totalSheets", "downloadedSheets", "reusedSheets", "pollIntervalMs"].every((k) => Number.isInteger(data[k]) && data[k] >= 0) || data.pollIntervalMs < 1e3 || data.totalSheets < 1 || data.completedSheets > data.totalSheets || data.completedSheets !== data.downloadedSheets + data.reusedSheets || data.workspaceDirectory !== "storyboards") bad();
+  if (data.status !== "working" && data.phase !== data.status || data.status === "working" && !["resolving", "downloading", "publishing"].includes(data.phase)) bad();
+  if (data.status === "completed" && (data.progressPercent !== 100 || data.completedSheets !== data.totalSheets)) bad();
+  if (data.status !== "failed" && data.error) bad();
+  const result = Object.fromEntries(taskSchema.required.map((k) => [k, data[k]]));
+  if (data.status === "failed") {
+    if (data.error?.code !== "STORYBOARD_DOWNLOAD_FAILED" || !Number.isInteger(data.failedSheetIndex) || data.failedSheetIndex < 0) bad();
+    result.failedSheetIndex = data.failedSheetIndex;
+    result.error = { code: data.error.code, message: messages[data.error.code] };
+  }
+  return result;
+}
+
 // background.js
 var CONTROL_PLANE_BASE_URL = "https://api.openai.com";
 var EXTERNAL_URLS = Object.freeze({
@@ -22,6 +155,7 @@ var MCP_TOOL_GROUPS = Object.freeze({
   speech: { title: "Text to Speech", order: 15 },
   workspace: { title: "Workspace", order: 20 },
   media: { title: "Media and images", order: 30 },
+  storyboards: { title: "YouTube Storyboards", order: 45 },
   visualMaps: { title: "Visual Maps", order: 40 },
   camera: { title: "Camera", order: 50 },
   youtube: { title: "YouTube", order: 60 },
@@ -32,6 +166,10 @@ var MCP_TOOL_GROUPS = Object.freeze({
   custom: { title: "Custom", order: 110 }
 });
 var MCP_TOOL_SETTINGS = Object.freeze({
+  youtube_storyboard_get_info: { group: "storyboards" },
+  youtube_storyboard_download: { group: "storyboards" },
+  youtube_storyboard_get_task: { group: "storyboards" },
+  youtube_storyboard_cancel_task: { group: "storyboards" },
   system_agent_status: { group: "system", alwaysEnabled: true },
   system_speech_list_voices: { group: "speech" },
   system_speech_speak: { group: "speech" },
@@ -83,8 +221,8 @@ var MCP_TOOL_SETTINGS = Object.freeze({
   online_share_status: { group: "online" },
   online_share_stop: { group: "online" }
 });
-var EXTENSION_VERSION = "2.1.5";
-var REQUIRED_AGENT_INTERFACE_VERSION = 62;
+var EXTENSION_VERSION = "2.2.0";
+var REQUIRED_AGENT_INTERFACE_VERSION = 63;
 var CAPTURE_FRAME_WIDGET_URI = "ui://researchtube/capture-frame-v43.html";
 var RESEARCHTUBE_SERVER_DESCRIPTION = "ResearchTube provides YouTube research, local media and image operations, workspace management, screenshots, clipboard, and Library integration. Search this server when the user refers to ResearchTube, YouTube analysis, a previously created workspace file, captured frame, screenshot, crop, clipboard, or asks to continue a previous ResearchTube operation. In clients with deferred tools, ResearchTube is discoverable through functions.exec lazy MCP-tool discovery; search there before treating the capability as unavailable.";
 var RESEARCHTUBE_MCP_INSTRUCTIONS = "ResearchTube exposes MCP tools that may be loaded or discovered lazily by the client. When the user mentions ResearchTube, invokes @ResearchTube, asks to repeat a ResearchTube operation, or requests a capability previously provided by ResearchTube, do not infer that ResearchTube is unavailable merely because its tools are not currently visible as a top-level tool namespace. In this client, ResearchTube is available through functions.exec with lazy MCP-tool discovery: search there for the appropriate ResearchTube tool before reporting that the capability is unavailable. Only report ResearchTube as unavailable if tool discovery actually fails, the required tool cannot be found after discovery, or an actual ResearchTube tool invocation returns an availability, connection, compatibility, or transport error. Successful use earlier in the conversation is evidence that the tools may be discoverable again; rediscover them rather than assuming access has disappeared. media_capture_frame, media_capture_screen, and media_image_crop never render a widget themselves. media_capture_frame is asynchronous: poll its task and call media_image_show only for specific completed frame paths the user asks to see. For media_capture_screen and media_image_crop, when showInChat is true, after the successful creation result call media_image_show once with the returned workspace image path; otherwise do not call the display tool.";
@@ -986,6 +1124,7 @@ var libraryStoreStatusSchema = libraryStoreTaskSchema;
 var libraryStoreCancelSchema = { type: "object", additionalProperties: false, properties: { task: libraryStoreTaskSchema, cancelled: { type: "boolean" } }, required: ["task", "cancelled"] };
 function toolDefinitions() {
   return [
+    ...storyboardDefinitions(localAgentReadAnnotations, localWorkspaceWriteAnnotations),
     {
       name: "system_agent_status",
       title: "Get ResearchTube Local Agent status",
@@ -1862,9 +2001,9 @@ function canonicalYouTubeVideoUrl(value) {
   }
   if (url.origin !== "https://www.youtube.com") throw cdpError("Open one YouTube video or Short before using Describe this video.");
   const shortMatch = url.pathname.match(/^\/shorts\/([A-Za-z0-9_-]{11})$/);
-  const videoId = url.pathname === "/watch" ? url.searchParams.get("v") || "" : shortMatch?.[1] || "";
-  if (!/^[A-Za-z0-9_-]{11}$/.test(videoId)) throw cdpError("The active YouTube page does not contain a valid video ID.");
-  return `https://www.youtube.com/watch?v=${videoId}`;
+  const videoId2 = url.pathname === "/watch" ? url.searchParams.get("v") || "" : shortMatch?.[1] || "";
+  if (!/^[A-Za-z0-9_-]{11}$/.test(videoId2)) throw cdpError("The active YouTube page does not contain a valid video ID.");
+  return `https://www.youtube.com/watch?v=${videoId2}`;
 }
 function describeYouTubeVideoTitle(value) {
   const title = String(value || "").replace(/\s+/g, " ").trim().replace(/\s*-\s*YouTube(?:\s+Shorts)?$/i, "").trim();
@@ -2102,8 +2241,8 @@ async function cdpAttachImagesNow(filePathValues, { onPhase = null } = {}) {
 function libraryStoreNow() {
   return (/* @__PURE__ */ new Date()).toISOString();
 }
-function libraryStoreQueuePosition(taskId) {
-  const index = libraryStoreQueue.indexOf(taskId);
+function libraryStoreQueuePosition(taskId2) {
+  const index = libraryStoreQueue.indexOf(taskId2);
   return index < 0 ? null : index + 1;
 }
 function libraryStoreTaskDocument(task) {
@@ -2134,7 +2273,7 @@ async function ensureLibraryStoreLoaded() {
     const stored = await chrome.storage.local.get({ [LIBRARY_STORE_TASK_STORAGE_KEY]: [], [LIBRARY_STORE_QUEUE_STORAGE_KEY]: [] });
     const tasks = Array.isArray(stored[LIBRARY_STORE_TASK_STORAGE_KEY]) ? stored[LIBRARY_STORE_TASK_STORAGE_KEY] : [];
     libraryStoreTasks = new Map(tasks.filter((task) => task && typeof task.taskId === "string").map((task) => [task.taskId, task]));
-    libraryStoreQueue = Array.isArray(stored[LIBRARY_STORE_QUEUE_STORAGE_KEY]) ? stored[LIBRARY_STORE_QUEUE_STORAGE_KEY].filter((taskId) => typeof taskId === "string" && libraryStoreTasks.get(taskId)?.status === "queued") : [];
+    libraryStoreQueue = Array.isArray(stored[LIBRARY_STORE_QUEUE_STORAGE_KEY]) ? stored[LIBRARY_STORE_QUEUE_STORAGE_KEY].filter((taskId2) => typeof taskId2 === "string" && libraryStoreTasks.get(taskId2)?.status === "queued") : [];
     for (const task of libraryStoreTasks.values()) {
       if (task.status === "working") {
         task.status = "failed";
@@ -2190,15 +2329,15 @@ async function drainLibraryStoreQueue() {
   libraryStoreDraining = true;
   try {
     while (libraryStoreQueue.length) {
-      const taskId = libraryStoreQueue.shift();
-      const task = libraryStoreTasks.get(taskId);
+      const taskId2 = libraryStoreQueue.shift();
+      const task = libraryStoreTasks.get(taskId2);
       if (!task || task.status !== "queued") continue;
       await updateLibraryStoreTask(task, "resolvingFiles", "Resolving the workspace image batch.");
       try {
         const localPaths = await resolveLibraryStoreFiles(task.files);
         await cdpAttachImagesNow(localPaths, { onPhase: async (phase) => {
-          const messages = { attaching: "Attaching the image batch to the background ChatGPT Composer.", composerAccepted: "The ChatGPT Composer accepted the image batch.", submitting: "Sending the attached image batch to ChatGPT without Composer text." };
-          await updateLibraryStoreTask(task, phase, messages[phase] || "Processing the attached image batch.");
+          const messages2 = { attaching: "Attaching the image batch to the background ChatGPT Composer.", composerAccepted: "The ChatGPT Composer accepted the image batch.", submitting: "Sending the attached image batch to ChatGPT without Composer text." };
+          await updateLibraryStoreTask(task, phase, messages2[phase] || "Processing the attached image batch.");
         } });
         task.libraryAvailability = "not_verified";
         await updateLibraryStoreTask(task, "submitted", "ResearchTube sent the attached image batch to ChatGPT without Composer text. Library completion cannot be verified.", {
@@ -2235,18 +2374,18 @@ async function libraryStoreStart(filesValue) {
   void drainLibraryStoreQueue();
   return { task: libraryStoreTaskDocument(task) };
 }
-async function libraryStoreStatus(taskId) {
+async function libraryStoreStatus(taskId2) {
   await ensureLibraryStoreLoaded();
-  const task = libraryStoreTasks.get(taskId);
+  const task = libraryStoreTasks.get(taskId2);
   if (!task) throw localAgentError("LIBRARY_STORE_TASK_NOT_FOUND", "The Library storage task was not found.");
   return libraryStoreTaskDocument(task);
 }
-async function libraryStoreCancel(taskId) {
+async function libraryStoreCancel(taskId2) {
   await ensureLibraryStoreLoaded();
-  const task = libraryStoreTasks.get(taskId);
+  const task = libraryStoreTasks.get(taskId2);
   if (!task) throw localAgentError("LIBRARY_STORE_TASK_NOT_FOUND", "The Library storage task was not found.");
   if (task.status !== "queued") return { task: libraryStoreTaskDocument(task), cancelled: false };
-  libraryStoreQueue = libraryStoreQueue.filter((queuedTaskId) => queuedTaskId !== taskId);
+  libraryStoreQueue = libraryStoreQueue.filter((queuedTaskId) => queuedTaskId !== taskId2);
   await updateLibraryStoreTask(task, "cancelled", "Cancelled before ChatGPT attachment began.", { status: "cancelled" });
   return { task: libraryStoreTaskDocument(task), cancelled: true };
 }
@@ -2584,14 +2723,14 @@ async function speechSpeak(argumentsValue) {
   const input = normalizeSpeechInput(argumentsValue);
   return normalizeSpeechTask(await agentJsonRequest("/tasks/system-speech", { method: "POST", body: input }), input);
 }
-async function speechStatus(taskId) {
-  return normalizeSpeechTask(await agentJsonRequest(`/tasks/system-speech/${encodeURIComponent(normalizeSpeechTaskId(taskId))}`));
+async function speechStatus(taskId2) {
+  return normalizeSpeechTask(await agentJsonRequest(`/tasks/system-speech/${encodeURIComponent(normalizeSpeechTaskId(taskId2))}`));
 }
-async function speechCancel(taskId) {
-  taskId = normalizeSpeechTaskId(taskId);
-  const document = await agentJsonRequest(`/tasks/system-speech/${encodeURIComponent(taskId)}/cancel`, { method: "POST", body: {} });
-  if (!document || document.taskId !== taskId || !["cancelled", "completed", "failed"].includes(document.status)) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent did not confirm speech cancellation.");
-  return { taskId, status: document.status };
+async function speechCancel(taskId2) {
+  taskId2 = normalizeSpeechTaskId(taskId2);
+  const document = await agentJsonRequest(`/tasks/system-speech/${encodeURIComponent(taskId2)}/cancel`, { method: "POST", body: {} });
+  if (!document || document.taskId !== taskId2 || !["cancelled", "completed", "failed"].includes(document.status)) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent did not confirm speech cancellation.");
+  return { taskId: taskId2, status: document.status };
 }
 function mcpLogStatus(value, failed = false) {
   const task = value && typeof value === "object" && value.task && typeof value.task === "object" ? value.task : null;
@@ -2683,8 +2822,8 @@ function normalizeFormatSelection(value) {
   return selection;
 }
 async function startYouTubeDownload(args = {}) {
-  const videoId = typeof args.videoId === "string" ? args.videoId.trim() : "";
-  if (!/^[A-Za-z0-9_-]{6,}$/.test(videoId)) throw localAgentError("INVALID_VIDEO_ID", "videoId is required.");
+  const videoId2 = typeof args.videoId === "string" ? args.videoId.trim() : "";
+  if (!/^[A-Za-z0-9_-]{6,}$/.test(videoId2)) throw localAgentError("INVALID_VIDEO_ID", "videoId is required.");
   const formatSelection = normalizeFormatSelection(args.formatSelection);
   const startSeconds = args.startSeconds;
   const endSeconds = args.endSeconds;
@@ -2695,7 +2834,7 @@ async function startYouTubeDownload(args = {}) {
   if (outputDir !== void 0 && (typeof outputDir !== "string" || !outputDir.trim())) {
     throw localAgentError("OUTPUT_DIR_INVALID", "outputDir must be a non-empty workspace-relative directory string.");
   }
-  return publicDownloadStartTask(normalizeAgentTask(await agentJsonRequest("/tasks/youtube-download", { method: "POST", body: { videoId, formatSelection, ...startSeconds === void 0 ? {} : { startSeconds, endSeconds }, ...outputDir === void 0 ? {} : { outputDir: outputDir.trim() } } })));
+  return publicDownloadStartTask(normalizeAgentTask(await agentJsonRequest("/tasks/youtube-download", { method: "POST", body: { videoId: videoId2, formatSelection, ...startSeconds === void 0 ? {} : { startSeconds, endSeconds }, ...outputDir === void 0 ? {} : { outputDir: outputDir.trim() } } })));
 }
 function normalizeYtDlpDownloadFormats(value) {
   if (!value || typeof value !== "object" || typeof value.available !== "boolean" || !["ytDlp", "unavailable"].includes(value.source) || !Array.isArray(value.combined) || !Array.isArray(value.video) || !Array.isArray(value.audio)) {
@@ -2730,23 +2869,23 @@ function normalizeYtDlpDownloadFormats(value) {
     audio: normalizeGroup(value.audio, "audio")
   };
 }
-async function getYouTubeDownloadFormats(videoId) {
-  if (typeof videoId !== "string" || !/^[A-Za-z0-9_-]{6,}$/.test(videoId)) throw localAgentError("INVALID_VIDEO_ID", "videoId is required.");
-  const result = await agentJsonRequest("/youtube/download-formats", { method: "POST", body: { videoId } });
-  if (!result || typeof result !== "object" || result.videoId !== videoId) {
+async function getYouTubeDownloadFormats(videoId2) {
+  if (typeof videoId2 !== "string" || !/^[A-Za-z0-9_-]{6,}$/.test(videoId2)) throw localAgentError("INVALID_VIDEO_ID", "videoId is required.");
+  const result = await agentJsonRequest("/youtube/download-formats", { method: "POST", body: { videoId: videoId2 } });
+  if (!result || typeof result !== "object" || result.videoId !== videoId2) {
     throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid download-format response.");
   }
-  return { videoId, downloadFormats: normalizeYtDlpDownloadFormats(result.downloadFormats) };
+  return { videoId: videoId2, downloadFormats: normalizeYtDlpDownloadFormats(result.downloadFormats) };
 }
 function nullableAgentString(value) {
   return typeof value === "string" ? value : null;
 }
-function nullableAgentNumber(value, integer = false) {
-  return typeof value === "number" && Number.isFinite(value) && value >= 0 && (!integer || Number.isInteger(value)) ? value : null;
+function nullableAgentNumber(value, integer2 = false) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && (!integer2 || Number.isInteger(value)) ? value : null;
 }
-async function getYouTubeDownloadTask(taskId) {
-  if (typeof taskId !== "string" || !taskId) throw localAgentError("TASK_NOT_FOUND", "taskId is required.");
-  return publicDownloadTask(normalizeAgentTask(await agentJsonRequest(`/tasks/${encodeURIComponent(taskId)}`)));
+async function getYouTubeDownloadTask(taskId2) {
+  if (typeof taskId2 !== "string" || !taskId2) throw localAgentError("TASK_NOT_FOUND", "taskId is required.");
+  return publicDownloadTask(normalizeAgentTask(await agentJsonRequest(`/tasks/${encodeURIComponent(taskId2)}`)));
 }
 function normalizeDownloadTaskDiagnostics(value) {
   if (!value || typeof value !== "object" || typeof value.taskId !== "string" || !["working", "completed", "failed", "cancelled"].includes(value.status) || !["preparing", "downloadingCombined", "downloadingVideo", "downloadingAudio", "merging", "completed", "failed", "cancelled"].includes(value.phase) || !Array.isArray(value.events) || !value.process || typeof value.process !== "object") {
@@ -2781,19 +2920,19 @@ function normalizeDownloadTaskDiagnostics(value) {
     nextEventId: Number.isInteger(value.nextEventId) && value.nextEventId >= 0 ? value.nextEventId : 0
   };
 }
-async function getYouTubeDownloadTaskDiagnostics(taskId, args = {}) {
-  if (typeof taskId !== "string" || !taskId) throw localAgentError("TASK_NOT_FOUND", "taskId is required.");
+async function getYouTubeDownloadTaskDiagnostics(taskId2, args = {}) {
+  if (typeof taskId2 !== "string" || !taskId2) throw localAgentError("TASK_NOT_FOUND", "taskId is required.");
   const afterEventId = args.afterEventId === void 0 ? 0 : args.afterEventId;
   const limit = args.limit === void 0 ? 100 : args.limit;
   if (!Number.isInteger(afterEventId) || afterEventId < 0 || !Number.isInteger(limit) || limit < 1 || limit > 100) {
     throw localAgentError("INVALID_ARGUMENT", "afterEventId and limit are invalid.");
   }
-  return normalizeDownloadTaskDiagnostics(await agentJsonRequest(`/tasks/${encodeURIComponent(taskId)}/diagnostics`, { method: "POST", body: { afterEventId, limit } }));
+  return normalizeDownloadTaskDiagnostics(await agentJsonRequest(`/tasks/${encodeURIComponent(taskId2)}/diagnostics`, { method: "POST", body: { afterEventId, limit } }));
 }
-async function cancelYouTubeDownloadTask(taskId) {
-  if (typeof taskId !== "string" || !taskId) throw localAgentError("TASK_NOT_FOUND", "taskId is required.");
-  await agentJsonRequest(`/tasks/${encodeURIComponent(taskId)}/cancel`, { method: "POST", body: {} });
-  return { taskId, accepted: true, message: "Cancellation request accepted. Poll youtube_download_get_task for the terminal status." };
+async function cancelYouTubeDownloadTask(taskId2) {
+  if (typeof taskId2 !== "string" || !taskId2) throw localAgentError("TASK_NOT_FOUND", "taskId is required.");
+  await agentJsonRequest(`/tasks/${encodeURIComponent(taskId2)}/cancel`, { method: "POST", body: {} });
+  return { taskId: taskId2, accepted: true, message: "Cancellation request accepted. Poll youtube_download_get_task for the terminal status." };
 }
 function normalizeWorkspacePath(value, fieldName, { allowRoot = false } = {}) {
   if (allowRoot && value === "") return "";
@@ -3013,9 +3152,9 @@ function normalizeCaptureFrameInput(argumentsValue = {}) {
   if (args.youtube !== void 0) {
     const value = captureFrameObject(args.youtube, "youtube", /* @__PURE__ */ new Set(["videoId", "formatId"]));
     if (!Object.hasOwn(value, "videoId") || !Object.hasOwn(value, "formatId") || Object.keys(value).length !== 2) throw localAgentError("CAPTURE_FRAME_INVALID", "youtube requires videoId and formatId.");
-    const videoId = requireVideoId({ videoId: value.videoId });
+    const videoId2 = requireVideoId({ videoId: value.videoId });
     if (typeof value.formatId !== "string" || !/^[0-9]+$/.test(value.formatId)) throw localAgentError("CAPTURE_FRAME_INVALID", "youtube.formatId must be a numeric ID returned by youtube_download_get_formats.");
-    youtube = { videoId, formatId: value.formatId };
+    youtube = { videoId: videoId2, formatId: value.formatId };
   }
   const timestampSeconds = captureFrameFiniteNumber(args.timestampSeconds, "timestampSeconds", { minimum: 0 });
   const videoStreamIndex = args.videoStreamIndex === void 0 ? void 0 : captureFrameInteger(args.videoStreamIndex, "videoStreamIndex");
@@ -3114,9 +3253,9 @@ async function createCaptureFrameTask(argumentsValue) {
   const document = await agentJsonRequest("/tasks/capture-frame", { method: "POST", body: input, timeoutMs: AGENT_TASK_TIMEOUT_MS });
   return normalizeCaptureFrameTask(document, input);
 }
-async function getCaptureFrameTask(taskId) {
-  if (typeof taskId !== "string" || !taskId.trim()) throw localAgentError("INVALID_ARGUMENT", "taskId must be a non-empty string.");
-  return normalizeCaptureFrameTask(await agentJsonRequest(`/tasks/capture-frame/${encodeURIComponent(taskId)}`, { timeoutMs: AGENT_TASK_TIMEOUT_MS }));
+async function getCaptureFrameTask(taskId2) {
+  if (typeof taskId2 !== "string" || !taskId2.trim()) throw localAgentError("INVALID_ARGUMENT", "taskId must be a non-empty string.");
+  return normalizeCaptureFrameTask(await agentJsonRequest(`/tasks/capture-frame/${encodeURIComponent(taskId2)}`, { timeoutMs: AGENT_TASK_TIMEOUT_MS }));
 }
 function normalizeCaptureFrameTaskDiagnostics(document) {
   if (!document || typeof document !== "object" || typeof document.taskId !== "string" || !["working", "completed", "failed", "cancelled"].includes(document.status)) {
@@ -3147,15 +3286,15 @@ function normalizeCaptureFrameTaskDiagnostics(document) {
   }
   return { taskId: document.taskId, status: document.status, error, youtube: { formatId: youtube.formatId, sectionCount: youtube.sectionCount, sections, ...failedSection === void 0 ? {} : { failedSection }, poTokenProvider: { state: youtube.poTokenProvider.state, provider: "bgutil" }, ytDlpExitCode: youtube.ytDlpExitCode, output: youtube.output } };
 }
-async function getCaptureFrameTaskDiagnostics(taskId) {
-  if (typeof taskId !== "string" || !taskId.trim()) throw localAgentError("INVALID_ARGUMENT", "taskId must be a non-empty string.");
-  return normalizeCaptureFrameTaskDiagnostics(await agentJsonRequest(`/tasks/capture-frame/${encodeURIComponent(taskId)}/diagnostics`, { method: "POST", body: {}, timeoutMs: AGENT_TASK_TIMEOUT_MS }));
+async function getCaptureFrameTaskDiagnostics(taskId2) {
+  if (typeof taskId2 !== "string" || !taskId2.trim()) throw localAgentError("INVALID_ARGUMENT", "taskId must be a non-empty string.");
+  return normalizeCaptureFrameTaskDiagnostics(await agentJsonRequest(`/tasks/capture-frame/${encodeURIComponent(taskId2)}/diagnostics`, { method: "POST", body: {}, timeoutMs: AGENT_TASK_TIMEOUT_MS }));
 }
-async function cancelCaptureFrameTask(taskId) {
-  if (typeof taskId !== "string" || !taskId.trim()) throw localAgentError("INVALID_ARGUMENT", "taskId must be a non-empty string.");
-  const document = await agentJsonRequest(`/tasks/capture-frame/${encodeURIComponent(taskId)}/cancel`, { method: "POST", body: {}, timeoutMs: AGENT_TASK_TIMEOUT_MS });
+async function cancelCaptureFrameTask(taskId2) {
+  if (typeof taskId2 !== "string" || !taskId2.trim()) throw localAgentError("INVALID_ARGUMENT", "taskId must be a non-empty string.");
+  const document = await agentJsonRequest(`/tasks/capture-frame/${encodeURIComponent(taskId2)}/cancel`, { method: "POST", body: {}, timeoutMs: AGENT_TASK_TIMEOUT_MS });
   if (!document || document.accepted !== true) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent did not confirm frame-extraction cancellation.");
-  return { taskId, accepted: true, message: "Cancellation request accepted. Poll media_capture_frame_get_task for the terminal status." };
+  return { taskId: taskId2, accepted: true, message: "Cancellation request accepted. Poll media_capture_frame_get_task for the terminal status." };
 }
 function normalizeCaptureFrameResult(document, input) {
   const expectedSource = input.path ?? `youtube:${input.youtube.videoId}`;
@@ -3204,6 +3343,36 @@ function normalizeCaptureFrameResult(document, input) {
       }
     }
   };
+}
+async function storyboardCall(name, args) {
+  const input = validateStoryboardInput(name, args);
+  if (name.endsWith("get_info") || name.endsWith("download")) {
+    const tabs = await chrome.tabs.query({ url: "https://www.youtube.com/*" }).catch(() => []);
+    for (const tab of tabs) {
+      try {
+        const url = new URL(tab.url);
+        if (url.searchParams.get("v") !== input.videoId && url.pathname !== `/shorts/${input.videoId}`) continue;
+        const response = await sendYouTubePageTool(tab.id, { type: "youtube-ui-tool", action: "storyboard-context", videoId: input.videoId });
+        const context = response?.data;
+        if (response?.ok && context?.videoId === input.videoId) {
+          input.context = {
+            videoId: input.videoId,
+            title: typeof context.title === "string" ? context.title.slice(0, 2e3) : "",
+            durationSeconds: context.durationSeconds,
+            isLive: context.isLive === true,
+            spec: typeof context.spec === "string" && context.spec.length <= 5e4 ? context.spec : null
+          };
+          break;
+        }
+      } catch (_) {
+      }
+    }
+  }
+  const operation = name.endsWith("get_info") ? "info" : name.endsWith("download") ? "download" : name.endsWith("cancel_task") ? "cancel" : "status";
+  const document = await agentJsonRequest(`/youtube/storyboards/${operation}`, { method: "POST", body: input, timeoutMs: 4e4 });
+  const result = normalizeStoryboardResult(name, document);
+  if (result.videoId && result.videoId !== input.videoId || input.taskId && result.taskId && result.taskId !== input.taskId) throw localAgentError("AGENT_INVALID_RESPONSE", "The Agent returned mismatched storyboard metadata.");
+  return result;
 }
 function normalizeVisualMapInput(argumentsValue = {}) {
   const args = captureFrameObject(argumentsValue, "visual_map_create", /* @__PURE__ */ new Set(["workspacePath", "columns", "rows", "maxTotalFrames", "selection", "sceneDetectThreshold", "startSeconds", "endSeconds", "maxMapDimension", "frameTimestampPosition"]));
@@ -3261,18 +3430,18 @@ async function createVisualMap(argumentsValue) {
   const document = await agentJsonRequest("/tasks/visual-map", { method: "POST", body: input, timeoutMs: AGENT_TASK_TIMEOUT_MS });
   return normalizeVisualMapTask(document, input);
 }
-async function getVisualMapTask(taskId) {
-  if (typeof taskId !== "string" || !taskId.trim()) throw localAgentError("INVALID_ARGUMENT", "taskId must be a non-empty string.");
-  const document = await agentJsonRequest(`/tasks/visual-map/${encodeURIComponent(taskId)}`, { timeoutMs: AGENT_TASK_TIMEOUT_MS });
+async function getVisualMapTask(taskId2) {
+  if (typeof taskId2 !== "string" || !taskId2.trim()) throw localAgentError("INVALID_ARGUMENT", "taskId must be a non-empty string.");
+  const document = await agentJsonRequest(`/tasks/visual-map/${encodeURIComponent(taskId2)}`, { timeoutMs: AGENT_TASK_TIMEOUT_MS });
   return normalizeVisualMapTask(document);
 }
-async function cancelVisualMapTask(taskId) {
-  if (typeof taskId !== "string" || !taskId.trim()) throw localAgentError("INVALID_ARGUMENT", "taskId must be a non-empty string.");
-  const document = await agentJsonRequest(`/tasks/visual-map/${encodeURIComponent(taskId)}/cancel`, { method: "POST", body: {}, timeoutMs: AGENT_TASK_TIMEOUT_MS });
+async function cancelVisualMapTask(taskId2) {
+  if (typeof taskId2 !== "string" || !taskId2.trim()) throw localAgentError("INVALID_ARGUMENT", "taskId must be a non-empty string.");
+  const document = await agentJsonRequest(`/tasks/visual-map/${encodeURIComponent(taskId2)}/cancel`, { method: "POST", body: {}, timeoutMs: AGENT_TASK_TIMEOUT_MS });
   if (!document || typeof document !== "object" || document.accepted !== true) {
     throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent did not confirm visual-map cancellation.");
   }
-  return { taskId, accepted: true, message: "Cancellation request accepted. Poll visual_map_get_task for the terminal status." };
+  return { taskId: taskId2, accepted: true, message: "Cancellation request accepted. Poll visual_map_get_task for the terminal status." };
 }
 function normalizeCameraMode(value, field) {
   if (!value || typeof value !== "object" || Array.isArray(value) || !Number.isInteger(value.width) || value.width < 1 || !Number.isInteger(value.height) || value.height < 1 || value.fps !== void 0 && (!Number.isFinite(value.fps) || value.fps <= 0)) {
@@ -3309,9 +3478,9 @@ async function cameraCaptureFrame(argumentsValue) {
   const input = normalizeCameraCaptureInput(argumentsValue);
   return normalizeCameraFrame(await agentJsonRequest("/media/camera/capture-frame", { method: "POST", body: input, timeoutMs: AGENT_CAPTURE_FRAME_TIMEOUT_MS }), input);
 }
-function cameraTaskId(taskId) {
-  if (typeof taskId !== "string" || !taskId.trim()) throw localAgentError("INVALID_ARGUMENT", "taskId must be a non-empty string.");
-  return taskId;
+function cameraTaskId(taskId2) {
+  if (typeof taskId2 !== "string" || !taskId2.trim()) throw localAgentError("INVALID_ARGUMENT", "taskId must be a non-empty string.");
+  return taskId2;
 }
 function normalizeCameraRecordInput(argumentsValue = {}) {
   const args = captureFrameObject(argumentsValue, "camera_record_video", /* @__PURE__ */ new Set(["cameraId", "durationSeconds", "targetFps"]));
@@ -3354,16 +3523,16 @@ async function cameraRecordAudio(argumentsValue) {
   updateCameraRecordingBadge(task);
   return task;
 }
-async function cameraRecordStatus(taskId) {
-  taskId = cameraTaskId(taskId);
-  const task = normalizeCameraRecordTask(await agentJsonRequest(`/tasks/camera-record/${encodeURIComponent(taskId)}`, { timeoutMs: AGENT_TASK_TIMEOUT_MS }));
+async function cameraRecordStatus(taskId2) {
+  taskId2 = cameraTaskId(taskId2);
+  const task = normalizeCameraRecordTask(await agentJsonRequest(`/tasks/camera-record/${encodeURIComponent(taskId2)}`, { timeoutMs: AGENT_TASK_TIMEOUT_MS }));
   updateCameraRecordingBadge(task);
   return task;
 }
-async function cameraRecordStop(taskId) {
-  taskId = cameraTaskId(taskId);
-  const document = await agentJsonRequest(`/tasks/camera-record/${encodeURIComponent(taskId)}/stop`, { method: "POST", body: {}, timeoutMs: AGENT_TASK_TIMEOUT_MS });
-  if (!document || typeof document !== "object" || document.taskId !== taskId || typeof document.accepted !== "boolean" || typeof document.message !== "string") throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent did not confirm the camera recording stop request.");
+async function cameraRecordStop(taskId2) {
+  taskId2 = cameraTaskId(taskId2);
+  const document = await agentJsonRequest(`/tasks/camera-record/${encodeURIComponent(taskId2)}/stop`, { method: "POST", body: {}, timeoutMs: AGENT_TASK_TIMEOUT_MS });
+  if (!document || typeof document !== "object" || document.taskId !== taskId2 || typeof document.accepted !== "boolean" || typeof document.message !== "string") throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent did not confirm the camera recording stop request.");
   return document;
 }
 function normalizeScreenCaptureInput(argumentsValue = {}) {
@@ -3889,25 +4058,25 @@ async function handleMcpRequest(request) {
     return executeToolCall(request.id, "youtube_download", input, () => startYouTubeDownload(input));
   }
   if (request?.method === "tools/call" && request.params?.name === "youtube_download_get_formats") {
-    const videoId = String(request.params.arguments?.videoId ?? "").trim();
-    if (!videoId) return toolError(request.id, localAgentError("INVALID_ARGUMENT", "videoId is required."));
-    return executeToolCall(request.id, "youtube_download_get_formats", { videoId }, () => getYouTubeDownloadFormats(videoId));
+    const videoId2 = String(request.params.arguments?.videoId ?? "").trim();
+    if (!videoId2) return toolError(request.id, localAgentError("INVALID_ARGUMENT", "videoId is required."));
+    return executeToolCall(request.id, "youtube_download_get_formats", { videoId: videoId2 }, () => getYouTubeDownloadFormats(videoId2));
   }
   if (request?.method === "tools/call" && request.params?.name === "youtube_download_get_task") {
-    const taskId = String(request.params.arguments?.taskId ?? "").trim();
-    if (!taskId) return toolError(request.id, localAgentError("INVALID_ARGUMENT", "taskId is required."));
-    return executeToolCall(request.id, "youtube_download_get_task", { taskId }, () => getYouTubeDownloadTask(taskId));
+    const taskId2 = String(request.params.arguments?.taskId ?? "").trim();
+    if (!taskId2) return toolError(request.id, localAgentError("INVALID_ARGUMENT", "taskId is required."));
+    return executeToolCall(request.id, "youtube_download_get_task", { taskId: taskId2 }, () => getYouTubeDownloadTask(taskId2));
   }
   if (request?.method === "tools/call" && request.params?.name === "youtube_download_task_diagnostics") {
     const args = request.params.arguments ?? {};
-    const taskId = String(args.taskId ?? "").trim();
-    if (!taskId) return toolError(request.id, localAgentError("INVALID_ARGUMENT", "taskId is required."));
-    return executeToolCall(request.id, "youtube_download_task_diagnostics", { taskId, afterEventId: args.afterEventId ?? 0, limit: args.limit ?? 100 }, () => getYouTubeDownloadTaskDiagnostics(taskId, args));
+    const taskId2 = String(args.taskId ?? "").trim();
+    if (!taskId2) return toolError(request.id, localAgentError("INVALID_ARGUMENT", "taskId is required."));
+    return executeToolCall(request.id, "youtube_download_task_diagnostics", { taskId: taskId2, afterEventId: args.afterEventId ?? 0, limit: args.limit ?? 100 }, () => getYouTubeDownloadTaskDiagnostics(taskId2, args));
   }
   if (request?.method === "tools/call" && request.params?.name === "youtube_download_cancel_task") {
-    const taskId = String(request.params.arguments?.taskId ?? "").trim();
-    if (!taskId) return toolError(request.id, localAgentError("INVALID_ARGUMENT", "taskId is required."));
-    return executeToolCall(request.id, "youtube_download_cancel_task", { taskId }, () => cancelYouTubeDownloadTask(taskId));
+    const taskId2 = String(request.params.arguments?.taskId ?? "").trim();
+    if (!taskId2) return toolError(request.id, localAgentError("INVALID_ARGUMENT", "taskId is required."));
+    return executeToolCall(request.id, "youtube_download_cancel_task", { taskId: taskId2 }, () => cancelYouTubeDownloadTask(taskId2));
   }
   if (request?.method === "tools/call" && request.params?.name === "system_agent_status") {
     return executeToolCall(request.id, "system_agent_status", {}, () => getAgentStatus());
@@ -3920,28 +4089,28 @@ async function handleMcpRequest(request) {
     return executeToolCall(request.id, "system_speech_speak", args, () => speechSpeak(args));
   }
   if (request?.method === "tools/call" && request.params?.name === "system_speech_status") {
-    const taskId = String(request.params.arguments?.taskId ?? "").trim();
-    if (!taskId) return toolError(request.id, localAgentError("INVALID_ARGUMENT", "taskId is required."));
-    return executeToolCall(request.id, "system_speech_status", { taskId }, () => speechStatus(taskId));
+    const taskId2 = String(request.params.arguments?.taskId ?? "").trim();
+    if (!taskId2) return toolError(request.id, localAgentError("INVALID_ARGUMENT", "taskId is required."));
+    return executeToolCall(request.id, "system_speech_status", { taskId: taskId2 }, () => speechStatus(taskId2));
   }
   if (request?.method === "tools/call" && request.params?.name === "system_speech_cancel") {
-    const taskId = String(request.params.arguments?.taskId ?? "").trim();
-    if (!taskId) return toolError(request.id, localAgentError("INVALID_ARGUMENT", "taskId is required."));
-    return executeToolCall(request.id, "system_speech_cancel", { taskId }, () => speechCancel(taskId));
+    const taskId2 = String(request.params.arguments?.taskId ?? "").trim();
+    if (!taskId2) return toolError(request.id, localAgentError("INVALID_ARGUMENT", "taskId is required."));
+    return executeToolCall(request.id, "system_speech_cancel", { taskId: taskId2 }, () => speechCancel(taskId2));
   }
   if (request?.method === "tools/call" && request.params?.name === "library_store_start") {
     const files = request.params.arguments?.files;
     return executeToolCall(request.id, "library_store_start", { files }, () => libraryStoreStart(files));
   }
   if (request?.method === "tools/call" && request.params?.name === "library_store_status") {
-    const taskId = String(request.params.arguments?.taskId ?? "").trim();
-    if (!taskId) return toolError(request.id, localAgentError("INVALID_ARGUMENT", "taskId is required."));
-    return executeToolCall(request.id, "library_store_status", { taskId }, () => libraryStoreStatus(taskId));
+    const taskId2 = String(request.params.arguments?.taskId ?? "").trim();
+    if (!taskId2) return toolError(request.id, localAgentError("INVALID_ARGUMENT", "taskId is required."));
+    return executeToolCall(request.id, "library_store_status", { taskId: taskId2 }, () => libraryStoreStatus(taskId2));
   }
   if (request?.method === "tools/call" && request.params?.name === "library_store_cancel") {
-    const taskId = String(request.params.arguments?.taskId ?? "").trim();
-    if (!taskId) return toolError(request.id, localAgentError("INVALID_ARGUMENT", "taskId is required."));
-    return executeToolCall(request.id, "library_store_cancel", { taskId }, () => libraryStoreCancel(taskId));
+    const taskId2 = String(request.params.arguments?.taskId ?? "").trim();
+    if (!taskId2) return toolError(request.id, localAgentError("INVALID_ARGUMENT", "taskId is required."));
+    return executeToolCall(request.id, "library_store_cancel", { taskId: taskId2 }, () => libraryStoreCancel(taskId2));
   }
   if (request?.method === "tools/call" && request.params?.name === "workspace_list") {
     const args = request.params.arguments ?? {};
@@ -3990,28 +4159,33 @@ async function handleMcpRequest(request) {
     return executeToolCall(request.id, "media_capture_frame", args, () => createCaptureFrameTask(args));
   }
   if (request?.method === "tools/call" && request.params?.name === "media_capture_frame_get_task") {
-    const taskId = request.params.arguments?.taskId;
-    return executeToolCall(request.id, "media_capture_frame_get_task", { taskId }, () => getCaptureFrameTask(taskId));
+    const taskId2 = request.params.arguments?.taskId;
+    return executeToolCall(request.id, "media_capture_frame_get_task", { taskId: taskId2 }, () => getCaptureFrameTask(taskId2));
   }
   if (request?.method === "tools/call" && request.params?.name === "media_capture_frame_task_diagnostics") {
-    const taskId = request.params.arguments?.taskId;
-    return executeToolCall(request.id, "media_capture_frame_task_diagnostics", { taskId }, () => getCaptureFrameTaskDiagnostics(taskId));
+    const taskId2 = request.params.arguments?.taskId;
+    return executeToolCall(request.id, "media_capture_frame_task_diagnostics", { taskId: taskId2 }, () => getCaptureFrameTaskDiagnostics(taskId2));
   }
   if (request?.method === "tools/call" && request.params?.name === "media_capture_frame_cancel_task") {
-    const taskId = request.params.arguments?.taskId;
-    return executeToolCall(request.id, "media_capture_frame_cancel_task", { taskId }, () => cancelCaptureFrameTask(taskId));
+    const taskId2 = request.params.arguments?.taskId;
+    return executeToolCall(request.id, "media_capture_frame_cancel_task", { taskId: taskId2 }, () => cancelCaptureFrameTask(taskId2));
+  }
+  if (request?.method === "tools/call" && STORYBOARD_TOOL_NAMES.includes(request.params?.name)) {
+    const name = request.params.name;
+    const args = request.params.arguments ?? {};
+    return executeToolCall(request.id, name, {}, () => storyboardCall(name, args));
   }
   if (request?.method === "tools/call" && request.params?.name === "visual_map_create") {
     const args = request.params.arguments ?? {};
     return executeToolCall(request.id, "visual_map_create", args, () => createVisualMap(args));
   }
   if (request?.method === "tools/call" && request.params?.name === "visual_map_get_task") {
-    const taskId = request.params.arguments?.taskId;
-    return executeToolCall(request.id, "visual_map_get_task", { taskId }, () => getVisualMapTask(taskId));
+    const taskId2 = request.params.arguments?.taskId;
+    return executeToolCall(request.id, "visual_map_get_task", { taskId: taskId2 }, () => getVisualMapTask(taskId2));
   }
   if (request?.method === "tools/call" && request.params?.name === "visual_map_cancel_task") {
-    const taskId = request.params.arguments?.taskId;
-    return executeToolCall(request.id, "visual_map_cancel_task", { taskId }, () => cancelVisualMapTask(taskId));
+    const taskId2 = request.params.arguments?.taskId;
+    return executeToolCall(request.id, "visual_map_cancel_task", { taskId: taskId2 }, () => cancelVisualMapTask(taskId2));
   }
   if (request?.method === "tools/call" && request.params?.name === "camera_list") {
     return executeToolCall(request.id, "camera_list", {}, cameraList);
@@ -4029,12 +4203,12 @@ async function handleMcpRequest(request) {
     return executeToolCall(request.id, "camera_record_audio", args, () => cameraRecordAudio(args));
   }
   if (request?.method === "tools/call" && request.params?.name === "camera_record_status") {
-    const taskId = request.params.arguments?.taskId;
-    return executeToolCall(request.id, "camera_record_status", { taskId }, () => cameraRecordStatus(taskId));
+    const taskId2 = request.params.arguments?.taskId;
+    return executeToolCall(request.id, "camera_record_status", { taskId: taskId2 }, () => cameraRecordStatus(taskId2));
   }
   if (request?.method === "tools/call" && request.params?.name === "camera_record_stop") {
-    const taskId = request.params.arguments?.taskId;
-    return executeToolCall(request.id, "camera_record_stop", { taskId }, () => cameraRecordStop(taskId));
+    const taskId2 = request.params.arguments?.taskId;
+    return executeToolCall(request.id, "camera_record_stop", { taskId: taskId2 }, () => cameraRecordStop(taskId2));
   }
   if (request?.method === "tools/call" && request.params?.name === "media_capture_screen") {
     const args = request.params.arguments ?? {};
@@ -4076,8 +4250,8 @@ async function handleMcpRequest(request) {
     return executeToolCall(request.id, "youtube_search", { query, limit }, () => youtubeSearch(query, limit), "YouTube search failed");
   }
   if (request?.method === "tools/call" && request.params?.name === "youtube_get_video") {
-    const videoId = requireVideoId(request.params.arguments);
-    return executeToolCall(request.id, "youtube_get_video", { videoId }, () => youtubeGetVideo(videoId));
+    const videoId2 = requireVideoId(request.params.arguments);
+    return executeToolCall(request.id, "youtube_get_video", { videoId: videoId2 }, () => youtubeGetVideo(videoId2));
   }
   if (request?.method === "tools/call" && request.params?.name === "youtube_get_channel_videos") {
     const args = request.params.arguments ?? {};
@@ -4104,25 +4278,25 @@ async function handleMcpRequest(request) {
   }
   if (request?.method === "tools/call" && request.params?.name === "youtube_get_transcript") {
     const args = request.params.arguments ?? {};
-    const videoId = requireVideoId(args);
+    const videoId2 = requireVideoId(args);
     const limit = boundedInt(args.limit, 800, 1, 5e3);
     const trackIndex = boundedInt(args.trackIndex, 0, 0, 100);
-    return executeToolCall(request.id, "youtube_get_transcript", { videoId, limit, trackIndex }, () => youtubeGetTranscript(videoId, limit, trackIndex));
+    return executeToolCall(request.id, "youtube_get_transcript", { videoId: videoId2, limit, trackIndex }, () => youtubeGetTranscript(videoId2, limit, trackIndex));
   }
   if (request?.method === "tools/call" && request.params?.name === "youtube_get_comments") {
     const args = request.params.arguments ?? {};
-    const videoId = requireVideoId(args);
+    const videoId2 = requireVideoId(args);
     const limit = boundedInt(args.limit, 20, 1, 100);
     const sort = args.sort === "newest" ? "newest" : "top";
-    return executeToolCall(request.id, "youtube_get_comments", { videoId, limit, sort }, () => youtubeGetComments(videoId, limit, sort));
+    return executeToolCall(request.id, "youtube_get_comments", { videoId: videoId2, limit, sort }, () => youtubeGetComments(videoId2, limit, sort));
   }
   if (request?.method === "tools/call" && request.params?.name === "youtube_get_comment_replies") {
     const args = request.params.arguments ?? {};
-    const videoId = requireVideoId(args);
+    const videoId2 = requireVideoId(args);
     const commentId = String(args.commentId ?? "").trim();
     if (!commentId) return toolError(request.id, localAgentError("INVALID_ARGUMENT", "commentId is required."));
     const limit = boundedInt(args.limit, 20, 1, 100);
-    return executeToolCall(request.id, "youtube_get_comment_replies", { videoId, commentId, limit }, () => youtubeGetCommentReplies(videoId, commentId, limit));
+    return executeToolCall(request.id, "youtube_get_comment_replies", { videoId: videoId2, commentId, limit }, () => youtubeGetCommentReplies(videoId2, commentId, limit));
   }
   return { jsonrpc: "2.0", id: request?.id, error: { code: -32601, message: "Method or tool is not implemented" } };
 }
@@ -4242,8 +4416,8 @@ function toolError(id, error) {
   const text = typeof code === "string" ? `[${code}] ${message}` : message;
   const errorDocument = { code: typeof code === "string" ? code : "TOOL_ERROR", message, detail: typeof error?.detail === "string" ? error.detail : null };
   if (isExpectedToolError(errorDocument.code)) {
-    const rejected = { status: "rejected", error: errorDocument };
-    return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text }], structuredContent: rejected, isError: false } };
+    const rejected2 = { status: "rejected", error: errorDocument };
+    return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text }], structuredContent: rejected2, isError: false } };
   }
   return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text }], structuredContent: { error: errorDocument }, isError: true } };
 }
@@ -4530,8 +4704,8 @@ async function youtubeSearchViaPageContext(query, limit, context) {
     hasMore: Boolean(pageResult.hasMore)
   };
 }
-async function youtubeGetVideo(videoId) {
-  const { player, initial } = await fetchVideoPage(videoId);
+async function youtubeGetVideo(videoId2) {
+  const { player, initial } = await fetchVideoPage(videoId2);
   const details = player?.videoDetails;
   if (!details?.videoId) throw new Error("YouTube video metadata was not found");
   const microformat = player?.microformat?.playerMicroformatRenderer ?? {};
@@ -4540,7 +4714,7 @@ async function youtubeGetVideo(videoId) {
   const likesText = findLikeText(initial);
   const commentCountText = findCommentCountText(initial);
   return {
-    videoId,
+    videoId: videoId2,
     title: details.title,
     description: details.shortDescription || "",
     channel: { name: details.author || null, channelId: details.channelId || null },
@@ -4634,14 +4808,14 @@ function compareDownloadFormats(left, right) {
   const rightPixels = (right.width || 0) * (right.height || 0);
   return rightPixels - leftPixels || (right.fps || 0) - (left.fps || 0) || (right.bitrateBps || 0) - (left.bitrateBps || 0) || left.formatId.localeCompare(right.formatId, void 0, { numeric: true });
 }
-async function youtubeGetTranscript(videoId, limit, trackIndex) {
-  return runYouTubePageTool("transcript", videoId, { limit, trackIndex });
+async function youtubeGetTranscript(videoId2, limit, trackIndex) {
+  return runYouTubePageTool("transcript", videoId2, { limit, trackIndex });
 }
-async function youtubeGetComments(videoId, limit, sort) {
-  return runYouTubePageTool("comments", videoId, { limit, sort });
+async function youtubeGetComments(videoId2, limit, sort) {
+  return runYouTubePageTool("comments", videoId2, { limit, sort });
 }
-async function youtubeGetCommentReplies(videoId, commentId, limit) {
-  return runYouTubePageTool("replies", videoId, { commentId, limit });
+async function youtubeGetCommentReplies(videoId2, commentId, limit) {
+  return runYouTubePageTool("replies", videoId2, { commentId, limit });
 }
 async function youtubeGetChannelVideos(args) {
   return runYouTubePageTool("channel-videos", null, args);
@@ -4663,13 +4837,13 @@ function optionalContinuation(value) {
   if (continuation.length > 2e4) throw new Error("continuation is too long");
   return continuation;
 }
-async function runYouTubePageTool(action, videoId, args) {
+async function runYouTubePageTool(action, videoId2, args) {
   try {
-    return await runYouTubePageToolAttempt(action, videoId, args);
+    return await runYouTubePageToolAttempt(action, videoId2, args);
   } catch (error) {
     if (!isRecoverablePageContextError(error)) throw error;
     try {
-      return await runYouTubePageToolAttempt(action, videoId, args);
+      return await runYouTubePageToolAttempt(action, videoId2, args);
     } catch (retryError) {
       if (isRecoverablePageContextError(retryError)) {
         throw new Error("ResearchTube could not restore its YouTube page context after one automatic retry. Please repeat the request.");
@@ -4678,13 +4852,13 @@ async function runYouTubePageTool(action, videoId, args) {
     }
   }
 }
-async function runYouTubePageToolAttempt(action, videoId, args) {
+async function runYouTubePageToolAttempt(action, videoId2, args) {
   const { tab } = await getOrCreateYouTubeTab();
   const startedAt = Date.now();
   const response = await sendYouTubePageTool(tab.id, {
     type: "youtube-ui-tool",
     action,
-    videoId,
+    videoId: videoId2,
     args
   });
   try {
@@ -4697,7 +4871,7 @@ async function runYouTubePageToolAttempt(action, videoId, args) {
       const url = new URL(item.url);
       void recordCommandDiagnostic("youtube_http_response", {
         action,
-        ...videoId ? { videoId } : {},
+        ...videoId2 ? { videoId: videoId2 } : {},
         endpoint: url.pathname.replace("/youtubei/v1/", "youtubei/"),
         method: item.method || "GET",
         status: Number(item.status || 0),
@@ -4708,7 +4882,7 @@ async function runYouTubePageToolAttempt(action, videoId, args) {
   } catch (error) {
     void recordCommandDiagnostic("page_diagnostics_unavailable", {
       action,
-      ...videoId ? { videoId } : {},
+      ...videoId2 ? { videoId: videoId2 } : {},
       error: searchDiagnosticMessage(error)
     });
   }
@@ -4800,23 +4974,23 @@ async function sendYouTubePageTool(tabId, message) {
     throw error;
   }
 }
-async function fetchVideoPage(videoId) {
-  const response = await fetchStandardWatchPage(videoId);
+async function fetchVideoPage(videoId2) {
+  const response = await fetchStandardWatchPage(videoId2);
   if (!response.ok) throw new Error(`YouTube HTTP ${response.status}`);
   const html = await response.text();
   const player = extractAnyJson(html, ["var ytInitialPlayerResponse =", "ytInitialPlayerResponse ="]);
   if (!player) throw new Error("ytInitialPlayerResponse was not found (consent or changed YouTube page)");
   return { player, initial: extractAnyJson(html, ["var ytInitialData =", "ytInitialData ="]) };
 }
-async function fetchStandardWatchPage(videoId) {
+async function fetchStandardWatchPage(videoId2) {
   try {
-    const response = await fetch(`https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`, {
+    const response = await fetch(`https://www.youtube.com/watch?v=${encodeURIComponent(videoId2)}`, {
       credentials: "omit",
       headers: { Accept: "text/html" }
     });
     void recordCommandDiagnostic("youtube_http_response", {
       action: "youtube_get_video",
-      videoId,
+      videoId: videoId2,
       endpoint: "/watch",
       method: "GET",
       status: response.status,
@@ -4827,7 +5001,7 @@ async function fetchStandardWatchPage(videoId) {
   } catch (error) {
     void recordCommandDiagnostic("youtube_http_network_error", {
       action: "youtube_get_video",
-      videoId,
+      videoId: videoId2,
       endpoint: "/watch",
       method: "GET",
       error: searchDiagnosticMessage(error)

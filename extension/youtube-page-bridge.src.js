@@ -92,6 +92,22 @@ import { Innertube, Parser } from "youtubei.js";
     return originalXhrSend.apply(this, args);
   };
 
+  function storyboardContext(videoId) {
+    let player = null;
+    // The live player handles SPA navigation; initial globals may be stale.
+    try { player = document.getElementById("movie_player")?.getPlayerResponse?.(); } catch (_) {}
+    if (typeof player === "string") { try { player = JSON.parse(player); } catch (_) { player = null; } }
+    if (player?.videoDetails?.videoId !== videoId) {
+      player = window.ytInitialPlayerResponse || window.ytplayer?.config?.args?.player_response;
+      if (typeof player === "string") { try { player = JSON.parse(player); } catch (_) { player = null; } }
+    }
+    const url = new URL(location.href);
+    if ((url.searchParams.get("v") !== videoId && url.pathname !== `/shorts/${videoId}`) || player?.videoDetails?.videoId !== videoId) return null;
+    return { videoId, title: player.videoDetails.title || "", durationSeconds: Number(player.videoDetails.lengthSeconds),
+      isLive: Boolean(player.videoDetails.isLive || player.videoDetails.isUpcoming || player.storyboards?.playerLiveStoryboardSpecRenderer),
+      spec: player.storyboards?.playerStoryboardSpecRenderer?.spec || null };
+  }
+
   function pageState() {
     const rawPlayer = window.ytInitialPlayerResponse || window.ytplayer?.config?.args?.player_response || null;
     let player = rawPlayer;
@@ -1097,7 +1113,8 @@ import { Innertube, Parser } from "youtubei.js";
     if (message?.source !== COMMAND_SOURCE || message.type !== "command" || !message.id) return;
     try {
       let data;
-      if (message.action === "page-state") data = pageState();
+      if (message.action === "storyboard-context") data = storyboardContext(message.payload?.videoId);
+      else if (message.action === "page-state") data = pageState();
       else if (message.action === "search") data = await searchPublicVideos(message.payload || {});
       else if (message.action === "channel-videos") data = await getChannelVideos(message.payload || {});
       else if (message.action === "channel-playlists") data = await getChannelPlaylists(message.payload || {});

@@ -48,6 +48,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
 async function runUiTool({ action, videoId, args }) {
   if (action === "bridge-version") return { version: "1.11.0" };
+  if (action === "storyboard-context") return callMainWorld("storyboard-context", { videoId }, 5000);
   if (action === "page-state") return waitForPageData();
   if (action === "search") return callMainWorld("search", args, 45_000);
   if (action === "channel-videos") return callMainWorld("channel-videos", args, 60_000);

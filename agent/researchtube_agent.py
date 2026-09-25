@@ -33,8 +33,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote, unquote, urlparse
 from urllib.request import Request, urlopen
 
-AGENT_VERSION = "1.101.0"
-INTERFACE_VERSION = 62
+AGENT_VERSION = "1.102.0"
+INTERFACE_VERSION = 63
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
 TASK_POLL_INTERVAL_MS = 1_000
@@ -4928,6 +4928,14 @@ def mcp_tool_log(tool: str, payload: Any) -> dict[str, Any]:
     return {"status": status}
 
 
+try:
+    from .storyboards import StoryboardService
+except ImportError:  # Direct python researchtube_agent.py launch.
+    from storyboards import StoryboardService
+
+STORYBOARD_TASKS = StoryboardService(sys.modules[__name__])
+
+
 async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
     method, path = "", ""
     try:
@@ -4968,6 +4976,8 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             response_status, response_body = "201 Created", await CAMERA_RECORD_TASKS.create(parse_json_body(body))
         elif method == "POST" and path == "/tasks/camera-record-audio":
             response_status, response_body = "201 Created", await CAMERA_RECORD_TASKS.create(parse_json_body(body), recording_kind="audio")
+        elif method == "POST" and path in {"/youtube/storyboards/info", "/youtube/storyboards/download", "/youtube/storyboards/status", "/youtube/storyboards/cancel"}:
+            response_status, response_body = "200 OK", await STORYBOARD_TASKS.dispatch(path.rsplit("/", 1)[1], parse_json_body(body))
         elif method == "POST" and path == "/tasks/visual-map":
             response_status, response_body = "201 Created", await VISUAL_MAP_TASKS.create(parse_json_body(body))
         elif method == "POST" and path == "/media/capture-screen":
@@ -5079,6 +5089,7 @@ async def serve(port: int) -> None:
             await stop_public_share_unlocked()
         await CAPTURE_FRAME_TASKS.shutdown()
         await SPEECH_TASKS.shutdown()
+        await STORYBOARD_TASKS.shutdown()
         await VISUAL_MAP_TASKS.shutdown()
         await CAMERA_RECORD_TASKS.shutdown()
         await TASKS.shutdown()

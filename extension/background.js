@@ -1,3 +1,4 @@
+import { STORYBOARD_TOOL_NAMES, storyboardDefinitions, validateStoryboardInput, normalizeStoryboardResult } from "./storyboards.js";
 const CONTROL_PLANE_BASE_URL = "https://api.openai.com";
 const EXTERNAL_URLS = Object.freeze({
   tunnels: "https://platform.openai.com/settings/organization/tunnels",
@@ -21,6 +22,7 @@ const MCP_TOOL_GROUPS = Object.freeze({
   speech: { title: "Text to Speech", order: 15 },
   workspace: { title: "Workspace", order: 20 },
   media: { title: "Media and images", order: 30 },
+  storyboards: { title: "YouTube Storyboards", order: 45 },
   visualMaps: { title: "Visual Maps", order: 40 },
   camera: { title: "Camera", order: 50 },
   youtube: { title: "YouTube", order: 60 },
@@ -33,6 +35,7 @@ const MCP_TOOL_GROUPS = Object.freeze({
 // This is deliberately explicit metadata, rather than a rule inferred from a
 // tool name. New third-party tools without an entry land safely in Custom.
 const MCP_TOOL_SETTINGS = Object.freeze({
+  youtube_storyboard_get_info: { group: "storyboards" }, youtube_storyboard_download: { group: "storyboards" }, youtube_storyboard_get_task: { group: "storyboards" }, youtube_storyboard_cancel_task: { group: "storyboards" },
   system_agent_status: { group: "system", alwaysEnabled: true },
   system_speech_list_voices: { group: "speech" }, system_speech_speak: { group: "speech" }, system_speech_status: { group: "speech" }, system_speech_cancel: { group: "speech" },
   workspace_list: { group: "workspace" }, workspace_stat: { group: "workspace" }, workspace_mkdir: { group: "workspace" }, workspace_move: { group: "workspace" }, workspace_delete: { group: "workspace" },
@@ -44,8 +47,8 @@ const MCP_TOOL_SETTINGS = Object.freeze({
   clipboard_status: { group: "clipboard" }, clipboard_get: { group: "clipboard" }, clipboard_set: { group: "clipboard" },
   library_store_start: { group: "library" }, library_store_status: { group: "library" }, library_store_cancel: { group: "library" }, online_share_start: { group: "online" }, online_share_status: { group: "online" }, online_share_stop: { group: "online" }
 });
-const EXTENSION_VERSION = "2.1.5";
-const REQUIRED_AGENT_INTERFACE_VERSION = 62;
+const EXTENSION_VERSION = "2.2.0";
+const REQUIRED_AGENT_INTERFACE_VERSION = 63;
 // A UI resource URI is a cache key in MCP Apps. Increment it whenever the
 // rendered template changes so ChatGPT does not reuse a stale iframe bundle.
 const CAPTURE_FRAME_WIDGET_URI = "ui://researchtube/capture-frame-v43.html";
@@ -828,6 +831,7 @@ const libraryStoreCancelSchema = { type: "object", additionalProperties: false, 
 
 function toolDefinitions() {
   return [
+    ...storyboardDefinitions(localAgentReadAnnotations, localWorkspaceWriteAnnotations),
     {
       name: "system_agent_status",
       title: "Get ResearchTube Local Agent status",
@@ -3159,6 +3163,33 @@ async function captureFrame(argumentsValue) {
   return normalizeCaptureFrameResult(document, input);
 }
 
+async function storyboardCall(name, args) {
+  const input = validateStoryboardInput(name, args);
+  if (name.endsWith("get_info") || name.endsWith("download")) {
+    // Do not create/navigate tabs, and do not use player state for another video.
+    const tabs = await chrome.tabs.query({ url: "https://www.youtube.com/*" }).catch(() => []);
+    for (const tab of tabs) {
+      try {
+        const url = new URL(tab.url);
+        if (url.searchParams.get("v") !== input.videoId && url.pathname !== `/shorts/${input.videoId}`) continue;
+        const response = await sendYouTubePageTool(tab.id, { type: "youtube-ui-tool", action: "storyboard-context", videoId: input.videoId });
+        const context = response?.data;
+        if (response?.ok && context?.videoId === input.videoId) {
+          input.context = { videoId: input.videoId, title: typeof context.title === "string" ? context.title.slice(0, 2000) : "",
+            durationSeconds: context.durationSeconds, isLive: context.isLive === true,
+            spec: typeof context.spec === "string" && context.spec.length <= 50000 ? context.spec : null };
+          break;
+        }
+      } catch (_) { /* Raw bridge errors may contain private page data. Use Agent fallback. */ }
+    }
+  }
+  const operation = name.endsWith("get_info") ? "info" : name.endsWith("download") ? "download" : name.endsWith("cancel_task") ? "cancel" : "status";
+  const document = await agentJsonRequest(`/youtube/storyboards/${operation}`, { method: "POST", body: input, timeoutMs: 40_000 });
+  const result = normalizeStoryboardResult(name, document);
+  if (result.videoId && result.videoId !== input.videoId || input.taskId && result.taskId && result.taskId !== input.taskId) throw localAgentError("AGENT_INVALID_RESPONSE", "The Agent returned mismatched storyboard metadata.");
+  return result;
+}
+
 function normalizeVisualMapInput(argumentsValue = {}) {
   const args = captureFrameObject(argumentsValue, "visual_map_create", new Set(["workspacePath", "columns", "rows", "maxTotalFrames", "selection", "sceneDetectThreshold", "startSeconds", "endSeconds", "maxMapDimension", "frameTimestampPosition"]));
   const workspacePath = normalizeWorkspacePath(args.workspacePath, "workspacePath");
@@ -4004,6 +4035,11 @@ async function handleMcpRequest(request) {
   if (request?.method === "tools/call" && request.params?.name === "media_capture_frame_cancel_task") {
     const taskId = request.params.arguments?.taskId;
     return executeToolCall(request.id, "media_capture_frame_cancel_task", { taskId }, () => cancelCaptureFrameTask(taskId));
+  }
+  if (request?.method === "tools/call" && STORYBOARD_TOOL_NAMES.includes(request.params?.name)) {
+    const name = request.params.name;
+    const args = request.params.arguments ?? {};
+    return executeToolCall(request.id, name, {}, () => storyboardCall(name, args));
   }
   if (request?.method === "tools/call" && request.params?.name === "visual_map_create") {
     const args = request.params.arguments ?? {};

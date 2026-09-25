@@ -1067,7 +1067,7 @@
     WEB: {
       NAME: "WEB",
       VERSION: "2.20260623.01.00",
-      get API_KEY() { return globalThis.ytcfg?.get?.("INNERTUBE_API_KEY") || ""; },
+      API_KEY: "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8",
       API_VERSION: "v1",
       STATIC_VISITOR_ID: "6zpwvWUNAco",
       SUGG_EXP_ID: "ytzpb5_e2,ytpo.bo.lqp.elu=1,ytpo.bo.lqp.ecsc=1,ytpo.bo.lqp.mcsc=3,ytpo.bo.lqp.mec=1,ytpo.bo.lqp.rw=0.8,ytpo.bo.lqp.fw=0.2,ytpo.bo.lqp.szp=1,ytpo.bo.lqp.mz=3,ytpo.bo.lqp.al=en_us,ytpo.bo.lqp.zrm=1,ytpo.bo.lqp.er=1,ytpo.bo.ro.erl=1,ytpo.bo.ro.mlus=3,ytpo.bo.ro.erls=3,ytpo.bo.qfo.mlus=3,ytzprp.ppp.e=1,ytzprp.ppp.st=772,ytzprp.ppp.p=5"
@@ -1132,14 +1132,14 @@
     WEB_EMBEDDED: {
       NAME: "WEB_EMBEDDED_PLAYER",
       VERSION: "1.20260206.01.00",
-      get API_KEY() { return globalThis.ytcfg?.get?.("INNERTUBE_API_KEY") || ""; },
+      API_KEY: "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8",
       API_VERSION: "v1",
       STATIC_VISITOR_ID: "6zpwvWUNAco"
     },
     WEB_CREATOR: {
       NAME: "WEB_CREATOR",
       VERSION: "1.20241203.01.00",
-      get API_KEY() { return globalThis.ytcfg?.get?.("INNERTUBE_API_KEY") || ""; },
+      API_KEY: "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8",
       API_VERSION: "v1",
       STATIC_VISITOR_ID: "6zpwvWUNAco"
     }
@@ -38561,6 +38561,39 @@ ${getNsigProcessorFn(eval_args.n, eval_args.sp, eval_args.sig)}`;
       }, { once: true });
       return originalXhrSend.apply(this, args);
     };
+    function storyboardContext(videoId) {
+      let player = null;
+      try {
+        player = document.getElementById("movie_player")?.getPlayerResponse?.();
+      } catch (_) {
+      }
+      if (typeof player === "string") {
+        try {
+          player = JSON.parse(player);
+        } catch (_) {
+          player = null;
+        }
+      }
+      if (player?.videoDetails?.videoId !== videoId) {
+        player = window.ytInitialPlayerResponse || window.ytplayer?.config?.args?.player_response;
+        if (typeof player === "string") {
+          try {
+            player = JSON.parse(player);
+          } catch (_) {
+            player = null;
+          }
+        }
+      }
+      const url = new URL(location.href);
+      if (url.searchParams.get("v") !== videoId && url.pathname !== `/shorts/${videoId}` || player?.videoDetails?.videoId !== videoId) return null;
+      return {
+        videoId,
+        title: player.videoDetails.title || "",
+        durationSeconds: Number(player.videoDetails.lengthSeconds),
+        isLive: Boolean(player.videoDetails.isLive || player.videoDetails.isUpcoming || player.storyboards?.playerLiveStoryboardSpecRenderer),
+        spec: player.storyboards?.playerStoryboardSpecRenderer?.spec || null
+      };
+    }
     function pageState() {
       const rawPlayer = window.ytInitialPlayerResponse || window.ytplayer?.config?.args?.player_response || null;
       let player = rawPlayer;
@@ -39457,7 +39490,8 @@ ${getNsigProcessorFn(eval_args.n, eval_args.sp, eval_args.sig)}`;
       if (message?.source !== COMMAND_SOURCE || message.type !== "command" || !message.id) return;
       try {
         let data;
-        if (message.action === "page-state") data = pageState();
+        if (message.action === "storyboard-context") data = storyboardContext(message.payload?.videoId);
+        else if (message.action === "page-state") data = pageState();
         else if (message.action === "search") data = await searchPublicVideos(message.payload || {});
         else if (message.action === "channel-videos") data = await getChannelVideos(message.payload || {});
         else if (message.action === "channel-playlists") data = await getChannelPlaylists(message.payload || {});
