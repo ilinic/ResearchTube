@@ -22,6 +22,7 @@ from urllib.parse import urljoin, urlsplit, urlunsplit, parse_qsl, urlencode
 MAX_SHEET_BYTES = 20 * 1024 * 1024
 MAX_FRAMES = 1_000_000
 CACHE_SECONDS = 300
+TIMESTAMP_POSITIONS = {'none', 'topLeft', 'topRight', 'bottomLeft', 'bottomRight'}
 PUBLIC_FIELDS = ('variantId', 'cellWidth', 'cellHeight', 'columns', 'rows',
                  'framesPerSheet', 'frameIntervalSeconds', 'frameIntervalEstimated', 'sheetCount', 'format')
 
@@ -165,6 +166,48 @@ def filename(title, vid, v, index):
     return 'storyboards/' + title + suffix
 
 
+def timestamp_label(seconds):
+    """Format one storyboard cell time exactly as Visual Map does."""
+    total = max(0, int(round(seconds)))
+    hours, remainder = divmod(total, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f'{hours}:{minutes:02d}:{seconds:02d}' if hours else f'{minutes}:{seconds:02d}'
+
+
+def sheet_frame_timestamps(v, sheet_index, duration):
+    """Return the absolute time of every real cell in one sheet."""
+    first = sheet_index * v['framesPerSheet']
+    last = min(first + v['framesPerSheet'], v['count'])
+    return [round(min(duration, frame_index * v['frameIntervalSeconds']), 9)
+            for frame_index in range(first, last)]
+
+
+def sheet_timestamp_filter(v, sheet_index, duration, position, font_file, escape):
+    """Place one absolute timestamp inside every real tile of one ready sheet."""
+    if position not in TIMESTAMP_POSITIONS - {'none'}:
+        raise ValueError('Timestamp position is unavailable')
+    font_size = max(1, min(24, math.floor(v['cellHeight'] * 0.15)))
+    padding = max(1, round(font_size * 0.30))
+    escaped_font = escape(font_file.as_posix())
+    filters = []
+    for cell_index, timestamp in enumerate(sheet_frame_timestamps(v, sheet_index, duration)):
+        frame_index = sheet_index * v['framesPerSheet'] + cell_index
+        row, column = divmod(cell_index, v['columns'])
+        x_origin, y_origin = column * v['cellWidth'], row * v['cellHeight']
+        x = (x_origin + padding if position.endswith('Left')
+             else x_origin + v['cellWidth'] - padding)
+        y = (y_origin + padding if position.startswith('top')
+             else y_origin + v['cellHeight'] - padding)
+        label = timestamp_label(timestamp)
+        filters.append(
+            f"drawtext=fontfile='{escaped_font}':text='{escape(label)}':x={x if position.endswith('Left') else str(x) + '-text_w'}:y={y if position.startswith('top') else str(y) + '-text_h'}:"
+            f"fontsize={font_size}:fontcolor=white:box=1:boxcolor=black@0.65:boxborderw={padding}"
+        )
+    if not filters:
+        raise ValueError('Storyboard sheet contains no frames')
+    return ','.join(filters)
+
+
 async def fetch_sheet(url, progress):
     return await asyncio.wait_for(_fetch_https_body(url, progress), 45)
 
@@ -280,6 +323,7 @@ class Task:
     source: dict
     variant: dict
     indexes: list
+    timestamp_position: str
     status: str = 'working'
     phase: str = 'resolving'
     progress: float = 0
@@ -294,7 +338,12 @@ class Task:
         result = dict(taskId=self.task_id, status=self.status, phase=self.phase,
                       progressPercent=round(self.progress, 3), totalSheets=len(self.indexes),
                       completedSheets=self.completed, downloadedSheets=self.downloaded,
-                      reusedSheets=self.reused, workspaceDirectory='storyboards', pollIntervalMs=1000)
+                      reusedSheets=self.reused, workspaceDirectory='storyboards', pollIntervalMs=1000,
+                      frameTimestampPosition=self.timestamp_position,
+                      sheetTimestamps=[dict(sheetIndex=index,
+                                            frameTimestampsSeconds=sheet_frame_timestamps(
+                                                self.variant, index, self.source['durationSeconds']))
+                                       for index in self.indexes])
         if self.error:
             result.update(error=self.error, failedSheetIndex=self.failed_index)
         return result
@@ -382,7 +431,7 @@ class StoryboardService:
                     variants=[{key: v[key] for key in PUBLIC_FIELDS} for v in source['variants']])
 
     async def create(self, payload):
-        if not isinstance(payload, dict) or set(payload) - {'videoId', 'variantId', 'selection', 'context'}:
+        if not isinstance(payload, dict) or set(payload) - {'videoId', 'variantId', 'selection', 'frameTimestampPosition', 'context'}:
             invalid('Specify videoId, variantId and selection.')
         vid = video_id(payload.get('videoId'))
         if not isinstance(payload.get('variantId'), str) or not re.fullmatch(r'storyboard_[1-9]\d*', payload['variantId']):
@@ -398,16 +447,36 @@ class StoryboardService:
         indexes = select_sheets(payload.get('selection'), v, source['durationSeconds'])
         if not indexes:
             invalid('The requested range contains no storyboard sheets.')
+        timestamp_position = payload.get('frameTimestampPosition', 'bottomRight')
+        if timestamp_position not in TIMESTAMP_POSITIONS:
+            invalid('frameTimestampPosition is invalid.')
         task_id = 'tsk_' + secrets.token_urlsafe(8)[:10]
         while task_id in self.tasks:
             task_id = 'tsk_' + secrets.token_urlsafe(8)[:10]
-        task = Task(task_id, source, v, indexes)
+        task = Task(task_id, source, v, indexes, timestamp_position)
         self.tasks[task_id] = task
         task.runner = asyncio.create_task(self.run(task))
         return task.snapshot()
 
     def path(self, logical):
         return self.host.WorkspacePathResolver().resolve_destination(logical, field_name='storyboard output', error_code='STORYBOARD_INVALID').physical_path
+
+    async def annotate_sheet(self, source, output, v, sheet_index, duration, position):
+        """Render labels directly over the received sheet; never rebuild its grid."""
+        ffmpeg = self.host.find_component('ffmpeg', self.host.COMPONENTS['ffmpeg'][0])
+        font_file = self.host.visual_map_font_file()
+        if ffmpeg.error or not ffmpeg.executable or font_file is None:
+            raise ValueError('Timestamp renderer is unavailable')
+        filters = sheet_timestamp_filter(v, sheet_index, duration, position, font_file, self.host.ffmpeg_filter_value)
+        command = [ffmpeg.executable, '-hide_banner', '-nostdin', '-v', 'error', '-i', str(source),
+                   '-map', '0:v:0', '-an', '-frames:v', '1', '-vf', filters, '-q:v', '2', '-y', str(output)]
+        returncode, _stderr = await self.host.run_visual_map_ffmpeg(command, 30)
+        if returncode != 0 or not output.is_file() or output.stat().st_size > MAX_SHEET_BYTES:
+            raise ValueError('Timestamp rendering failed')
+        result = output.read_bytes()
+        if not result.startswith(b'\xff\xd8\xff') or not result.endswith(b'\xff\xd9'):
+            raise ValueError('Timestamp renderer produced an invalid JPEG')
+        return result
 
     async def run(self, task):
         try:
@@ -416,7 +485,7 @@ class StoryboardService:
                     task.failed_index = index
                     logical = filename(task.source['title'], task.source['videoId'], task.variant, index)
                     destination = self.path(logical)
-                    identity = (task.source['videoId'], task.variant['variantId'], index,
+                    identity = (task.timestamp_position, task.source['videoId'], task.variant['variantId'], index,
                                 tuple(task.variant[key] for key in PUBLIC_FIELDS))
                     known = self.published.get(logical)
                     reused = False
@@ -428,24 +497,35 @@ class StoryboardService:
                             fraction = min(0.99, received / total) if total else 0
                             task.progress = max(task.progress, 100 * (task.completed + fraction) / len(task.indexes))
                         data = await fetch_sheet(task.variant['urls'][index], progress)
-                        task.phase = 'publishing'
                         destination.parent.mkdir(parents=True, exist_ok=True)
                         destination = self.path(logical)  # Recheck redirects after network await.
-                        digest = hashlib.sha256(data).digest()
-                        if destination.exists():
-                            if not destination.is_file() or destination.stat().st_size != len(data) or destination.read_bytes() != data:
-                                raise ValueError('Destination belongs to another file')
-                            reused = True
-                        else:
-                            # Temp bytes live outside Workspace. A hard link publishes
-                            # a complete sheet atomically and never replaces another file.
-                            with tempfile.TemporaryDirectory(prefix='researchtube-storyboard-', dir=destination.parent.parent.parent) as temp:
-                                temporary = Path(temp) / 'sheet.jpeg'
-                                temporary.write_bytes(data)
+                        task.phase = 'publishing'
+                        with tempfile.TemporaryDirectory(prefix='researchtube-storyboard-', dir=destination.parent.parent.parent) as temp:
+                            temporary = Path(temp) / 'source.jpeg'
+                            rendered = Path(temp) / 'sheet.jpeg'
+                            temporary.write_bytes(data)
+                            if task.timestamp_position == 'none':
+                                rendered.write_bytes(data)
+                            else:
+                                await self.annotate_sheet(temporary, rendered, task.variant, index,
+                                                          task.source['durationSeconds'], task.timestamp_position)
+                            rendered_data = rendered.read_bytes()
+                            digest = hashlib.sha256(rendered_data).digest()
+                            if destination.exists():
+                                if destination.is_symlink() or not destination.is_file():
+                                    raise ValueError('Destination belongs to another file')
+                                existing = destination.read_bytes()
+                                if existing == rendered_data:
+                                    reused = True
+                                else:
+                                    raise ValueError('Destination belongs to another file')
+                            else:
+                                # The rendered temporary is linked atomically, never
+                                # replacing a concurrently created destination.
                                 try:
-                                    os.link(temporary, destination)
+                                    os.link(rendered, destination)
                                 except FileExistsError:
-                                    if destination.is_symlink() or destination.read_bytes() != data:
+                                    if destination.is_symlink() or destination.read_bytes() != rendered_data:
                                         raise ValueError('Destination already exists')
                                     reused = True
                         self.published[logical] = (identity, digest)

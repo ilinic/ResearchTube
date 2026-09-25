@@ -33,8 +33,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote, unquote, urlparse
 from urllib.request import Request, urlopen
 
-AGENT_VERSION = "1.103.0"
-INTERFACE_VERSION = 64
+AGENT_VERSION = "1.104.0"
+INTERFACE_VERSION = 65
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
 TASK_POLL_INTERVAL_MS = 1_000

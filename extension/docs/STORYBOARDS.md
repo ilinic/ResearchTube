@@ -1,6 +1,6 @@
-# YouTube Storyboards — ResearchTube 2.2.0
+# YouTube Storyboards — ResearchTube 2.2.2
 
-Extension 2.2.0, Agent 1.102.0, interface 63. Install both components together.
+Extension 2.2.2, Agent 1.104.0, interface 65. Install both components together.
 The Agent now includes `storyboards.py`; keep it beside `researchtube_agent.py`.
 No additional Python packages or media executables are needed for sheet transfers.
 
@@ -9,7 +9,7 @@ The **YouTube Storyboards** settings group publishes:
 | Tool | Input | Result |
 | --- | --- | --- |
 | `youtube_storyboard_get_info` | `videoId` | Availability and variants; no files or sheets downloaded |
-| `youtube_storyboard_download` | `videoId`, `variantId`, `selection` | One asynchronous `tsk_XXXXXXXXXX` task |
+| `youtube_storyboard_download` | `videoId`, `variantId`, `selection`, optional `frameTimestampPosition` | One asynchronous `tsk_XXXXXXXXXX` task |
 | `youtube_storyboard_get_task` | `taskId` | Compact progress, counts, status, directory and sanitized error |
 | `youtube_storyboard_cancel_task` | `taskId` | Terminal status after stopping active/queued work |
 
@@ -36,6 +36,16 @@ videos, variants, tasks, or sheet numbers are created inside it.
 storyboards/Название [yt_aqz-KE-bpKQ] [sz_160x90] [tstp_5] [mesh_5x5] [sheet_0000].jpeg
 ```
 
+Each file preserves YouTube's ready-made sheet geometry. The Agent always returns
+the absolute video time for every real cell in `sheetTimestamps`, calculated as
+`(sheetIndex * framesPerSheet + cellIndex) * frameIntervalSeconds`. It does not
+scale, crop, split, or reassemble the sheet. `frameTimestampPosition` controls
+whether the `M:SS` or `H:MM:SS` label is drawn inside each real cell. It has the
+same values as Visual Map: `none`, `topLeft`, `topRight`, `bottomLeft`, and
+`bottomRight`; its default is `bottomRight`. With explicit `none`, the ready-made
+YouTube JPEG is saved unchanged. Unused cells in a final partial sheet receive
+no label.
+
 - `sz`: one cell's width × height, in pixels (not the whole sheet).
 - `tstp`: the effective frame interval, in seconds; up to nine decimal places,
   with trailing zeroes removed.
@@ -46,8 +56,8 @@ storyboards/Название [yt_aqz-KE-bpKQ] [sz_160x90] [tstp_5] [mesh_5x5] [s
   Limit the entire filename component to 240 UTF-16 code units, preserving tags.
 
 Distinct variants with identical geometry/timing may map to the same name.
-Byte-identical sheets can be reused. Different existing content is never
-silently replaced; the task fails and retains previously completed files.
+Byte-identical output sheets can be reused. Any existing file with different
+bytes is a conflict and is never replaced, including an unlabelled source JPEG.
 
 ## Selections
 
@@ -69,8 +79,10 @@ out-of-range values. Last sheets may contain unused cells.
 The start result has `status: working`, `phase: resolving`, counts and a 1000 ms
 poll interval. Phases are resolving, downloading, publishing, completed,
 cancelled and failed. Percentage is monotonic, based on completed sheets and
-usable current-transfer content length. Polling returns downloaded/reused
-counts and `workspaceDirectory: storyboards`, without a file-path array.
+usable current-transfer content length. Polling returns downloaded/reused counts,
+`frameTimestampPosition`, `sheetTimestamps` for every selected sheet, and
+`workspaceDirectory: storyboards`, without a file-path array. Each timestamp
+record is shaped as `{"sheetIndex": 0, "frameTimestampsSeconds": [0, 5, ...]}`.
 
 Cancellation closes the active HTTP transfer, skips remaining sheets and retains
 complete sheets. Partial HTTP bytes remain in bounded memory; publishing uses a

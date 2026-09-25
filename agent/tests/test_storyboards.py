@@ -17,6 +17,17 @@ JPEG = b'\xff\xd8\xff\xe0' + b'image' * 100 + b'\xff\xd9'
 
 
 class MetadataTests(unittest.TestCase):
+    def test_timestamp_overlay_uses_absolute_times_and_real_cells_only(self):
+        v = sb.parse_spec(SPEC, 263.2)[1]
+        filter_value = sb.sheet_timestamp_filter(v, 2, 263.2, 'bottomLeft', Path('/fonts/DejaVuSans.ttf'), agent.ffmpeg_filter_value)
+        self.assertIn("text='4\\:10'", filter_value)
+        self.assertIn("text='4\\:20'", filter_value)
+        self.assertIn('x=4:y=86-text_h', filter_value)
+        self.assertEqual(filter_value.count('drawtext='), 3, 'the final partial sheet must leave its unused cells unchanged')
+        self.assertEqual(sb.sheet_frame_timestamps(v, 2, 263.2), [250, 255, 260])
+        self.assertEqual(sb.timestamp_label(65.9), '1:06')
+        self.assertEqual(sb.timestamp_label(3661), '1:01:01')
+
     def test_levels_geometry_partial_sheet_and_private_signature(self):
         levels = sb.parse_spec(SPEC, 263.2)
         self.assertEqual([v['variantId'] for v in levels], ['storyboard_1', 'storyboard_2'])
@@ -81,6 +92,11 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.patch = patch.object(agent, 'WORKSPACE_PATH', self.workspace)
         self.patch.start()
         self.service = sb.StoryboardService(agent)
+        async def annotate(source, output, *_args):
+            output.write_bytes(b'\xff\xd8\xff\xe0timestamped\xff\xd9')
+            return output.read_bytes()
+        self.annotation = AsyncMock(side_effect=annotate)
+        self.service.annotate_sheet = self.annotation
         self.fallback = AsyncMock(return_value=None)
         self.service.metadata = self.fallback
 
@@ -89,9 +105,9 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.patch.stop()
         self.temp.cleanup()
 
-    async def start(self, selection=None):
+    async def start(self, selection=None, timestamp_position='bottomRight'):
         return await self.service.dispatch('download', dict(videoId=VID, variantId='storyboard_2',
-            selection=selection or {'mode': 'all'}, context=CONTEXT))
+            selection=selection or {'mode': 'all'}, frameTimestampPosition=timestamp_position, context=CONTEXT))
 
     async def test_info_creates_no_files_and_leaks_no_internals(self):
         result = await self.service.dispatch('info', {'videoId': VID, 'context': CONTEXT})
@@ -127,6 +143,8 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(sb, 'fetch_sheet', transfer):
             result = await self.start()
             self.assertRegex(result['taskId'], r'^tsk_[A-Za-z0-9_-]{10}$')
+            self.assertEqual(result['frameTimestampPosition'], 'bottomRight')
+            self.assertEqual(result['sheetTimestamps'][2], {'sheetIndex': 2, 'frameTimestampsSeconds': [250, 255, 260]})
             task = self.service.get(result['taskId']); await task.runner
             self.assertEqual(task.status, 'completed'); self.assertEqual(task.downloaded, 3)
             self.assertEqual(updates, sorted(updates)); self.assertEqual(task.progress, 100)
@@ -141,6 +159,15 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(task3.reused, 3)
             snapshot = json.dumps(task.snapshot())
             for private in ['sigh', 'secret', 'https', 'spec', str(self.root), 'sheet_0000']: self.assertNotIn(private, snapshot)
+
+    async def test_none_preserves_youtube_jpeg_without_annotation(self):
+        with patch.object(sb, 'fetch_sheet', AsyncMock(return_value=JPEG)):
+            result = await self.start({'mode': 'sheets', 'sheetIndexes': [0]}, 'none')
+            task = self.service.get(result['taskId']); await task.runner
+        self.assertEqual(result['frameTimestampPosition'], 'none')
+        self.annotation.assert_not_called()
+        output = next((self.workspace / 'storyboards').iterdir())
+        self.assertEqual(output.read_bytes(), JPEG)
 
     async def test_range_downloads_only_intersecting_sheet(self):
         transfer = AsyncMock(return_value=JPEG)
@@ -181,10 +208,10 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_conflicting_file_is_not_overwritten(self):
         destination = self.service.path(sb.filename(CONTEXT['title'], VID, sb.parse_spec(SPEC, 263.2)[1], 0))
-        destination.parent.mkdir(parents=True); destination.write_bytes(b'unrelated')
+        destination.parent.mkdir(parents=True); destination.write_bytes(JPEG)
         with patch.object(sb, 'fetch_sheet', AsyncMock(return_value=JPEG)):
             result = await self.start(); task = self.service.get(result['taskId']); await task.runner
-        self.assertEqual(task.status, 'failed'); self.assertEqual(destination.read_bytes(), b'unrelated')
+        self.assertEqual(task.status, 'failed'); self.assertEqual(destination.read_bytes(), JPEG)
 
     async def test_workspace_symlink_is_rejected(self):
         self.workspace.mkdir(); outside = self.root / 'outside'; outside.mkdir()

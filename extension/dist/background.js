@@ -5,6 +5,8 @@ var positive = { type: "integer", minimum: 1 };
 var videoId = { type: "string", pattern: "^[A-Za-z0-9_-]{11}$" };
 var taskId = { type: "string", pattern: "^tsk_[A-Za-z0-9_-]{10}$" };
 var variantId = { type: "string", pattern: "^storyboard_[1-9][0-9]*$" };
+var timestampPositions = ["none", "topLeft", "topRight", "bottomLeft", "bottomRight"];
+var frameTimestampPosition = { type: "string", enum: timestampPositions, default: "bottomRight" };
 var reasons = ["STORYBOARD_NOT_AVAILABLE", "STORYBOARD_VIDEO_LIVE", "STORYBOARD_CONTEXT_UNAVAILABLE"];
 var messages = {
   STORYBOARD_INVALID: "Check videoId, variantId, selection and taskId against the documented input.",
@@ -41,6 +43,10 @@ var infoSchema = { type: "object", oneOf: [
   rejected
 ] };
 var statuses = ["working", "completed", "cancelled", "failed"];
+var sheetTimestampSchema = object({
+  sheetIndex: integer,
+  frameTimestampsSeconds: { type: "array", minItems: 1, items: { type: "number", minimum: 0 } }
+});
 var taskSchema = object(
   {
     taskId,
@@ -53,10 +59,12 @@ var taskSchema = object(
     reusedSheets: integer,
     workspaceDirectory: { const: "storyboards" },
     pollIntervalMs: { type: "integer", minimum: 1e3 },
+    frameTimestampPosition,
+    sheetTimestamps: { type: "array", minItems: 1, items: sheetTimestampSchema },
     failedSheetIndex: integer,
     error: errorSchema
   },
-  ["taskId", "status", "phase", "progressPercent", "completedSheets", "totalSheets", "downloadedSheets", "reusedSheets", "workspaceDirectory", "pollIntervalMs"]
+  ["taskId", "status", "phase", "progressPercent", "completedSheets", "totalSheets", "downloadedSheets", "reusedSheets", "workspaceDirectory", "pollIntervalMs", "frameTimestampPosition", "sheetTimestamps"]
 );
 var cancelSchema = object({ taskId, status: { enum: statuses } });
 var STORYBOARD_TOOL_NAMES = Object.freeze(["youtube_storyboard_get_info", "youtube_storyboard_download", "youtube_storyboard_get_task", "youtube_storyboard_cancel_task"]);
@@ -71,7 +79,7 @@ function storyboardDefinitions(readAnnotations, writeAnnotations) {
   });
   return [
     make(STORYBOARD_TOOL_NAMES[0], "Get YouTube storyboard variants", "Discover pre-generated timeline-preview sheet variants. Returns cell geometry, interval and sheet count. frameIntervalEstimated marks timing inferred when YouTube has no nonzero interval or the last yt-dlp fallback only provides average fps; range boundaries then use that estimate. Reads the matching open YouTube tab first, then yt-dlp metadata. Creates no files and downloads no media or sheets. variantId is opaque; retain it unchanged.", object({ videoId }), infoSchema),
-    make(STORYBOARD_TOOL_NAMES[1], "Download YouTube storyboard sheets", "Start one asynchronous task for all sheets, an inclusive time range within video duration, or zero-based sheet indexes of one discovered variant. Downloads preview JPEG sheets only, never video/audio. Files are directly in storyboards/ with video ID, sz_widthxheight, tstp_seconds, mesh_columnsxrows and sheet index tags in each filename. Never displays an image automatically. Poll youtube_storyboard_get_task at pollIntervalMs; use workspace_list on workspaceDirectory to find files.", object({ videoId, variantId, selection: selectionSchema }), { type: "object", oneOf: [taskSchema, rejected] }, true),
+    make(STORYBOARD_TOOL_NAMES[1], "Download YouTube storyboard sheets", "Start one asynchronous task for all sheets, an inclusive time range within video duration, or zero-based sheet indexes of one discovered variant. Downloads YouTube's ready preview JPEG sheets only, never video/audio. sheetTimestamps always returns the calculated absolute time for every real tile. frameTimestampPosition controls whether those labels are drawn on the ready-made grid: bottomRight by default, or none, topLeft, topRight, or bottomLeft when explicitly requested; unused cells of a final partial sheet stay untouched. Files are directly in storyboards/ with video ID, sz_widthxheight, tstp_seconds, mesh_columnsxrows and sheet index tags in each filename. Never displays an image automatically. Poll youtube_storyboard_get_task at pollIntervalMs; use workspace_list on workspaceDirectory to find files.", object({ videoId, variantId, selection: selectionSchema, frameTimestampPosition }, ["videoId", "variantId", "selection"]), { type: "object", oneOf: [taskSchema, rejected] }, true),
     make(STORYBOARD_TOOL_NAMES[2], "Get storyboard task progress", "Get compact sheet counts and monotonic progress. Poll no faster than pollIntervalMs. Complete sheets remain in storyboards/ after failure or cancellation. Does not return images or a sheet-path array.", object({ taskId }), { type: "object", oneOf: [taskSchema, rejected] }),
     make(STORYBOARD_TOOL_NAMES[3], "Cancel storyboard download", "Stop current and queued transfers for one storyboard task. Preserves all completely published sheets. Repeating cancellation returns the existing terminal status.", object({ taskId }), { type: "object", oneOf: [cancelSchema, rejected] }, true)
   ];
@@ -84,18 +92,20 @@ var matches = (schema, value) => typeof value === "string" && new RegExp(schema.
 var finite = (value) => typeof value === "number" && Number.isFinite(value);
 function validateStoryboardInput(name, args) {
   const keys = name.endsWith("get_info") ? ["videoId"] : name.endsWith("download") ? ["videoId", "variantId", "selection"] : ["taskId"];
-  if (!plain(args) || Object.keys(args).length !== keys.length || keys.some((k) => !Object.hasOwn(args, k))) fail();
+  const allowed = name.endsWith("download") ? [...keys, "frameTimestampPosition"] : keys;
+  if (!plain(args) || Object.keys(args).some((k) => !allowed.includes(k)) || keys.some((k) => !Object.hasOwn(args, k))) fail();
   if (keys.includes("taskId")) {
     if (!matches(taskId, args.taskId)) fail();
     return { taskId: args.taskId };
   }
   if (!matches(videoId, args.videoId)) fail();
   if (name.endsWith("get_info")) return { videoId: args.videoId };
-  if (!matches(variantId, args.variantId) || !plain(args.selection)) fail();
+  if (!matches(variantId, args.variantId) || !plain(args.selection) || args.frameTimestampPosition !== void 0 && !timestampPositions.includes(args.frameTimestampPosition)) fail();
   const s = args.selection;
-  if (s.mode === "all" && Object.keys(s).length === 1) return { ...args, selection: { mode: "all" } };
-  if (s.mode === "range" && Object.keys(s).length === 3 && finite(s.startSeconds) && finite(s.endSeconds) && 0 <= s.startSeconds && s.startSeconds <= s.endSeconds) return { ...args, selection: { mode: "range", startSeconds: s.startSeconds, endSeconds: s.endSeconds } };
-  if (s.mode === "sheets" && Object.keys(s).length === 2 && Array.isArray(s.sheetIndexes) && s.sheetIndexes.length && s.sheetIndexes.every((i) => Number.isInteger(i) && i >= 0)) return { ...args, selection: { mode: "sheets", sheetIndexes: [...new Set(s.sheetIndexes)] } };
+  const position = args.frameTimestampPosition === void 0 ? "bottomRight" : args.frameTimestampPosition;
+  if (s.mode === "all" && Object.keys(s).length === 1) return { ...args, frameTimestampPosition: position, selection: { mode: "all" } };
+  if (s.mode === "range" && Object.keys(s).length === 3 && finite(s.startSeconds) && finite(s.endSeconds) && 0 <= s.startSeconds && s.startSeconds <= s.endSeconds) return { ...args, frameTimestampPosition: position, selection: { mode: "range", startSeconds: s.startSeconds, endSeconds: s.endSeconds } };
+  if (s.mode === "sheets" && Object.keys(s).length === 2 && Array.isArray(s.sheetIndexes) && s.sheetIndexes.length && s.sheetIndexes.every((i) => Number.isInteger(i) && i >= 0)) return { ...args, frameTimestampPosition: position, selection: { mode: "sheets", sheetIndexes: [...new Set(s.sheetIndexes)] } };
   fail();
 }
 function normalizeStoryboardResult(name, data) {
@@ -118,7 +128,8 @@ function normalizeStoryboardResult(name, data) {
   }
   if (!matches(taskId, data.taskId) || !statuses.includes(data.status)) bad();
   if (name.endsWith("cancel_task")) return { taskId: data.taskId, status: data.status };
-  if (!taskSchema.properties.phase.enum.includes(data.phase) || !finite(data.progressPercent) || data.progressPercent < 0 || data.progressPercent > 100 || !["completedSheets", "totalSheets", "downloadedSheets", "reusedSheets", "pollIntervalMs"].every((k) => Number.isInteger(data[k]) && data[k] >= 0) || data.pollIntervalMs < 1e3 || data.totalSheets < 1 || data.completedSheets > data.totalSheets || data.completedSheets !== data.downloadedSheets + data.reusedSheets || data.workspaceDirectory !== "storyboards") bad();
+  if (!taskSchema.properties.phase.enum.includes(data.phase) || !finite(data.progressPercent) || data.progressPercent < 0 || data.progressPercent > 100 || !["completedSheets", "totalSheets", "downloadedSheets", "reusedSheets", "pollIntervalMs"].every((k) => Number.isInteger(data[k]) && data[k] >= 0) || data.pollIntervalMs < 1e3 || data.totalSheets < 1 || data.completedSheets > data.totalSheets || data.completedSheets !== data.downloadedSheets + data.reusedSheets || data.workspaceDirectory !== "storyboards" || !timestampPositions.includes(data.frameTimestampPosition) || !Array.isArray(data.sheetTimestamps) || data.sheetTimestamps.length !== data.totalSheets) bad();
+  if (new Set(data.sheetTimestamps.map((sheet) => sheet?.sheetIndex)).size !== data.sheetTimestamps.length || data.sheetTimestamps.some((sheet) => !plain(sheet) || !Number.isInteger(sheet.sheetIndex) || sheet.sheetIndex < 0 || !Array.isArray(sheet.frameTimestampsSeconds) || !sheet.frameTimestampsSeconds.length || sheet.frameTimestampsSeconds.some((timestamp) => !finite(timestamp) || timestamp < 0))) bad();
   if (data.status !== "working" && data.phase !== data.status || data.status === "working" && !["resolving", "downloading", "publishing"].includes(data.phase)) bad();
   if (data.status === "completed" && (data.progressPercent !== 100 || data.completedSheets !== data.totalSheets)) bad();
   if (data.status !== "failed" && data.error) bad();
@@ -221,8 +232,8 @@ var MCP_TOOL_SETTINGS = Object.freeze({
   online_share_status: { group: "online" },
   online_share_stop: { group: "online" }
 });
-var EXTENSION_VERSION = "2.2.1";
-var REQUIRED_AGENT_INTERFACE_VERSION = 64;
+var EXTENSION_VERSION = "2.2.2";
+var REQUIRED_AGENT_INTERFACE_VERSION = 65;
 var CAPTURE_FRAME_WIDGET_URI = "ui://researchtube/capture-frame-v44.html";
 var RESEARCHTUBE_SERVER_DESCRIPTION = "ResearchTube provides YouTube research, local media and image operations, workspace management, screenshots, clipboard, and Library integration. Search this server when the user refers to ResearchTube, YouTube analysis, a previously created workspace file, captured frame, screenshot, crop, clipboard, or asks to continue a previous ResearchTube operation. In clients with deferred tools, ResearchTube is discoverable through functions.exec lazy MCP-tool discovery; search there before treating the capability as unavailable.";
 var RESEARCHTUBE_MCP_INSTRUCTIONS = "ResearchTube exposes MCP tools that may be loaded or discovered lazily by the client. When the user mentions ResearchTube, invokes @ResearchTube, asks to repeat a ResearchTube operation, or requests a capability previously provided by ResearchTube, do not infer that ResearchTube is unavailable merely because its tools are not currently visible as a top-level tool namespace. In this client, ResearchTube is available through functions.exec with lazy MCP-tool discovery: search there for the appropriate ResearchTube tool before reporting that the capability is unavailable. Only report ResearchTube as unavailable if tool discovery actually fails, the required tool cannot be found after discovery, or an actual ResearchTube tool invocation returns an availability, connection, compatibility, or transport error. Successful use earlier in the conversation is evidence that the tools may be discoverable again; rediscover them rather than assuming access has disappeared. media_capture_frame, media_capture_screen, and media_image_crop never render a widget themselves. media_capture_frame is asynchronous: poll its task and call media_image_show only for specific completed frame paths the user asks to see. For media_capture_screen and media_image_crop, when showInChat is true, after the successful creation result call media_image_show once with the returned workspace image path; otherwise do not call the display tool.";
@@ -3408,9 +3419,9 @@ function normalizeVisualMapInput(argumentsValue = {}) {
   const endSeconds = args.endSeconds === void 0 ? void 0 : captureFrameFiniteNumber(args.endSeconds, "endSeconds", { minimum: 0 });
   if (endSeconds !== void 0 && startSeconds >= endSeconds) throw localAgentError("VISUAL_MAP_INVALID", "startSeconds must be less than endSeconds.");
   const maxMapDimension = args.maxMapDimension === void 0 ? 4096 : captureFrameInteger(args.maxMapDimension, "maxMapDimension", 1);
-  const frameTimestampPosition = args.frameTimestampPosition === void 0 ? "bottomRight" : args.frameTimestampPosition;
-  if (!(/* @__PURE__ */ new Set(["none", "topLeft", "topRight", "bottomLeft", "bottomRight"])).has(frameTimestampPosition)) throw localAgentError("VISUAL_MAP_INVALID", "frameTimestampPosition is invalid.");
-  return { workspacePath, columns, rows, maxTotalFrames, selection, ...sceneDetectThreshold === null ? {} : { sceneDetectThreshold }, startSeconds, ...endSeconds === void 0 ? {} : { endSeconds }, maxMapDimension, frameTimestampPosition };
+  const frameTimestampPosition2 = args.frameTimestampPosition === void 0 ? "bottomRight" : args.frameTimestampPosition;
+  if (!(/* @__PURE__ */ new Set(["none", "topLeft", "topRight", "bottomLeft", "bottomRight"])).has(frameTimestampPosition2)) throw localAgentError("VISUAL_MAP_INVALID", "frameTimestampPosition is invalid.");
+  return { workspacePath, columns, rows, maxTotalFrames, selection, ...sceneDetectThreshold === null ? {} : { sceneDetectThreshold }, startSeconds, ...endSeconds === void 0 ? {} : { endSeconds }, maxMapDimension, frameTimestampPosition: frameTimestampPosition2 };
 }
 function normalizeVisualMapResult(document, input) {
   if (!document || typeof document !== "object" || Array.isArray(document) || typeof document.sourcePath !== "string" || !document.sourcePath || !(/* @__PURE__ */ new Set(["uniform", "sceneDetect", "hybrid"])).has(document.selection) || !(document.sceneDetectThreshold === null || Number.isFinite(document.sceneDetectThreshold) && document.sceneDetectThreshold >= 0 && document.sceneDetectThreshold <= 100) || document.selection === "uniform" && document.sceneDetectThreshold !== null || (/* @__PURE__ */ new Set(["sceneDetect", "hybrid"])).has(document.selection) && document.sceneDetectThreshold === null || !document.range || !Number.isFinite(document.range.startSeconds) || !Number.isFinite(document.range.endSeconds) || !Number.isInteger(document.columns) || document.columns < 1 || !Number.isInteger(document.rows) || document.rows < 1 || document.mapCapacity !== document.columns * document.rows || !Number.isInteger(document.maxTotalFrames) || document.maxTotalFrames < 1 || !Number.isInteger(document.actualTotalFrames) || document.actualTotalFrames < 1 || document.actualTotalFrames > document.maxTotalFrames || document.selection === "hybrid" && document.actualTotalFrames !== document.maxTotalFrames || !Array.isArray(document.maps) || !document.maps.length) {

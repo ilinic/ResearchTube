@@ -11,7 +11,11 @@ const definitions = storyboardDefinitions({ readOnlyHint: true }, { readOnlyHint
 assert.deepEqual(definitions.map(d => d.name), STORYBOARD_TOOL_NAMES);
 assert.equal(definitions[0].annotations.readOnlyHint, true);
 assert.equal(definitions[1].annotations.readOnlyHint, false);
-assert.deepEqual(validateStoryboardInput(download, { videoId: vid, variantId: variant.variantId, selection: { mode: 'sheets', sheetIndexes: [2, 2, 0] } }).selection.sheetIndexes, [2, 0]);
+assert.match(definitions[1].description, /sheetTimestamps always returns the calculated absolute time/);
+const downloadArgs = validateStoryboardInput(download, { videoId: vid, variantId: variant.variantId, selection: { mode: 'sheets', sheetIndexes: [2, 2, 0] } });
+assert.deepEqual(downloadArgs.selection.sheetIndexes, [2, 0]);
+assert.equal(downloadArgs.frameTimestampPosition, 'bottomRight');
+assert.equal(validateStoryboardInput(download, { videoId: vid, variantId: variant.variantId, selection: { mode: 'all' }, frameTimestampPosition: 'none' }).frameTimestampPosition, 'none');
 for (const args of [{ videoId: vid, rawSpec: 'secret' }, { videoId: 'bad' }, null, []]) assert.throws(() => validateStoryboardInput(info, args), { code: 'STORYBOARD_INVALID' });
 for (const selection of [{ mode: 'all', sheetIndexes: [1] }, { mode: 'sheets', sheetIndexes: [] }, { mode: 'range', startSeconds: NaN, endSeconds: 10 }, { mode: 'range', startSeconds: 10, endSeconds: 5 }]) {
   assert.throws(() => validateStoryboardInput(download, { videoId: vid, variantId: variant.variantId, selection }), { code: 'STORYBOARD_INVALID' });
@@ -20,10 +24,11 @@ const normalized = normalizeStoryboardResult(info, { videoId: vid, available: tr
 assert.equal(JSON.stringify(normalized).includes('secret'), false);
 assert.deepEqual(normalized.variants, [variant]);
 assert.throws(() => normalizeStoryboardResult(info, { videoId: vid, available: true, durationSeconds: 20, variants: [{ ...variant, framesPerSheet: 24 }] }), { code: 'AGENT_INVALID_RESPONSE' });
-const task = { taskId: id, status: 'working', phase: 'downloading', progressPercent: 35, completedSheets: 1, totalSheets: 3, downloadedSheets: 1, reusedSheets: 0, workspaceDirectory: 'storyboards', pollIntervalMs: 1000 };
+const task = { taskId: id, status: 'working', phase: 'downloading', progressPercent: 35, completedSheets: 1, totalSheets: 3, downloadedSheets: 1, reusedSheets: 0, workspaceDirectory: 'storyboards', pollIntervalMs: 1000, frameTimestampPosition: 'bottomRight', sheetTimestamps: [{ sheetIndex: 0, frameTimestampsSeconds: [0, 5] }, { sheetIndex: 1, frameTimestampsSeconds: [125, 130] }, { sheetIndex: 2, frameTimestampsSeconds: [250, 255, 260] }] };
 assert.deepEqual(normalizeStoryboardResult(status, { ...task, rawSpec: 'secret', paths: ['C:\\private'] }), task);
 assert.throws(() => normalizeStoryboardResult(status, { ...task, completedSheets: 2 }), { code: 'AGENT_INVALID_RESPONSE' });
 assert.throws(() => normalizeStoryboardResult(status, { ...task, workspaceDirectory: 'C:\\private' }), { code: 'AGENT_INVALID_RESPONSE' });
+assert.throws(() => normalizeStoryboardResult(status, { ...task, sheetTimestamps: [] }), { code: 'AGENT_INVALID_RESPONSE' });
 assert.throws(() => normalizeStoryboardResult(status, { ...task, status: 'completed', phase: 'completed' }), { code: 'AGENT_INVALID_RESPONSE' });
 const failed = normalizeStoryboardResult(status, { ...task, status: 'failed', phase: 'failed', failedSheetIndex: 2, error: { code: 'STORYBOARD_DOWNLOAD_FAILED', message: 'private https://foo?sigh=secret' } });
 assert.equal(JSON.stringify(failed).includes('secret'), false);

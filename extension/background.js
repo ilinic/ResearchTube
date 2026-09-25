@@ -47,8 +47,8 @@ const MCP_TOOL_SETTINGS = Object.freeze({
   clipboard_status: { group: "clipboard" }, clipboard_get: { group: "clipboard" }, clipboard_set: { group: "clipboard" },
   library_store_start: { group: "library" }, library_store_status: { group: "library" }, library_store_cancel: { group: "library" }, online_share_start: { group: "online" }, online_share_status: { group: "online" }, online_share_stop: { group: "online" }
 });
-const EXTENSION_VERSION = "2.2.1";
-const REQUIRED_AGENT_INTERFACE_VERSION = 64;
+const EXTENSION_VERSION = "2.2.2";
+const REQUIRED_AGENT_INTERFACE_VERSION = 65;
 // A UI resource URI is a cache key in MCP Apps. Increment it whenever the
 // rendered template changes so ChatGPT does not reuse a stale iframe bundle.
 const CAPTURE_FRAME_WIDGET_URI = "ui://researchtube/capture-frame-v44.html";
