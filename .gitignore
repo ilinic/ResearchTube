@@ -1,1 +1,5 @@
 ТЗ.docx
+
+# Python test/runtime caches
+__pycache__/
+*.py[cod]

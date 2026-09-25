@@ -1067,7 +1067,7 @@
     WEB: {
       NAME: "WEB",
       VERSION: "2.20260623.01.00",
-      API_KEY: "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8",
+      get API_KEY() { return globalThis.ytcfg?.get?.("INNERTUBE_API_KEY") || ""; },
       API_VERSION: "v1",
       STATIC_VISITOR_ID: "6zpwvWUNAco",
       SUGG_EXP_ID: "ytzpb5_e2,ytpo.bo.lqp.elu=1,ytpo.bo.lqp.ecsc=1,ytpo.bo.lqp.mcsc=3,ytpo.bo.lqp.mec=1,ytpo.bo.lqp.rw=0.8,ytpo.bo.lqp.fw=0.2,ytpo.bo.lqp.szp=1,ytpo.bo.lqp.mz=3,ytpo.bo.lqp.al=en_us,ytpo.bo.lqp.zrm=1,ytpo.bo.lqp.er=1,ytpo.bo.ro.erl=1,ytpo.bo.ro.mlus=3,ytpo.bo.ro.erls=3,ytpo.bo.qfo.mlus=3,ytzprp.ppp.e=1,ytzprp.ppp.st=772,ytzprp.ppp.p=5"
@@ -1132,14 +1132,14 @@
     WEB_EMBEDDED: {
       NAME: "WEB_EMBEDDED_PLAYER",
       VERSION: "1.20260206.01.00",
-      API_KEY: "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8",
+      get API_KEY() { return globalThis.ytcfg?.get?.("INNERTUBE_API_KEY") || ""; },
       API_VERSION: "v1",
       STATIC_VISITOR_ID: "6zpwvWUNAco"
     },
     WEB_CREATOR: {
       NAME: "WEB_CREATOR",
       VERSION: "1.20241203.01.00",
-      API_KEY: "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8",
+      get API_KEY() { return globalThis.ytcfg?.get?.("INNERTUBE_API_KEY") || ""; },
       API_VERSION: "v1",
       STATIC_VISITOR_ID: "6zpwvWUNAco"
     }

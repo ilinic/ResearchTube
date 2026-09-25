@@ -47,11 +47,11 @@ const MCP_TOOL_SETTINGS = Object.freeze({
   clipboard_status: { group: "clipboard" }, clipboard_get: { group: "clipboard" }, clipboard_set: { group: "clipboard" },
   library_store_start: { group: "library" }, library_store_status: { group: "library" }, library_store_cancel: { group: "library" }, online_share_start: { group: "online" }, online_share_status: { group: "online" }, online_share_stop: { group: "online" }
 });
-const EXTENSION_VERSION = "2.2.0";
-const REQUIRED_AGENT_INTERFACE_VERSION = 63;
+const EXTENSION_VERSION = "2.2.1";
+const REQUIRED_AGENT_INTERFACE_VERSION = 64;
 // A UI resource URI is a cache key in MCP Apps. Increment it whenever the
 // rendered template changes so ChatGPT does not reuse a stale iframe bundle.
-const CAPTURE_FRAME_WIDGET_URI = "ui://researchtube/capture-frame-v43.html";
+const CAPTURE_FRAME_WIDGET_URI = "ui://researchtube/capture-frame-v44.html";
 const RESEARCHTUBE_SERVER_DESCRIPTION = "ResearchTube provides YouTube research, local media and image operations, workspace management, screenshots, clipboard, and Library integration. Search this server when the user refers to ResearchTube, YouTube analysis, a previously created workspace file, captured frame, screenshot, crop, clipboard, or asks to continue a previous ResearchTube operation. In clients with deferred tools, ResearchTube is discoverable through functions.exec lazy MCP-tool discovery; search there before treating the capability as unavailable.";
 const RESEARCHTUBE_MCP_INSTRUCTIONS = "ResearchTube exposes MCP tools that may be loaded or discovered lazily by the client. When the user mentions ResearchTube, invokes @ResearchTube, asks to repeat a ResearchTube operation, or requests a capability previously provided by ResearchTube, do not infer that ResearchTube is unavailable merely because its tools are not currently visible as a top-level tool namespace. In this client, ResearchTube is available through functions.exec with lazy MCP-tool discovery: search there for the appropriate ResearchTube tool before reporting that the capability is unavailable. Only report ResearchTube as unavailable if tool discovery actually fails, the required tool cannot be found after discovery, or an actual ResearchTube tool invocation returns an availability, connection, compatibility, or transport error. Successful use earlier in the conversation is evidence that the tools may be discoverable again; rediscover them rather than assuming access has disappeared. media_capture_frame, media_capture_screen, and media_image_crop never render a widget themselves. media_capture_frame is asynchronous: poll its task and call media_image_show only for specific completed frame paths the user asks to see. For media_capture_screen and media_image_crop, when showInChat is true, after the successful creation result call media_image_show once with the returned workspace image path; otherwise do not call the display tool.";
 const CAPTURE_FRAME_OFFSCREEN_DOCUMENT = "capture-frame-offscreen.html";
@@ -336,11 +336,13 @@ const speechTaskSchema = {
   type: "object", additionalProperties: false,
   properties: {
     taskId: { type: "string", pattern: "^tsk_[A-Za-z0-9_-]{10}$" }, status: { type: "string", enum: ["working", "completed", "cancelled", "failed"] },
-    phase: { type: "string", enum: ["preparing", "synthesizing", "speaking", "completed", "cancelled", "failed"] }, progressPercent: { type: "number", minimum: 0, maximum: 100 }, statusMessage: { type: "string", minLength: 1 },
+    phase: { type: "string", enum: ["preparing", "synthesizing", "saving", "speaking", "completed", "cancelled", "failed"] }, progressPercent: { type: "number", minimum: 0, maximum: 100 }, statusMessage: { type: "string", minLength: 1 },
+    voiceName: { type: "string", minLength: 1 }, outputMode: { type: "string", enum: ["file", "speakers", "both"] }, saveToFile: { type: "boolean" }, outputPath: nullableString,
     createdAt: { type: "string", format: "date-time" }, lastUpdatedAt: { type: "string", format: "date-time" }, pollIntervalMs: { type: "integer", minimum: 100 },
+    result: { type: "object", additionalProperties: false, properties: { filePath: { type: "string", minLength: 1 }, format: { const: "wav" }, mimeType: { const: "audio/wav" } }, required: ["filePath", "format", "mimeType"] },
     error: { type: "object", additionalProperties: false, properties: { code: { type: "string" }, message: { type: "string" } }, required: ["code", "message"] }
   },
-  required: ["taskId", "status", "phase", "progressPercent", "statusMessage", "createdAt", "lastUpdatedAt", "pollIntervalMs"]
+  required: ["taskId", "status", "phase", "progressPercent", "statusMessage", "voiceName", "outputMode", "saveToFile", "outputPath", "createdAt", "lastUpdatedAt", "pollIntervalMs"]
 };
 const speechCancelSchema = { type: "object", additionalProperties: false, properties: { taskId: { type: "string", pattern: "^tsk_[A-Za-z0-9_-]{10}$" }, status: { type: "string", enum: ["cancelled", "completed", "failed"] } }, required: ["taskId", "status"] };
 const youtubeDownloadResultSchema = {
@@ -850,17 +852,17 @@ function toolDefinitions() {
     },
     {
       name: "system_speech_speak",
-      title: "Speak text through Windows audio",
-      description: "Start speaking text asynchronously through the default Windows audio output. The call returns immediately; poll system_speech_status no faster than pollIntervalMs. Omit voiceId for the Windows default voice. Long text is split internally for responsive playback and cancellation. This Windows-only tool creates no Workspace file.",
+      title: "Synthesize Windows speech",
+      description: "Synthesize text asynchronously with a Windows voice. outputMode is exactly one of: speakers (play only), file (save WAV only), or both (save WAV and play). For file or both, outputPath is optional: when omitted the tool writes text-to-speech/<selected voice name> <UTC timestamp> [tts_<id>].wav. The call returns immediately; poll system_speech_status no faster than pollIntervalMs. Omit voiceId for the current Windows default. Long text is split internally for responsive playback and cancellation.",
       annotations: localWorkspaceWriteAnnotations,
-      inputSchema: { type: "object", additionalProperties: false, properties: { text: { type: "string", minLength: 1, maxLength: 60000 }, voiceId: { type: ["string", "null"], default: null } }, required: ["text"] },
+      inputSchema: { type: "object", additionalProperties: false, properties: { text: { type: "string", minLength: 1, maxLength: 60000 }, voiceId: { type: ["string", "null"], default: null }, outputMode: { type: "string", enum: ["file", "speakers", "both"], default: "speakers" }, outputPath: { ...nullableString, description: "Optional safe workspace-relative .wav path; available only when outputMode is file or both." } }, required: ["text"] },
       outputSchema: speechTaskSchema,
       _meta: { "openai/toolInvocation/invoking": "Starting speech…", "openai/toolInvocation/invoked": "Speech task started." }
     },
     {
       name: "system_speech_status",
       title: "Get speech task status",
-      description: "Get the status and progress of an asynchronous Windows speech task. Poll no faster than pollIntervalMs. working phases are preparing, synthesizing, and speaking.",
+      description: "Get the status and progress of an asynchronous Windows speech task. Poll no faster than pollIntervalMs. Working phases are preparing, synthesizing, saving, and speaking. Completed file output includes its safe workspace-relative WAV path.",
       annotations: localAgentReadAnnotations,
       inputSchema: { type: "object", additionalProperties: false, properties: { taskId: { type: "string", minLength: 1 } }, required: ["taskId"] },
       outputSchema: speechTaskSchema,
@@ -2446,20 +2448,28 @@ function normalizeSpeechTaskId(value) {
 function normalizeSpeechTask(document) {
   if (!document || typeof document !== "object" || Array.isArray(document) || typeof document.taskId !== "string" || !/^tsk_[A-Za-z0-9_-]{10}$/.test(document.taskId)
     || !["working", "completed", "cancelled", "failed"].includes(document.status)
-    || !["preparing", "synthesizing", "speaking", "completed", "cancelled", "failed"].includes(document.phase)
+    || !["preparing", "synthesizing", "saving", "speaking", "completed", "cancelled", "failed"].includes(document.phase)
     || !Number.isFinite(document.progressPercent) || document.progressPercent < 0 || document.progressPercent > 100
-    || typeof document.statusMessage !== "string" || !document.statusMessage
+    || typeof document.statusMessage !== "string" || !document.statusMessage || typeof document.voiceName !== "string" || !document.voiceName
+    || !["file", "speakers", "both"].includes(document.outputMode) || typeof document.saveToFile !== "boolean"
+    || (document.outputPath !== null && (typeof document.outputPath !== "string" || !document.outputPath))
     || typeof document.createdAt !== "string" || typeof document.lastUpdatedAt !== "string"
     || !Number.isInteger(document.pollIntervalMs) || document.pollIntervalMs < 100) {
     throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid speech task.");
   }
-  const task = { taskId: document.taskId, status: document.status, phase: document.phase, progressPercent: document.progressPercent, statusMessage: document.statusMessage, createdAt: document.createdAt, lastUpdatedAt: document.lastUpdatedAt, pollIntervalMs: document.pollIntervalMs };
+  if (document.saveToFile !== (document.outputMode === "file" || document.outputMode === "both") || (document.saveToFile !== Boolean(document.outputPath))) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned inconsistent speech output settings.");
+  const task = { taskId: document.taskId, status: document.status, phase: document.phase, progressPercent: document.progressPercent, statusMessage: document.statusMessage, voiceName: document.voiceName, outputMode: document.outputMode, saveToFile: document.saveToFile, outputPath: document.outputPath, createdAt: document.createdAt, lastUpdatedAt: document.lastUpdatedAt, pollIntervalMs: document.pollIntervalMs };
+  if (document.result !== undefined) {
+    if (!document.result || typeof document.result !== "object" || typeof document.result.filePath !== "string" || !document.result.filePath || document.result.format !== "wav" || document.result.mimeType !== "audio/wav" || !document.saveToFile || document.result.filePath !== document.outputPath) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid speech file result.");
+    task.result = { filePath: document.result.filePath, format: "wav", mimeType: "audio/wav" };
+  }
   if (document.error !== undefined) {
     if (!document.error || typeof document.error !== "object" || typeof document.error.code !== "string" || typeof document.error.message !== "string") throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid speech error.");
     task.error = { code: document.error.code, message: document.error.message };
   }
   if ((task.status === "failed") !== Boolean(task.error)) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an inconsistent speech task.");
   if (task.status === "completed" && task.progressPercent !== 100) throw localAgentError("AGENT_INVALID_RESPONSE", "The completed speech task must have 100 percent progress.");
+  if (task.status === "completed" && task.saveToFile !== Boolean(task.result)) throw localAgentError("AGENT_INVALID_RESPONSE", "The completed speech task has an inconsistent file result.");
   return task;
 }
 
@@ -2473,10 +2483,15 @@ async function speechListVoices() {
 }
 
 function normalizeSpeechInput(argumentsValue = {}) {
-  const args = captureFrameObject(argumentsValue, "system_speech_speak", new Set(["text", "voiceId"]));
+  const args = captureFrameObject(argumentsValue, "system_speech_speak", new Set(["text", "voiceId", "outputMode", "outputPath"]));
   if (typeof args.text !== "string" || !args.text.trim() || args.text.length > 60_000) throw localAgentError("SPEECH_INVALID", "text must be a non-empty string of at most 60000 characters.");
   if (args.voiceId !== undefined && args.voiceId !== null && (typeof args.voiceId !== "string" || !args.voiceId.trim())) throw localAgentError("SPEECH_INVALID", "voiceId must be omitted, null, or a voiceId returned by system_speech_list_voices.");
-  return { text: args.text, voiceId: args.voiceId ?? null };
+  const outputMode = args.outputMode ?? "speakers";
+  if (!["file", "speakers", "both"].includes(outputMode)) throw localAgentError("SPEECH_INVALID", "outputMode must be one of: file, speakers, both.");
+  const outputPath = args.outputPath === undefined || args.outputPath === null ? null : normalizeWorkspacePath(args.outputPath, "outputPath");
+  if (outputPath !== null && !outputPath.toLowerCase().endsWith(".wav")) throw localAgentError("SPEECH_INVALID", "outputPath must end in .wav.");
+  if (outputMode === "speakers" && outputPath !== null) throw localAgentError("SPEECH_INVALID", "outputPath is available only when outputMode is file or both.");
+  return { text: args.text, voiceId: args.voiceId ?? null, outputMode, outputPath };
 }
 
 async function speechSpeak(argumentsValue) {

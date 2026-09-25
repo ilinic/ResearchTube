@@ -23,9 +23,12 @@ assert.match(widget, /<audio id="audio" controls>/, "the widget must render supp
 assert.match(widget, /function workspaceFormatLabel\(/, "the widget must label media with its filename extension");
 assert.match(widget, /workspaceFormatLabel\(info\.workspacePath/, "an M4A file must show M4A instead of the generic audio\/mp4 container label");
 assert.match(widget, /function cameraTaskTag\(path\)/, "a strict camera task tag must identify webcam media");
+assert.match(widget, /function ttsTaskTag\(path\)/, "a strict TTS task tag must identify synthesized speech audio");
+assert.match(widget, /Speech TTS Audio/, "TTS WAV files must receive a distinct audio label");
 assert.doesNotMatch(widget, /addChip\(`duration /, "duration chips must use the standard bare timestamp format");
 assert.match(widget, /return `\$\{hours\}:\$\{String\(minutes % 60\)/, "long durations must use H:MM:SS");
 assert.match(widget, /cam_\[A-Za-z0-9_-\]\{10\}/, "the camera task tag must require the expected compact ID length");
+assert.match(widget, /tts_\[A-Za-z0-9_-\]\{10\}/, "the TTS task tag must require the expected compact ID length");
 assert.doesNotMatch(widget, /createImageBitmap/);
 assert.doesNotMatch(widget, /getContext\("2d"\)/);
 assert.doesNotMatch(widget, /base64/i, "the active widget must load images only from the Local Agent URL");

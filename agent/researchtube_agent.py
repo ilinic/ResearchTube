@@ -33,8 +33,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote, unquote, urlparse
 from urllib.request import Request, urlopen
 
-AGENT_VERSION = "1.102.0"
-INTERFACE_VERSION = 63
+AGENT_VERSION = "1.103.0"
+INTERFACE_VERSION = 64
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
 TASK_POLL_INTERVAL_MS = 1_000
@@ -2033,9 +2033,9 @@ def windows_speech_python() -> str:
     return sys.executable
 
 
-def speech_options(payload: Any) -> dict[str, str | None]:
-    if not isinstance(payload, dict) or set(payload) - {"text", "voiceId"}:
-        raise AgentApiError("SPEECH_INVALID", "system_speech_speak accepts only text and optional voiceId.")
+def speech_options(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict) or set(payload) - {"text", "voiceId", "outputPath", "outputMode"}:
+        raise AgentApiError("SPEECH_INVALID", "system_speech_speak accepts text, optional voiceId, outputMode, and outputPath only.")
     text = payload.get("text")
     voice_id = payload.get("voiceId")
     if not isinstance(text, str) or not text.strip():
@@ -2044,7 +2044,15 @@ def speech_options(payload: Any) -> dict[str, str | None]:
         raise AgentApiError("SPEECH_INVALID", f"text must not exceed {SPEECH_MAX_TEXT_BYTES} UTF-8 bytes.")
     if voice_id is not None and (not isinstance(voice_id, str) or not voice_id.strip()):
         raise AgentApiError("SPEECH_INVALID", "voiceId must be null or a non-empty voiceId returned by system_speech_list_voices.")
-    return {"text": text, "voiceId": voice_id}
+    output_path = payload.get("outputPath")
+    if output_path is not None and (not isinstance(output_path, str) or not output_path.strip()):
+        raise AgentApiError("SPEECH_INVALID", "outputPath must be omitted, null, or a non-empty workspace-relative WAV path.")
+    output_mode = payload.get("outputMode", "speakers")
+    if output_mode not in {"file", "speakers", "both"}:
+        raise AgentApiError("SPEECH_INVALID", "outputMode must be one of: file, speakers, both.")
+    if output_mode == "speakers" and output_path is not None:
+        raise AgentApiError("SPEECH_INVALID", "outputPath is available only when outputMode is file or both.")
+    return {"text": text, "voiceId": voice_id, "outputPath": output_path, "outputMode": output_mode}
 
 
 def speech_base64(value: str | None) -> str:
@@ -2066,15 +2074,18 @@ def normalize_speech_voice(voice: Any) -> dict[str, Any]:
 # They only need to survive from list_voices to a following speak call in this
 # running Local Agent, so an in-memory, positional mapping is sufficient.
 SPEECH_WINDOWS_VOICE_IDS: dict[str, str] = {}
+SPEECH_WINDOWS_VOICE_NAMES: dict[str, str] = {}
 
 
 def public_speech_voices(voices: list[Any]) -> list[dict[str, Any]]:
     normalized = [normalize_speech_voice(voice) for voice in voices]
     SPEECH_WINDOWS_VOICE_IDS.clear()
+    SPEECH_WINDOWS_VOICE_NAMES.clear()
     public: list[dict[str, Any]] = []
     for index, voice in enumerate(normalized, start=1):
         public_id = f"voice_{index}"
         SPEECH_WINDOWS_VOICE_IDS[public_id] = voice["voiceId"]
+        SPEECH_WINDOWS_VOICE_NAMES[public_id] = voice["name"]
         public.append({**voice, "voiceId": public_id})
     return public
 
@@ -2103,17 +2114,63 @@ async def system_speech_list_voices(payload: Any) -> dict[str, Any]:
     return {"voices": public_speech_voices(voices)}
 
 
+async def system_speech_voice_name(executable: str, voice_id: str | None) -> str:
+    """Resolve the actual selected voice's display name without publishing its ID."""
+    process: asyncio.subprocess.Process | None = None
+    try:
+        process = await asyncio.create_subprocess_exec(
+            executable, str(WINDOWS_SPEECH_SCRIPT_PATH), "--action", "voice-info",
+            "--voice-id-base64", speech_base64(voice_id),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=15)
+    except asyncio.TimeoutError as error:
+        if process is not None:
+            process.kill(); await process.communicate()
+        raise AgentApiError("SPEECH_SYNTHESIS_FAILED", "Windows could not resolve the selected speech voice in time.") from error
+    except OSError as error:
+        raise AgentApiError("SPEECH_NOT_AVAILABLE", "The Windows text-to-speech helper could not start.") from error
+    if process.returncode != 0:
+        code = "VOICE_NOT_FOUND" if b"VOICE_NOT_FOUND" in stderr else "SPEECH_SYNTHESIS_FAILED"
+        raise AgentApiError(code, "The selected Windows voice was not found." if code == "VOICE_NOT_FOUND" else "Windows could not resolve the selected speech voice.")
+    try:
+        name = json.loads(stdout.decode("utf-8")).get("name")
+    except (UnicodeDecodeError, json.JSONDecodeError, AttributeError) as error:
+        raise AgentApiError("SPEECH_SYNTHESIS_FAILED", "Windows returned invalid selected-voice information.") from error
+    if not isinstance(name, str) or not name.strip():
+        raise AgentApiError("SPEECH_SYNTHESIS_FAILED", "Windows returned invalid selected-voice information.")
+    return name.strip()
+
+
+def new_speech_file_id() -> str:
+    return f"tts_{secrets.token_urlsafe(7)}"
+
+
+def speech_filename_stem(voice_name: str, file_id: str) -> str:
+    name = re.sub(r'[\x00-\x1f<>:"/\\|?*]+', " ", voice_name)
+    name = re.sub(r"\s+", " ", name).strip(" .")[:160].rstrip(" .") or "Windows voice"
+    return f"{name} {camera_filename_timestamp()} [{file_id}]"
+
+
+def speech_default_workspace_path(voice_name: str, file_id: str) -> str:
+    return f"text-to-speech/{speech_filename_stem(voice_name, file_id)}.wav"
+
+
 @dataclass
 class SpeechTask:
     task_id: str
     text: str
     voice_id: str | None
+    voice_name: str
+    output_mode: str
+    output_path: str | None
     created_at: str
     last_updated_at: str
     status: str = "working"
     status_message: str = "Preparing speech."
     phase: str = "preparing"
     progress_percent: float = 0.0
+    result: dict[str, Any] | None = None
     error: dict[str, str] | None = None
     process: asyncio.subprocess.Process | None = None
     runner: asyncio.Task[None] | None = None
@@ -2140,7 +2197,9 @@ class SpeechTaskManager:
         return self.tasks[task_id]
 
     def snapshot(self, task: SpeechTask) -> dict[str, Any]:
-        result: dict[str, Any] = {"taskId": task.task_id, "status": task.status, "phase": task.phase, "progressPercent": task.progress_percent, "statusMessage": task.status_message, "createdAt": task.created_at, "lastUpdatedAt": task.last_updated_at, "pollIntervalMs": TASK_POLL_INTERVAL_MS}
+        result: dict[str, Any] = {"taskId": task.task_id, "status": task.status, "phase": task.phase, "progressPercent": task.progress_percent, "statusMessage": task.status_message, "voiceName": task.voice_name, "outputMode": task.output_mode, "saveToFile": task.output_path is not None, "outputPath": task.output_path, "createdAt": task.created_at, "lastUpdatedAt": task.last_updated_at, "pollIntervalMs": TASK_POLL_INTERVAL_MS}
+        if task.result is not None:
+            result["result"] = task.result
         if task.error is not None:
             result["error"] = task.error
         return result
@@ -2150,21 +2209,47 @@ class SpeechTaskManager:
         options = speech_options(payload)
         now = utc_now()
         requested_voice_id = options["voiceId"]
+        if requested_voice_id is not None and requested_voice_id not in SPEECH_WINDOWS_VOICE_IDS:
+            raise AgentApiError("VOICE_NOT_FOUND", "The selected Windows voice was not found. Call system_speech_list_voices again.")
         windows_voice_id = SPEECH_WINDOWS_VOICE_IDS.get(requested_voice_id) if requested_voice_id is not None else None
-        task = SpeechTask(self.new_task_id(), options["text"] or "", windows_voice_id, now, now, voice_not_found=requested_voice_id is not None and windows_voice_id is None)
+        voice_name = SPEECH_WINDOWS_VOICE_NAMES.get(requested_voice_id) if requested_voice_id is not None else None
+        if voice_name is None:
+            voice_name = await system_speech_voice_name(executable, windows_voice_id)
+        save_to_file = options["outputMode"] in {"file", "both"}
+        output_path: str | None = options["outputPath"]
+        if save_to_file:
+            if output_path is None:
+                output_path = speech_default_workspace_path(voice_name, new_speech_file_id())
+            destination = WorkspacePathResolver().resolve_destination(output_path, field_name="outputPath", error_code="SPEECH_INVALID")
+            if destination.physical_path.suffix.lower() != ".wav":
+                raise AgentApiError("SPEECH_INVALID", "outputPath must end in .wav because Windows Speech exports WAV audio.")
+            if destination.physical_path.exists() or destination.physical_path.is_symlink():
+                raise AgentApiError("DESTINATION_EXISTS", "The speech output destination already exists; this tool never overwrites files.")
+            output_path = destination.logical_path
+        task = SpeechTask(self.new_task_id(), options["text"], windows_voice_id, voice_name, options["outputMode"], output_path, now, now)
         self.tasks[task.task_id] = task
         task.runner = asyncio.create_task(self.run(task, executable), name=f"researchtube-speech-{task.task_id}")
         return self.snapshot(task)
 
     async def run(self, task: SpeechTask, executable: str) -> None:
-        stdout = b""; stderr = b""
+        stdout = b""; stderr = b""; temporary_output: Path | None = None; final_output: ResolvedWorkspacePath | None = None
         try:
             if task.voice_not_found:
                 raise AgentApiError("VOICE_NOT_FOUND", "The selected Windows voice was not found.")
+            if task.output_path is not None:
+                final_output = WorkspacePathResolver().resolve_destination(task.output_path, field_name="speech output", error_code="SPEECH_FILE_FAILED")
+                if final_output.physical_path.exists() or final_output.physical_path.is_symlink():
+                    raise AgentApiError("DESTINATION_EXISTS", "The speech output destination already exists; this tool never overwrites files.")
+                final_output.physical_path.parent.mkdir(parents=True, exist_ok=True)
+                temporary_output = final_output.physical_path.with_suffix(".tmp.wav")
+                if temporary_output.exists() or temporary_output.is_symlink():
+                    raise AgentApiError("DESTINATION_EXISTS", "The temporary speech output destination already exists. Try again.")
             task.phase = "synthesizing"; task.touch("Synthesizing speech.")
             task.process = await asyncio.create_subprocess_exec(
                 executable, str(WINDOWS_SPEECH_SCRIPT_PATH), "--action", "speak",
                 "--text-base64", "__STDIN__", "--voice-id-base64", speech_base64(task.voice_id),
+                "--output-path-base64", speech_base64(str(temporary_output) if temporary_output is not None else None),
+                "--play-through-speakers", "true" if task.output_mode in {"speakers", "both"} else "false",
                 stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
             assert task.process.stdin is not None
@@ -2189,6 +2274,7 @@ class SpeechTaskManager:
                         task.progress_percent = min(99.0, max(task.progress_percent, float(reported_progress)))
                     kind = event.get("event")
                     if kind == "synthesizing": task.phase, task.status_message = "synthesizing", "Synthesizing speech."
+                    elif kind == "saving": task.phase, task.status_message = "saving", "Saving synthesized speech to WAV."
                     elif kind == "speaking": task.phase, task.status_message = "speaking", "Speaking through the default Windows audio output."
                     task.last_updated_at = utc_now()
 
@@ -2199,8 +2285,14 @@ class SpeechTaskManager:
             await asyncio.gather(reader, return_exceptions=True)
             if task.process.returncode != 0:
                 message = stderr.decode("utf-8", errors="replace")
-                code = "VOICE_NOT_FOUND" if "VOICE_NOT_FOUND" in message else "AUDIO_PLAYBACK_FAILED" if "AUDIO_PLAYBACK_FAILED" in message else "SPEECH_SYNTHESIS_FAILED"
-                raise AgentApiError(code, "The selected Windows voice was not found." if code == "VOICE_NOT_FOUND" else "Windows could not synthesize or play the requested speech.")
+                code = "VOICE_NOT_FOUND" if "VOICE_NOT_FOUND" in message else "AUDIO_PLAYBACK_FAILED" if "AUDIO_PLAYBACK_FAILED" in message else "SPEECH_FILE_FAILED" if "SPEECH_FILE_FAILED" in message else "SPEECH_SYNTHESIS_FAILED"
+                messages = {"VOICE_NOT_FOUND": "The selected Windows voice was not found.", "AUDIO_PLAYBACK_FAILED": "Windows could not play the requested speech.", "SPEECH_FILE_FAILED": "Windows could not save the requested speech audio.", "SPEECH_SYNTHESIS_FAILED": "Windows could not synthesize the requested speech."}
+                raise AgentApiError(code, messages[code])
+            if temporary_output is not None and final_output is not None:
+                if not temporary_output.is_file() or temporary_output.stat().st_size < 44:
+                    raise AgentApiError("SPEECH_FILE_FAILED", "Windows could not save the requested speech audio.")
+                temporary_output.replace(final_output.physical_path)
+                task.result = {"filePath": final_output.logical_path, "format": "wav", "mimeType": "audio/wav"}
             task.status, task.phase, task.progress_percent = "completed", "completed", 100.0
             task.touch("Speech completed.")
         except asyncio.CancelledError:
@@ -2216,6 +2308,8 @@ class SpeechTaskManager:
             task.status, task.phase, task.error = "failed", "failed", {"code": "SPEECH_SYNTHESIS_FAILED", "message": "Windows could not start text-to-speech."}; task.touch("Speech failed.")
         finally:
             task.process = None
+            if temporary_output is not None:
+                temporary_output.unlink(missing_ok=True)
 
     async def cancel(self, task_id: str) -> dict[str, Any]:
         task = self.get(task_id)

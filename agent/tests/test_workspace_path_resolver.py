@@ -657,7 +657,8 @@ class CaptureFrameTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(agent.youtube_section_expected_bytes({"bitrateBps": None}, 15.0))
 
     def test_speech_options_and_task_snapshot_are_compact(self) -> None:
-        self.assertEqual(agent.speech_options({"text": "Привет", "voiceId": None}), {"text": "Привет", "voiceId": None})
+        self.assertEqual(agent.speech_options({"text": "Привет", "voiceId": None}), {"text": "Привет", "voiceId": None, "outputPath": None, "outputMode": "speakers"})
+        self.assertEqual(agent.speech_options({"text": "Привет", "outputMode": "both", "outputPath": "audio/voice.wav"})["outputMode"], "both")
         self.assertEqual(agent.WINDOWS_SPEECH_SCRIPT_PATH.name, "researchtube_speech.py")
         self.assertEqual(agent.normalize_speech_voice({"voiceId": "id", "name": "Voice", "language": "ru-RU", "gender": "unknown", "isDefault": False})["gender"], "neutral")
         public_voices = agent.public_speech_voices([{"voiceId": "HKEY_LOCAL_MACHINE\\voice", "name": "Voice", "language": "ru-RU", "gender": "female", "isDefault": True}])
@@ -666,10 +667,16 @@ class CaptureFrameTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(agent.AgentApiError) as error:
             agent.speech_options({"text": ""})
         self.assertEqual(error.exception.code, "SPEECH_INVALID")
+        with self.assertRaises(agent.AgentApiError) as error:
+            agent.speech_options({"text": "Привет", "outputMode": "speakers", "outputPath": "audio/voice.wav"})
+        self.assertEqual(error.exception.code, "SPEECH_INVALID")
+        self.assertRegex(agent.speech_default_workspace_path("Microsoft Dmitry", "tts_AbCdEf1234"), r"^text-to-speech/Microsoft Dmitry \d{4}-\d{2}-\d{2}T\d{2}_\d{2}_\d{2}Z \[tts_AbCdEf1234\]\.wav$")
         manager = agent.SpeechTaskManager()
-        task = agent.SpeechTask("tsk_abcdefghij", "Hello", None, "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z")
+        task = agent.SpeechTask(task_id="tsk_abcdefghij", text="Hello", voice_id=None, voice_name="Microsoft Dmitry", output_mode="file", output_path="text-to-speech/Microsoft Dmitry 2026-01-02T03_04_05Z [tts_AbCdEf1234].wav", created_at="2026-01-01T00:00:00Z", last_updated_at="2026-01-01T00:00:00Z")
         self.assertEqual(manager.snapshot(task)["status"], "working")
         self.assertEqual(manager.snapshot(task)["phase"], "preparing")
+        self.assertEqual(manager.snapshot(task)["outputMode"], "file")
+        self.assertEqual(manager.snapshot(task)["voiceName"], "Microsoft Dmitry")
 
     async def test_youtube_batch_retries_only_the_failed_section(self) -> None:
         commands: list[tuple[str, ...]] = []

@@ -27,7 +27,10 @@ for (const tool of ["youtube_download_get_formats", "youtube_download_get_task",
 assert.match(background, /youtubeFormats: youtubeFormatsSchema/);
 assert.match(background, /youtube_download_get_formats\.downloadFormats/);
 assert.match(background, /afterEventId/);
-assert.match(background, /const REQUIRED_AGENT_INTERFACE_VERSION = 63;/);
+assert.match(background, /const REQUIRED_AGENT_INTERFACE_VERSION = 64;/);
+assert.match(background, /outputMode: \{ type: "string", enum: \["file", "speakers", "both"\]/, "speech must choose exactly one output mode");
+assert.match(background, /voiceName: \{ type: "string", minLength: 1 \}/, "speech status must report the selected voice name");
+assert.match(background, /text-to-speech\/<selected voice name>/, "default TTS WAV names must use the selected voice name");
 assert.match(background, /gap of at most 10 seconds are merged, but one range never exceeds 60 seconds/, "YouTube frame batches must use bounded hybrid section grouping");
 assert.match(background, /targetFps is optional/, "camera recording must choose a default FPS when none is supplied");
 assert.match(background, /name: "camera_record_audio"/, "audio-only camera recording must be published through the MCP tool registry");
