@@ -44,7 +44,7 @@ const MCP_TOOL_SETTINGS = Object.freeze({
   clipboard_status: { group: "clipboard" }, clipboard_get: { group: "clipboard" }, clipboard_set: { group: "clipboard" },
   library_store_start: { group: "library" }, library_store_status: { group: "library" }, library_store_cancel: { group: "library" }, online_share_start: { group: "online" }, online_share_status: { group: "online" }, online_share_stop: { group: "online" }
 });
-const EXTENSION_VERSION = "2.1.4";
+const EXTENSION_VERSION = "2.1.5";
 const REQUIRED_AGENT_INTERFACE_VERSION = 62;
 // A UI resource URI is a cache key in MCP Apps. Increment it whenever the
 // rendered template changes so ChatGPT does not reuse a stale iframe bundle.
@@ -839,7 +839,7 @@ function toolDefinitions() {
     {
       name: "system_speech_list_voices",
       title: "List Windows speech voices",
-      description: "List voices exposed by Windows.Media.SpeechSynthesis.SpeechSynthesizer. Use a returned voiceId with system_speech_speak, or omit voiceId to use the current Windows default. Windows-only; does not expose registry or host implementation details.",
+      description: "List voices exposed by Windows.Media.SpeechSynthesis.SpeechSynthesizer. voiceId is an opaque ResearchTube ID; use it with system_speech_speak, or omit voiceId for the current Windows default. Windows-only; does not expose registry or host implementation details.",
       annotations: localAgentReadAnnotations,
       inputSchema: { type: "object", additionalProperties: false, properties: {} },
       outputSchema: speechVoicesSchema

@@ -33,7 +33,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote, unquote, urlparse
 from urllib.request import Request, urlopen
 
-AGENT_VERSION = "1.100.0"
+AGENT_VERSION = "1.101.0"
 INTERFACE_VERSION = 62
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
@@ -2062,6 +2062,23 @@ def normalize_speech_voice(voice: Any) -> dict[str, Any]:
     return {"voiceId": voice_id, "name": name, "language": language, "gender": gender if gender in {"male", "female", "neutral"} else "neutral", "isDefault": voice["isDefault"]}
 
 
+# Public voice IDs intentionally never contain the Windows voice/registry ID.
+# They only need to survive from list_voices to a following speak call in this
+# running Local Agent, so an in-memory, positional mapping is sufficient.
+SPEECH_WINDOWS_VOICE_IDS: dict[str, str] = {}
+
+
+def public_speech_voices(voices: list[Any]) -> list[dict[str, Any]]:
+    normalized = [normalize_speech_voice(voice) for voice in voices]
+    SPEECH_WINDOWS_VOICE_IDS.clear()
+    public: list[dict[str, Any]] = []
+    for index, voice in enumerate(normalized, start=1):
+        public_id = f"voice_{index}"
+        SPEECH_WINDOWS_VOICE_IDS[public_id] = voice["voiceId"]
+        public.append({**voice, "voiceId": public_id})
+    return public
+
+
 async def system_speech_list_voices(payload: Any) -> dict[str, Any]:
     if payload not in ({}, None):
         raise AgentApiError("SPEECH_INVALID", "system_speech_list_voices does not accept arguments.")
@@ -2083,7 +2100,7 @@ async def system_speech_list_voices(payload: Any) -> dict[str, Any]:
     voices = document.get("voices") if isinstance(document, dict) else None
     if not isinstance(voices, list):
         raise AgentApiError("SPEECH_SYNTHESIS_FAILED", "Windows returned an invalid speech-voice list.")
-    return {"voices": [normalize_speech_voice(voice) for voice in voices]}
+    return {"voices": public_speech_voices(voices)}
 
 
 @dataclass
@@ -2100,6 +2117,7 @@ class SpeechTask:
     error: dict[str, str] | None = None
     process: asyncio.subprocess.Process | None = None
     runner: asyncio.Task[None] | None = None
+    voice_not_found: bool = False
 
     def touch(self, message: str | None = None) -> None:
         self.last_updated_at = utc_now()
@@ -2131,7 +2149,9 @@ class SpeechTaskManager:
         executable = windows_speech_python()
         options = speech_options(payload)
         now = utc_now()
-        task = SpeechTask(self.new_task_id(), options["text"] or "", options["voiceId"], now, now)
+        requested_voice_id = options["voiceId"]
+        windows_voice_id = SPEECH_WINDOWS_VOICE_IDS.get(requested_voice_id) if requested_voice_id is not None else None
+        task = SpeechTask(self.new_task_id(), options["text"] or "", windows_voice_id, now, now, voice_not_found=requested_voice_id is not None and windows_voice_id is None)
         self.tasks[task.task_id] = task
         task.runner = asyncio.create_task(self.run(task, executable), name=f"researchtube-speech-{task.task_id}")
         return self.snapshot(task)
@@ -2139,6 +2159,8 @@ class SpeechTaskManager:
     async def run(self, task: SpeechTask, executable: str) -> None:
         stdout = b""; stderr = b""
         try:
+            if task.voice_not_found:
+                raise AgentApiError("VOICE_NOT_FOUND", "The selected Windows voice was not found.")
             task.phase = "synthesizing"; task.touch("Synthesizing speech.")
             task.process = await asyncio.create_subprocess_exec(
                 executable, str(WINDOWS_SPEECH_SCRIPT_PATH), "--action", "speak",

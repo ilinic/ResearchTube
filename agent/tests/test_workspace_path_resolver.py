@@ -660,6 +660,9 @@ class CaptureFrameTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(agent.speech_options({"text": "Привет", "voiceId": None}), {"text": "Привет", "voiceId": None})
         self.assertEqual(agent.WINDOWS_SPEECH_SCRIPT_PATH.name, "researchtube_speech.py")
         self.assertEqual(agent.normalize_speech_voice({"voiceId": "id", "name": "Voice", "language": "ru-RU", "gender": "unknown", "isDefault": False})["gender"], "neutral")
+        public_voices = agent.public_speech_voices([{"voiceId": "HKEY_LOCAL_MACHINE\\voice", "name": "Voice", "language": "ru-RU", "gender": "female", "isDefault": True}])
+        self.assertEqual(public_voices[0]["voiceId"], "voice_1")
+        self.assertEqual(agent.SPEECH_WINDOWS_VOICE_IDS["voice_1"], "HKEY_LOCAL_MACHINE\\voice")
         with self.assertRaises(agent.AgentApiError) as error:
             agent.speech_options({"text": ""})
         self.assertEqual(error.exception.code, "SPEECH_INVALID")

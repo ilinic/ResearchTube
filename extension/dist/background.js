@@ -83,7 +83,7 @@ var MCP_TOOL_SETTINGS = Object.freeze({
   online_share_status: { group: "online" },
   online_share_stop: { group: "online" }
 });
-var EXTENSION_VERSION = "2.1.4";
+var EXTENSION_VERSION = "2.1.5";
 var REQUIRED_AGENT_INTERFACE_VERSION = 62;
 var CAPTURE_FRAME_WIDGET_URI = "ui://researchtube/capture-frame-v43.html";
 var RESEARCHTUBE_SERVER_DESCRIPTION = "ResearchTube provides YouTube research, local media and image operations, workspace management, screenshots, clipboard, and Library integration. Search this server when the user refers to ResearchTube, YouTube analysis, a previously created workspace file, captured frame, screenshot, crop, clipboard, or asks to continue a previous ResearchTube operation. In clients with deferred tools, ResearchTube is discoverable through functions.exec lazy MCP-tool discovery; search there before treating the capability as unavailable.";
@@ -997,7 +997,7 @@ function toolDefinitions() {
     {
       name: "system_speech_list_voices",
       title: "List Windows speech voices",
-      description: "List voices exposed by Windows.Media.SpeechSynthesis.SpeechSynthesizer. Use a returned voiceId with system_speech_speak, or omit voiceId to use the current Windows default. Windows-only; does not expose registry or host implementation details.",
+      description: "List voices exposed by Windows.Media.SpeechSynthesis.SpeechSynthesizer. voiceId is an opaque ResearchTube ID; use it with system_speech_speak, or omit voiceId for the current Windows default. Windows-only; does not expose registry or host implementation details.",
       annotations: localAgentReadAnnotations,
       inputSchema: { type: "object", additionalProperties: false, properties: {} },
       outputSchema: speechVoicesSchema
