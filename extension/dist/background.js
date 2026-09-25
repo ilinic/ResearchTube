@@ -19,6 +19,7 @@ var DEFAULTS = {
 var DEFAULT_MCP_TOOL_PREFERENCES = Object.freeze({ newToolsEnabledByDefault: true, enabledByName: {} });
 var MCP_TOOL_GROUPS = Object.freeze({
   system: { title: "System", order: 10 },
+  speech: { title: "Text to Speech", order: 15 },
   workspace: { title: "Workspace", order: 20 },
   media: { title: "Media and images", order: 30 },
   visualMaps: { title: "Visual Maps", order: 40 },
@@ -32,6 +33,10 @@ var MCP_TOOL_GROUPS = Object.freeze({
 });
 var MCP_TOOL_SETTINGS = Object.freeze({
   system_agent_status: { group: "system", alwaysEnabled: true },
+  system_speech_list_voices: { group: "speech" },
+  system_speech_speak: { group: "speech" },
+  system_speech_status: { group: "speech" },
+  system_speech_cancel: { group: "speech" },
   workspace_list: { group: "workspace" },
   workspace_stat: { group: "workspace" },
   workspace_mkdir: { group: "workspace" },
@@ -78,8 +83,8 @@ var MCP_TOOL_SETTINGS = Object.freeze({
   online_share_status: { group: "online" },
   online_share_stop: { group: "online" }
 });
-var EXTENSION_VERSION = "2.0.9";
-var REQUIRED_AGENT_INTERFACE_VERSION = 61;
+var EXTENSION_VERSION = "2.1.4";
+var REQUIRED_AGENT_INTERFACE_VERSION = 62;
 var CAPTURE_FRAME_WIDGET_URI = "ui://researchtube/capture-frame-v43.html";
 var RESEARCHTUBE_SERVER_DESCRIPTION = "ResearchTube provides YouTube research, local media and image operations, workspace management, screenshots, clipboard, and Library integration. Search this server when the user refers to ResearchTube, YouTube analysis, a previously created workspace file, captured frame, screenshot, crop, clipboard, or asks to continue a previous ResearchTube operation. In clients with deferred tools, ResearchTube is discoverable through functions.exec lazy MCP-tool discovery; search there before treating the capability as unavailable.";
 var RESEARCHTUBE_MCP_INSTRUCTIONS = "ResearchTube exposes MCP tools that may be loaded or discovered lazily by the client. When the user mentions ResearchTube, invokes @ResearchTube, asks to repeat a ResearchTube operation, or requests a capability previously provided by ResearchTube, do not infer that ResearchTube is unavailable merely because its tools are not currently visible as a top-level tool namespace. In this client, ResearchTube is available through functions.exec with lazy MCP-tool discovery: search there for the appropriate ResearchTube tool before reporting that the capability is unavailable. Only report ResearchTube as unavailable if tool discovery actually fails, the required tool cannot be found after discovery, or an actual ResearchTube tool invocation returns an availability, connection, compatibility, or transport error. Successful use earlier in the conversation is evidence that the tools may be discoverable again; rediscover them rather than assuming access has disappeared. media_capture_frame, media_capture_screen, and media_image_crop never render a widget themselves. media_capture_frame is asynchronous: poll its task and call media_image_show only for specific completed frame paths the user asks to see. For media_capture_screen and media_image_crop, when showInChat is true, after the successful creation result call media_image_show once with the returned workspace image path; otherwise do not call the display tool.";
@@ -387,6 +392,30 @@ var agentStatusSchema = {
   },
   required: ["available", "error", "message", "status", "extensionVersion", "extensionInterfaceVersion", "agentVersion", "interfaceVersion", "chromeAutomation", "platform", "workspace", "components"]
 };
+var speechVoiceSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: { voiceId: { type: "string", minLength: 1 }, name: { type: "string", minLength: 1 }, language: { type: "string", minLength: 1 }, gender: { type: "string", enum: ["male", "female", "neutral"] }, isDefault: { type: "boolean" } },
+  required: ["voiceId", "name", "language", "gender", "isDefault"]
+};
+var speechVoicesSchema = { type: "object", additionalProperties: false, properties: { voices: { type: "array", items: speechVoiceSchema } }, required: ["voices"] };
+var speechTaskSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    taskId: { type: "string", pattern: "^tsk_[A-Za-z0-9_-]{10}$" },
+    status: { type: "string", enum: ["working", "completed", "cancelled", "failed"] },
+    phase: { type: "string", enum: ["preparing", "synthesizing", "speaking", "completed", "cancelled", "failed"] },
+    progressPercent: { type: "number", minimum: 0, maximum: 100 },
+    statusMessage: { type: "string", minLength: 1 },
+    createdAt: { type: "string", format: "date-time" },
+    lastUpdatedAt: { type: "string", format: "date-time" },
+    pollIntervalMs: { type: "integer", minimum: 100 },
+    error: { type: "object", additionalProperties: false, properties: { code: { type: "string" }, message: { type: "string" } }, required: ["code", "message"] }
+  },
+  required: ["taskId", "status", "phase", "progressPercent", "statusMessage", "createdAt", "lastUpdatedAt", "pollIntervalMs"]
+};
+var speechCancelSchema = { type: "object", additionalProperties: false, properties: { taskId: { type: "string", pattern: "^tsk_[A-Za-z0-9_-]{10}$" }, status: { type: "string", enum: ["cancelled", "completed", "failed"] } }, required: ["taskId", "status"] };
 var youtubeDownloadResultSchema = {
   type: "object",
   additionalProperties: false,
@@ -964,6 +993,41 @@ function toolDefinitions() {
       annotations: localAgentReadAnnotations,
       inputSchema: { type: "object", additionalProperties: false, properties: {} },
       outputSchema: agentStatusSchema
+    },
+    {
+      name: "system_speech_list_voices",
+      title: "List Windows speech voices",
+      description: "List voices exposed by Windows.Media.SpeechSynthesis.SpeechSynthesizer. Use a returned voiceId with system_speech_speak, or omit voiceId to use the current Windows default. Windows-only; does not expose registry or host implementation details.",
+      annotations: localAgentReadAnnotations,
+      inputSchema: { type: "object", additionalProperties: false, properties: {} },
+      outputSchema: speechVoicesSchema
+    },
+    {
+      name: "system_speech_speak",
+      title: "Speak text through Windows audio",
+      description: "Start speaking text asynchronously through the default Windows audio output. The call returns immediately; poll system_speech_status no faster than pollIntervalMs. Omit voiceId for the Windows default voice. Long text is split internally for responsive playback and cancellation. This Windows-only tool creates no Workspace file.",
+      annotations: localWorkspaceWriteAnnotations,
+      inputSchema: { type: "object", additionalProperties: false, properties: { text: { type: "string", minLength: 1, maxLength: 6e4 }, voiceId: { type: ["string", "null"], default: null } }, required: ["text"] },
+      outputSchema: speechTaskSchema,
+      _meta: { "openai/toolInvocation/invoking": "Starting speech\u2026", "openai/toolInvocation/invoked": "Speech task started." }
+    },
+    {
+      name: "system_speech_status",
+      title: "Get speech task status",
+      description: "Get the status and progress of an asynchronous Windows speech task. Poll no faster than pollIntervalMs. working phases are preparing, synthesizing, and speaking.",
+      annotations: localAgentReadAnnotations,
+      inputSchema: { type: "object", additionalProperties: false, properties: { taskId: { type: "string", minLength: 1 } }, required: ["taskId"] },
+      outputSchema: speechTaskSchema,
+      _meta: { "openai/toolInvocation/invoking": "Checking speech\u2026", "openai/toolInvocation/invoked": "Speech status checked." }
+    },
+    {
+      name: "system_speech_cancel",
+      title: "Cancel speech",
+      description: "Stop a working Windows speech task as quickly as practical. Cancellation stops playback, skips remaining text, releases local speech resources, and is a normal terminal outcome.",
+      annotations: localWorkspaceWriteAnnotations,
+      inputSchema: { type: "object", additionalProperties: false, properties: { taskId: { type: "string", minLength: 1 } }, required: ["taskId"] },
+      outputSchema: speechCancelSchema,
+      _meta: { "openai/toolInvocation/invoking": "Cancelling speech\u2026", "openai/toolInvocation/invoked": "Speech cancelled." }
     },
     {
       name: "library_store_start",
@@ -2485,6 +2549,50 @@ async function agentJsonRequest(path, { method = "GET", body = null, port = null
     clearTimeout(timeout);
   }
 }
+function normalizeSpeechTaskId(value) {
+  if (typeof value !== "string" || !/^tsk_[A-Za-z0-9_-]{10}$/.test(value)) throw localAgentError("INVALID_ARGUMENT", "taskId must be a ResearchTube task ID.");
+  return value;
+}
+function normalizeSpeechTask(document) {
+  if (!document || typeof document !== "object" || Array.isArray(document) || typeof document.taskId !== "string" || !/^tsk_[A-Za-z0-9_-]{10}$/.test(document.taskId) || !["working", "completed", "cancelled", "failed"].includes(document.status) || !["preparing", "synthesizing", "speaking", "completed", "cancelled", "failed"].includes(document.phase) || !Number.isFinite(document.progressPercent) || document.progressPercent < 0 || document.progressPercent > 100 || typeof document.statusMessage !== "string" || !document.statusMessage || typeof document.createdAt !== "string" || typeof document.lastUpdatedAt !== "string" || !Number.isInteger(document.pollIntervalMs) || document.pollIntervalMs < 100) {
+    throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid speech task.");
+  }
+  const task = { taskId: document.taskId, status: document.status, phase: document.phase, progressPercent: document.progressPercent, statusMessage: document.statusMessage, createdAt: document.createdAt, lastUpdatedAt: document.lastUpdatedAt, pollIntervalMs: document.pollIntervalMs };
+  if (document.error !== void 0) {
+    if (!document.error || typeof document.error !== "object" || typeof document.error.code !== "string" || typeof document.error.message !== "string") throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid speech error.");
+    task.error = { code: document.error.code, message: document.error.message };
+  }
+  if (task.status === "failed" !== Boolean(task.error)) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an inconsistent speech task.");
+  if (task.status === "completed" && task.progressPercent !== 100) throw localAgentError("AGENT_INVALID_RESPONSE", "The completed speech task must have 100 percent progress.");
+  return task;
+}
+async function speechListVoices() {
+  const document = await agentJsonRequest("/system/speech/voices", { method: "POST", body: {} });
+  if (!document || typeof document !== "object" || !Array.isArray(document.voices)) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid speech voice list.");
+  return { voices: document.voices.map((voice) => {
+    if (!voice || typeof voice !== "object" || typeof voice.voiceId !== "string" || !voice.voiceId || typeof voice.name !== "string" || !voice.name || typeof voice.language !== "string" || !voice.language || !["male", "female", "neutral"].includes(voice.gender) || typeof voice.isDefault !== "boolean") throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid speech voice.");
+    return { voiceId: voice.voiceId, name: voice.name, language: voice.language, gender: voice.gender, isDefault: voice.isDefault };
+  }) };
+}
+function normalizeSpeechInput(argumentsValue = {}) {
+  const args = captureFrameObject(argumentsValue, "system_speech_speak", /* @__PURE__ */ new Set(["text", "voiceId"]));
+  if (typeof args.text !== "string" || !args.text.trim() || args.text.length > 6e4) throw localAgentError("SPEECH_INVALID", "text must be a non-empty string of at most 60000 characters.");
+  if (args.voiceId !== void 0 && args.voiceId !== null && (typeof args.voiceId !== "string" || !args.voiceId.trim())) throw localAgentError("SPEECH_INVALID", "voiceId must be omitted, null, or a voiceId returned by system_speech_list_voices.");
+  return { text: args.text, voiceId: args.voiceId ?? null };
+}
+async function speechSpeak(argumentsValue) {
+  const input = normalizeSpeechInput(argumentsValue);
+  return normalizeSpeechTask(await agentJsonRequest("/tasks/system-speech", { method: "POST", body: input }), input);
+}
+async function speechStatus(taskId) {
+  return normalizeSpeechTask(await agentJsonRequest(`/tasks/system-speech/${encodeURIComponent(normalizeSpeechTaskId(taskId))}`));
+}
+async function speechCancel(taskId) {
+  taskId = normalizeSpeechTaskId(taskId);
+  const document = await agentJsonRequest(`/tasks/system-speech/${encodeURIComponent(taskId)}/cancel`, { method: "POST", body: {} });
+  if (!document || document.taskId !== taskId || !["cancelled", "completed", "failed"].includes(document.status)) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent did not confirm speech cancellation.");
+  return { taskId, status: document.status };
+}
 function mcpLogStatus(value, failed = false) {
   const task = value && typeof value === "object" && value.task && typeof value.task === "object" ? value.task : null;
   const candidate = task?.phase ?? value?.phase ?? task?.status ?? value?.status;
@@ -3600,7 +3708,7 @@ async function setActionBadge(state) {
     setup: { text: "", color: [0, 0, 0, 0], title: "ResearchTube: setup required" },
     // Keep the original toolbar icon. The neutral transparent badge makes a
     // routine MCP call visible without competing with a CAM/MIC recording.
-    working: { text: "...", color: [0, 0, 0, 0], title: "ResearchTube: working" },
+    working: { text: "?", color: [0, 0, 0, 0], title: "ResearchTube: working" },
     "youtube-rate-limited": { text: "!", color: "#b7791f", textColor: "#ffffff", title: "ResearchTube: YouTube search is temporarily limited" },
     "connection-error": { text: "\xD7", color: "#cf222e", textColor: "#ffffff", title: "ResearchTube: connection needs attention" }
   }[state] ?? { text: "", color: [0, 0, 0, 0], title: "ResearchTube" };
@@ -3803,6 +3911,23 @@ async function handleMcpRequest(request) {
   }
   if (request?.method === "tools/call" && request.params?.name === "system_agent_status") {
     return executeToolCall(request.id, "system_agent_status", {}, () => getAgentStatus());
+  }
+  if (request?.method === "tools/call" && request.params?.name === "system_speech_list_voices") {
+    return executeToolCall(request.id, "system_speech_list_voices", {}, speechListVoices);
+  }
+  if (request?.method === "tools/call" && request.params?.name === "system_speech_speak") {
+    const args = request.params.arguments ?? {};
+    return executeToolCall(request.id, "system_speech_speak", args, () => speechSpeak(args));
+  }
+  if (request?.method === "tools/call" && request.params?.name === "system_speech_status") {
+    const taskId = String(request.params.arguments?.taskId ?? "").trim();
+    if (!taskId) return toolError(request.id, localAgentError("INVALID_ARGUMENT", "taskId is required."));
+    return executeToolCall(request.id, "system_speech_status", { taskId }, () => speechStatus(taskId));
+  }
+  if (request?.method === "tools/call" && request.params?.name === "system_speech_cancel") {
+    const taskId = String(request.params.arguments?.taskId ?? "").trim();
+    if (!taskId) return toolError(request.id, localAgentError("INVALID_ARGUMENT", "taskId is required."));
+    return executeToolCall(request.id, "system_speech_cancel", { taskId }, () => speechCancel(taskId));
   }
   if (request?.method === "tools/call" && request.params?.name === "library_store_start") {
     const files = request.params.arguments?.files;

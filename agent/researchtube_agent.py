@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import ctypes
 from html import escape
 import json
@@ -32,11 +33,12 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote, unquote, urlparse
 from urllib.request import Request, urlopen
 
-AGENT_VERSION = "1.96.1"
-INTERFACE_VERSION = 61
+AGENT_VERSION = "1.100.0"
+INTERFACE_VERSION = 62
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
 TASK_POLL_INTERVAL_MS = 1_000
+SPEECH_MAX_TEXT_BYTES = 60 * 1024
 TASK_HEARTBEAT_SECONDS = 5
 MAX_DIAGNOSTIC_LINES = 20
 MAX_DIAGNOSTIC_LINE_LENGTH = 240
@@ -47,6 +49,7 @@ ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "agent-config.json"
 WORKSPACE_PATH = ROOT / "workspace"
 TOOLS_PATH = ROOT / "tools"
+WINDOWS_SPEECH_SCRIPT_PATH = TOOLS_PATH / "windows-speech" / "researchtube_speech.py"
 FONTS_PATH = TOOLS_PATH / "fonts"
 YOUTUBE_POT_PROVIDER_PATH = TOOLS_PATH / "youtube-pot-provider"
 YOUTUBE_POT_PROVIDER_SERVER_PATH = YOUTUBE_POT_PROVIDER_PATH / "server"
@@ -2020,6 +2023,195 @@ async def media_create_visual_map(payload: Any, progress: VisualMapProgressRepor
         raise
     finally:
         shutil.rmtree(temporary_directory.physical_path, ignore_errors=True)
+
+
+def windows_speech_python() -> str:
+    if sys.platform != "win32":
+        raise AgentApiError("SPEECH_NOT_SUPPORTED", "Windows text-to-speech is available only on Windows.")
+    if not WINDOWS_SPEECH_SCRIPT_PATH.is_file():
+        raise AgentApiError("SPEECH_NOT_AVAILABLE", "The Windows text-to-speech helper is not installed.")
+    return sys.executable
+
+
+def speech_options(payload: Any) -> dict[str, str | None]:
+    if not isinstance(payload, dict) or set(payload) - {"text", "voiceId"}:
+        raise AgentApiError("SPEECH_INVALID", "system_speech_speak accepts only text and optional voiceId.")
+    text = payload.get("text")
+    voice_id = payload.get("voiceId")
+    if not isinstance(text, str) or not text.strip():
+        raise AgentApiError("SPEECH_INVALID", "text must be a non-empty string.")
+    if len(text.encode("utf-8")) > SPEECH_MAX_TEXT_BYTES:
+        raise AgentApiError("SPEECH_INVALID", f"text must not exceed {SPEECH_MAX_TEXT_BYTES} UTF-8 bytes.")
+    if voice_id is not None and (not isinstance(voice_id, str) or not voice_id.strip()):
+        raise AgentApiError("SPEECH_INVALID", "voiceId must be null or a non-empty voiceId returned by system_speech_list_voices.")
+    return {"text": text, "voiceId": voice_id}
+
+
+def speech_base64(value: str | None) -> str:
+    return base64.b64encode((value or "").encode("utf-8")).decode("ascii")
+
+
+def normalize_speech_voice(voice: Any) -> dict[str, Any]:
+    """Keep Windows' optional/unknown VoiceGender from breaking voice discovery."""
+    if not isinstance(voice, dict):
+        raise AgentApiError("SPEECH_SYNTHESIS_FAILED", "Windows returned an invalid speech voice.")
+    voice_id, name, language = voice.get("voiceId"), voice.get("name"), voice.get("language")
+    if not isinstance(voice_id, str) or not voice_id or not isinstance(name, str) or not name or not isinstance(language, str) or not language or not isinstance(voice.get("isDefault"), bool):
+        raise AgentApiError("SPEECH_SYNTHESIS_FAILED", "Windows returned an invalid speech voice.")
+    gender = voice.get("gender")
+    return {"voiceId": voice_id, "name": name, "language": language, "gender": gender if gender in {"male", "female", "neutral"} else "neutral", "isDefault": voice["isDefault"]}
+
+
+async def system_speech_list_voices(payload: Any) -> dict[str, Any]:
+    if payload not in ({}, None):
+        raise AgentApiError("SPEECH_INVALID", "system_speech_list_voices does not accept arguments.")
+    executable = windows_speech_python()
+    try:
+        process = await asyncio.create_subprocess_exec(executable, str(WINDOWS_SPEECH_SCRIPT_PATH), "--action", "list-voices", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=15)
+    except asyncio.TimeoutError as error:
+        process.kill(); await process.communicate()
+        raise AgentApiError("SPEECH_SYNTHESIS_FAILED", "Windows could not enumerate speech voices in time.") from error
+    except OSError as error:
+        raise AgentApiError("SPEECH_NOT_AVAILABLE", "The Windows text-to-speech helper could not start.") from error
+    if process.returncode != 0:
+        raise AgentApiError("SPEECH_SYNTHESIS_FAILED", "Windows could not enumerate speech voices.")
+    try:
+        document = json.loads(stdout.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise AgentApiError("SPEECH_SYNTHESIS_FAILED", "Windows returned an invalid speech-voice list.") from error
+    voices = document.get("voices") if isinstance(document, dict) else None
+    if not isinstance(voices, list):
+        raise AgentApiError("SPEECH_SYNTHESIS_FAILED", "Windows returned an invalid speech-voice list.")
+    return {"voices": [normalize_speech_voice(voice) for voice in voices]}
+
+
+@dataclass
+class SpeechTask:
+    task_id: str
+    text: str
+    voice_id: str | None
+    created_at: str
+    last_updated_at: str
+    status: str = "working"
+    status_message: str = "Preparing speech."
+    phase: str = "preparing"
+    progress_percent: float = 0.0
+    error: dict[str, str] | None = None
+    process: asyncio.subprocess.Process | None = None
+    runner: asyncio.Task[None] | None = None
+
+    def touch(self, message: str | None = None) -> None:
+        self.last_updated_at = utc_now()
+        if message is not None:
+            self.status_message = message
+
+
+class SpeechTaskManager:
+    def __init__(self) -> None: self.tasks: dict[str, SpeechTask] = {}
+
+    def new_task_id(self) -> str:
+        while True:
+            task_id = f"tsk_{secrets.token_urlsafe(7)}"
+            if task_id not in self.tasks:
+                return task_id
+
+    def get(self, task_id: str) -> SpeechTask:
+        if not isinstance(task_id, str) or not task_id or task_id not in self.tasks:
+            raise AgentApiError("TASK_NOT_FOUND", "The requested speech task does not exist.")
+        return self.tasks[task_id]
+
+    def snapshot(self, task: SpeechTask) -> dict[str, Any]:
+        result: dict[str, Any] = {"taskId": task.task_id, "status": task.status, "phase": task.phase, "progressPercent": task.progress_percent, "statusMessage": task.status_message, "createdAt": task.created_at, "lastUpdatedAt": task.last_updated_at, "pollIntervalMs": TASK_POLL_INTERVAL_MS}
+        if task.error is not None:
+            result["error"] = task.error
+        return result
+
+    async def create(self, payload: Any) -> dict[str, Any]:
+        executable = windows_speech_python()
+        options = speech_options(payload)
+        now = utc_now()
+        task = SpeechTask(self.new_task_id(), options["text"] or "", options["voiceId"], now, now)
+        self.tasks[task.task_id] = task
+        task.runner = asyncio.create_task(self.run(task, executable), name=f"researchtube-speech-{task.task_id}")
+        return self.snapshot(task)
+
+    async def run(self, task: SpeechTask, executable: str) -> None:
+        stdout = b""; stderr = b""
+        try:
+            task.phase = "synthesizing"; task.touch("Synthesizing speech.")
+            task.process = await asyncio.create_subprocess_exec(
+                executable, str(WINDOWS_SPEECH_SCRIPT_PATH), "--action", "speak",
+                "--text-base64", "__STDIN__", "--voice-id-base64", speech_base64(task.voice_id),
+                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            assert task.process.stdin is not None
+            task.process.stdin.write(speech_base64(task.text).encode("ascii"))
+            await task.process.stdin.drain()
+            task.process.stdin.close()
+
+            async def read_events() -> None:
+                assert task.process is not None and task.process.stdout is not None
+                while line := await task.process.stdout.readline():
+                    try:
+                        event = json.loads(line.decode("utf-8"))
+                    except (UnicodeDecodeError, json.JSONDecodeError):
+                        continue
+                    if not isinstance(event, dict):
+                        continue
+                    completed, total = event.get("completedChunks"), event.get("totalChunks")
+                    if isinstance(completed, int) and isinstance(total, int) and total > 0:
+                        task.progress_percent = min(99.0, max(task.progress_percent, completed * 100.0 / total))
+                    reported_progress = event.get("progressPercent")
+                    if isinstance(reported_progress, (int, float)) and math.isfinite(reported_progress):
+                        task.progress_percent = min(99.0, max(task.progress_percent, float(reported_progress)))
+                    kind = event.get("event")
+                    if kind == "synthesizing": task.phase, task.status_message = "synthesizing", "Synthesizing speech."
+                    elif kind == "speaking": task.phase, task.status_message = "speaking", "Speaking through the default Windows audio output."
+                    task.last_updated_at = utc_now()
+
+            reader = asyncio.create_task(read_events())
+            assert task.process.stderr is not None
+            stderr = await task.process.stderr.read()
+            await task.process.wait()
+            await asyncio.gather(reader, return_exceptions=True)
+            if task.process.returncode != 0:
+                message = stderr.decode("utf-8", errors="replace")
+                code = "VOICE_NOT_FOUND" if "VOICE_NOT_FOUND" in message else "AUDIO_PLAYBACK_FAILED" if "AUDIO_PLAYBACK_FAILED" in message else "SPEECH_SYNTHESIS_FAILED"
+                raise AgentApiError(code, "The selected Windows voice was not found." if code == "VOICE_NOT_FOUND" else "Windows could not synthesize or play the requested speech.")
+            task.status, task.phase, task.progress_percent = "completed", "completed", 100.0
+            task.touch("Speech completed.")
+        except asyncio.CancelledError:
+            if task.process is not None and task.process.returncode is None:
+                task.process.terminate()
+                try: await asyncio.wait_for(task.process.wait(), timeout=2)
+                except asyncio.TimeoutError: task.process.kill()
+            task.status, task.phase = "cancelled", "cancelled"; task.touch("Speech cancelled.")
+            raise
+        except AgentApiError as error:
+            task.status, task.phase, task.error = "failed", "failed", {"code": error.code, "message": error.message}; task.touch("Speech failed.")
+        except (OSError, asyncio.SubprocessError) as error:
+            task.status, task.phase, task.error = "failed", "failed", {"code": "SPEECH_SYNTHESIS_FAILED", "message": "Windows could not start text-to-speech."}; task.touch("Speech failed.")
+        finally:
+            task.process = None
+
+    async def cancel(self, task_id: str) -> dict[str, Any]:
+        task = self.get(task_id)
+        if task.status == "working" and task.runner is not None and not task.runner.done():
+            if task.process is not None and task.process.returncode is None:
+                task.process.terminate()
+            task.status, task.phase = "cancelled", "cancelled"
+            task.touch("Speech cancelled.")
+            task.runner.cancel()
+        return {"taskId": task.task_id, "status": task.status}
+
+    async def shutdown(self) -> None:
+        runners = [task.runner for task in self.tasks.values() if task.runner is not None and not task.runner.done()]
+        for runner in runners: runner.cancel()
+        if runners: await asyncio.gather(*runners, return_exceptions=True)
+
+
+SPEECH_TASKS = SpeechTaskManager()
 
 
 @dataclass
@@ -4740,6 +4932,10 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             response_status, response_body = "200 OK", await workspace_share_stop()
         elif method == "POST" and path == "/media/probe":
             response_status, response_body = "200 OK", await media_probe(parse_json_body(body))
+        elif method == "POST" and path == "/system/speech/voices":
+            response_status, response_body = "200 OK", await system_speech_list_voices(parse_json_body(body))
+        elif method == "POST" and path == "/tasks/system-speech":
+            response_status, response_body = "201 Created", await SPEECH_TASKS.create(parse_json_body(body))
         elif method == "POST" and path == "/tasks/capture-frame":
             response_status, response_body = "201 Created", await CAPTURE_FRAME_TASKS.create(parse_json_body(body))
         elif method == "POST" and path == "/media/camera/list":
@@ -4779,6 +4975,9 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             task_id = path.removeprefix("/tasks/visual-map/").removesuffix("/cancel").rstrip("/")
             await VISUAL_MAP_TASKS.cancel(task_id)
             response_status, response_body = "202 Accepted", {"accepted": True}
+        elif method == "POST" and path.startswith("/tasks/system-speech/") and path.endswith("/cancel"):
+            task_id = path.removeprefix("/tasks/system-speech/").removesuffix("/cancel").rstrip("/")
+            response_status, response_body = "200 OK", await SPEECH_TASKS.cancel(task_id)
         elif method == "POST" and path.startswith("/tasks/capture-frame/") and path.endswith("/cancel"):
             task_id = path.removeprefix("/tasks/capture-frame/").removesuffix("/cancel").rstrip("/")
             await CAPTURE_FRAME_TASKS.cancel(task_id)
@@ -4798,6 +4997,8 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             response_status, response_body = "202 Accepted", {"accepted": True}
         elif method == "GET" and path.startswith("/tasks/visual-map/"):
             response_status, response_body = "200 OK", VISUAL_MAP_TASKS.snapshot(VISUAL_MAP_TASKS.get(path.removeprefix("/tasks/visual-map/")))
+        elif method == "GET" and path.startswith("/tasks/system-speech/"):
+            response_status, response_body = "200 OK", SPEECH_TASKS.snapshot(SPEECH_TASKS.get(path.removeprefix("/tasks/system-speech/")))
         elif method == "GET" and path.startswith("/tasks/capture-frame/"):
             response_status, response_body = "200 OK", CAPTURE_FRAME_TASKS.snapshot(CAPTURE_FRAME_TASKS.get(path.removeprefix("/tasks/capture-frame/")))
         elif method == "GET" and path.startswith("/tasks/camera-record/"):
@@ -4855,6 +5056,7 @@ async def serve(port: int) -> None:
         async with PUBLIC_SHARE_LOCK:
             await stop_public_share_unlocked()
         await CAPTURE_FRAME_TASKS.shutdown()
+        await SPEECH_TASKS.shutdown()
         await VISUAL_MAP_TASKS.shutdown()
         await CAMERA_RECORD_TASKS.shutdown()
         await TASKS.shutdown()

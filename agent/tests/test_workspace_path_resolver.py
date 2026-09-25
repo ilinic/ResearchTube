@@ -656,6 +656,18 @@ class CaptureFrameTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(agent.youtube_section_expected_bytes({"bitrateBps": 800_000}, 15.0), 1_500_000)
         self.assertIsNone(agent.youtube_section_expected_bytes({"bitrateBps": None}, 15.0))
 
+    def test_speech_options_and_task_snapshot_are_compact(self) -> None:
+        self.assertEqual(agent.speech_options({"text": "Привет", "voiceId": None}), {"text": "Привет", "voiceId": None})
+        self.assertEqual(agent.WINDOWS_SPEECH_SCRIPT_PATH.name, "researchtube_speech.py")
+        self.assertEqual(agent.normalize_speech_voice({"voiceId": "id", "name": "Voice", "language": "ru-RU", "gender": "unknown", "isDefault": False})["gender"], "neutral")
+        with self.assertRaises(agent.AgentApiError) as error:
+            agent.speech_options({"text": ""})
+        self.assertEqual(error.exception.code, "SPEECH_INVALID")
+        manager = agent.SpeechTaskManager()
+        task = agent.SpeechTask("tsk_abcdefghij", "Hello", None, "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z")
+        self.assertEqual(manager.snapshot(task)["status"], "working")
+        self.assertEqual(manager.snapshot(task)["phase"], "preparing")
+
     async def test_youtube_batch_retries_only_the_failed_section(self) -> None:
         commands: list[tuple[str, ...]] = []
 
