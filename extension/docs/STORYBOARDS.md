@@ -1,6 +1,6 @@
-# YouTube Storyboards — ResearchTube 2.2.15
+# YouTube Storyboards — ResearchTube 2.2.18
 
-Extension 2.2.15, Agent 1.105.6, interface 66. Install both components together.
+Extension 2.2.18, Agent 1.106.0, interface 67. Install both components together.
 The Agent now includes `storyboards.py`; keep it beside `researchtube_agent.py`.
 No additional Python packages or media executables are needed for sheet transfers.
 

@@ -47,8 +47,8 @@ const MCP_TOOL_SETTINGS = Object.freeze({
   clipboard_status: { group: "clipboard" }, clipboard_get: { group: "clipboard" }, clipboard_set: { group: "clipboard" },
   library_store_start: { group: "library" }, library_store_status: { group: "library" }, library_store_cancel: { group: "library" }, online_share_start: { group: "online" }, online_share_status: { group: "online" }, online_share_stop: { group: "online" }
 });
-const EXTENSION_VERSION = "2.2.15";
-const REQUIRED_AGENT_INTERFACE_VERSION = 66;
+const EXTENSION_VERSION = "2.2.18";
+const REQUIRED_AGENT_INTERFACE_VERSION = 67;
 // A UI resource URI is a cache key in MCP Apps. Increment it whenever the
 // rendered template changes so ChatGPT does not reuse a stale iframe bundle.
 const CAPTURE_FRAME_WIDGET_URI = "ui://researchtube/capture-frame-v44.html";
@@ -57,6 +57,10 @@ const RESEARCHTUBE_MCP_INSTRUCTIONS = "ResearchTube exposes MCP tools that may b
 const CAPTURE_FRAME_OFFSCREEN_DOCUMENT = "capture-frame-offscreen.html";
 const GOOGLE_TRANSLATE_URL = "https://translate.google.com/";
 const GOOGLE_TRANSLATE_TAB_TIMEOUT_MS = 20_000;
+const GOOGLE_TRANSLATE_AUDIO_TIMEOUT_MS = 60_000;
+const GOOGLE_TRANSLATE_AUDIO_QUIET_MS = 750;
+const GOOGLE_TRANSLATE_MAX_AUDIO_BYTES = 16 * 1024 * 1024;
+const GOOGLE_TRANSLATE_PLAYBACK_TIMEOUT_MS = 10 * 60_000;
 const AGENT_HEALTH_TIMEOUT_MS = 5_000;
 const AGENT_TASK_TIMEOUT_MS = 10_000;
 const AGENT_CAPTURE_FRAME_TIMEOUT_MS = 90_000;
@@ -340,10 +344,10 @@ const speechTaskSchema = {
   type: "object", additionalProperties: false,
   properties: {
     taskId: { type: "string", pattern: "^tsk_[A-Za-z0-9_-]{10}$" }, status: { type: "string", enum: ["working", "completed", "cancelled", "failed"] },
-    phase: { type: "string", enum: ["preparing", "openingTranslate", "synthesizing", "playing", "recording", "saving", "speaking", "completed", "cancelled", "failed"] }, progressPercent: { type: "number", minimum: 0, maximum: 100 }, statusMessage: { type: "string", minLength: 1 },
+    phase: { type: "string", enum: ["preparing", "openingTranslate", "synthesizing", "playing", "capturing", "saving", "speaking", "completed", "cancelled", "failed"] }, progressPercent: { type: "number", minimum: 0, maximum: 100 }, statusMessage: { type: "string", minLength: 1 },
     engine: { type: "string", enum: ["windows", "googleTranslate"] }, voiceName: { type: "string", minLength: 1 }, outputMode: { type: "string", enum: ["file", "speakers", "both"] }, saveToFile: { type: "boolean" }, outputPath: nullableString,
     createdAt: { type: "string", format: "date-time" }, lastUpdatedAt: { type: "string", format: "date-time" }, pollIntervalMs: { type: "integer", minimum: 100 },
-    result: { type: "object", additionalProperties: false, properties: { filePath: { type: "string", minLength: 1 }, format: { type: "string", enum: ["wav", "webm"] }, mimeType: { type: "string", enum: ["audio/wav", "audio/webm"] } }, required: ["filePath", "format", "mimeType"] },
+    result: { type: "object", additionalProperties: false, properties: { filePath: { type: "string", minLength: 1 }, format: { type: "string", enum: ["wav", "mp3"] }, mimeType: { type: "string", enum: ["audio/wav", "audio/mpeg"] } }, required: ["filePath", "format", "mimeType"] },
     error: { type: "object", additionalProperties: false, properties: { code: { type: "string" }, message: { type: "string" } }, required: ["code", "message"] }
   },
   required: ["taskId", "status", "phase", "progressPercent", "statusMessage", "engine", "voiceName", "outputMode", "saveToFile", "outputPath", "createdAt", "lastUpdatedAt", "pollIntervalMs"]
@@ -857,9 +861,9 @@ function toolDefinitions() {
     {
       name: "system_speech_speak",
       title: "Synthesize speech",
-      description: "Synthesize text asynchronously. engine googleTranslate is the default: ResearchTube opens a background Google Translate tab without changing the active ChatGPT tab, lets Google detect the text language automatically, inserts the text, and presses its listen control. engine windows is the explicit alternative and uses a selected Windows voice. outputMode is exactly one of: speakers (play only), file (save only), or both. Google Translate file output records only its tab audio as WebM/Opus; Windows file output is WAV. For file or both, outputPath is optional: when omitted the tool writes text-to-speech/<engine or selected voice name> <UTC timestamp> [tts_<id>].<format>. The call returns immediately; poll system_speech_status no faster than pollIntervalMs.",
+      description: "Synthesize text asynchronously. engine googleTranslate is the default: ResearchTube opens a background Google Translate tab without changing the active ChatGPT tab, lets Google detect the text language automatically, inserts the text, and presses its listen control. engine windows is the explicit alternative and uses a selected Windows voice. outputMode is exactly one of: speakers (play only), file (save only), or both. Google Translate file output saves the source MP3 returned to its page through CDP network events; Windows file output is WAV. For file or both, outputPath is optional: when omitted the tool writes text-to-speech/<engine or selected voice name> <UTC timestamp> [tts_<id>].<format>. The call returns immediately; poll system_speech_status no faster than pollIntervalMs.",
       annotations: localWorkspaceWriteAnnotations,
-      inputSchema: { type: "object", additionalProperties: false, properties: { text: { type: "string", minLength: 1, maxLength: 60000 }, engine: { type: "string", enum: ["googleTranslate", "windows"], default: "googleTranslate" }, voiceId: { type: ["string", "null"], default: null, description: "Windows voice only; omit for Google Translate." }, outputMode: { type: "string", enum: ["file", "speakers", "both"], default: "speakers" }, outputPath: { ...nullableString, description: "Optional safe workspace-relative .webm path for Google Translate or .wav path for Windows; available only when outputMode is file or both." } }, required: ["text"] },
+      inputSchema: { type: "object", additionalProperties: false, properties: { text: { type: "string", minLength: 1, maxLength: 60000 }, engine: { type: "string", enum: ["googleTranslate", "windows"], default: "googleTranslate" }, voiceId: { type: ["string", "null"], default: null, description: "Windows voice only; omit for Google Translate." }, outputMode: { type: "string", enum: ["file", "speakers", "both"], default: "speakers" }, outputPath: { ...nullableString, description: "Optional safe workspace-relative .mp3 path for Google Translate or .wav path for Windows; available only when outputMode is file or both." } }, required: ["text"] },
       outputSchema: speechTaskSchema,
       _meta: { "openai/toolInvocation/invoking": "Starting speech…", "openai/toolInvocation/invoked": "Speech task started." }
     },
@@ -875,7 +879,7 @@ function toolDefinitions() {
     {
       name: "system_speech_cancel",
       title: "Cancel speech",
-      description: "Stop a working speech task as quickly as practical. Cancellation stops playback or recording and releases local resources. The Google Translate tab is deliberately retained and is never closed by ResearchTube.",
+      description: "Stop a working speech task as quickly as practical. Cancellation stops playback or source-audio collection and releases local resources. The Google Translate tab is deliberately retained and is never closed by ResearchTube.",
       annotations: localWorkspaceWriteAnnotations,
       inputSchema: { type: "object", additionalProperties: false, properties: { taskId: { type: "string", minLength: 1 } }, required: ["taskId"] },
       outputSchema: speechCancelSchema,
@@ -2452,7 +2456,7 @@ function normalizeSpeechTaskId(value) {
 function normalizeSpeechTask(document) {
   if (!document || typeof document !== "object" || Array.isArray(document) || typeof document.taskId !== "string" || !/^tsk_[A-Za-z0-9_-]{10}$/.test(document.taskId)
     || !["working", "completed", "cancelled", "failed"].includes(document.status)
-    || !["preparing", "openingTranslate", "synthesizing", "playing", "recording", "saving", "speaking", "completed", "cancelled", "failed"].includes(document.phase)
+    || !["preparing", "openingTranslate", "synthesizing", "playing", "capturing", "saving", "speaking", "completed", "cancelled", "failed"].includes(document.phase)
     || !Number.isFinite(document.progressPercent) || document.progressPercent < 0 || document.progressPercent > 100
     || typeof document.statusMessage !== "string" || !document.statusMessage || !["windows", "googleTranslate"].includes(document.engine) || typeof document.voiceName !== "string" || !document.voiceName
     || !["file", "speakers", "both"].includes(document.outputMode) || typeof document.saveToFile !== "boolean"
@@ -2464,7 +2468,7 @@ function normalizeSpeechTask(document) {
   if (document.saveToFile !== (document.outputMode === "file" || document.outputMode === "both") || (document.saveToFile !== Boolean(document.outputPath))) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned inconsistent speech output settings.");
   const task = { taskId: document.taskId, status: document.status, phase: document.phase, progressPercent: document.progressPercent, statusMessage: document.statusMessage, engine: document.engine, voiceName: document.voiceName, outputMode: document.outputMode, saveToFile: document.saveToFile, outputPath: document.outputPath, createdAt: document.createdAt, lastUpdatedAt: document.lastUpdatedAt, pollIntervalMs: document.pollIntervalMs };
   if (document.result !== undefined) {
-    const expected = document.engine === "googleTranslate" ? ["webm", "audio/webm"] : ["wav", "audio/wav"];
+    const expected = document.engine === "googleTranslate" ? ["mp3", "audio/mpeg"] : ["wav", "audio/wav"];
     if (!document.result || typeof document.result !== "object" || typeof document.result.filePath !== "string" || !document.result.filePath || document.result.format !== expected[0] || document.result.mimeType !== expected[1] || !document.saveToFile || document.result.filePath !== document.outputPath) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid speech file result.");
     task.result = { filePath: document.result.filePath, format: expected[0], mimeType: expected[1] };
   }
@@ -2497,7 +2501,7 @@ function normalizeSpeechInput(argumentsValue = {}) {
   const outputMode = args.outputMode ?? "speakers";
   if (!["file", "speakers", "both"].includes(outputMode)) throw localAgentError("SPEECH_INVALID", "outputMode must be one of: file, speakers, both.");
   const outputPath = args.outputPath === undefined || args.outputPath === null ? null : normalizeWorkspacePath(args.outputPath, "outputPath");
-  const extension = engine === "googleTranslate" ? ".webm" : ".wav";
+  const extension = engine === "googleTranslate" ? ".mp3" : ".wav";
   if (outputPath !== null && !outputPath.toLowerCase().endsWith(extension)) throw localAgentError("SPEECH_INVALID", `outputPath must end in ${extension} for engine ${engine}.`);
   if (outputMode === "speakers" && outputPath !== null) throw localAgentError("SPEECH_INVALID", "outputPath is available only when outputMode is file or both.");
   return { text: args.text, engine, voiceId: args.voiceId ?? null, outputMode, outputPath };
@@ -2640,6 +2644,39 @@ async function googleTranslatePressListen(tabId, signal, debuggerAlreadyAttached
   }
 }
 
+async function waitForGoogleTranslatePlaybackEnd(tabId, signal) {
+  const deadline = Date.now() + GOOGLE_TRANSLATE_PLAYBACK_TIMEOUT_MS;
+  let sawPlayback = false;
+  let idleSince = null;
+  while (Date.now() < deadline) {
+    googleTranslateAbort(signal);
+    const state = (await cdpEvaluate(tabId, `(() => {
+      const controls = [...document.querySelectorAll('button[data-aria-label-on="Stop listening"][data-aria-label-off="Listen to source text"], [role="button"][data-aria-label-on="Stop listening"][data-aria-label-off="Listen to source text"], button[aria-label="Listen to source text"], button[aria-label="Stop listening"]')];
+      const button = controls.find(element => {
+        const style = getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return style.visibility !== "hidden" && style.display !== "none" && rect.width > 2 && rect.height > 2;
+      });
+      if (!button) return "unavailable";
+      return button.getAttribute("aria-label") === "Stop listening" ? "playing" : "idle";
+    })()`))?.value;
+    if (state === "playing") {
+      sawPlayback = true;
+      idleSince = null;
+    } else if (state === "idle") {
+      if (sawPlayback) return;
+      // Very short phrases can finish between the click and the first poll.
+      // A stable idle state then means there is no audible tail to wait for.
+      idleSince ??= Date.now();
+      if (Date.now() - idleSince >= 1_200) return;
+    } else {
+      idleSince = null;
+    }
+    await sleep(100);
+  }
+  throw new Error("Google Translate playback did not finish in time.");
+}
+
 async function waitForGoogleTranslateListenControl(tabId, signal) {
   const deadline = Date.now() + GOOGLE_TRANSLATE_TAB_TIMEOUT_MS;
   while (Date.now() < deadline) {
@@ -2658,10 +2695,138 @@ async function waitForGoogleTranslateListenControl(tabId, signal) {
   throw new Error("Google Translate listen control did not become active.");
 }
 
-async function googleTranslateOffscreen(message) {
-  const result = await chrome.runtime.sendMessage(message);
-  if (!result?.ok) throw new Error(String(result?.message || "Google Translate audio helper failed."));
+function googleTranslateBase64Bytes(value) {
+  if (typeof value !== "string" || !/^[A-Za-z0-9+/_-]+={0,2}$/.test(value) || value.length < 16) return null;
+  try {
+    const source = value.replace(/-/g, "+").replace(/_/g, "/");
+    const binary = atob(source.padEnd(Math.ceil(source.length / 4) * 4, "="));
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+    return bytes;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function googleTranslateIsMp3(bytes) {
+  return bytes instanceof Uint8Array && (bytes.length >= 3 && bytes[0] === 0x49 && bytes[1] === 0x44 && bytes[2] === 0x33
+    || bytes.length >= 2 && bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0);
+}
+
+function googleTranslateBatchAudioChunks(body) {
+  if (typeof body !== "string") return [];
+  const chunks = [];
+  const rpc = /"jQ1olc"\s*,\s*"((?:\\.|[^"\\])*)"/g;
+  for (const match of body.matchAll(rpc)) {
+    try {
+      const payload = JSON.parse(`"${match[1]}"`);
+      const decodedPayload = JSON.parse(payload);
+      const encodedAudio = Array.isArray(decodedPayload) ? decodedPayload[0] : null;
+      const bytes = googleTranslateBase64Bytes(encodedAudio);
+      if (googleTranslateIsMp3(bytes)) chunks.push(bytes);
+    } catch (_error) {
+      // Other batchexecute RPC payloads are expected and contain no audio.
+    }
+  }
+  return chunks;
+}
+
+function googleTranslateConcatenateAudio(chunks, totalBytes) {
+  const result = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) { result.set(chunk, offset); offset += chunk.length; }
   return result;
+}
+
+async function googleTranslateNetworkAudioCapture(tabId) {
+  const candidates = new Map();
+  const chunks = [];
+  let totalBytes = 0;
+  let lastAudioAt = null;
+  let captureError = null;
+  const addChunks = audioChunks => {
+    for (const chunk of audioChunks) {
+      if (!googleTranslateIsMp3(chunk)) continue;
+      totalBytes += chunk.length;
+      if (totalBytes > GOOGLE_TRANSLATE_MAX_AUDIO_BYTES) {
+        captureError = new Error("Google Translate source audio exceeded the local file limit.");
+        return;
+      }
+      chunks.push(chunk);
+      lastAudioAt = Date.now();
+    }
+  };
+  const readCandidate = async (requestId, candidate) => {
+    try {
+      // Do not use cdpCommand here: a response can legitimately disappear from
+      // Chrome's small in-memory cache, and that must not produce a noisy log.
+      const result = await chrome.debugger.sendCommand({ tabId }, "Network.getResponseBody", { requestId });
+      const body = result?.body;
+      if (candidate.kind === "batch") addChunks(googleTranslateBatchAudioChunks(body));
+      else {
+        const direct = result?.base64Encoded === true ? googleTranslateBase64Bytes(body) : null;
+        if (googleTranslateIsMp3(direct)) addChunks([direct]);
+      }
+    } catch (_error) {
+      // A non-audio Translate request can be evicted before loadingFinished.
+    }
+  };
+  const onEvent = (source, method, params) => {
+    if (source.tabId !== tabId) return;
+    if (method === "Network.responseReceived") {
+      const response = params?.response;
+      const url = typeof response?.url === "string" ? response.url : "";
+      const mimeType = typeof response?.mimeType === "string" ? response.mimeType.toLowerCase() : "";
+      const fromTranslate = /^https:\/\/(?:[^/]+\.)?translate\.google\.com\//.test(url);
+      if (!fromTranslate || !Number.isInteger(params?.requestId) && typeof params?.requestId !== "string") return;
+      if (url.includes("/_/TranslateWebserverUi/data/batchexecute")) candidates.set(params.requestId, { kind: "batch" });
+      else if (url.includes("/translate_tts") || mimeType.startsWith("audio/")) candidates.set(params.requestId, { kind: "direct" });
+      return;
+    }
+    if (method === "Network.loadingFinished" && candidates.has(params?.requestId)) {
+      const candidate = candidates.get(params.requestId);
+      candidates.delete(params.requestId);
+      void readCandidate(params.requestId, candidate);
+    }
+  };
+  chrome.debugger.onEvent.addListener(onEvent);
+  try {
+    await cdpCommand(tabId, "Network.enable", {
+      maxTotalBufferSize: GOOGLE_TRANSLATE_MAX_AUDIO_BYTES + 1024 * 1024,
+      maxResourceBufferSize: GOOGLE_TRANSLATE_MAX_AUDIO_BYTES + 1024 * 1024
+    });
+  } catch (error) {
+    chrome.debugger.onEvent.removeListener(onEvent);
+    throw error;
+  }
+  return {
+    async waitForAudio(signal) {
+      const deadline = Date.now() + GOOGLE_TRANSLATE_AUDIO_TIMEOUT_MS;
+      while (Date.now() < deadline) {
+        googleTranslateAbort(signal);
+        if (captureError) throw captureError;
+        if (chunks.length && lastAudioAt !== null && Date.now() - lastAudioAt >= GOOGLE_TRANSLATE_AUDIO_QUIET_MS) {
+          return googleTranslateConcatenateAudio(chunks, totalBytes);
+        }
+        await sleep(100);
+      }
+      if (captureError) throw captureError;
+      throw new Error("Google Translate did not return source audio through its network response.");
+    },
+    dispose() { chrome.debugger.onEvent.removeListener(onEvent); }
+  };
+}
+
+async function uploadGoogleTranslateAudio(taskId, uploadToken, audio) {
+  const config = await getConfig();
+  const port = normalizeAgentPort(config.agentPort);
+  const response = await fetch(`http://127.0.0.1:${port}/tasks/system-speech/${encodeURIComponent(taskId)}/google-translate-audio?token=${encodeURIComponent(uploadToken)}`, {
+    method: "POST", headers: { "Content-Type": "audio/mpeg" }, body: audio
+  });
+  let document = null;
+  try { document = await response.json(); } catch (_error) { /* The status below is sufficient. */ }
+  if (!response.ok) throw new Error(typeof document?.error?.message === "string" ? document.error.message : "The Local Agent could not save Google Translate source audio.");
+  return normalizeSpeechTask(document);
 }
 
 async function startGoogleTranslateSpeechTask(taskId, uploadToken, input) {
@@ -2670,6 +2835,8 @@ async function startGoogleTranslateSpeechTask(taskId, uploadToken, input) {
   googleTranslateSpeechRunners.set(taskId, active);
   let completed = false;
   let focusEmulationAttached = false;
+  let audioCapture = null;
+  let restoreGoogleTranslateTabMute = false;
   try {
     await googleTranslateProgress(taskId, uploadToken, "openingTranslate", 5);
     const tab = await acquireGoogleTranslateTab();
@@ -2689,38 +2856,47 @@ async function startGoogleTranslateSpeechTask(taskId, uploadToken, input) {
       // emulation and CDP input still provide the normal TTS path.
       cdpLog("Google Translate active lifecycle emulation is unavailable", { tabId: tab.id, error: safeErrorMessage(error) });
     }
+    // Google can prefetch its audio when text is inserted or when the listen
+    // control becomes available. Enable Network before either action.
+    if (input.outputMode !== "speakers") audioCapture = await googleTranslateNetworkAudioCapture(tab.id);
     await waitForGoogleTranslateTab(tab.id, controller.signal);
     await googleTranslateSetText(tab.id, input.text, controller.signal);
     await googleTranslateProgress(taskId, uploadToken, "synthesizing", 20);
     await waitForGoogleTranslateListenControl(tab.id, controller.signal);
     await googleTranslateProgress(taskId, uploadToken, "playing", 28);
-    // Speaker-only playback is already produced by the active Google Translate
-    // tab. Do not make a tab-audio capture a prerequisite for pressing Listen.
+    // Google must still perform its ordinary page playback for the network
+    // response to arrive. In file-only mode, mute only its audible tab output.
+    // Preserve a mute state that the user had already selected themselves.
+    if (input.outputMode === "file") {
+      const currentTab = await chrome.tabs.get(tab.id);
+      if (currentTab.mutedInfo?.muted !== true) {
+        await chrome.tabs.update(tab.id, { muted: true });
+        restoreGoogleTranslateTabMute = true;
+      }
+    }
+    await googleTranslatePressListen(tab.id, controller.signal, true);
     if (input.outputMode === "speakers") {
-      await googleTranslatePressListen(tab.id, controller.signal, true);
       await agentJsonRequest(`/tasks/system-speech/${encodeURIComponent(taskId)}/google-translate-complete`, { method: "POST", body: { uploadToken } });
       completed = true;
       return;
     }
-    await ensureCaptureFrameOffscreenDocument();
-    googleTranslateAbort(controller.signal);
-    const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tab.id });
-    if (typeof streamId !== "string" || !streamId) throw new Error("Chrome did not provide Google Translate tab audio.");
-    await googleTranslateOffscreen({ type: "researchtube_google_translate_start", taskId, streamId, record: true, relayAudio: input.outputMode === "both" });
-    await googleTranslateProgress(taskId, uploadToken, "recording", 35);
-    await googleTranslatePressListen(tab.id, controller.signal, true);
-    const config = await getConfig();
-    const uploadUrl = `http://127.0.0.1:${normalizeAgentPort(config.agentPort)}/tasks/system-speech/${encodeURIComponent(taskId)}/google-translate-audio?token=${encodeURIComponent(uploadToken)}`;
-    await googleTranslateOffscreen({ type: "researchtube_google_translate_finish", taskId, uploadUrl });
+    await googleTranslateProgress(taskId, uploadToken, "capturing", 35);
+    const audio = await audioCapture.waitForAudio(controller.signal);
+    if (input.outputMode === "file") await waitForGoogleTranslatePlaybackEnd(tab.id, controller.signal);
+    await googleTranslateProgress(taskId, uploadToken, "saving", 75);
+    await uploadGoogleTranslateAudio(taskId, uploadToken, audio);
     completed = true;
   } catch (error) {
     if (error?.name !== "AbortError") {
       const text = String(error?.message || error || "");
-      const code = /audio|record|stream/i.test(text) ? "GOOGLE_TRANSLATE_RECORDING_FAILED" : /listen|play/i.test(text) ? "GOOGLE_TRANSLATE_PLAYBACK_FAILED" : "GOOGLE_TRANSLATE_UNAVAILABLE";
+      const code = /audio|network|response|mp3/i.test(text) ? "GOOGLE_TRANSLATE_AUDIO_UNAVAILABLE" : /listen|play/i.test(text) ? "GOOGLE_TRANSLATE_PLAYBACK_FAILED" : "GOOGLE_TRANSLATE_UNAVAILABLE";
       await googleTranslateFail(taskId, uploadToken, code);
     }
   } finally {
-    if (!completed) void chrome.runtime.sendMessage({ type: "researchtube_google_translate_stop", taskId }).catch(() => undefined);
+    audioCapture?.dispose();
+    if (restoreGoogleTranslateTabMute && Number.isInteger(active.tabId)) {
+      await chrome.tabs.update(active.tabId, { muted: false }).catch(error => cdpErrorLog("Could not restore Google Translate tab audio", { tabId: active.tabId, error: safeErrorMessage(error) }));
+    }
     if (focusEmulationAttached && Number.isInteger(active.tabId)) {
       try { await cdpCommand(active.tabId, "Emulation.setFocusEmulationEnabled", { enabled: false }); }
       catch (error) { cdpErrorLog("Could not disable Google Translate focus emulation", { tabId: active.tabId, error: safeErrorMessage(error) }); }
@@ -2736,7 +2912,6 @@ async function speechCancel(taskId) {
   const active = googleTranslateSpeechRunners.get(taskId);
   if (active) {
     active.controller.abort();
-    void chrome.runtime.sendMessage({ type: "researchtube_google_translate_stop", taskId }).catch(() => undefined);
   }
   const document = await agentJsonRequest(`/tasks/system-speech/${encodeURIComponent(taskId)}/cancel`, { method: "POST", body: {} });
   if (!document || document.taskId !== taskId || !["cancelled", "completed", "failed"].includes(document.status)) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent did not confirm speech cancellation.");
@@ -3807,8 +3982,8 @@ async function ensureCaptureFrameOffscreenDocument() {
     if (!contexts.length) {
       await chrome.offscreen.createDocument({
         url: CAPTURE_FRAME_OFFSCREEN_DOCUMENT,
-        reasons: ["CLIPBOARD", "USER_MEDIA", "AUDIO_PLAYBACK"],
-        justification: "Copy a requested workspace path and capture or relay tab audio for a user-requested Google Translate speech task."
+        reasons: ["CLIPBOARD"],
+        justification: "Copy a requested workspace path through Chrome's local clipboard helper."
       });
     }
   })();

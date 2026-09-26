@@ -34,8 +34,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote, unquote, urlparse
 from urllib.request import Request, urlopen
 
-AGENT_VERSION = "1.105.6"
-INTERFACE_VERSION = 66
+AGENT_VERSION = "1.106.0"
+INTERFACE_VERSION = 67
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
 MAX_GOOGLE_TRANSLATE_AUDIO_BYTES = 16 * 1024 * 1024
@@ -2054,7 +2054,7 @@ def speech_options(payload: Any) -> dict[str, Any]:
             raise AgentApiError("SPEECH_INVALID", "voiceId is available only with the Windows speech engine.")
     output_path = payload.get("outputPath")
     if output_path is not None and (not isinstance(output_path, str) or not output_path.strip()):
-        raise AgentApiError("SPEECH_INVALID", "outputPath must be omitted, null, or a non-empty workspace-relative WAV path.")
+        raise AgentApiError("SPEECH_INVALID", "outputPath must be omitted, null, or a non-empty workspace-relative audio path.")
     output_mode = payload.get("outputMode", "speakers")
     if output_mode not in {"file", "speakers", "both"}:
         raise AgentApiError("SPEECH_INVALID", "outputMode must be one of: file, speakers, both.")
@@ -2219,7 +2219,7 @@ class SpeechTaskManager:
         now = utc_now()
         if options["engine"] == "googleTranslate":
             voice_name = "Google Translate (auto)"
-            output_path = self.prepare_output_path(options, voice_name, "webm")
+            output_path = self.prepare_output_path(options, voice_name, "mp3")
             task = SpeechTask(self.new_task_id(), options["text"], None, voice_name, options["outputMode"], output_path, now, now,
                               engine="googleTranslate", upload_token=secrets.token_urlsafe(24),
                               status_message="Opening Google Translate.", phase="preparing")
@@ -2267,7 +2267,7 @@ class SpeechTaskManager:
         task = self.google_task(task_id, payload["uploadToken"])
         phase = payload["phase"]
         progress = payload["progressPercent"]
-        messages = {"openingTranslate": "Opening Google Translate.", "synthesizing": "Waiting for Google Translate to prepare speech.", "playing": "Playing Google Translate speech.", "recording": "Recording Google Translate tab audio.", "saving": "Saving recorded Google Translate speech."}
+        messages = {"openingTranslate": "Opening Google Translate.", "synthesizing": "Waiting for Google Translate to prepare speech.", "playing": "Playing Google Translate speech.", "capturing": "Collecting Google Translate source audio.", "saving": "Saving Google Translate source audio."}
         if phase not in messages or not isinstance(progress, (int, float)) or isinstance(progress, bool) or not math.isfinite(progress) or not 0 <= progress < 100:
             raise AgentApiError("GOOGLE_TRANSLATE_TASK_INVALID", "Google Translate progress is invalid.")
         task.phase, task.progress_percent = phase, max(task.progress_percent, float(progress))
@@ -2288,7 +2288,7 @@ class SpeechTaskManager:
         if not isinstance(payload, dict) or set(payload) != {"uploadToken", "code"}:
             raise AgentApiError("GOOGLE_TRANSLATE_TASK_INVALID", "Google Translate failure is invalid.")
         task = self.google_task(task_id, payload["uploadToken"])
-        messages = {"GOOGLE_TRANSLATE_UNAVAILABLE": "Google Translate could not prepare the requested speech.", "GOOGLE_TRANSLATE_PLAYBACK_FAILED": "Google Translate could not play the requested speech.", "GOOGLE_TRANSLATE_RECORDING_FAILED": "Chrome could not record Google Translate tab audio."}
+        messages = {"GOOGLE_TRANSLATE_UNAVAILABLE": "Google Translate could not prepare the requested speech.", "GOOGLE_TRANSLATE_PLAYBACK_FAILED": "Google Translate could not play the requested speech.", "GOOGLE_TRANSLATE_AUDIO_UNAVAILABLE": "Chrome could not obtain the Google Translate source audio."}
         if payload["code"] not in messages:
             raise AgentApiError("GOOGLE_TRANSLATE_TASK_INVALID", "Google Translate failure is invalid.")
         task.status, task.phase, task.error = "failed", "failed", {"code": payload["code"], "message": messages[payload["code"]]}
@@ -2297,15 +2297,16 @@ class SpeechTaskManager:
 
     async def google_audio(self, task_id: str, upload_token: str, audio: bytes) -> dict[str, Any]:
         task = self.google_task(task_id, upload_token)
-        if task.output_path is None or len(audio) < 64 or len(audio) > MAX_GOOGLE_TRANSLATE_AUDIO_BYTES or not audio.startswith(b"\x1aE\xdf\xa3"):
-            raise AgentApiError("GOOGLE_TRANSLATE_RECORDING_FAILED", "Chrome did not provide a valid Google Translate recording.")
+        is_mp3 = audio.startswith(b"ID3") or (len(audio) >= 2 and audio[0] == 0xff and (audio[1] & 0xe0) == 0xe0)
+        if task.output_path is None or len(audio) < 64 or len(audio) > MAX_GOOGLE_TRANSLATE_AUDIO_BYTES or not is_mp3:
+            raise AgentApiError("GOOGLE_TRANSLATE_AUDIO_UNAVAILABLE", "Chrome did not provide valid Google Translate MP3 audio.")
         destination = WorkspacePathResolver().resolve_destination(task.output_path, field_name="speech output", error_code="SPEECH_FILE_FAILED")
         if destination.physical_path.exists() or destination.physical_path.is_symlink():
             raise AgentApiError("DESTINATION_EXISTS", "The speech output destination already exists; this tool never overwrites files.")
         task.phase, task.progress_percent = "saving", max(task.progress_percent, 80.0)
-        task.touch("Saving recorded Google Translate speech.")
+        task.touch("Saving Google Translate source audio.")
         destination.physical_path.parent.mkdir(parents=True, exist_ok=True)
-        descriptor, temporary_name = tempfile.mkstemp(prefix=".researchtube-google-tts-", suffix=".webm", dir=destination.physical_path.parent)
+        descriptor, temporary_name = tempfile.mkstemp(prefix=".researchtube-google-tts-", suffix=".mp3", dir=destination.physical_path.parent)
         temporary = Path(temporary_name)
         try:
             with os.fdopen(descriptor, "wb") as source:
@@ -2316,7 +2317,7 @@ class SpeechTaskManager:
                 raise AgentApiError("DESTINATION_EXISTS", "The speech output destination already exists; this tool never overwrites files.") from error
         finally:
             temporary.unlink(missing_ok=True)
-        task.result = {"filePath": destination.logical_path, "format": "webm", "mimeType": "audio/webm"}
+        task.result = {"filePath": destination.logical_path, "format": "mp3", "mimeType": "audio/mpeg"}
         task.status, task.phase, task.progress_percent = "completed", "completed", 100.0
         task.touch("Google Translate speech completed.")
         return self.snapshot(task)

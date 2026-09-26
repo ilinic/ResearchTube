@@ -1,9 +1,9 @@
 {
-  "version": "2.2.15",
+  "version": "2.2.18",
   "scripts": {
     "build": "esbuild background.js --bundle --format=esm --target=chrome120 --outfile=dist/background.js && esbuild youtube-page-bridge.src.js --bundle --format=iife --target=chrome120 --outfile=youtube-page-bridge.js && node scripts/replace-youtubei-api-keys.mjs youtube-page-bridge.js",
     "check": "npm run build && node --check background.js && node --check youtube-content.js && node --check dist/background.js && node --check youtube-page-bridge.js",
-    "test": "npm run build && node tests/download-format-normalization.test.mjs && node tests/agent-interface-version.test.mjs && node tests/download-selection.test.mjs && node tests/workspace-tools-contract.test.mjs && node tests/tool-error-contract.test.mjs && node tests/capture-frame-widget.test.mjs && node tests/chatgpt-capture-frame-bridge.test.mjs && node tests/screen-capture-tool.test.mjs && node tests/image-crop-tool.test.mjs && node tests/clipboard-tools.test.mjs && node tests/popup-ui.test.mjs && node tests/mcp-tool-settings.test.mjs && node tests/cdp-service-tab-prototype.test.mjs && node tests/debug-banner-tool.test.mjs && node tests/release-version-consistency.test.mjs && node tests/storyboards.test.mjs"
+    "test": "npm run build && node tests/download-format-normalization.test.mjs && node tests/agent-interface-version.test.mjs && node tests/download-selection.test.mjs && node tests/workspace-tools-contract.test.mjs && node tests/google-translate-network-audio.test.mjs && node tests/tool-error-contract.test.mjs && node tests/capture-frame-widget.test.mjs && node tests/chatgpt-capture-frame-bridge.test.mjs && node tests/screen-capture-tool.test.mjs && node tests/image-crop-tool.test.mjs && node tests/clipboard-tools.test.mjs && node tests/popup-ui.test.mjs && node tests/mcp-tool-settings.test.mjs && node tests/cdp-service-tab-prototype.test.mjs && node tests/debug-banner-tool.test.mjs && node tests/release-version-consistency.test.mjs && node tests/storyboards.test.mjs"
   },
   "dependencies": {
     "youtubei.js": "18.0.0"
