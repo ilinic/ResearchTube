@@ -34,8 +34,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote, unquote, urlparse
 from urllib.request import Request, urlopen
 
-AGENT_VERSION = "1.106.0"
-INTERFACE_VERSION = 67
+AGENT_VERSION = "1.107.0"
+INTERFACE_VERSION = 68
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
 MAX_GOOGLE_TRANSLATE_AUDIO_BYTES = 16 * 1024 * 1024
@@ -1121,25 +1121,46 @@ def screen_capture_image(value: Any) -> dict[str, Any]:
     return {"format": image_format, "quality": quality if quality is not None else (90 if image_format in {"jpeg", "webp"} else None)}
 
 
-def screen_capture_default_workspace_path(image_format: str) -> str:
+def screen_capture_default_workspace_path(image_format: str, region: dict[str, int] | None = None) -> str:
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     capture_id = secrets.token_urlsafe(8)
-    return f"screenshots/screenshot_{timestamp}_{capture_id}.{image_format}"
+    region_tag = "" if region is None else f"_x{region['x']}_y{region['y']}_w{region['width']}_h{region['height']}"
+    return f"screenshots/screenshot_{timestamp}{region_tag}_{capture_id}.{image_format}"
 
 
 def screen_capture_options(payload: Any) -> dict[str, Any]:
-    if not isinstance(payload, dict) or set(payload) - {"outputPath", "image"}:
+    if not isinstance(payload, dict) or set(payload) - {"outputPath", "image", "region"}:
         raise AgentApiError("SCREEN_CAPTURE_INVALID", "capture_screen requires only documented fields.")
     image = screen_capture_image(payload.get("image"))
+    region = payload.get("region")
+    if region is not None:
+        if not isinstance(region, dict) or set(region) != {"x", "y", "width", "height"}:
+            raise AgentApiError("SCREEN_CAPTURE_INVALID", "region requires x, y, width, and height.")
+        if isinstance(region["x"], bool) or not isinstance(region["x"], int) or isinstance(region["y"], bool) or not isinstance(region["y"], int):
+            raise AgentApiError("SCREEN_CAPTURE_INVALID", "region.x and region.y must be integers.")
+        if isinstance(region["width"], bool) or not isinstance(region["width"], int) or region["width"] < 1 or isinstance(region["height"], bool) or not isinstance(region["height"], int) or region["height"] < 1:
+            raise AgentApiError("SCREEN_CAPTURE_INVALID", "region.width and region.height must be positive integers.")
     output_path = payload.get("outputPath")
     if output_path is not None and (not isinstance(output_path, str) or not output_path):
         raise AgentApiError("SCREEN_CAPTURE_INVALID", "outputPath must be a non-empty logical workspace path.")
-    path = output_path or screen_capture_default_workspace_path(image["format"])
+    path = output_path or screen_capture_default_workspace_path(image["format"], region)
     suffix = Path(path).suffix.lower()
     allowed_suffixes = {"png": {".png"}, "jpeg": {".jpg", ".jpeg"}, "webp": {".webp"}}
     if suffix not in allowed_suffixes[image["format"]]:
         raise AgentApiError("SCREEN_CAPTURE_INVALID", f"outputPath extension must match image.format {image['format']}.")
-    return {"image": image, "outputPath": path}
+    return {"image": image, "outputPath": path, "region": region}
+
+
+def screen_capture_region(options: dict[str, Any], virtual_desktop: dict[str, int]) -> dict[str, int]:
+    """Resolve an optional global desktop rectangle and reject out-of-bounds input."""
+    region = options["region"]
+    if region is None:
+        return {"x": virtual_desktop["left"], "y": virtual_desktop["top"], "width": virtual_desktop["width"], "height": virtual_desktop["height"]}
+    left, top = virtual_desktop["left"], virtual_desktop["top"]
+    right, bottom = left + virtual_desktop["width"], top + virtual_desktop["height"]
+    if region["x"] < left or region["y"] < top or region["x"] + region["width"] > right or region["y"] + region["height"] > bottom:
+        raise AgentApiError("SCREEN_CAPTURE_INVALID", "region must lie completely inside the current virtual desktop.")
+    return dict(region)
 
 
 def capture_default_workspace_path(source_path: str, timestamp_seconds: float, image_format: str) -> str:
@@ -1548,6 +1569,7 @@ async def capture_screen_macos(payload: Any) -> dict[str, Any]:
     """Capture macOS active displays solely with FFmpeg avfoundation and xstack."""
     options = screen_capture_options(payload)
     displays, virtual_desktop = macos_virtual_desktop()
+    region = screen_capture_region(options, virtual_desktop)
     ffmpeg = find_component("ffmpeg", COMPONENTS["ffmpeg"][0])
     ffprobe = find_component("ffprobe", COMPONENTS["ffprobe"][0])
     if ffmpeg.error or ffprobe.error:
@@ -1574,8 +1596,12 @@ async def capture_screen_macos(payload: Any) -> dict[str, Any]:
             labels.append(f"[{label}]")
         layout = "|".join(f"{display['left'] - virtual_desktop['left']}_{display['top'] - virtual_desktop['top']}" for display in displays)
         filters.append(f"{''.join(labels)}xstack=inputs={len(displays)}:layout={layout}:fill=black[out]")
+        output_label = "out"
+        if options["region"] is not None:
+            filters.append(f"[out]crop={region['width']}:{region['height']}:{region['x'] - virtual_desktop['left']}:{region['y'] - virtual_desktop['top']}[region]")
+            output_label = "region"
         encoder_args, mime_type = capture_encoder_arguments({**options["image"], "compressionLevel": 6 if options["image"]["format"] == "png" else None})
-        command.extend(["-filter_complex", ";".join(filters), "-map", "[out]", "-frames:v", "1", *encoder_args, "-y", str(destination_path)])
+        command.extend(["-filter_complex", ";".join(filters), "-map", f"[{output_label}]", "-frames:v", "1", *encoder_args, "-y", str(destination_path)])
         try:
             process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
             await asyncio.wait_for(process.communicate(), timeout=CAPTURE_FRAME_TIMEOUT_SECONDS)
@@ -1591,9 +1617,9 @@ async def capture_screen_macos(payload: Any) -> dict[str, Any]:
         stream = next((item for item in output_streams if item.get("codec_type") == "video"), None)
         width = stream.get("width") if isinstance(stream, dict) else None
         height = stream.get("height") if isinstance(stream, dict) else None
-        if width != virtual_desktop["width"] or height != virtual_desktop["height"]:
-            raise AgentApiError("SCREEN_CAPTURE_FAILED", "FFmpeg did not produce the requested macOS virtual-desktop dimensions.")
-        result = {"workspacePath": destination.logical_path, "format": options["image"]["format"], "mimeType": mime_type, "width": width, "height": height, "imageSizeBytes": destination_path.stat().st_size, "monitorCount": len(displays), "virtualDesktop": virtual_desktop}
+        if width != region["width"] or height != region["height"]:
+            raise AgentApiError("SCREEN_CAPTURE_FAILED", "FFmpeg did not produce the requested macOS screen-capture dimensions.")
+        result = {"workspacePath": destination.logical_path, "format": options["image"]["format"], "mimeType": mime_type, "width": width, "height": height, "imageSizeBytes": destination_path.stat().st_size, "monitorCount": len(displays), "virtualDesktop": virtual_desktop, "region": region}
         log(f"capture_screen monitors={len(displays)} {width}x{height} -> {destination.logical_path}")
         return result
     except AgentApiError:
@@ -1642,6 +1668,7 @@ async def capture_screen_x11(payload: Any) -> dict[str, Any]:
     """Capture exactly one Linux/X11 virtual-desktop image through FFmpeg x11grab."""
     options = screen_capture_options(payload)
     virtual_desktop, monitor_count = await x11_virtual_desktop()
+    region = screen_capture_region(options, virtual_desktop)
     ffmpeg = find_component("ffmpeg", COMPONENTS["ffmpeg"][0])
     ffprobe = find_component("ffprobe", COMPONENTS["ffprobe"][0])
     if ffmpeg.error:
@@ -1664,7 +1691,7 @@ async def capture_screen_x11(payload: Any) -> dict[str, Any]:
         encoder_args, mime_type = capture_encoder_arguments({**options["image"], "compressionLevel": 6 if options["image"]["format"] == "png" else None})
         command = [
             ffmpeg.executable, "-hide_banner", "-nostdin", "-v", "error", "-f", "x11grab", "-framerate", "1",
-            "-video_size", f"{virtual_desktop['width']}x{virtual_desktop['height']}", "-i", f"{os.environ['DISPLAY']}+0,0",
+            "-video_size", f"{region['width']}x{region['height']}", "-i", f"{os.environ['DISPLAY']}+{region['x']},{region['y']}",
             "-map", "0:v:0", "-an", "-frames:v", "1", *encoder_args, "-y", str(destination_path),
         ]
         try:
@@ -1682,9 +1709,9 @@ async def capture_screen_x11(payload: Any) -> dict[str, Any]:
         output_stream = next((stream for stream in output_streams if stream.get("codec_type") == "video"), None)
         width = output_stream.get("width") if isinstance(output_stream, dict) else None
         height = output_stream.get("height") if isinstance(output_stream, dict) else None
-        if width != virtual_desktop["width"] or height != virtual_desktop["height"]:
-            raise AgentApiError("SCREEN_CAPTURE_FAILED", "FFmpeg did not produce the requested Linux/X11 virtual-desktop dimensions.")
-        result = {"workspacePath": destination.logical_path, "format": options["image"]["format"], "mimeType": mime_type, "width": width, "height": height, "imageSizeBytes": destination_path.stat().st_size, "monitorCount": monitor_count, "virtualDesktop": virtual_desktop}
+        if width != region["width"] or height != region["height"]:
+            raise AgentApiError("SCREEN_CAPTURE_FAILED", "FFmpeg did not produce the requested Linux/X11 screen-capture dimensions.")
+        result = {"workspacePath": destination.logical_path, "format": options["image"]["format"], "mimeType": mime_type, "width": width, "height": height, "imageSizeBytes": destination_path.stat().st_size, "monitorCount": monitor_count, "virtualDesktop": virtual_desktop, "region": region}
         log(f"capture_screen monitors={monitor_count} {width}x{height} -> {destination.logical_path}")
         return result
     except AgentApiError:
@@ -1730,6 +1757,7 @@ async def capture_screen_windows(payload: Any) -> dict[str, Any]:
     """Capture exactly one Windows virtual-desktop image through FFmpeg gdigrab."""
     options = screen_capture_options(payload)
     virtual_desktop, monitor_count = windows_virtual_desktop()
+    region = screen_capture_region(options, virtual_desktop)
     ffmpeg = find_component("ffmpeg", COMPONENTS["ffmpeg"][0])
     ffprobe = find_component("ffprobe", COMPONENTS["ffprobe"][0])
     if ffmpeg.error:
@@ -1752,8 +1780,8 @@ async def capture_screen_windows(payload: Any) -> dict[str, Any]:
         encoder_args, mime_type = capture_encoder_arguments({**options["image"], "compressionLevel": 6 if options["image"]["format"] == "png" else None})
         command = [
             ffmpeg.executable, "-hide_banner", "-nostdin", "-v", "error",
-            "-f", "gdigrab", "-offset_x", str(virtual_desktop["left"]), "-offset_y", str(virtual_desktop["top"]),
-            "-video_size", f"{virtual_desktop['width']}x{virtual_desktop['height']}", "-framerate", "1", "-i", "desktop",
+            "-f", "gdigrab", "-offset_x", str(region["x"]), "-offset_y", str(region["y"]),
+            "-video_size", f"{region['width']}x{region['height']}", "-framerate", "1", "-i", "desktop",
             "-map", "0:v:0", "-an", "-frames:v", "1", *encoder_args, "-y", str(destination_path),
         ]
         try:
@@ -1771,9 +1799,9 @@ async def capture_screen_windows(payload: Any) -> dict[str, Any]:
         output_stream = next((stream for stream in output_streams if stream.get("codec_type") == "video"), None)
         width = output_stream.get("width") if isinstance(output_stream, dict) else None
         height = output_stream.get("height") if isinstance(output_stream, dict) else None
-        if width != virtual_desktop["width"] or height != virtual_desktop["height"]:
-            raise AgentApiError("SCREEN_CAPTURE_FAILED", "FFmpeg did not produce the requested virtual-desktop dimensions.")
-        result = {"workspacePath": destination.logical_path, "format": options["image"]["format"], "mimeType": mime_type, "width": width, "height": height, "imageSizeBytes": destination_path.stat().st_size, "monitorCount": monitor_count, "virtualDesktop": virtual_desktop}
+        if width != region["width"] or height != region["height"]:
+            raise AgentApiError("SCREEN_CAPTURE_FAILED", "FFmpeg did not produce the requested screen-capture dimensions.")
+        result = {"workspacePath": destination.logical_path, "format": options["image"]["format"], "mimeType": mime_type, "width": width, "height": height, "imageSizeBytes": destination_path.stat().st_size, "monitorCount": monitor_count, "virtualDesktop": virtual_desktop, "region": region}
         log(f"capture_screen monitors={monitor_count} {width}x{height} -> {destination.logical_path}")
         return result
     except AgentApiError:

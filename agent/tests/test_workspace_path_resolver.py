@@ -430,7 +430,19 @@ class CaptureFrameTests(unittest.IsolatedAsyncioTestCase):
     def test_screen_capture_defaults_to_a_workspace_screenshots_png(self) -> None:
         options = agent.screen_capture_options({})
         self.assertEqual(options["image"], {"format": "png", "quality": None})
+        self.assertIsNone(options["region"])
         self.assertRegex(options["outputPath"], r"^screenshots/screenshot_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}_[A-Za-z0-9_-]+\.png$")
+
+    def test_screen_capture_region_is_named_immediately_before_the_unique_id(self) -> None:
+        options = agent.screen_capture_options({"region": {"x": -1280, "y": 40, "width": 640, "height": 360}})
+        self.assertEqual(options["region"], {"x": -1280, "y": 40, "width": 640, "height": 360})
+        self.assertRegex(options["outputPath"], r"^screenshots/screenshot_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}_x-1280_y40_w640_h360_[A-Za-z0-9_-]+\.png$")
+
+    def test_screen_capture_region_requires_complete_integer_rectangle(self) -> None:
+        for value in ({"x": 0, "y": 0, "width": 10}, {"x": 0, "y": 0, "width": 0, "height": 10}, {"x": 0.5, "y": 0, "width": 10, "height": 10}):
+            with self.subTest(value=value), self.assertRaisesRegex(agent.AgentApiError, "region") as raised:
+                agent.screen_capture_options({"region": value})
+            self.assertEqual(raised.exception.code, "SCREEN_CAPTURE_INVALID")
 
     def test_screen_capture_validates_matching_output_extension(self) -> None:
         self.assertEqual(agent.screen_capture_options({"outputPath": "screenshots/desktop.jpg", "image": {"format": "jpeg", "quality": 85}})["outputPath"], "screenshots/desktop.jpg")
@@ -523,11 +535,44 @@ class CaptureFrameTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["monitorCount"], 2)
         self.assertEqual(result["width"], 3200)
         self.assertEqual(result["height"], 1080)
+        self.assertEqual(result["region"], {"x": -1280, "y": 0, "width": 3200, "height": 1080})
         self.assertEqual(result["workspacePath"], "screenshots/windows.png")
         self.assertEqual(commands[0][commands[0].index("-f") + 1], "gdigrab")
         self.assertEqual(commands[0][commands[0].index("-offset_x") + 1], "-1280")
         self.assertEqual(commands[0][commands[0].index("-video_size") + 1], "3200x1080")
         self.assertIn("desktop", commands[0])
+
+    async def test_windows_screen_capture_passes_a_requested_region_directly_to_gdigrab(self) -> None:
+        commands: list[tuple[str, ...]] = []
+
+        async def windows_subprocess(*command, **_kwargs):
+            commands.append(command)
+            if command[0] == "/private/ffmpeg":
+                Path(command[-1]).write_bytes(b"screen-image")
+                return type("Process", (), {"returncode": 0, "communicate": staticmethod(lambda: _bytes_result(b"", b""))})()
+            if command[0] == "/private/ffprobe":
+                video_size = commands[0][commands[0].index("-video_size") + 1]
+                width, height = (int(item) for item in video_size.split("x"))
+                payload = json.dumps({"streams": [{"index": 0, "codec_type": "video", "width": width, "height": height}]}).encode("utf-8")
+                return type("Process", (), {"returncode": 0, "communicate": staticmethod(lambda: _bytes_result(payload, b""))})()
+            raise AssertionError(command)
+
+        virtual_desktop = {"left": -1280, "top": 0, "width": 3200, "height": 1080}
+        region = {"x": -1200, "y": 40, "width": 640, "height": 360}
+        with patch.object(agent, "windows_virtual_desktop", return_value=(virtual_desktop, 2)), patch.object(agent, "find_component", side_effect=self.discovery), patch.object(asyncio, "create_subprocess_exec", side_effect=windows_subprocess):
+            result = await agent.capture_screen_windows({"region": region})
+        self.assertEqual(result["region"], region)
+        self.assertEqual(result["width"], 640)
+        self.assertEqual(result["height"], 360)
+        self.assertEqual(commands[0][commands[0].index("-offset_x") + 1], "-1200")
+        self.assertEqual(commands[0][commands[0].index("-offset_y") + 1], "40")
+        self.assertEqual(commands[0][commands[0].index("-video_size") + 1], "640x360")
+
+    def test_screen_capture_region_must_fit_inside_virtual_desktop(self) -> None:
+        options = agent.screen_capture_options({"region": {"x": -1281, "y": 0, "width": 10, "height": 10}})
+        with self.assertRaisesRegex(agent.AgentApiError, "inside the current virtual desktop") as raised:
+            agent.screen_capture_region(options, {"left": -1280, "top": 0, "width": 3200, "height": 1080})
+        self.assertEqual(raised.exception.code, "SCREEN_CAPTURE_INVALID")
 
     async def test_capture_frame_honours_explicit_workspace_output_without_public_url(self) -> None:
         with patch.object(agent, "find_component", side_effect=self.discovery), patch.object(asyncio, "create_subprocess_exec", side_effect=self.subprocess):

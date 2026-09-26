@@ -27,7 +27,7 @@ for (const tool of ["youtube_download_get_formats", "youtube_download_get_task",
 assert.match(background, /youtubeFormats: youtubeFormatsSchema/);
 assert.match(background, /youtube_download_get_formats\.downloadFormats/);
 assert.match(background, /afterEventId/);
-assert.match(background, /const REQUIRED_AGENT_INTERFACE_VERSION = 67;/);
+assert.match(background, /const REQUIRED_AGENT_INTERFACE_VERSION = 68;/);
 assert.match(background, /outputMode: \{ type: "string", enum: \["file", "speakers", "both"\]/, "speech must choose exactly one output mode");
 assert.match(background, /voiceName: \{ type: "string", minLength: 1 \}/, "speech status must report the selected voice name");
 assert.match(background, /engine: \{ type: "string", enum: \["googleTranslate", "windows"\], default: "googleTranslate" \}/, "Google Translate must be the default TTS engine");

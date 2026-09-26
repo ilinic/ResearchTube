@@ -232,8 +232,8 @@ var MCP_TOOL_SETTINGS = Object.freeze({
   online_share_status: { group: "online" },
   online_share_stop: { group: "online" }
 });
-var EXTENSION_VERSION = "2.2.18";
-var REQUIRED_AGENT_INTERFACE_VERSION = 67;
+var EXTENSION_VERSION = "2.2.20";
+var REQUIRED_AGENT_INTERFACE_VERSION = 68;
 var CAPTURE_FRAME_WIDGET_URI = "ui://researchtube/capture-frame-v44.html";
 var RESEARCHTUBE_SERVER_DESCRIPTION = "ResearchTube provides YouTube research, local media and image operations, workspace management, screenshots, clipboard, and Library integration. Search this server when the user refers to ResearchTube, YouTube analysis, a previously created workspace file, captured frame, screenshot, crop, clipboard, or asks to continue a previous ResearchTube operation. In clients with deferred tools, ResearchTube is discoverable through functions.exec lazy MCP-tool discovery; search there before treating the capability as unavailable.";
 var RESEARCHTUBE_MCP_INSTRUCTIONS = "ResearchTube exposes MCP tools that may be loaded or discovered lazily by the client. When the user mentions ResearchTube, invokes @ResearchTube, asks to repeat a ResearchTube operation, or requests a capability previously provided by ResearchTube, do not infer that ResearchTube is unavailable merely because its tools are not currently visible as a top-level tool namespace. In this client, ResearchTube is available through functions.exec with lazy MCP-tool discovery: search there for the appropriate ResearchTube tool before reporting that the capability is unavailable. Only report ResearchTube as unavailable if tool discovery actually fails, the required tool cannot be found after discovery, or an actual ResearchTube tool invocation returns an availability, connection, compatibility, or transport error. Successful use earlier in the conversation is evidence that the tools may be discoverable again; rediscover them rather than assuming access has disappeared. media_capture_frame, media_capture_screen, and media_image_crop never render a widget themselves. media_capture_frame is asynchronous: poll its task and call media_image_show only for specific completed frame paths the user asks to see. For media_capture_screen and media_image_crop, when showInChat is true, after the successful creation result call media_image_show once with the returned workspace image path; otherwise do not call the display tool.";
@@ -819,6 +819,17 @@ var screenCaptureImageInputSchema = {
     quality: { type: "integer", minimum: 1, maximum: 100, description: "JPEG/WebP quality. It is invalid for PNG." }
   }
 };
+var screenCaptureRegionSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    x: { type: "integer", description: "Left edge in global virtual-desktop pixel coordinates; it may be negative." },
+    y: { type: "integer", description: "Top edge in global virtual-desktop pixel coordinates; it may be negative." },
+    width: { type: "integer", minimum: 1 },
+    height: { type: "integer", minimum: 1 }
+  },
+  required: ["x", "y", "width", "height"]
+};
 var captureFrameSchema = {
   type: "object",
   additionalProperties: false,
@@ -987,8 +998,8 @@ var screenCaptureSchema = {
     workspacePath: { type: "string", minLength: 1, description: "Logical workspace-relative path of the created screen image." },
     format: captureFrameFormatSchema,
     mimeType: { type: "string", enum: ["image/png", "image/jpeg", "image/webp"] },
-    width: { type: "integer", minimum: 1, description: "Virtual-desktop image width in pixels." },
-    height: { type: "integer", minimum: 1, description: "Virtual-desktop image height in pixels." },
+    width: { type: "integer", minimum: 1, description: "Captured image width in pixels." },
+    height: { type: "integer", minimum: 1, description: "Captured image height in pixels." },
     imageSizeBytes: { type: "integer", minimum: 0 },
     showInChat: { type: "boolean", description: "Whether this screenshot was requested for visible inline display in ChatGPT." },
     monitorCount: { type: "integer", minimum: 1, description: "Number of monitors included in the captured virtual desktop." },
@@ -1002,9 +1013,10 @@ var screenCaptureSchema = {
         height: { type: "integer", minimum: 1 }
       },
       required: ["left", "top", "width", "height"]
-    }
+    },
+    region: { ...screenCaptureRegionSchema, description: "Actual captured rectangle in global virtual-desktop coordinates. It equals virtualDesktop when no region was requested." }
   },
-  required: ["workspacePath", "format", "mimeType", "width", "height", "imageSizeBytes", "showInChat", "monitorCount", "virtualDesktop"]
+  required: ["workspacePath", "format", "mimeType", "width", "height", "imageSizeBytes", "showInChat", "monitorCount", "virtualDesktop", "region"]
 };
 var imageCropSchema = {
   type: "object",
@@ -1454,14 +1466,15 @@ function toolDefinitions() {
     },
     {
       name: "media_capture_screen",
-      title: "Capture the full desktop",
-      description: "Capture the complete current virtual desktop into one workspace image. FFmpeg is the only pixel-capture implementation: gdigrab on Windows, x11grab on Linux/X11, and avfoundation on macOS. Small platform display queries provide only truthful virtual-desktop bounds and monitorCount; they do not capture pixels. Linux Wayland capture is intentionally not supported. On macOS, the operating system must grant screen-recording permission to the FFmpeg process. This can capture visible sensitive information; invoke it only when a current full-screen image is actually needed. The default is a lossless PNG. JPEG or WebP may be chosen when a smaller file is preferable. outputPath is optional: if omitted, the Agent creates a uniquely named image under screenshots/. Any supplied outputPath must be a logical workspace-relative image path with an extension that matches image.format. showInChat defaults to false: set it true only when the user needs to see this screenshot inline. Inline display is presentation only; it does not make image pixels a reliable visual input to ChatGPT. The tool never returns a host path and never overwrites an existing workspace file.",
+      title: "Capture desktop or screen region",
+      description: "Capture the complete current virtual desktop or one requested region into a workspace image. region, when supplied, requires x, y, width, and height in global virtual-desktop pixel coordinates and must lie completely inside the current virtual desktop. FFmpeg receives that region directly: gdigrab on Windows, x11grab on Linux/X11, and an FFmpeg crop filter after avfoundation's display composition on macOS. FFmpeg is the only pixel-capture implementation. Small platform display queries provide only truthful virtual-desktop bounds and monitorCount; they do not capture pixels. Linux Wayland capture is intentionally not supported. On macOS, the operating system must grant screen-recording permission to the FFmpeg process. This can capture visible sensitive information; invoke it only when a current image is actually needed. The default is a lossless PNG. JPEG or WebP may be chosen when a smaller file is preferable. outputPath is optional: if omitted, the Agent creates a uniquely named image under screenshots/; a regional filename includes _x, _y, _w, and _h tags immediately before its unique ID. Any supplied outputPath must be a logical workspace-relative image path with an extension that matches image.format. showInChat defaults to false: set it true only when the user needs to see this screenshot inline. Inline display is presentation only; it does not make image pixels a reliable visual input to ChatGPT. The tool never returns a host path and never overwrites an existing workspace file.",
       annotations: localWorkspaceWriteAnnotations,
       inputSchema: {
         type: "object",
         additionalProperties: false,
         properties: {
           outputPath: { type: "string", minLength: 1, description: "Optional logical workspace-relative image path. If omitted, media_capture_screen creates a uniquely named file under screenshots/. It never overwrites an existing file." },
+          region: screenCaptureRegionSchema,
           image: screenCaptureImageInputSchema,
           showInChat: { type: "boolean", default: false, description: "Set true only when the user needs this screenshot displayed inline. After a successful result, call media_image_show for its workspacePath. Default false keeps the chat compact and must not create a display widget." }
         }
@@ -1698,10 +1711,6 @@ function toolSettingsMetadata(name) {
   const group = MCP_TOOL_GROUPS[metadata.group] ? metadata.group : "custom";
   return { group, alwaysEnabled: metadata.alwaysEnabled === true };
 }
-function shortMcpToolDescription(tool) {
-  const firstSentence = String(tool.description || tool.title || "").match(/^.*?[.!?](?:\s|$)/)?.[0]?.trim() || tool.title || tool.name;
-  return firstSentence.length <= 180 ? firstSentence : `${firstSentence.slice(0, 177).trimEnd()}\u2026`;
-}
 function normalizeMcpToolPreferences(value) {
   const rawEnabled = value && typeof value === "object" && !Array.isArray(value) && value.enabledByName && typeof value.enabledByName === "object" && !Array.isArray(value.enabledByName) ? value.enabledByName : {};
   const enabledByName = {};
@@ -1732,7 +1741,7 @@ async function mcpToolSettingsCatalog() {
     return {
       name: tool.name,
       title: tool.title,
-      description: shortMcpToolDescription(tool),
+      description: String(tool.description || tool.title || tool.name),
       group: metadata.group,
       alwaysEnabled: metadata.alwaysEnabled,
       enabled: metadata.alwaysEnabled || preferences.enabledByName[tool.name] === true
@@ -2418,7 +2427,7 @@ chrome.runtime.onInstalled.addListener(({ reason }) => {
   void bootstrapTunnel();
   void ensureLibraryStoreLoaded().then(drainLibraryStoreQueue);
   if (reason === "install") {
-    void chrome.tabs.create({ url: chrome.runtime.getURL("onboarding.html"), active: true });
+    void chrome.tabs.create({ url: chrome.runtime.getURL("settings.html"), active: true });
   }
 });
 chrome.runtime.onStartup.addListener(() => {
@@ -3970,7 +3979,7 @@ async function cameraRecordStop(taskId2) {
   return document2;
 }
 function normalizeScreenCaptureInput(argumentsValue = {}) {
-  const args = captureFrameObject(argumentsValue, "media_capture_screen", /* @__PURE__ */ new Set(["outputPath", "image", "showInChat"]));
+  const args = captureFrameObject(argumentsValue, "media_capture_screen", /* @__PURE__ */ new Set(["outputPath", "region", "image", "showInChat"]));
   const imageValue = captureFrameObject(args.image, "image", /* @__PURE__ */ new Set(["format", "quality"]));
   const format = imageValue.format === void 0 ? "png" : imageValue.format;
   if (!(/* @__PURE__ */ new Set(["png", "jpeg", "webp"])).has(format)) throw localAgentError("SCREEN_CAPTURE_INVALID", "image.format must be png, jpeg, or webp.");
@@ -3981,17 +3990,24 @@ function normalizeScreenCaptureInput(argumentsValue = {}) {
   const extension = outputPath?.slice(outputPath.lastIndexOf(".")).toLowerCase();
   const allowedExtensions = { png: /* @__PURE__ */ new Set([".png"]), jpeg: /* @__PURE__ */ new Set([".jpg", ".jpeg"]), webp: /* @__PURE__ */ new Set([".webp"]) };
   if (extension && !allowedExtensions[format].has(extension)) throw localAgentError("SCREEN_CAPTURE_INVALID", `outputPath extension must match image.format ${format}.`);
+  let region;
+  if (args.region !== void 0) {
+    const regionValue = captureFrameObject(args.region, "region", /* @__PURE__ */ new Set(["x", "y", "width", "height"]));
+    if (!["x", "y", "width", "height"].every((key) => Object.hasOwn(regionValue, key))) throw localAgentError("SCREEN_CAPTURE_INVALID", "region requires x, y, width, and height.");
+    if (!Number.isInteger(regionValue.x) || !Number.isInteger(regionValue.y)) throw localAgentError("SCREEN_CAPTURE_INVALID", "region.x and region.y must be integers.");
+    region = { x: regionValue.x, y: regionValue.y, width: captureFrameInteger(regionValue.width, "region.width", 1), height: captureFrameInteger(regionValue.height, "region.height", 1) };
+  }
   const showInChat = args.showInChat === void 0 ? false : args.showInChat;
   if (typeof showInChat !== "boolean") throw localAgentError("SCREEN_CAPTURE_INVALID", "showInChat must be a boolean.");
-  return { image: { format, ...quality === void 0 ? {} : { quality } }, ...outputPath === void 0 ? {} : { outputPath }, showInChat };
+  return { image: { format, ...quality === void 0 ? {} : { quality } }, ...outputPath === void 0 ? {} : { outputPath }, ...region === void 0 ? {} : { region }, showInChat };
 }
 function normalizeScreenCaptureResult(document2) {
-  if (!document2 || typeof document2 !== "object" || Array.isArray(document2) || typeof document2.workspacePath !== "string" || !(/* @__PURE__ */ new Set(["png", "jpeg", "webp"])).has(document2.format) || !(/* @__PURE__ */ new Set(["image/png", "image/jpeg", "image/webp"])).has(document2.mimeType) || !Number.isInteger(document2.width) || document2.width < 1 || !Number.isInteger(document2.height) || document2.height < 1 || !Number.isInteger(document2.imageSizeBytes) || document2.imageSizeBytes < 0 || !Number.isInteger(document2.monitorCount) || document2.monitorCount < 1 || !document2.virtualDesktop || typeof document2.virtualDesktop !== "object" || Array.isArray(document2.virtualDesktop) || !Number.isInteger(document2.virtualDesktop.left) || !Number.isInteger(document2.virtualDesktop.top) || !Number.isInteger(document2.virtualDesktop.width) || document2.virtualDesktop.width < 1 || !Number.isInteger(document2.virtualDesktop.height) || document2.virtualDesktop.height < 1 || document2.virtualDesktop.width !== document2.width || document2.virtualDesktop.height !== document2.height) {
+  if (!document2 || typeof document2 !== "object" || Array.isArray(document2) || typeof document2.workspacePath !== "string" || !(/* @__PURE__ */ new Set(["png", "jpeg", "webp"])).has(document2.format) || !(/* @__PURE__ */ new Set(["image/png", "image/jpeg", "image/webp"])).has(document2.mimeType) || !Number.isInteger(document2.width) || document2.width < 1 || !Number.isInteger(document2.height) || document2.height < 1 || !Number.isInteger(document2.imageSizeBytes) || document2.imageSizeBytes < 0 || !Number.isInteger(document2.monitorCount) || document2.monitorCount < 1 || !document2.virtualDesktop || typeof document2.virtualDesktop !== "object" || Array.isArray(document2.virtualDesktop) || !Number.isInteger(document2.virtualDesktop.left) || !Number.isInteger(document2.virtualDesktop.top) || !Number.isInteger(document2.virtualDesktop.width) || document2.virtualDesktop.width < 1 || !Number.isInteger(document2.virtualDesktop.height) || document2.virtualDesktop.height < 1 || !document2.region || typeof document2.region !== "object" || Array.isArray(document2.region) || !Number.isInteger(document2.region.x) || !Number.isInteger(document2.region.y) || !Number.isInteger(document2.region.width) || document2.region.width < 1 || !Number.isInteger(document2.region.height) || document2.region.height < 1 || document2.region.width !== document2.width || document2.region.height !== document2.height || document2.region.x < document2.virtualDesktop.left || document2.region.y < document2.virtualDesktop.top || document2.region.x + document2.region.width > document2.virtualDesktop.left + document2.virtualDesktop.width || document2.region.y + document2.region.height > document2.virtualDesktop.top + document2.virtualDesktop.height) {
     throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid screen-capture result.");
   }
   const expectedMimeType = { png: "image/png", jpeg: "image/jpeg", webp: "image/webp" }[document2.format];
   if (document2.mimeType !== expectedMimeType) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an inconsistent screen-capture MIME type.");
-  return { workspacePath: normalizeWorkspacePath(document2.workspacePath, "workspacePath"), format: document2.format, mimeType: document2.mimeType, width: document2.width, height: document2.height, imageSizeBytes: document2.imageSizeBytes, showInChat: false, monitorCount: document2.monitorCount, virtualDesktop: { left: document2.virtualDesktop.left, top: document2.virtualDesktop.top, width: document2.virtualDesktop.width, height: document2.virtualDesktop.height } };
+  return { workspacePath: normalizeWorkspacePath(document2.workspacePath, "workspacePath"), format: document2.format, mimeType: document2.mimeType, width: document2.width, height: document2.height, imageSizeBytes: document2.imageSizeBytes, showInChat: false, monitorCount: document2.monitorCount, virtualDesktop: { left: document2.virtualDesktop.left, top: document2.virtualDesktop.top, width: document2.virtualDesktop.width, height: document2.virtualDesktop.height }, region: { x: document2.region.x, y: document2.region.y, width: document2.region.width, height: document2.region.height } };
 }
 async function captureScreen(argumentsValue) {
   const input = normalizeScreenCaptureInput(argumentsValue);

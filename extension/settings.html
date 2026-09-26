@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ResearchTube Settings</title>
+  <link rel="stylesheet" href="settings.css">
+</head>
+<body>
+  <main>
+    <header>
+      <img src="icons/researchtube-48.png" alt="">
+      <div><h1>ResearchTube Settings</h1><p>Connect this local Chrome extension to your OpenAI tunnel and ChatGPT.</p></div>
+    </header>
+
+    <section>
+      <h2>1. Set up OpenAI connection</h2>
+      <p class="intro">Create or choose an OpenAI tunnel and a separate Restricted OpenAI API Key. Both fields are required.</p>
+
+      <label for="api-key">OpenAI API Key <span class="required" aria-label="required">*</span></label>
+      <input id="api-key" type="password" autocomplete="off" spellcheck="false" placeholder="sk-…" required>
+      <p class="field-help">Use a <strong>Restricted OpenAI API Key</strong> with <code>Tunnels: Read + Use</code> permissions. Open <a href="#" data-open="apiKeys">OpenAI API Keys <svg class="external-link-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7M21 3l-9 9M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg></a></p>
+
+      <label for="tunnel-id">Tunnel ID <span class="required" aria-label="required">*</span></label>
+      <div class="copy-row"><input id="tunnel-id" type="text" autocomplete="off" spellcheck="false" placeholder="tunnel_…" required><button id="copy-tunnel" class="secondary" type="button">Copy Tunnel ID</button></div>
+      <p class="field-help">Use the Tunnel ID from <a href="#" data-open="tunnels">OpenAI Tunnels <svg class="external-link-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7M21 3l-9 9M21 14v5a2 2 0 0 1-2-2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg></a></p>
+
+      <div class="actions"><button id="test-connection">Save and test connection</button></div>
+      <div id="test-result" hidden role="status"></div>
+    </section>
+
+    <section>
+      <h2>2. Connect ChatGPT</h2>
+      <p>Developer Mode is required to add a local Tunnel connection. Use a ChatGPT plan or workspace with Developer Mode access—typically Plus or higher.</p>
+      <ol>
+        <li>Open <a href="#" data-open="chatgptSettings">ChatGPT Settings <svg class="external-link-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7M21 3l-9 9M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg></a> and enable <strong>Developer Mode</strong>.</li>
+        <li>Copy the Tunnel ID above.</li>
+        <li>Open <a href="#" data-open="chatgpt">ChatGPT Plugins <svg class="external-link-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7M21 3l-9 9M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg></a>, then select the plus button to create a developer-mode app.</li>
+        <li>Choose <strong>Tunnel</strong> under Connection, then select or paste the Tunnel ID.</li>
+        <li>Name the app <strong>ResearchTube</strong><button id="copy-app-name" class="copy-inline" type="button">Copy name</button>, then save it.</li>
+      </ol>
+    </section>
+
+    <section>
+      <h2>3. Try ResearchTube</h2>
+      <div class="example-row"><blockquote id="example-prompt">@ResearchTube Search YouTube for recent videos about quantum computing. Read the relevant transcripts and summarize the main ideas.</blockquote><button id="copy-prompt" class="secondary" type="button">Copy example prompt</button></div>
+      <p class="field-help">Open a new <a href="#" data-open="chatgptNewChat">ChatGPT chat <svg class="external-link-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7M21 3l-9 9M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg></a> and paste the example prompt.</p>
+    </section>
+
+    <section>
+      <h2>Local Agent (optional)</h2>
+      <p class="intro">The Local Agent prepares a private workspace for future local media features. It listens only on <code>127.0.0.1</code>; YouTube research works normally when it is stopped.</p>
+      <label for="agent-port">Port</label>
+      <div class="copy-row"><input id="agent-port" type="number" min="1" max="65535" inputmode="numeric" value="17843" required><button id="test-agent" class="secondary" type="button">Test connection</button></div>
+      <div id="agent-result" hidden role="status"></div>
+    </section>
+
+    <section>
+      <h2>Diagnostics</h2>
+      <p class="field-help">For troubleshooting only. The local log records concise tool timing, safe request summaries, errors, search queue state, and YouTube HTTP status. It never records OpenAI API keys, Tunnel IDs, YouTube cookies, request headers, response bodies, transcript text, or comment text.</p>
+      <div class="actions"><button id="copy-diagnostics" class="secondary" type="button">Copy diagnostics log</button><button id="clear-diagnostics" class="secondary" type="button">Clear diagnostics log</button></div>
+      <p id="diagnostics-summary" class="field-help" role="status">Loading diagnostics…</p>
+    </section>
+
+    <section aria-labelledby="mcp-tools-heading">
+      <h2 id="mcp-tools-heading">MCP tool availability</h2>
+      <p class="field-help">Changes are saved immediately. To apply them in ChatGPT:</p>
+      <ol class="refresh-instructions">
+        <li>Open <a href="#" data-open="chatgpt">ChatGPT Plugins <svg class="external-link-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7M21 3l-9 9M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg></a>.</li>
+        <li>Find <strong>ResearchTube</strong> and open <strong>Manage</strong>.</li>
+        <li>Click <strong>Refresh</strong> to reload the MCP tool schema.</li>
+      </ol>
+      <label class="tool-default"><input id="new-tools-enabled" type="checkbox"> <span>Enable newly added tools by default</span></label>
+      <p id="mcp-tools-result" class="field-help" role="status"></p>
+      <div id="mcp-tools" class="mcp-tools" aria-live="polite">Loading MCP tools…</div>
+    </section>
+
+  </main>
+  <script src="settings.js"></script>
+</body>
+</html>

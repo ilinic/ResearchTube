@@ -3,8 +3,8 @@ import { readFile } from "node:fs/promises";
 
 const [background, html, script] = await Promise.all([
   readFile(new URL("../background.js", import.meta.url), "utf8"),
-  readFile(new URL("../onboarding.html", import.meta.url), "utf8"),
-  readFile(new URL("../onboarding.js", import.meta.url), "utf8")
+  readFile(new URL("../settings.html", import.meta.url), "utf8"),
+  readFile(new URL("../settings.js", import.meta.url), "utf8")
 ]);
 
 assert.match(background, /const MCP_TOOL_GROUPS/);
@@ -17,6 +17,7 @@ assert.match(background, /updateNewToolsEnabledByDefault/);
 assert.match(background, /enabledByName/);
 assert.match(background, /name: tool\.name/);
 assert.match(background, /tools: await enabledMcpToolDefinitions\(\)/);
+assert.match(background, /description: String\(tool\.description \|\| tool\.title \|\| tool\.name\)/, "Settings must keep each tool's complete description");
 assert.doesNotMatch(background, /localWorkspaceReadAnnotations/, "all tool annotation constants must be defined");
 assert.match(html, /MCP tool availability/);
 assert.match(html, /id="new-tools-enabled"/);
@@ -31,4 +32,6 @@ assert.match(script, /set-mcp-tool-enabled/);
 assert.match(script, /set-mcp-new-tools-default/);
 assert.match(script, /ResearchTube → Manage → Refresh/);
 assert.match(script, /tools\.sort\(\(left, right\) => left\.name\.localeCompare\(right\.name\)\)/, "each Settings group must be ordered by MCP command name");
+assert.match(script, /tool-heading/, "tool titles and MCP names must share a heading line");
+assert.match(script, /heading\.append\(title, name\)/, "the MCP name must follow the bold tool title");
 console.log("MCP tool settings: ok");
