@@ -24,6 +24,7 @@ import shutil
 import struct
 import string
 import sys
+import tempfile
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -33,10 +34,11 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote, unquote, urlparse
 from urllib.request import Request, urlopen
 
-AGENT_VERSION = "1.104.0"
-INTERFACE_VERSION = 65
+AGENT_VERSION = "1.105.6"
+INTERFACE_VERSION = 66
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
+MAX_GOOGLE_TRANSLATE_AUDIO_BYTES = 16 * 1024 * 1024
 TASK_POLL_INTERVAL_MS = 1_000
 SPEECH_MAX_TEXT_BYTES = 60 * 1024
 TASK_HEARTBEAT_SECONDS = 5
@@ -2034,8 +2036,8 @@ def windows_speech_python() -> str:
 
 
 def speech_options(payload: Any) -> dict[str, Any]:
-    if not isinstance(payload, dict) or set(payload) - {"text", "voiceId", "outputPath", "outputMode"}:
-        raise AgentApiError("SPEECH_INVALID", "system_speech_speak accepts text, optional voiceId, outputMode, and outputPath only.")
+    if not isinstance(payload, dict) or set(payload) - {"text", "engine", "voiceId", "outputPath", "outputMode"}:
+        raise AgentApiError("SPEECH_INVALID", "system_speech_speak accepts text, engine, optional voiceId, outputMode, and outputPath only.")
     text = payload.get("text")
     voice_id = payload.get("voiceId")
     if not isinstance(text, str) or not text.strip():
@@ -2044,6 +2046,12 @@ def speech_options(payload: Any) -> dict[str, Any]:
         raise AgentApiError("SPEECH_INVALID", f"text must not exceed {SPEECH_MAX_TEXT_BYTES} UTF-8 bytes.")
     if voice_id is not None and (not isinstance(voice_id, str) or not voice_id.strip()):
         raise AgentApiError("SPEECH_INVALID", "voiceId must be null or a non-empty voiceId returned by system_speech_list_voices.")
+    engine = payload.get("engine", "googleTranslate")
+    if engine not in {"windows", "googleTranslate"}:
+        raise AgentApiError("SPEECH_INVALID", "engine must be windows or googleTranslate.")
+    if engine == "googleTranslate":
+        if voice_id is not None:
+            raise AgentApiError("SPEECH_INVALID", "voiceId is available only with the Windows speech engine.")
     output_path = payload.get("outputPath")
     if output_path is not None and (not isinstance(output_path, str) or not output_path.strip()):
         raise AgentApiError("SPEECH_INVALID", "outputPath must be omitted, null, or a non-empty workspace-relative WAV path.")
@@ -2052,7 +2060,7 @@ def speech_options(payload: Any) -> dict[str, Any]:
         raise AgentApiError("SPEECH_INVALID", "outputMode must be one of: file, speakers, both.")
     if output_mode == "speakers" and output_path is not None:
         raise AgentApiError("SPEECH_INVALID", "outputPath is available only when outputMode is file or both.")
-    return {"text": text, "voiceId": voice_id, "outputPath": output_path, "outputMode": output_mode}
+    return {"text": text, "engine": engine, "voiceId": voice_id, "outputPath": output_path, "outputMode": output_mode}
 
 
 def speech_base64(value: str | None) -> str:
@@ -2152,8 +2160,8 @@ def speech_filename_stem(voice_name: str, file_id: str) -> str:
     return f"{name} {camera_filename_timestamp()} [{file_id}]"
 
 
-def speech_default_workspace_path(voice_name: str, file_id: str) -> str:
-    return f"text-to-speech/{speech_filename_stem(voice_name, file_id)}.wav"
+def speech_default_workspace_path(voice_name: str, file_id: str, extension: str = "wav") -> str:
+    return f"text-to-speech/{speech_filename_stem(voice_name, file_id)}.{extension}"
 
 
 @dataclass
@@ -2166,6 +2174,8 @@ class SpeechTask:
     output_path: str | None
     created_at: str
     last_updated_at: str
+    engine: str = "windows"
+    upload_token: str | None = None
     status: str = "working"
     status_message: str = "Preparing speech."
     phase: str = "preparing"
@@ -2197,7 +2207,7 @@ class SpeechTaskManager:
         return self.tasks[task_id]
 
     def snapshot(self, task: SpeechTask) -> dict[str, Any]:
-        result: dict[str, Any] = {"taskId": task.task_id, "status": task.status, "phase": task.phase, "progressPercent": task.progress_percent, "statusMessage": task.status_message, "voiceName": task.voice_name, "outputMode": task.output_mode, "saveToFile": task.output_path is not None, "outputPath": task.output_path, "createdAt": task.created_at, "lastUpdatedAt": task.last_updated_at, "pollIntervalMs": TASK_POLL_INTERVAL_MS}
+        result: dict[str, Any] = {"taskId": task.task_id, "status": task.status, "phase": task.phase, "progressPercent": task.progress_percent, "statusMessage": task.status_message, "engine": task.engine, "voiceName": task.voice_name, "outputMode": task.output_mode, "saveToFile": task.output_path is not None, "outputPath": task.output_path, "createdAt": task.created_at, "lastUpdatedAt": task.last_updated_at, "pollIntervalMs": TASK_POLL_INTERVAL_MS}
         if task.result is not None:
             result["result"] = task.result
         if task.error is not None:
@@ -2205,9 +2215,19 @@ class SpeechTaskManager:
         return result
 
     async def create(self, payload: Any) -> dict[str, Any]:
-        executable = windows_speech_python()
         options = speech_options(payload)
         now = utc_now()
+        if options["engine"] == "googleTranslate":
+            voice_name = "Google Translate (auto)"
+            output_path = self.prepare_output_path(options, voice_name, "webm")
+            task = SpeechTask(self.new_task_id(), options["text"], None, voice_name, options["outputMode"], output_path, now, now,
+                              engine="googleTranslate", upload_token=secrets.token_urlsafe(24),
+                              status_message="Opening Google Translate.", phase="preparing")
+            self.tasks[task.task_id] = task
+            result = self.snapshot(task)
+            result["uploadToken"] = task.upload_token
+            return result
+        executable = windows_speech_python()
         requested_voice_id = options["voiceId"]
         if requested_voice_id is not None and requested_voice_id not in SPEECH_WINDOWS_VOICE_IDS:
             raise AgentApiError("VOICE_NOT_FOUND", "The selected Windows voice was not found. Call system_speech_list_voices again.")
@@ -2215,20 +2235,90 @@ class SpeechTaskManager:
         voice_name = SPEECH_WINDOWS_VOICE_NAMES.get(requested_voice_id) if requested_voice_id is not None else None
         if voice_name is None:
             voice_name = await system_speech_voice_name(executable, windows_voice_id)
-        save_to_file = options["outputMode"] in {"file", "both"}
-        output_path: str | None = options["outputPath"]
-        if save_to_file:
-            if output_path is None:
-                output_path = speech_default_workspace_path(voice_name, new_speech_file_id())
-            destination = WorkspacePathResolver().resolve_destination(output_path, field_name="outputPath", error_code="SPEECH_INVALID")
-            if destination.physical_path.suffix.lower() != ".wav":
-                raise AgentApiError("SPEECH_INVALID", "outputPath must end in .wav because Windows Speech exports WAV audio.")
-            if destination.physical_path.exists() or destination.physical_path.is_symlink():
-                raise AgentApiError("DESTINATION_EXISTS", "The speech output destination already exists; this tool never overwrites files.")
-            output_path = destination.logical_path
+        output_path = self.prepare_output_path(options, voice_name, "wav")
         task = SpeechTask(self.new_task_id(), options["text"], windows_voice_id, voice_name, options["outputMode"], output_path, now, now)
         self.tasks[task.task_id] = task
         task.runner = asyncio.create_task(self.run(task, executable), name=f"researchtube-speech-{task.task_id}")
+        return self.snapshot(task)
+
+    @staticmethod
+    def prepare_output_path(options: dict[str, Any], voice_name: str, extension: str) -> str | None:
+        if options["outputMode"] not in {"file", "both"}:
+            return None
+        output_path = options["outputPath"] or speech_default_workspace_path(voice_name, new_speech_file_id(), extension)
+        destination = WorkspacePathResolver().resolve_destination(output_path, field_name="outputPath", error_code="SPEECH_INVALID")
+        if destination.physical_path.suffix.lower() != f".{extension}":
+            raise AgentApiError("SPEECH_INVALID", f"outputPath must end in .{extension} for the selected speech engine.")
+        if destination.physical_path.exists() or destination.physical_path.is_symlink():
+            raise AgentApiError("DESTINATION_EXISTS", "The speech output destination already exists; this tool never overwrites files.")
+        return destination.logical_path
+
+    def google_task(self, task_id: str, upload_token: str) -> SpeechTask:
+        task = self.get(task_id)
+        if task.engine != "googleTranslate" or not isinstance(upload_token, str) or not secrets.compare_digest(task.upload_token or "", upload_token):
+            raise AgentApiError("GOOGLE_TRANSLATE_TASK_INVALID", "The Google Translate speech task is invalid.")
+        if task.status != "working":
+            raise AgentApiError("GOOGLE_TRANSLATE_TASK_INVALID", "The Google Translate speech task is no longer active.")
+        return task
+
+    def google_progress(self, task_id: str, payload: Any) -> dict[str, Any]:
+        if not isinstance(payload, dict) or set(payload) != {"uploadToken", "phase", "progressPercent"}:
+            raise AgentApiError("GOOGLE_TRANSLATE_TASK_INVALID", "Google Translate progress is invalid.")
+        task = self.google_task(task_id, payload["uploadToken"])
+        phase = payload["phase"]
+        progress = payload["progressPercent"]
+        messages = {"openingTranslate": "Opening Google Translate.", "synthesizing": "Waiting for Google Translate to prepare speech.", "playing": "Playing Google Translate speech.", "recording": "Recording Google Translate tab audio.", "saving": "Saving recorded Google Translate speech."}
+        if phase not in messages or not isinstance(progress, (int, float)) or isinstance(progress, bool) or not math.isfinite(progress) or not 0 <= progress < 100:
+            raise AgentApiError("GOOGLE_TRANSLATE_TASK_INVALID", "Google Translate progress is invalid.")
+        task.phase, task.progress_percent = phase, max(task.progress_percent, float(progress))
+        task.touch(messages[phase])
+        return self.snapshot(task)
+
+    def google_complete(self, task_id: str, payload: Any) -> dict[str, Any]:
+        if not isinstance(payload, dict) or set(payload) != {"uploadToken"}:
+            raise AgentApiError("GOOGLE_TRANSLATE_TASK_INVALID", "Google Translate completion is invalid.")
+        task = self.google_task(task_id, payload["uploadToken"])
+        if task.output_path is not None:
+            raise AgentApiError("GOOGLE_TRANSLATE_TASK_INVALID", "Google Translate audio must be uploaded before completing this task.")
+        task.status, task.phase, task.progress_percent = "completed", "completed", 100.0
+        task.touch("Google Translate speech completed.")
+        return self.snapshot(task)
+
+    def google_fail(self, task_id: str, payload: Any) -> dict[str, Any]:
+        if not isinstance(payload, dict) or set(payload) != {"uploadToken", "code"}:
+            raise AgentApiError("GOOGLE_TRANSLATE_TASK_INVALID", "Google Translate failure is invalid.")
+        task = self.google_task(task_id, payload["uploadToken"])
+        messages = {"GOOGLE_TRANSLATE_UNAVAILABLE": "Google Translate could not prepare the requested speech.", "GOOGLE_TRANSLATE_PLAYBACK_FAILED": "Google Translate could not play the requested speech.", "GOOGLE_TRANSLATE_RECORDING_FAILED": "Chrome could not record Google Translate tab audio."}
+        if payload["code"] not in messages:
+            raise AgentApiError("GOOGLE_TRANSLATE_TASK_INVALID", "Google Translate failure is invalid.")
+        task.status, task.phase, task.error = "failed", "failed", {"code": payload["code"], "message": messages[payload["code"]]}
+        task.touch("Google Translate speech failed.")
+        return self.snapshot(task)
+
+    async def google_audio(self, task_id: str, upload_token: str, audio: bytes) -> dict[str, Any]:
+        task = self.google_task(task_id, upload_token)
+        if task.output_path is None or len(audio) < 64 or len(audio) > MAX_GOOGLE_TRANSLATE_AUDIO_BYTES or not audio.startswith(b"\x1aE\xdf\xa3"):
+            raise AgentApiError("GOOGLE_TRANSLATE_RECORDING_FAILED", "Chrome did not provide a valid Google Translate recording.")
+        destination = WorkspacePathResolver().resolve_destination(task.output_path, field_name="speech output", error_code="SPEECH_FILE_FAILED")
+        if destination.physical_path.exists() or destination.physical_path.is_symlink():
+            raise AgentApiError("DESTINATION_EXISTS", "The speech output destination already exists; this tool never overwrites files.")
+        task.phase, task.progress_percent = "saving", max(task.progress_percent, 80.0)
+        task.touch("Saving recorded Google Translate speech.")
+        destination.physical_path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary_name = tempfile.mkstemp(prefix=".researchtube-google-tts-", suffix=".webm", dir=destination.physical_path.parent)
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "wb") as source:
+                source.write(audio)
+            try:
+                os.link(temporary, destination.physical_path)
+            except FileExistsError as error:
+                raise AgentApiError("DESTINATION_EXISTS", "The speech output destination already exists; this tool never overwrites files.") from error
+        finally:
+            temporary.unlink(missing_ok=True)
+        task.result = {"filePath": destination.logical_path, "format": "webm", "mimeType": "audio/webm"}
+        task.status, task.phase, task.progress_percent = "completed", "completed", 100.0
+        task.touch("Google Translate speech completed.")
         return self.snapshot(task)
 
     async def run(self, task: SpeechTask, executable: str) -> None:
@@ -2313,6 +2403,9 @@ class SpeechTaskManager:
 
     async def cancel(self, task_id: str) -> dict[str, Any]:
         task = self.get(task_id)
+        if task.status == "working" and task.engine == "googleTranslate":
+            task.status, task.phase = "cancelled", "cancelled"; task.touch("Speech cancelled.")
+            return {"taskId": task.task_id, "status": task.status}
         if task.status == "working" and task.runner is not None and not task.runner.done():
             if task.process is not None and task.process.returncode is None:
                 task.process.terminate()
@@ -4611,10 +4704,11 @@ async def read_request(reader: asyncio.StreamReader) -> tuple[str, str, dict[str
         content_length = int(headers.get("content-length", "0"))
     except ValueError as error:
         raise AgentApiError("BAD_REQUEST", "Invalid Content-Length.") from error
-    if content_length < 0 or content_length > MAX_REQUEST_BODY_BYTES:
-        raise AgentApiError("REQUEST_TOO_LARGE", "Request body is too large.")
-    body = await asyncio.wait_for(reader.readexactly(content_length), timeout=5) if content_length else b""
     parsed = urlparse(parts[1])
+    maximum = MAX_GOOGLE_TRANSLATE_AUDIO_BYTES if re.fullmatch(r"/tasks/system-speech/tsk_[A-Za-z0-9_-]{10}/google-translate-audio", parsed.path) else MAX_REQUEST_BODY_BYTES
+    if content_length < 0 or content_length > maximum:
+        raise AgentApiError("REQUEST_TOO_LARGE", "Request body is too large.")
+    body = await asyncio.wait_for(reader.readexactly(content_length), timeout=30 if maximum > MAX_REQUEST_BODY_BYTES else 5) if content_length else b""
     return parts[0].upper(), parsed.path, parse_qs(parsed.query, keep_blank_values=True), body
 
 
@@ -5011,6 +5105,28 @@ def response_log_suffix(path: str, body: dict[str, Any] | None) -> str:
     return ""
 
 
+def internal_google_translate_speech_path(path: str) -> bool:
+    """Google Translate callbacks are internal task plumbing, not user-facing actions."""
+    return bool(re.fullmatch(
+        r"/tasks/system-speech/tsk_[A-Za-z0-9_-]{10}/google-translate-(?:progress|complete|fail|audio)",
+        path,
+    ))
+
+
+def compact_google_translate_speech_log_path(path: str, body: dict[str, Any] | None) -> str:
+    """Show every Google TTS request, without repeating its long internal route."""
+    callback = re.fullmatch(
+        r"/tasks/system-speech/(tsk_[A-Za-z0-9_-]{10})/google-translate-(progress|complete|fail|audio)",
+        path,
+    )
+    if callback:
+        task_id, _action = callback.groups()
+        return f"/tasks/{task_id}"
+    if re.fullmatch(r"/tasks/system-speech/tsk_[A-Za-z0-9_-]{10}", path) and isinstance(body, dict) and body.get("engine") == "googleTranslate":
+        return f"/tasks/{body['taskId']}"
+    return path
+
+
 def mcp_tool_log(tool: str, payload: Any) -> dict[str, Any]:
     if not re.fullmatch(r"[a-z0-9_]{1,80}", tool):
         raise AgentApiError("MCP_LOG_INVALID", "The MCP tool name is invalid.")
@@ -5060,6 +5176,21 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             response_status, response_body = "200 OK", await system_speech_list_voices(parse_json_body(body))
         elif method == "POST" and path == "/tasks/system-speech":
             response_status, response_body = "201 Created", await SPEECH_TASKS.create(parse_json_body(body))
+        elif method == "POST" and re.fullmatch(r"/tasks/system-speech/tsk_[A-Za-z0-9_-]{10}/google-translate-progress", path):
+            task_id = path.removeprefix("/tasks/system-speech/").removesuffix("/google-translate-progress")
+            response_status, response_body = "200 OK", SPEECH_TASKS.google_progress(task_id, parse_json_body(body))
+        elif method == "POST" and re.fullmatch(r"/tasks/system-speech/tsk_[A-Za-z0-9_-]{10}/google-translate-complete", path):
+            task_id = path.removeprefix("/tasks/system-speech/").removesuffix("/google-translate-complete")
+            response_status, response_body = "200 OK", SPEECH_TASKS.google_complete(task_id, parse_json_body(body))
+        elif method == "POST" and re.fullmatch(r"/tasks/system-speech/tsk_[A-Za-z0-9_-]{10}/google-translate-fail", path):
+            task_id = path.removeprefix("/tasks/system-speech/").removesuffix("/google-translate-fail")
+            response_status, response_body = "200 OK", SPEECH_TASKS.google_fail(task_id, parse_json_body(body))
+        elif method == "POST" and re.fullmatch(r"/tasks/system-speech/tsk_[A-Za-z0-9_-]{10}/google-translate-audio", path):
+            task_id = path.removeprefix("/tasks/system-speech/").removesuffix("/google-translate-audio")
+            tokens = query.get("token")
+            if not isinstance(tokens, list) or len(tokens) != 1:
+                raise AgentApiError("GOOGLE_TRANSLATE_TASK_INVALID", "The Google Translate speech task is invalid.")
+            response_status, response_body = "200 OK", await SPEECH_TASKS.google_audio(task_id, tokens[0], body)
         elif method == "POST" and path == "/tasks/capture-frame":
             response_status, response_body = "201 Created", await CAPTURE_FRAME_TASKS.create(parse_json_body(body))
         elif method == "POST" and path == "/media/camera/list":
@@ -5155,7 +5286,8 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             response_status, response_body = "404 Not Found", error_document(AgentApiError("NOT_FOUND", "Unknown local Agent endpoint."))
         writer.write(http_response(response_status, response_body))
         await writer.drain()
-        log(f"{method or 'INVALID'} {path or '/'} -> {response_status.split()[0]}{response_log_suffix(path, response_body)}")
+        log_path = compact_google_translate_speech_log_path(path, response_body)
+        log(f"{method or 'INVALID'} {log_path or '/'} -> {response_status.split()[0]}{response_log_suffix(path, response_body)}")
     except AgentApiError as error:
         status = "404 Not Found" if error.code in {"TASK_NOT_FOUND", "VISUAL_MAP_TASK_NOT_FOUND", "CAMERA_RECORD_TASK_NOT_FOUND", "CAPTURE_FRAME_TASK_NOT_FOUND"} else "400 Bad Request"
         writer.write(http_response(status, error_document(error)))

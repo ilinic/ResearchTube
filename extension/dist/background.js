@@ -232,12 +232,14 @@ var MCP_TOOL_SETTINGS = Object.freeze({
   online_share_status: { group: "online" },
   online_share_stop: { group: "online" }
 });
-var EXTENSION_VERSION = "2.2.2";
-var REQUIRED_AGENT_INTERFACE_VERSION = 65;
+var EXTENSION_VERSION = "2.2.15";
+var REQUIRED_AGENT_INTERFACE_VERSION = 66;
 var CAPTURE_FRAME_WIDGET_URI = "ui://researchtube/capture-frame-v44.html";
 var RESEARCHTUBE_SERVER_DESCRIPTION = "ResearchTube provides YouTube research, local media and image operations, workspace management, screenshots, clipboard, and Library integration. Search this server when the user refers to ResearchTube, YouTube analysis, a previously created workspace file, captured frame, screenshot, crop, clipboard, or asks to continue a previous ResearchTube operation. In clients with deferred tools, ResearchTube is discoverable through functions.exec lazy MCP-tool discovery; search there before treating the capability as unavailable.";
 var RESEARCHTUBE_MCP_INSTRUCTIONS = "ResearchTube exposes MCP tools that may be loaded or discovered lazily by the client. When the user mentions ResearchTube, invokes @ResearchTube, asks to repeat a ResearchTube operation, or requests a capability previously provided by ResearchTube, do not infer that ResearchTube is unavailable merely because its tools are not currently visible as a top-level tool namespace. In this client, ResearchTube is available through functions.exec with lazy MCP-tool discovery: search there for the appropriate ResearchTube tool before reporting that the capability is unavailable. Only report ResearchTube as unavailable if tool discovery actually fails, the required tool cannot be found after discovery, or an actual ResearchTube tool invocation returns an availability, connection, compatibility, or transport error. Successful use earlier in the conversation is evidence that the tools may be discoverable again; rediscover them rather than assuming access has disappeared. media_capture_frame, media_capture_screen, and media_image_crop never render a widget themselves. media_capture_frame is asynchronous: poll its task and call media_image_show only for specific completed frame paths the user asks to see. For media_capture_screen and media_image_crop, when showInChat is true, after the successful creation result call media_image_show once with the returned workspace image path; otherwise do not call the display tool.";
 var CAPTURE_FRAME_OFFSCREEN_DOCUMENT = "capture-frame-offscreen.html";
+var GOOGLE_TRANSLATE_URL = "https://translate.google.com/";
+var GOOGLE_TRANSLATE_TAB_TIMEOUT_MS = 2e4;
 var AGENT_HEALTH_TIMEOUT_MS = 5e3;
 var AGENT_TASK_TIMEOUT_MS = 1e4;
 var AGENT_CAPTURE_FRAME_TIMEOUT_MS = 9e4;
@@ -273,6 +275,8 @@ var searchDiagnosticWrite = Promise.resolve();
 var commandDiagnosticWrite = Promise.resolve();
 var recentDescribeVideoRequests = /* @__PURE__ */ new Map();
 var captureFrameOffscreenPromise = null;
+var googleTranslateSpeechRunners = /* @__PURE__ */ new Map();
+var googleTranslateSpeechTabId = null;
 var libraryStoreTasks = /* @__PURE__ */ new Map();
 var libraryStoreQueue = [];
 var libraryStoreLoaded = false;
@@ -554,9 +558,10 @@ var speechTaskSchema = {
   properties: {
     taskId: { type: "string", pattern: "^tsk_[A-Za-z0-9_-]{10}$" },
     status: { type: "string", enum: ["working", "completed", "cancelled", "failed"] },
-    phase: { type: "string", enum: ["preparing", "synthesizing", "saving", "speaking", "completed", "cancelled", "failed"] },
+    phase: { type: "string", enum: ["preparing", "openingTranslate", "synthesizing", "playing", "recording", "saving", "speaking", "completed", "cancelled", "failed"] },
     progressPercent: { type: "number", minimum: 0, maximum: 100 },
     statusMessage: { type: "string", minLength: 1 },
+    engine: { type: "string", enum: ["windows", "googleTranslate"] },
     voiceName: { type: "string", minLength: 1 },
     outputMode: { type: "string", enum: ["file", "speakers", "both"] },
     saveToFile: { type: "boolean" },
@@ -564,10 +569,10 @@ var speechTaskSchema = {
     createdAt: { type: "string", format: "date-time" },
     lastUpdatedAt: { type: "string", format: "date-time" },
     pollIntervalMs: { type: "integer", minimum: 100 },
-    result: { type: "object", additionalProperties: false, properties: { filePath: { type: "string", minLength: 1 }, format: { const: "wav" }, mimeType: { const: "audio/wav" } }, required: ["filePath", "format", "mimeType"] },
+    result: { type: "object", additionalProperties: false, properties: { filePath: { type: "string", minLength: 1 }, format: { type: "string", enum: ["wav", "webm"] }, mimeType: { type: "string", enum: ["audio/wav", "audio/webm"] } }, required: ["filePath", "format", "mimeType"] },
     error: { type: "object", additionalProperties: false, properties: { code: { type: "string" }, message: { type: "string" } }, required: ["code", "message"] }
   },
-  required: ["taskId", "status", "phase", "progressPercent", "statusMessage", "voiceName", "outputMode", "saveToFile", "outputPath", "createdAt", "lastUpdatedAt", "pollIntervalMs"]
+  required: ["taskId", "status", "phase", "progressPercent", "statusMessage", "engine", "voiceName", "outputMode", "saveToFile", "outputPath", "createdAt", "lastUpdatedAt", "pollIntervalMs"]
 };
 var speechCancelSchema = { type: "object", additionalProperties: false, properties: { taskId: { type: "string", pattern: "^tsk_[A-Za-z0-9_-]{10}$" }, status: { type: "string", enum: ["cancelled", "completed", "failed"] } }, required: ["taskId", "status"] };
 var youtubeDownloadResultSchema = {
@@ -1159,17 +1164,17 @@ function toolDefinitions() {
     },
     {
       name: "system_speech_speak",
-      title: "Synthesize Windows speech",
-      description: "Synthesize text asynchronously with a Windows voice. outputMode is exactly one of: speakers (play only), file (save WAV only), or both (save WAV and play). For file or both, outputPath is optional: when omitted the tool writes text-to-speech/<selected voice name> <UTC timestamp> [tts_<id>].wav. The call returns immediately; poll system_speech_status no faster than pollIntervalMs. Omit voiceId for the current Windows default. Long text is split internally for responsive playback and cancellation.",
+      title: "Synthesize speech",
+      description: "Synthesize text asynchronously. engine googleTranslate is the default: ResearchTube opens a background Google Translate tab without changing the active ChatGPT tab, lets Google detect the text language automatically, inserts the text, and presses its listen control. engine windows is the explicit alternative and uses a selected Windows voice. outputMode is exactly one of: speakers (play only), file (save only), or both. Google Translate file output records only its tab audio as WebM/Opus; Windows file output is WAV. For file or both, outputPath is optional: when omitted the tool writes text-to-speech/<engine or selected voice name> <UTC timestamp> [tts_<id>].<format>. The call returns immediately; poll system_speech_status no faster than pollIntervalMs.",
       annotations: localWorkspaceWriteAnnotations,
-      inputSchema: { type: "object", additionalProperties: false, properties: { text: { type: "string", minLength: 1, maxLength: 6e4 }, voiceId: { type: ["string", "null"], default: null }, outputMode: { type: "string", enum: ["file", "speakers", "both"], default: "speakers" }, outputPath: { ...nullableString, description: "Optional safe workspace-relative .wav path; available only when outputMode is file or both." } }, required: ["text"] },
+      inputSchema: { type: "object", additionalProperties: false, properties: { text: { type: "string", minLength: 1, maxLength: 6e4 }, engine: { type: "string", enum: ["googleTranslate", "windows"], default: "googleTranslate" }, voiceId: { type: ["string", "null"], default: null, description: "Windows voice only; omit for Google Translate." }, outputMode: { type: "string", enum: ["file", "speakers", "both"], default: "speakers" }, outputPath: { ...nullableString, description: "Optional safe workspace-relative .webm path for Google Translate or .wav path for Windows; available only when outputMode is file or both." } }, required: ["text"] },
       outputSchema: speechTaskSchema,
       _meta: { "openai/toolInvocation/invoking": "Starting speech\u2026", "openai/toolInvocation/invoked": "Speech task started." }
     },
     {
       name: "system_speech_status",
       title: "Get speech task status",
-      description: "Get the status and progress of an asynchronous Windows speech task. Poll no faster than pollIntervalMs. Working phases are preparing, synthesizing, saving, and speaking. Completed file output includes its safe workspace-relative WAV path.",
+      description: "Get the status and progress of an asynchronous speech task. Poll no faster than pollIntervalMs. Completed file output includes its safe workspace-relative path and actual audio format.",
       annotations: localAgentReadAnnotations,
       inputSchema: { type: "object", additionalProperties: false, properties: { taskId: { type: "string", minLength: 1 } }, required: ["taskId"] },
       outputSchema: speechTaskSchema,
@@ -1178,7 +1183,7 @@ function toolDefinitions() {
     {
       name: "system_speech_cancel",
       title: "Cancel speech",
-      description: "Stop a working Windows speech task as quickly as practical. Cancellation stops playback, skips remaining text, releases local speech resources, and is a normal terminal outcome.",
+      description: "Stop a working speech task as quickly as practical. Cancellation stops playback or recording and releases local resources. The Google Translate tab is deliberately retained and is never closed by ResearchTube.",
       annotations: localWorkspaceWriteAnnotations,
       inputSchema: { type: "object", additionalProperties: false, properties: { taskId: { type: "string", minLength: 1 } }, required: ["taskId"] },
       outputSchema: speechCancelSchema,
@@ -2329,11 +2334,11 @@ function normalizeLibraryStoreFiles(value) {
   return paths.map((workspacePath) => ({ workspacePath }));
 }
 async function resolveLibraryStoreFiles(files) {
-  const document = await agentJsonRequest("/internal/library-store-files", { method: "POST", body: { files } });
-  if (!document || typeof document !== "object" || !Array.isArray(document.files) || document.files.length !== files.length) {
+  const document2 = await agentJsonRequest("/internal/library-store-files", { method: "POST", body: { files } });
+  if (!document2 || typeof document2 !== "object" || !Array.isArray(document2.files) || document2.files.length !== files.length) {
     throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid Library file resolution.");
   }
-  return document.files.map((entry, index) => {
+  return document2.files.map((entry, index) => {
     if (!entry || typeof entry !== "object" || entry.workspacePath !== files[index].workspacePath || typeof entry.localPath !== "string") {
       throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid Library file resolution.");
     }
@@ -2682,21 +2687,21 @@ async function agentJsonRequest(path, { method = "GET", body = null, port = null
       body: body === null ? void 0 : JSON.stringify(body),
       signal: controller.signal
     });
-    let document = null;
+    let document2 = null;
     try {
-      document = await response.json();
+      document2 = await response.json();
     } catch (_error) {
     }
     if (!response.ok) {
-      const remote = document?.error;
+      const remote = document2?.error;
       throw localAgentError(
         typeof remote?.code === "string" ? remote.code : "AGENT_REQUEST_FAILED",
         typeof remote?.message === "string" ? remote.message : `Local Agent request failed (${response.status}).`,
         typeof remote?.detail === "string" ? remote.detail : null
       );
     }
-    if (!document || typeof document !== "object") throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid JSON.");
-    return document;
+    if (!document2 || typeof document2 !== "object") throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid JSON.");
+    return document2;
   } catch (error) {
     if (error?.code) throw error;
     throw localAgentError("AGENT_UNAVAILABLE", `ResearchTube Local Agent is not available on port ${resolvedPort}.`);
@@ -2708,19 +2713,20 @@ function normalizeSpeechTaskId(value) {
   if (typeof value !== "string" || !/^tsk_[A-Za-z0-9_-]{10}$/.test(value)) throw localAgentError("INVALID_ARGUMENT", "taskId must be a ResearchTube task ID.");
   return value;
 }
-function normalizeSpeechTask(document) {
-  if (!document || typeof document !== "object" || Array.isArray(document) || typeof document.taskId !== "string" || !/^tsk_[A-Za-z0-9_-]{10}$/.test(document.taskId) || !["working", "completed", "cancelled", "failed"].includes(document.status) || !["preparing", "synthesizing", "saving", "speaking", "completed", "cancelled", "failed"].includes(document.phase) || !Number.isFinite(document.progressPercent) || document.progressPercent < 0 || document.progressPercent > 100 || typeof document.statusMessage !== "string" || !document.statusMessage || typeof document.voiceName !== "string" || !document.voiceName || !["file", "speakers", "both"].includes(document.outputMode) || typeof document.saveToFile !== "boolean" || document.outputPath !== null && (typeof document.outputPath !== "string" || !document.outputPath) || typeof document.createdAt !== "string" || typeof document.lastUpdatedAt !== "string" || !Number.isInteger(document.pollIntervalMs) || document.pollIntervalMs < 100) {
+function normalizeSpeechTask(document2) {
+  if (!document2 || typeof document2 !== "object" || Array.isArray(document2) || typeof document2.taskId !== "string" || !/^tsk_[A-Za-z0-9_-]{10}$/.test(document2.taskId) || !["working", "completed", "cancelled", "failed"].includes(document2.status) || !["preparing", "openingTranslate", "synthesizing", "playing", "recording", "saving", "speaking", "completed", "cancelled", "failed"].includes(document2.phase) || !Number.isFinite(document2.progressPercent) || document2.progressPercent < 0 || document2.progressPercent > 100 || typeof document2.statusMessage !== "string" || !document2.statusMessage || !["windows", "googleTranslate"].includes(document2.engine) || typeof document2.voiceName !== "string" || !document2.voiceName || !["file", "speakers", "both"].includes(document2.outputMode) || typeof document2.saveToFile !== "boolean" || document2.outputPath !== null && (typeof document2.outputPath !== "string" || !document2.outputPath) || typeof document2.createdAt !== "string" || typeof document2.lastUpdatedAt !== "string" || !Number.isInteger(document2.pollIntervalMs) || document2.pollIntervalMs < 100) {
     throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid speech task.");
   }
-  if (document.saveToFile !== (document.outputMode === "file" || document.outputMode === "both") || document.saveToFile !== Boolean(document.outputPath)) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned inconsistent speech output settings.");
-  const task = { taskId: document.taskId, status: document.status, phase: document.phase, progressPercent: document.progressPercent, statusMessage: document.statusMessage, voiceName: document.voiceName, outputMode: document.outputMode, saveToFile: document.saveToFile, outputPath: document.outputPath, createdAt: document.createdAt, lastUpdatedAt: document.lastUpdatedAt, pollIntervalMs: document.pollIntervalMs };
-  if (document.result !== void 0) {
-    if (!document.result || typeof document.result !== "object" || typeof document.result.filePath !== "string" || !document.result.filePath || document.result.format !== "wav" || document.result.mimeType !== "audio/wav" || !document.saveToFile || document.result.filePath !== document.outputPath) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid speech file result.");
-    task.result = { filePath: document.result.filePath, format: "wav", mimeType: "audio/wav" };
+  if (document2.saveToFile !== (document2.outputMode === "file" || document2.outputMode === "both") || document2.saveToFile !== Boolean(document2.outputPath)) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned inconsistent speech output settings.");
+  const task = { taskId: document2.taskId, status: document2.status, phase: document2.phase, progressPercent: document2.progressPercent, statusMessage: document2.statusMessage, engine: document2.engine, voiceName: document2.voiceName, outputMode: document2.outputMode, saveToFile: document2.saveToFile, outputPath: document2.outputPath, createdAt: document2.createdAt, lastUpdatedAt: document2.lastUpdatedAt, pollIntervalMs: document2.pollIntervalMs };
+  if (document2.result !== void 0) {
+    const expected = document2.engine === "googleTranslate" ? ["webm", "audio/webm"] : ["wav", "audio/wav"];
+    if (!document2.result || typeof document2.result !== "object" || typeof document2.result.filePath !== "string" || !document2.result.filePath || document2.result.format !== expected[0] || document2.result.mimeType !== expected[1] || !document2.saveToFile || document2.result.filePath !== document2.outputPath) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid speech file result.");
+    task.result = { filePath: document2.result.filePath, format: expected[0], mimeType: expected[1] };
   }
-  if (document.error !== void 0) {
-    if (!document.error || typeof document.error !== "object" || typeof document.error.code !== "string" || typeof document.error.message !== "string") throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid speech error.");
-    task.error = { code: document.error.code, message: document.error.message };
+  if (document2.error !== void 0) {
+    if (!document2.error || typeof document2.error !== "object" || typeof document2.error.code !== "string" || typeof document2.error.message !== "string") throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid speech error.");
+    task.error = { code: document2.error.code, message: document2.error.message };
   }
   if (task.status === "failed" !== Boolean(task.error)) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an inconsistent speech task.");
   if (task.status === "completed" && task.progressPercent !== 100) throw localAgentError("AGENT_INVALID_RESPONSE", "The completed speech task must have 100 percent progress.");
@@ -2728,36 +2734,268 @@ function normalizeSpeechTask(document) {
   return task;
 }
 async function speechListVoices() {
-  const document = await agentJsonRequest("/system/speech/voices", { method: "POST", body: {} });
-  if (!document || typeof document !== "object" || !Array.isArray(document.voices)) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid speech voice list.");
-  return { voices: document.voices.map((voice) => {
+  const document2 = await agentJsonRequest("/system/speech/voices", { method: "POST", body: {} });
+  if (!document2 || typeof document2 !== "object" || !Array.isArray(document2.voices)) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid speech voice list.");
+  return { voices: document2.voices.map((voice) => {
     if (!voice || typeof voice !== "object" || typeof voice.voiceId !== "string" || !voice.voiceId || typeof voice.name !== "string" || !voice.name || typeof voice.language !== "string" || !voice.language || !["male", "female", "neutral"].includes(voice.gender) || typeof voice.isDefault !== "boolean") throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid speech voice.");
     return { voiceId: voice.voiceId, name: voice.name, language: voice.language, gender: voice.gender, isDefault: voice.isDefault };
   }) };
 }
 function normalizeSpeechInput(argumentsValue = {}) {
-  const args = captureFrameObject(argumentsValue, "system_speech_speak", /* @__PURE__ */ new Set(["text", "voiceId", "outputMode", "outputPath"]));
+  const args = captureFrameObject(argumentsValue, "system_speech_speak", /* @__PURE__ */ new Set(["text", "engine", "voiceId", "outputMode", "outputPath"]));
   if (typeof args.text !== "string" || !args.text.trim() || args.text.length > 6e4) throw localAgentError("SPEECH_INVALID", "text must be a non-empty string of at most 60000 characters.");
   if (args.voiceId !== void 0 && args.voiceId !== null && (typeof args.voiceId !== "string" || !args.voiceId.trim())) throw localAgentError("SPEECH_INVALID", "voiceId must be omitted, null, or a voiceId returned by system_speech_list_voices.");
+  const engine = args.engine ?? "googleTranslate";
+  if (!["windows", "googleTranslate"].includes(engine)) throw localAgentError("SPEECH_INVALID", "engine must be windows or googleTranslate.");
+  if (engine === "googleTranslate" && args.voiceId !== void 0 && args.voiceId !== null) throw localAgentError("SPEECH_INVALID", "voiceId is available only with engine windows.");
   const outputMode = args.outputMode ?? "speakers";
   if (!["file", "speakers", "both"].includes(outputMode)) throw localAgentError("SPEECH_INVALID", "outputMode must be one of: file, speakers, both.");
   const outputPath = args.outputPath === void 0 || args.outputPath === null ? null : normalizeWorkspacePath(args.outputPath, "outputPath");
-  if (outputPath !== null && !outputPath.toLowerCase().endsWith(".wav")) throw localAgentError("SPEECH_INVALID", "outputPath must end in .wav.");
+  const extension = engine === "googleTranslate" ? ".webm" : ".wav";
+  if (outputPath !== null && !outputPath.toLowerCase().endsWith(extension)) throw localAgentError("SPEECH_INVALID", `outputPath must end in ${extension} for engine ${engine}.`);
   if (outputMode === "speakers" && outputPath !== null) throw localAgentError("SPEECH_INVALID", "outputPath is available only when outputMode is file or both.");
-  return { text: args.text, voiceId: args.voiceId ?? null, outputMode, outputPath };
+  return { text: args.text, engine, voiceId: args.voiceId ?? null, outputMode, outputPath };
 }
 async function speechSpeak(argumentsValue) {
   const input = normalizeSpeechInput(argumentsValue);
-  return normalizeSpeechTask(await agentJsonRequest("/tasks/system-speech", { method: "POST", body: input }), input);
+  const document2 = await agentJsonRequest("/tasks/system-speech", { method: "POST", body: input });
+  const task = normalizeSpeechTask(document2);
+  if (input.engine === "googleTranslate") {
+    if (typeof document2.uploadToken !== "string" || document2.uploadToken.length < 20) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent did not create a Google Translate upload token.");
+    void startGoogleTranslateSpeechTask(task.taskId, document2.uploadToken, input);
+  }
+  return task;
+}
+function googleTranslateAbort(signal) {
+  if (signal?.aborted) throw new DOMException("Google Translate speech was cancelled.", "AbortError");
+}
+async function googleTranslateProgress(taskId2, uploadToken, phase, progressPercent) {
+  await agentJsonRequest(`/tasks/system-speech/${encodeURIComponent(taskId2)}/google-translate-progress`, { method: "POST", body: { uploadToken, phase, progressPercent } });
+}
+async function googleTranslateFail(taskId2, uploadToken, code) {
+  try {
+    await agentJsonRequest(`/tasks/system-speech/${encodeURIComponent(taskId2)}/google-translate-fail`, { method: "POST", body: { uploadToken, code } });
+  } catch (_error) {
+  }
+}
+async function waitForGoogleTranslateTab(tabId, signal) {
+  const deadline = Date.now() + GOOGLE_TRANSLATE_TAB_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    googleTranslateAbort(signal);
+    const tab = await chrome.tabs.get(tabId);
+    if (tab.status === "complete") {
+      try {
+        const [{ result }] = await chrome.scripting.executeScript({
+          target: { tabId },
+          func: () => {
+            const visible = (element) => {
+              const style = getComputedStyle(element);
+              const rect = element.getBoundingClientRect();
+              return style.visibility !== "hidden" && style.display !== "none" && rect.width > 2 && rect.height > 2;
+            };
+            return document.readyState === "complete" && [...document.querySelectorAll("textarea, [contenteditable='true']")].some(visible);
+          }
+        });
+        if (result === true) return;
+      } catch (_error) {
+      }
+    }
+    await sleep(250);
+  }
+  throw new Error("Google Translate did not finish loading its text input.");
+}
+async function googleTranslateSetText(tabId, text, signal) {
+  googleTranslateAbort(signal);
+  const [{ result }] = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: (value) => {
+      const visible = (element) => {
+        const style = getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return style.visibility !== "hidden" && style.display !== "none" && rect.width > 2 && rect.height > 2;
+      };
+      const field = [...document.querySelectorAll("textarea, [contenteditable='true']")].find(visible);
+      if (!field) return { present: false, value: null };
+      const setValue = (nextValue) => {
+        if (field instanceof HTMLTextAreaElement) {
+          const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
+          setter ? setter.call(field, nextValue) : field.value = nextValue;
+        } else {
+          field.textContent = nextValue;
+        }
+        field.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: nextValue }));
+        field.dispatchEvent(new Event("change", { bubbles: true }));
+      };
+      setValue("");
+      setValue(value);
+      return { present: true, value: field instanceof HTMLTextAreaElement ? field.value : field.textContent };
+    },
+    args: [text]
+  });
+  if (result?.present !== true) throw new Error("Google Translate text field is unavailable.");
+  const deadline = Date.now() + GOOGLE_TRANSLATE_TAB_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    googleTranslateAbort(signal);
+    const [{ result: current }] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => {
+        const visible = (element) => {
+          const style = getComputedStyle(element);
+          const rect = element.getBoundingClientRect();
+          return style.visibility !== "hidden" && style.display !== "none" && rect.width > 2 && rect.height > 2;
+        };
+        const field = [...document.querySelectorAll("textarea, [contenteditable='true']")].find(visible);
+        if (!field) return { present: false, value: null };
+        return { present: true, value: field instanceof HTMLTextAreaElement ? field.value : field.textContent };
+      }
+    });
+    if (current?.present === true && current.value === text) return;
+    await sleep(150);
+  }
+  throw new Error("Google Translate text field did not retain the requested text.");
+}
+async function acquireGoogleTranslateTab() {
+  if (Number.isInteger(googleTranslateSpeechTabId)) {
+    try {
+      const existing = await chrome.tabs.get(googleTranslateSpeechTabId);
+      if (typeof existing.url === "string" && existing.url.startsWith(GOOGLE_TRANSLATE_URL)) return existing;
+    } catch (_error) {
+    }
+    googleTranslateSpeechTabId = null;
+  }
+  const tab = await chrome.tabs.create({ url: `${GOOGLE_TRANSLATE_URL}?sl=auto&tl=en&op=translate`, active: false });
+  if (!Number.isInteger(tab.id)) throw new Error("Chrome did not create a Google Translate tab.");
+  googleTranslateSpeechTabId = tab.id;
+  return tab;
+}
+async function googleTranslatePressListen(tabId, signal, debuggerAlreadyAttached = false) {
+  await waitForGoogleTranslateListenControl(tabId, signal);
+  googleTranslateAbort(signal);
+  let attached = false;
+  try {
+    if (!debuggerAlreadyAttached) {
+      await cdpAttach(tabId);
+      attached = true;
+    }
+    const target = (await cdpEvaluate(tabId, `(() => {
+      const enabled = element => {
+        const style = getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return !element.disabled && element.getAttribute("aria-disabled") !== "true"
+          && style.visibility !== "hidden" && style.display !== "none" && rect.width > 2 && rect.height > 2;
+      };
+      const button = [...document.querySelectorAll('button[aria-label="Listen to source text"], [role="button"][aria-label="Listen to source text"]')].find(enabled);
+      if (!button) return null;
+      const rect = button.getBoundingClientRect();
+      return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+    })()`))?.value;
+    if (!Number.isFinite(target?.x) || !Number.isFinite(target?.y)) throw new Error("Google Translate listen control became unavailable before playback.");
+    await cdpCommand(tabId, "Input.dispatchMouseEvent", { type: "mouseMoved", x: target.x, y: target.y, button: "none", buttons: 0 });
+    await cdpCommand(tabId, "Input.dispatchMouseEvent", { type: "mousePressed", x: target.x, y: target.y, button: "left", buttons: 1, clickCount: 1 });
+    await cdpCommand(tabId, "Input.dispatchMouseEvent", { type: "mouseReleased", x: target.x, y: target.y, button: "left", buttons: 0, clickCount: 1 });
+    cdpLog("Clicked Google Translate source listen button with browser input", { tabId });
+  } finally {
+    if (attached) await cdpDetach(tabId);
+  }
+}
+async function waitForGoogleTranslateListenControl(tabId, signal) {
+  const deadline = Date.now() + GOOGLE_TRANSLATE_TAB_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    googleTranslateAbort(signal);
+    const [{ result }] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => {
+        const enabled = (element) => {
+          const style = getComputedStyle(element);
+          const rect = element.getBoundingClientRect();
+          return !element.disabled && element.getAttribute("aria-disabled") !== "true" && style.visibility !== "hidden" && style.display !== "none" && rect.width > 2 && rect.height > 2;
+        };
+        const sourceControl = [...document.querySelectorAll('button[aria-label="Listen to source text"], [role="button"][aria-label="Listen to source text"]')].find(enabled);
+        return Boolean(sourceControl);
+      }
+    });
+    if (result === true) return;
+    await sleep(250);
+  }
+  throw new Error("Google Translate listen control did not become active.");
+}
+async function googleTranslateOffscreen(message) {
+  const result = await chrome.runtime.sendMessage(message);
+  if (!result?.ok) throw new Error(String(result?.message || "Google Translate audio helper failed."));
+  return result;
+}
+async function startGoogleTranslateSpeechTask(taskId2, uploadToken, input) {
+  const controller = new AbortController();
+  const active = { controller, tabId: null };
+  googleTranslateSpeechRunners.set(taskId2, active);
+  let completed = false;
+  let focusEmulationAttached = false;
+  try {
+    await googleTranslateProgress(taskId2, uploadToken, "openingTranslate", 5);
+    const tab = await acquireGoogleTranslateTab();
+    active.tabId = tab.id;
+    await cdpAttach(tab.id);
+    focusEmulationAttached = true;
+    await cdpCommand(tab.id, "Emulation.setFocusEmulationEnabled", { enabled: true });
+    try {
+      await cdpCommand(tab.id, "Page.setWebLifecycleState", { state: "active" });
+    } catch (error) {
+      cdpLog("Google Translate active lifecycle emulation is unavailable", { tabId: tab.id, error: safeErrorMessage(error) });
+    }
+    await waitForGoogleTranslateTab(tab.id, controller.signal);
+    await googleTranslateSetText(tab.id, input.text, controller.signal);
+    await googleTranslateProgress(taskId2, uploadToken, "synthesizing", 20);
+    await waitForGoogleTranslateListenControl(tab.id, controller.signal);
+    await googleTranslateProgress(taskId2, uploadToken, "playing", 28);
+    if (input.outputMode === "speakers") {
+      await googleTranslatePressListen(tab.id, controller.signal, true);
+      await agentJsonRequest(`/tasks/system-speech/${encodeURIComponent(taskId2)}/google-translate-complete`, { method: "POST", body: { uploadToken } });
+      completed = true;
+      return;
+    }
+    await ensureCaptureFrameOffscreenDocument();
+    googleTranslateAbort(controller.signal);
+    const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tab.id });
+    if (typeof streamId !== "string" || !streamId) throw new Error("Chrome did not provide Google Translate tab audio.");
+    await googleTranslateOffscreen({ type: "researchtube_google_translate_start", taskId: taskId2, streamId, record: true, relayAudio: input.outputMode === "both" });
+    await googleTranslateProgress(taskId2, uploadToken, "recording", 35);
+    await googleTranslatePressListen(tab.id, controller.signal, true);
+    const config = await getConfig();
+    const uploadUrl = `http://127.0.0.1:${normalizeAgentPort(config.agentPort)}/tasks/system-speech/${encodeURIComponent(taskId2)}/google-translate-audio?token=${encodeURIComponent(uploadToken)}`;
+    await googleTranslateOffscreen({ type: "researchtube_google_translate_finish", taskId: taskId2, uploadUrl });
+    completed = true;
+  } catch (error) {
+    if (error?.name !== "AbortError") {
+      const text = String(error?.message || error || "");
+      const code = /audio|record|stream/i.test(text) ? "GOOGLE_TRANSLATE_RECORDING_FAILED" : /listen|play/i.test(text) ? "GOOGLE_TRANSLATE_PLAYBACK_FAILED" : "GOOGLE_TRANSLATE_UNAVAILABLE";
+      await googleTranslateFail(taskId2, uploadToken, code);
+    }
+  } finally {
+    if (!completed) void chrome.runtime.sendMessage({ type: "researchtube_google_translate_stop", taskId: taskId2 }).catch(() => void 0);
+    if (focusEmulationAttached && Number.isInteger(active.tabId)) {
+      try {
+        await cdpCommand(active.tabId, "Emulation.setFocusEmulationEnabled", { enabled: false });
+      } catch (error) {
+        cdpErrorLog("Could not disable Google Translate focus emulation", { tabId: active.tabId, error: safeErrorMessage(error) });
+      }
+      await cdpDetach(active.tabId);
+    }
+    googleTranslateSpeechRunners.delete(taskId2);
+  }
 }
 async function speechStatus(taskId2) {
   return normalizeSpeechTask(await agentJsonRequest(`/tasks/system-speech/${encodeURIComponent(normalizeSpeechTaskId(taskId2))}`));
 }
 async function speechCancel(taskId2) {
   taskId2 = normalizeSpeechTaskId(taskId2);
-  const document = await agentJsonRequest(`/tasks/system-speech/${encodeURIComponent(taskId2)}/cancel`, { method: "POST", body: {} });
-  if (!document || document.taskId !== taskId2 || !["cancelled", "completed", "failed"].includes(document.status)) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent did not confirm speech cancellation.");
-  return { taskId: taskId2, status: document.status };
+  const active = googleTranslateSpeechRunners.get(taskId2);
+  if (active) {
+    active.controller.abort();
+    void chrome.runtime.sendMessage({ type: "researchtube_google_translate_stop", taskId: taskId2 }).catch(() => void 0);
+  }
+  const document2 = await agentJsonRequest(`/tasks/system-speech/${encodeURIComponent(taskId2)}/cancel`, { method: "POST", body: {} });
+  if (!document2 || document2.taskId !== taskId2 || !["cancelled", "completed", "failed"].includes(document2.status)) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent did not confirm speech cancellation.");
+  return { taskId: taskId2, status: document2.status };
 }
 function mcpLogStatus(value, failed = false) {
   const task = value && typeof value === "object" && value.task && typeof value.task === "object" ? value.task : null;
@@ -3008,20 +3246,20 @@ function normalizeWorkspaceExtensions(value) {
 async function workspaceList(path = "", limit = 100, extensions = void 0) {
   const normalizedPath = normalizeWorkspacePath(path, "path", { allowRoot: true });
   const normalizedExtensions = normalizeWorkspaceExtensions(extensions);
-  const document = await agentJsonRequest("/workspace/list", { method: "POST", body: { path: normalizedPath, limit, ...normalizedExtensions === void 0 ? {} : { extensions: normalizedExtensions } } });
-  if (!document || typeof document !== "object" || !Array.isArray(document.entries) || document.entries.length > 500 || !Number.isInteger(document.returned) || !Number.isInteger(document.limit)) {
+  const document2 = await agentJsonRequest("/workspace/list", { method: "POST", body: { path: normalizedPath, limit, ...normalizedExtensions === void 0 ? {} : { extensions: normalizedExtensions } } });
+  if (!document2 || typeof document2 !== "object" || !Array.isArray(document2.entries) || document2.entries.length > 500 || !Number.isInteger(document2.returned) || !Number.isInteger(document2.limit)) {
     throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid workspace listing.");
   }
-  const entries = document.entries.map(normalizeWorkspaceEntry);
-  if (document.returned !== entries.length || document.limit !== limit || !Array.isArray(document.extensions) && document.extensions !== null) {
+  const entries = document2.entries.map(normalizeWorkspaceEntry);
+  if (document2.returned !== entries.length || document2.limit !== limit || !Array.isArray(document2.extensions) && document2.extensions !== null) {
     throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid workspace listing.");
   }
-  if (normalizedExtensions && (document.extensions.length !== normalizedExtensions.length || document.extensions.some((entry, index) => entry !== [...normalizedExtensions].sort()[index]))) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid workspace extension filter.");
-  return { path: normalizeWorkspacePath(document.path, "path", { allowRoot: true }), entries, returned: entries.length, limit, extensions: document.extensions };
+  if (normalizedExtensions && (document2.extensions.length !== normalizedExtensions.length || document2.extensions.some((entry, index) => entry !== [...normalizedExtensions].sort()[index]))) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid workspace extension filter.");
+  return { path: normalizeWorkspacePath(document2.path, "path", { allowRoot: true }), entries, returned: entries.length, limit, extensions: document2.extensions };
 }
 async function workspaceStat(path) {
-  const document = await agentJsonRequest("/workspace/stat", { method: "POST", body: { path: normalizeWorkspacePath(path, "path") } });
-  return normalizeWorkspaceStat(document);
+  const document2 = await agentJsonRequest("/workspace/stat", { method: "POST", body: { path: normalizeWorkspacePath(path, "path") } });
+  return normalizeWorkspaceStat(document2);
 }
 function normalizeMediaInspectImage(value) {
   if (!value || typeof value !== "object" || Array.isArray(value) || !(/* @__PURE__ */ new Set(["png", "jpeg", "webp"])).has(value.format) || !(/* @__PURE__ */ new Set(["image/png", "image/jpeg", "image/webp"])).has(value.mimeType) || !Number.isInteger(value.width) || value.width < 1 || !Number.isInteger(value.height) || value.height < 1 || !Number.isInteger(value.imageSizeBytes) || value.imageSizeBytes < 0) {
@@ -3032,31 +3270,31 @@ function normalizeMediaInspectImage(value) {
   return { workspacePath: normalizeWorkspacePath(value.workspacePath, "workspacePath"), format: value.format, mimeType: value.mimeType, width: value.width, height: value.height, imageSizeBytes: value.imageSizeBytes };
 }
 async function mediaInspectImage(path) {
-  const document = await agentJsonRequest("/media/inspect-image", { method: "POST", body: { path: normalizeWorkspacePath(path, "path") } });
-  return normalizeMediaInspectImage(document);
+  const document2 = await agentJsonRequest("/media/inspect-image", { method: "POST", body: { path: normalizeWorkspacePath(path, "path") } });
+  return normalizeMediaInspectImage(document2);
 }
 async function workspaceMkdir(path) {
-  const document = await agentJsonRequest("/workspace/mkdir", { method: "POST", body: { path: normalizeWorkspacePath(path, "path") } });
-  if (!document || typeof document !== "object" || document.type !== "directory" || typeof document.created !== "boolean") {
+  const document2 = await agentJsonRequest("/workspace/mkdir", { method: "POST", body: { path: normalizeWorkspacePath(path, "path") } });
+  if (!document2 || typeof document2 !== "object" || document2.type !== "directory" || typeof document2.created !== "boolean") {
     throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid mkdir result.");
   }
-  return { path: normalizeWorkspacePath(document.path, "path"), type: "directory", created: document.created };
+  return { path: normalizeWorkspacePath(document2.path, "path"), type: "directory", created: document2.created };
 }
 async function workspaceMove(source, destination) {
   const input = { source: normalizeWorkspacePath(source, "source"), destination: normalizeWorkspacePath(destination, "destination") };
-  const document = await agentJsonRequest("/workspace/move", { method: "POST", body: input });
-  if (!document || typeof document !== "object" || document.source !== input.source || document.destination !== input.destination) {
+  const document2 = await agentJsonRequest("/workspace/move", { method: "POST", body: input });
+  if (!document2 || typeof document2 !== "object" || document2.source !== input.source || document2.destination !== input.destination) {
     throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid move result.");
   }
-  return { source: input.source, destination: input.destination, type: normalizeWorkspaceType(document.type, ["file", "directory"]) };
+  return { source: input.source, destination: input.destination, type: normalizeWorkspaceType(document2.type, ["file", "directory"]) };
 }
 async function workspaceDelete(path) {
   const logicalPath = normalizeWorkspacePath(path, "path");
-  const document = await agentJsonRequest("/workspace/delete", { method: "POST", body: { path: logicalPath } });
-  if (!document || typeof document !== "object" || document.path !== logicalPath || document.deleted !== true) {
+  const document2 = await agentJsonRequest("/workspace/delete", { method: "POST", body: { path: logicalPath } });
+  if (!document2 || typeof document2 !== "object" || document2.path !== logicalPath || document2.deleted !== true) {
     throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid delete result.");
   }
-  return { path: logicalPath, type: normalizeWorkspaceType(document.type, ["file", "directory"]), deleted: true };
+  return { path: logicalPath, type: normalizeWorkspaceType(document2.type, ["file", "directory"]), deleted: true };
 }
 var workspaceShareFileTypes = /* @__PURE__ */ new Set(["images", "audio", "video", "documents", "archives", "other", "all"]);
 function normalizeWorkspaceShareFileTypes(value) {
@@ -3065,27 +3303,27 @@ function normalizeWorkspaceShareFileTypes(value) {
   }
   return value;
 }
-function normalizeWorkspaceShareStatus(document) {
-  if (!document || typeof document !== "object" || Array.isArray(document) || !["active", "inactive"].includes(document.state) || !Array.isArray(document.fileTypes) || !Array.isArray(document.methods) || !document.externalProbe || typeof document.externalProbe !== "object") {
+function normalizeWorkspaceShareStatus(document2) {
+  if (!document2 || typeof document2 !== "object" || Array.isArray(document2) || !["active", "inactive"].includes(document2.state) || !Array.isArray(document2.fileTypes) || !Array.isArray(document2.methods) || !document2.externalProbe || typeof document2.externalProbe !== "object") {
     throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid workspace sharing status.");
   }
-  const active = document.state === "active";
-  const fileTypes = active ? normalizeWorkspaceShareFileTypes(document.fileTypes) : document.fileTypes;
+  const active = document2.state === "active";
+  const fileTypes = active ? normalizeWorkspaceShareFileTypes(document2.fileTypes) : document2.fileTypes;
   if (!active && fileTypes.length) throw localAgentError("AGENT_INVALID_RESPONSE", "An inactive workspace share must not have file types.");
-  if (document.folder !== null && typeof document.folder !== "string") throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid shared folder.");
-  const folder = document.folder === null ? null : normalizeWorkspacePath(document.folder, "folder", { allowRoot: true });
-  if (document.file !== null && typeof document.file !== "string") throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid shared file.");
-  const file = document.file === null ? null : normalizeWorkspacePath(document.file, "file");
-  if (document.publicBaseUrl !== null && (typeof document.publicBaseUrl !== "string" || !/^https:\/\//.test(document.publicBaseUrl))) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid public workspace URL.");
-  if (document.publicFileUrl !== null && (typeof document.publicFileUrl !== "string" || !/^https:\/\//.test(document.publicFileUrl))) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid public workspace file URL.");
-  if (document.methods.some((method) => method !== "GET" && method !== "HEAD")) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid public workspace methods.");
-  const folderShare = folder !== null && file === null && document.publicBaseUrl !== null && document.publicFileUrl === null && fileTypes.length > 0;
-  const fileShare = folder === null && file !== null && document.publicBaseUrl === null && document.publicFileUrl !== null && fileTypes.length === 0;
-  if (active !== ((folderShare || fileShare) && document.methods.length === 2)) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an inconsistent workspace sharing status.");
-  const probe = document.externalProbe;
+  if (document2.folder !== null && typeof document2.folder !== "string") throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid shared folder.");
+  const folder = document2.folder === null ? null : normalizeWorkspacePath(document2.folder, "folder", { allowRoot: true });
+  if (document2.file !== null && typeof document2.file !== "string") throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid shared file.");
+  const file = document2.file === null ? null : normalizeWorkspacePath(document2.file, "file");
+  if (document2.publicBaseUrl !== null && (typeof document2.publicBaseUrl !== "string" || !/^https:\/\//.test(document2.publicBaseUrl))) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid public workspace URL.");
+  if (document2.publicFileUrl !== null && (typeof document2.publicFileUrl !== "string" || !/^https:\/\//.test(document2.publicFileUrl))) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid public workspace file URL.");
+  if (document2.methods.some((method) => method !== "GET" && method !== "HEAD")) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid public workspace methods.");
+  const folderShare = folder !== null && file === null && document2.publicBaseUrl !== null && document2.publicFileUrl === null && fileTypes.length > 0;
+  const fileShare = folder === null && file !== null && document2.publicBaseUrl === null && document2.publicFileUrl !== null && fileTypes.length === 0;
+  if (active !== ((folderShare || fileShare) && document2.methods.length === 2)) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an inconsistent workspace sharing status.");
+  const probe = document2.externalProbe;
   if (!["not_requested", "passed", "failed"].includes(probe.state) || probe.provider !== "wsrv.nl" || probe.probePath !== null && typeof probe.probePath !== "string" || probe.httpStatus !== null && (!Number.isInteger(probe.httpStatus) || probe.httpStatus < 100 || probe.httpStatus > 599) || probe.contentType !== null && typeof probe.contentType !== "string") throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid external sharing probe.");
-  if (![true, false, null].includes(document.externallyReachable) || document.externallyReachable === true !== (probe.state === "passed") || document.externallyReachable === false !== (probe.state === "failed")) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an inconsistent external sharing probe.");
-  return { state: document.state, folder, file, fileTypes, publicBaseUrl: document.publicBaseUrl, publicFileUrl: document.publicFileUrl, methods: document.methods, externallyReachable: document.externallyReachable, externalProbe: { state: probe.state, provider: probe.provider, probePath: probe.probePath === null ? null : normalizeWorkspacePath(probe.probePath, "externalProbe.probePath"), httpStatus: probe.httpStatus, contentType: probe.contentType } };
+  if (![true, false, null].includes(document2.externallyReachable) || document2.externallyReachable === true !== (probe.state === "passed") || document2.externallyReachable === false !== (probe.state === "failed")) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an inconsistent external sharing probe.");
+  return { state: document2.state, folder, file, fileTypes, publicBaseUrl: document2.publicBaseUrl, publicFileUrl: document2.publicFileUrl, methods: document2.methods, externallyReachable: document2.externallyReachable, externalProbe: { state: probe.state, provider: probe.provider, probePath: probe.probePath === null ? null : normalizeWorkspacePath(probe.probePath, "externalProbe.probePath"), httpStatus: probe.httpStatus, contentType: probe.contentType } };
 }
 async function workspaceShareStart(args) {
   const hasFolder = Object.hasOwn(args, "folder"), hasFile = Object.hasOwn(args, "file");
@@ -3101,9 +3339,9 @@ async function workspaceShareStatus(verifyExternal = false) {
   return normalizeWorkspaceShareStatus(await agentJsonRequest("/workspace/share/status", { method: "POST", body: { verifyExternal }, timeoutMs: verifyExternal ? 3e4 : 1e4 }));
 }
 async function workspaceShareStop() {
-  const document = await agentJsonRequest("/workspace/share/stop", { method: "POST", body: {} });
-  if (!document || typeof document !== "object" || document.state !== "stopped" || typeof document.stopped !== "boolean") throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid workspace sharing stop result.");
-  return { state: "stopped", stopped: document.stopped };
+  const document2 = await agentJsonRequest("/workspace/share/stop", { method: "POST", body: {} });
+  if (!document2 || typeof document2 !== "object" || document2.state !== "stopped" || typeof document2.stopped !== "boolean") throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid workspace sharing stop result.");
+  return { state: "stopped", stopped: document2.stopped };
 }
 var mediaProbeSectionNames = /* @__PURE__ */ new Set(["format", "streams", "chapters", "programs"]);
 function normalizeMediaProbeSections(value) {
@@ -3138,20 +3376,20 @@ function normalizeMediaProbeDocument(value, sections) {
 async function mediaProbe(path, sections) {
   const logicalPath = normalizeWorkspacePath(path, "path");
   const normalizedSections = normalizeMediaProbeSections(sections);
-  const document = await agentJsonRequest("/media/probe", { method: "POST", body: { path: logicalPath, ...normalizedSections === void 0 ? {} : { sections: normalizedSections } }, timeoutMs: AGENT_TASK_TIMEOUT_MS });
-  if (!document || typeof document !== "object" || document.path !== logicalPath || !Number.isInteger(document.fileSizeBytes) || document.fileSizeBytes < 0 || !Array.isArray(document.sections) || document.sections.length < 1) {
+  const document2 = await agentJsonRequest("/media/probe", { method: "POST", body: { path: logicalPath, ...normalizedSections === void 0 ? {} : { sections: normalizedSections } }, timeoutMs: AGENT_TASK_TIMEOUT_MS });
+  if (!document2 || typeof document2 !== "object" || document2.path !== logicalPath || !Number.isInteger(document2.fileSizeBytes) || document2.fileSizeBytes < 0 || !Array.isArray(document2.sections) || document2.sections.length < 1) {
     throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid media metadata.");
   }
-  const returnedSections = normalizeMediaProbeSections(document.sections);
+  const returnedSections = normalizeMediaProbeSections(document2.sections);
   if (normalizedSections !== void 0 && (returnedSections.length !== normalizedSections.length || returnedSections.some((section, index) => section !== normalizedSections[index]))) {
     throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned unexpected ffprobe metadata sections.");
   }
   return {
     path: logicalPath,
-    fileSizeBytes: document.fileSizeBytes,
-    ffprobeFileSizeBytes: nullableAgentNumber(document.ffprobeFileSizeBytes, true),
+    fileSizeBytes: document2.fileSizeBytes,
+    ffprobeFileSizeBytes: nullableAgentNumber(document2.ffprobeFileSizeBytes, true),
     sections: returnedSections,
-    probe: normalizeMediaProbeDocument(document.probe, returnedSections)
+    probe: normalizeMediaProbeDocument(document2.probe, returnedSections)
   };
 }
 function captureFrameFiniteNumber(value, field, { minimum = null, maximum = null } = {}) {
@@ -3250,50 +3488,50 @@ function normalizeCaptureFrameBatchInput(argumentsValue = {}) {
   const { timestampSeconds: _timestampSeconds, outputPath: _outputPath, showInChat: _showInChat, ...source } = single;
   return { ...source, timestampsSeconds };
 }
-function normalizeCaptureFrameTask(document, input = null) {
-  if (!document || typeof document !== "object" || Array.isArray(document) || typeof document.taskId !== "string" || !document.taskId || !(/* @__PURE__ */ new Set(["working", "completed", "failed", "cancelled"])).has(document.status) || typeof document.statusMessage !== "string" || !Number.isFinite(document.progressPercent) || document.progressPercent < 0 || document.progressPercent > 100 || !Number.isInteger(document.completedFrames) || !Number.isInteger(document.totalFrames) || document.completedFrames < 0 || document.totalFrames < 1 || document.completedFrames > document.totalFrames || !Array.isArray(document.frames) || typeof document.createdAt !== "string" || typeof document.lastUpdatedAt !== "string" || !Number.isInteger(document.pollIntervalMs) || document.pollIntervalMs < 100) {
+function normalizeCaptureFrameTask(document2, input = null) {
+  if (!document2 || typeof document2 !== "object" || Array.isArray(document2) || typeof document2.taskId !== "string" || !document2.taskId || !(/* @__PURE__ */ new Set(["working", "completed", "failed", "cancelled"])).has(document2.status) || typeof document2.statusMessage !== "string" || !Number.isFinite(document2.progressPercent) || document2.progressPercent < 0 || document2.progressPercent > 100 || !Number.isInteger(document2.completedFrames) || !Number.isInteger(document2.totalFrames) || document2.completedFrames < 0 || document2.totalFrames < 1 || document2.completedFrames > document2.totalFrames || !Array.isArray(document2.frames) || typeof document2.createdAt !== "string" || typeof document2.lastUpdatedAt !== "string" || !Number.isInteger(document2.pollIntervalMs) || document2.pollIntervalMs < 100) {
     throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid frame-extraction task.");
   }
-  if (document.frames.length !== document.completedFrames) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned inconsistent frame-extraction progress.");
-  const task = { taskId: document.taskId, status: document.status, statusMessage: document.statusMessage, progressPercent: document.progressPercent, completedFrames: document.completedFrames, totalFrames: document.totalFrames, createdAt: document.createdAt, lastUpdatedAt: document.lastUpdatedAt, pollIntervalMs: document.pollIntervalMs };
-  task.frames = document.frames.map((frame) => {
+  if (document2.frames.length !== document2.completedFrames) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned inconsistent frame-extraction progress.");
+  const task = { taskId: document2.taskId, status: document2.status, statusMessage: document2.statusMessage, progressPercent: document2.progressPercent, completedFrames: document2.completedFrames, totalFrames: document2.totalFrames, createdAt: document2.createdAt, lastUpdatedAt: document2.lastUpdatedAt, pollIntervalMs: document2.pollIntervalMs };
+  task.frames = document2.frames.map((frame) => {
     const inferredSource = input || (typeof frame.sourcePath === "string" && frame.sourcePath.startsWith("youtube:") ? { youtube: { videoId: frame.sourceVideoId, formatId: frame.sourceVideoFormatId }, seekMode: frame.seekMode, showInChat: false } : { path: frame.sourcePath, seekMode: frame.seekMode, showInChat: false });
     return normalizeCaptureFrameResult(frame, { ...inferredSource, timestampSeconds: frame.requestedTimestampSeconds, showInChat: false }).metadata;
   });
-  if (document.error) {
-    if (typeof document.error !== "object" || typeof document.error.code !== "string" || typeof document.error.message !== "string") throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid frame-extraction error.");
-    task.error = { code: document.error.code, message: document.error.message };
+  if (document2.error) {
+    if (typeof document2.error !== "object" || typeof document2.error.code !== "string" || typeof document2.error.message !== "string") throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid frame-extraction error.");
+    task.error = { code: document2.error.code, message: document2.error.message };
   }
-  if (document.failedSection !== void 0) {
-    const section = document.failedSection;
+  if (document2.failedSection !== void 0) {
+    const section = document2.failedSection;
     if (!section || typeof section !== "object" || !Number.isInteger(section.sectionIndex) || section.sectionIndex < 1 || !Number.isFinite(section.startSeconds) || section.startSeconds < 0 || !Number.isFinite(section.endSeconds) || section.endSeconds < section.startSeconds || !Number.isInteger(section.frameCount) || section.frameCount < 1 || !Number.isInteger(section.attemptCount) || section.attemptCount < 1 || section.attemptCount > 3 || section.sectionIndex > task.totalFrames) {
       throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid failed frame section.");
     }
     task.failedSection = { sectionIndex: section.sectionIndex, startSeconds: section.startSeconds, endSeconds: section.endSeconds, frameCount: section.frameCount, attemptCount: section.attemptCount };
   }
-  if (task.failedSection && document.status !== "failed") throw localAgentError("AGENT_INVALID_RESPONSE", "Only a failed frame-extraction task may contain failedSection.");
-  if (document.status === "completed" && (task.completedFrames !== task.totalFrames || task.error)) throw localAgentError("AGENT_INVALID_RESPONSE", "The completed frame-extraction task is inconsistent.");
+  if (task.failedSection && document2.status !== "failed") throw localAgentError("AGENT_INVALID_RESPONSE", "Only a failed frame-extraction task may contain failedSection.");
+  if (document2.status === "completed" && (task.completedFrames !== task.totalFrames || task.error)) throw localAgentError("AGENT_INVALID_RESPONSE", "The completed frame-extraction task is inconsistent.");
   return task;
 }
 async function createCaptureFrameTask(argumentsValue) {
   const input = normalizeCaptureFrameBatchInput(argumentsValue);
-  const document = await agentJsonRequest("/tasks/capture-frame", { method: "POST", body: input, timeoutMs: AGENT_TASK_TIMEOUT_MS });
-  return normalizeCaptureFrameTask(document, input);
+  const document2 = await agentJsonRequest("/tasks/capture-frame", { method: "POST", body: input, timeoutMs: AGENT_TASK_TIMEOUT_MS });
+  return normalizeCaptureFrameTask(document2, input);
 }
 async function getCaptureFrameTask(taskId2) {
   if (typeof taskId2 !== "string" || !taskId2.trim()) throw localAgentError("INVALID_ARGUMENT", "taskId must be a non-empty string.");
   return normalizeCaptureFrameTask(await agentJsonRequest(`/tasks/capture-frame/${encodeURIComponent(taskId2)}`, { timeoutMs: AGENT_TASK_TIMEOUT_MS }));
 }
-function normalizeCaptureFrameTaskDiagnostics(document) {
-  if (!document || typeof document !== "object" || typeof document.taskId !== "string" || !["working", "completed", "failed", "cancelled"].includes(document.status)) {
+function normalizeCaptureFrameTaskDiagnostics(document2) {
+  if (!document2 || typeof document2 !== "object" || typeof document2.taskId !== "string" || !["working", "completed", "failed", "cancelled"].includes(document2.status)) {
     throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid frame-extraction diagnostics.");
   }
-  const error = document.error === null ? null : document.error;
+  const error = document2.error === null ? null : document2.error;
   if (error !== null && (!error || typeof error !== "object" || typeof error.code !== "string" || typeof error.message !== "string")) {
     throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid frame-extraction diagnostics.");
   }
-  if (document.youtube === null) return { taskId: document.taskId, status: document.status, error, youtube: null };
-  const youtube = document.youtube;
+  if (document2.youtube === null) return { taskId: document2.taskId, status: document2.status, error, youtube: null };
+  const youtube = document2.youtube;
   if (!youtube || typeof youtube !== "object" || typeof youtube.formatId !== "string" || !Number.isInteger(youtube.sectionCount) || youtube.sectionCount < 1 || !Array.isArray(youtube.sections) || !youtube.poTokenProvider || typeof youtube.poTokenProvider !== "object" || !["ready", "notInstalled", "incomplete", "notReady", "runtimeMissing"].includes(youtube.poTokenProvider.state) || youtube.poTokenProvider.provider !== "bgutil" || !(youtube.ytDlpExitCode === null || Number.isInteger(youtube.ytDlpExitCode)) || !Array.isArray(youtube.output) || youtube.output.length > 20 || youtube.output.some((line) => typeof line !== "string" || line.length > 240)) {
     throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid frame-extraction diagnostics.");
   }
@@ -3311,7 +3549,7 @@ function normalizeCaptureFrameTaskDiagnostics(document) {
     }
     failedSection = { sectionIndex: section.sectionIndex, startSeconds: section.startSeconds, endSeconds: section.endSeconds, frameCount: section.frameCount, attemptCount: section.attemptCount };
   }
-  return { taskId: document.taskId, status: document.status, error, youtube: { formatId: youtube.formatId, sectionCount: youtube.sectionCount, sections, ...failedSection === void 0 ? {} : { failedSection }, poTokenProvider: { state: youtube.poTokenProvider.state, provider: "bgutil" }, ytDlpExitCode: youtube.ytDlpExitCode, output: youtube.output } };
+  return { taskId: document2.taskId, status: document2.status, error, youtube: { formatId: youtube.formatId, sectionCount: youtube.sectionCount, sections, ...failedSection === void 0 ? {} : { failedSection }, poTokenProvider: { state: youtube.poTokenProvider.state, provider: "bgutil" }, ytDlpExitCode: youtube.ytDlpExitCode, output: youtube.output } };
 }
 async function getCaptureFrameTaskDiagnostics(taskId2) {
   if (typeof taskId2 !== "string" || !taskId2.trim()) throw localAgentError("INVALID_ARGUMENT", "taskId must be a non-empty string.");
@@ -3319,45 +3557,45 @@ async function getCaptureFrameTaskDiagnostics(taskId2) {
 }
 async function cancelCaptureFrameTask(taskId2) {
   if (typeof taskId2 !== "string" || !taskId2.trim()) throw localAgentError("INVALID_ARGUMENT", "taskId must be a non-empty string.");
-  const document = await agentJsonRequest(`/tasks/capture-frame/${encodeURIComponent(taskId2)}/cancel`, { method: "POST", body: {}, timeoutMs: AGENT_TASK_TIMEOUT_MS });
-  if (!document || document.accepted !== true) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent did not confirm frame-extraction cancellation.");
+  const document2 = await agentJsonRequest(`/tasks/capture-frame/${encodeURIComponent(taskId2)}/cancel`, { method: "POST", body: {}, timeoutMs: AGENT_TASK_TIMEOUT_MS });
+  if (!document2 || document2.accepted !== true) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent did not confirm frame-extraction cancellation.");
   return { taskId: taskId2, accepted: true, message: "Cancellation request accepted. Poll media_capture_frame_get_task for the terminal status." };
 }
-function normalizeCaptureFrameResult(document, input) {
+function normalizeCaptureFrameResult(document2, input) {
   const expectedSource = input.path ?? `youtube:${input.youtube.videoId}`;
-  if (!document || typeof document !== "object" || Array.isArray(document) || document.sourcePath !== expectedSource || document.seekMode !== input.seekMode || document.displayRotationApplied !== true && document.displayRotationApplied !== false) {
+  if (!document2 || typeof document2 !== "object" || Array.isArray(document2) || document2.sourcePath !== expectedSource || document2.seekMode !== input.seekMode || document2.displayRotationApplied !== true && document2.displayRotationApplied !== false) {
     throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid captured-frame result.");
   }
-  const requestedTimestampSeconds = captureFrameFiniteNumber(document.requestedTimestampSeconds, "requestedTimestampSeconds", { minimum: 0 });
+  const requestedTimestampSeconds = captureFrameFiniteNumber(document2.requestedTimestampSeconds, "requestedTimestampSeconds", { minimum: 0 });
   if (requestedTimestampSeconds !== input.timestampSeconds) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an unexpected captured-frame timestamp.");
-  const actualTimestampSeconds = document.actualTimestampSeconds === null ? null : captureFrameFiniteNumber(document.actualTimestampSeconds, "actualTimestampSeconds", { minimum: 0 });
-  const selectedVideoStreamIndex = captureFrameInteger(document.selectedVideoStreamIndex, "selectedVideoStreamIndex");
-  const image = document.image;
+  const actualTimestampSeconds = document2.actualTimestampSeconds === null ? null : captureFrameFiniteNumber(document2.actualTimestampSeconds, "actualTimestampSeconds", { minimum: 0 });
+  const selectedVideoStreamIndex = captureFrameInteger(document2.selectedVideoStreamIndex, "selectedVideoStreamIndex");
+  const image = document2.image;
   if (!image || typeof image !== "object" || Array.isArray(image) || !(/* @__PURE__ */ new Set(["png", "jpeg", "webp"])).has(image.format) || !(/* @__PURE__ */ new Set(["image/png", "image/jpeg", "image/webp"])).has(image.mimeType) || !Number.isInteger(image.width) || image.width < 1 || !Number.isInteger(image.height) || image.height < 1 || !Number.isInteger(image.imageSizeBytes) || image.imageSizeBytes < 0) {
     throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid captured-image metadata.");
   }
   const expectedMimeType = { png: "image/png", jpeg: "image/jpeg", webp: "image/webp" }[image.format];
   if (image.mimeType !== expectedMimeType) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an inconsistent captured-image MIME type.");
-  if (typeof image.workspacePath !== "string" || Object.hasOwn(document, "inlineImageBase64") || Object.hasOwn(image, "publicUrl")) {
+  if (typeof image.workspacePath !== "string" || Object.hasOwn(document2, "inlineImageBase64") || Object.hasOwn(image, "publicUrl")) {
     throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid workspace image result.");
   }
   const remote = input.youtube === void 0 ? {} : {
-    sourceVideoId: document.sourceVideoId,
-    sourceVideoFormatId: document.sourceVideoFormatId,
-    sourceTitle: document.sourceTitle,
-    partialDownload: document.partialDownload
+    sourceVideoId: document2.sourceVideoId,
+    sourceVideoFormatId: document2.sourceVideoFormatId,
+    sourceTitle: document2.sourceTitle,
+    partialDownload: document2.partialDownload
   };
-  if (input.youtube !== void 0 && (document.sourceVideoId !== input.youtube.videoId || document.sourceVideoFormatId !== input.youtube.formatId || typeof document.sourceTitle !== "string" || !document.sourceTitle || !document.partialDownload || typeof document.partialDownload !== "object" || !Number.isFinite(document.partialDownload.startSeconds) || !Number.isFinite(document.partialDownload.endSeconds))) {
+  if (input.youtube !== void 0 && (document2.sourceVideoId !== input.youtube.videoId || document2.sourceVideoFormatId !== input.youtube.formatId || typeof document2.sourceTitle !== "string" || !document2.sourceTitle || !document2.partialDownload || typeof document2.partialDownload !== "object" || !Number.isFinite(document2.partialDownload.startSeconds) || !Number.isFinite(document2.partialDownload.endSeconds))) {
     throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid partial YouTube capture metadata.");
   }
   return {
     metadata: {
-      sourcePath: document.sourcePath,
+      sourcePath: document2.sourcePath,
       requestedTimestampSeconds,
       actualTimestampSeconds,
       selectedVideoStreamIndex,
       seekMode: input.seekMode,
-      displayRotationApplied: document.displayRotationApplied,
+      displayRotationApplied: document2.displayRotationApplied,
       showInChat: input.showInChat,
       ...remote,
       image: {
@@ -3396,8 +3634,8 @@ async function storyboardCall(name, args) {
     }
   }
   const operation = name.endsWith("get_info") ? "info" : name.endsWith("download") ? "download" : name.endsWith("cancel_task") ? "cancel" : "status";
-  const document = await agentJsonRequest(`/youtube/storyboards/${operation}`, { method: "POST", body: input, timeoutMs: 4e4 });
-  const result = normalizeStoryboardResult(name, document);
+  const document2 = await agentJsonRequest(`/youtube/storyboards/${operation}`, { method: "POST", body: input, timeoutMs: 4e4 });
+  const result = normalizeStoryboardResult(name, document2);
   if (result.videoId && result.videoId !== input.videoId || input.taskId && result.taskId && result.taskId !== input.taskId) throw localAgentError("AGENT_INVALID_RESPONSE", "The Agent returned mismatched storyboard metadata.");
   return result;
 }
@@ -3423,49 +3661,49 @@ function normalizeVisualMapInput(argumentsValue = {}) {
   if (!(/* @__PURE__ */ new Set(["none", "topLeft", "topRight", "bottomLeft", "bottomRight"])).has(frameTimestampPosition2)) throw localAgentError("VISUAL_MAP_INVALID", "frameTimestampPosition is invalid.");
   return { workspacePath, columns, rows, maxTotalFrames, selection, ...sceneDetectThreshold === null ? {} : { sceneDetectThreshold }, startSeconds, ...endSeconds === void 0 ? {} : { endSeconds }, maxMapDimension, frameTimestampPosition: frameTimestampPosition2 };
 }
-function normalizeVisualMapResult(document, input) {
-  if (!document || typeof document !== "object" || Array.isArray(document) || typeof document.sourcePath !== "string" || !document.sourcePath || !(/* @__PURE__ */ new Set(["uniform", "sceneDetect", "hybrid"])).has(document.selection) || !(document.sceneDetectThreshold === null || Number.isFinite(document.sceneDetectThreshold) && document.sceneDetectThreshold >= 0 && document.sceneDetectThreshold <= 100) || document.selection === "uniform" && document.sceneDetectThreshold !== null || (/* @__PURE__ */ new Set(["sceneDetect", "hybrid"])).has(document.selection) && document.sceneDetectThreshold === null || !document.range || !Number.isFinite(document.range.startSeconds) || !Number.isFinite(document.range.endSeconds) || !Number.isInteger(document.columns) || document.columns < 1 || !Number.isInteger(document.rows) || document.rows < 1 || document.mapCapacity !== document.columns * document.rows || !Number.isInteger(document.maxTotalFrames) || document.maxTotalFrames < 1 || !Number.isInteger(document.actualTotalFrames) || document.actualTotalFrames < 1 || document.actualTotalFrames > document.maxTotalFrames || document.selection === "hybrid" && document.actualTotalFrames !== document.maxTotalFrames || !Array.isArray(document.maps) || !document.maps.length) {
+function normalizeVisualMapResult(document2, input) {
+  if (!document2 || typeof document2 !== "object" || Array.isArray(document2) || typeof document2.sourcePath !== "string" || !document2.sourcePath || !(/* @__PURE__ */ new Set(["uniform", "sceneDetect", "hybrid"])).has(document2.selection) || !(document2.sceneDetectThreshold === null || Number.isFinite(document2.sceneDetectThreshold) && document2.sceneDetectThreshold >= 0 && document2.sceneDetectThreshold <= 100) || document2.selection === "uniform" && document2.sceneDetectThreshold !== null || (/* @__PURE__ */ new Set(["sceneDetect", "hybrid"])).has(document2.selection) && document2.sceneDetectThreshold === null || !document2.range || !Number.isFinite(document2.range.startSeconds) || !Number.isFinite(document2.range.endSeconds) || !Number.isInteger(document2.columns) || document2.columns < 1 || !Number.isInteger(document2.rows) || document2.rows < 1 || document2.mapCapacity !== document2.columns * document2.rows || !Number.isInteger(document2.maxTotalFrames) || document2.maxTotalFrames < 1 || !Number.isInteger(document2.actualTotalFrames) || document2.actualTotalFrames < 1 || document2.actualTotalFrames > document2.maxTotalFrames || document2.selection === "hybrid" && document2.actualTotalFrames !== document2.maxTotalFrames || !Array.isArray(document2.maps) || !document2.maps.length) {
     throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid visual-map result.");
   }
-  if (input && (document.sourcePath !== input.workspacePath || document.selection !== input.selection || document.sceneDetectThreshold !== (input.sceneDetectThreshold ?? null) || document.range.startSeconds !== input.startSeconds || document.columns !== input.columns || document.rows !== input.rows || document.maxTotalFrames !== input.maxTotalFrames || document.actualTotalFrames > input.maxTotalFrames)) {
+  if (input && (document2.sourcePath !== input.workspacePath || document2.selection !== input.selection || document2.sceneDetectThreshold !== (input.sceneDetectThreshold ?? null) || document2.range.startSeconds !== input.startSeconds || document2.columns !== input.columns || document2.rows !== input.rows || document2.maxTotalFrames !== input.maxTotalFrames || document2.actualTotalFrames > input.maxTotalFrames)) {
     throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned a visual-map result that does not match the requested task.");
   }
   let count = 0;
-  const maps = document.maps.map((map) => {
+  const maps = document2.maps.map((map) => {
     if (!map || typeof map !== "object" || typeof map.workspacePath !== "string" || !Number.isInteger(map.frameCount) || map.frameCount < 1 || !Array.isArray(map.timestampsSeconds) || map.frameCount !== map.timestampsSeconds.length || map.timestampsSeconds.some((value) => !Number.isFinite(value) || value < 0)) {
       throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid visual-map entries.");
     }
     count += map.frameCount;
     return { workspacePath: normalizeWorkspacePath(map.workspacePath, "maps.workspacePath"), frameCount: map.frameCount, timestampsSeconds: map.timestampsSeconds };
   });
-  if (count !== document.actualTotalFrames) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned inconsistent visual-map frame counts.");
-  return { sourcePath: document.sourcePath, selection: document.selection, sceneDetectThreshold: document.sceneDetectThreshold, range: { startSeconds: document.range.startSeconds, endSeconds: document.range.endSeconds }, columns: document.columns, rows: document.rows, mapCapacity: document.mapCapacity, maxTotalFrames: document.maxTotalFrames, actualTotalFrames: count, maps };
+  if (count !== document2.actualTotalFrames) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned inconsistent visual-map frame counts.");
+  return { sourcePath: document2.sourcePath, selection: document2.selection, sceneDetectThreshold: document2.sceneDetectThreshold, range: { startSeconds: document2.range.startSeconds, endSeconds: document2.range.endSeconds }, columns: document2.columns, rows: document2.rows, mapCapacity: document2.mapCapacity, maxTotalFrames: document2.maxTotalFrames, actualTotalFrames: count, maps };
 }
-function normalizeVisualMapTask(document, input = null) {
-  if (!document || typeof document !== "object" || Array.isArray(document) || typeof document.taskId !== "string" || !document.taskId || !(/* @__PURE__ */ new Set(["working", "completed", "failed", "cancelled"])).has(document.status) || typeof document.statusMessage !== "string" || !(/* @__PURE__ */ new Set(["preparing", "detectingScenes", "extractingFrames", "assemblingMaps", "completed", "failed", "cancelled"])).has(document.phase) || !Number.isFinite(document.progressPercent) || document.progressPercent < 0 || document.progressPercent > 100 || !["completedFrames", "totalFrames", "completedMaps", "totalMaps", "pollIntervalMs"].every((key) => Number.isInteger(document[key]) && document[key] >= 0) || typeof document.createdAt !== "string" || typeof document.lastUpdatedAt !== "string" || document.pollIntervalMs < 100) {
+function normalizeVisualMapTask(document2, input = null) {
+  if (!document2 || typeof document2 !== "object" || Array.isArray(document2) || typeof document2.taskId !== "string" || !document2.taskId || !(/* @__PURE__ */ new Set(["working", "completed", "failed", "cancelled"])).has(document2.status) || typeof document2.statusMessage !== "string" || !(/* @__PURE__ */ new Set(["preparing", "detectingScenes", "extractingFrames", "assemblingMaps", "completed", "failed", "cancelled"])).has(document2.phase) || !Number.isFinite(document2.progressPercent) || document2.progressPercent < 0 || document2.progressPercent > 100 || !["completedFrames", "totalFrames", "completedMaps", "totalMaps", "pollIntervalMs"].every((key) => Number.isInteger(document2[key]) && document2[key] >= 0) || typeof document2.createdAt !== "string" || typeof document2.lastUpdatedAt !== "string" || document2.pollIntervalMs < 100) {
     throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid visual-map task.");
   }
-  if (document.status === "completed" && (!document.result || document.error)) throw localAgentError("AGENT_INVALID_RESPONSE", "A completed visual-map task must contain only its result.");
-  if (document.status === "failed" && (!document.error || document.result || typeof document.error.code !== "string" || typeof document.error.message !== "string")) throw localAgentError("AGENT_INVALID_RESPONSE", "A failed visual-map task must contain only its error.");
-  const task = { taskId: document.taskId, status: document.status, statusMessage: document.statusMessage, phase: document.phase, progressPercent: document.progressPercent, completedFrames: document.completedFrames, totalFrames: document.totalFrames, completedMaps: document.completedMaps, totalMaps: document.totalMaps, createdAt: document.createdAt, lastUpdatedAt: document.lastUpdatedAt, pollIntervalMs: document.pollIntervalMs };
-  if (document.result) task.result = normalizeVisualMapResult(document.result, input);
-  if (document.error) task.error = { code: document.error.code, message: document.error.message };
+  if (document2.status === "completed" && (!document2.result || document2.error)) throw localAgentError("AGENT_INVALID_RESPONSE", "A completed visual-map task must contain only its result.");
+  if (document2.status === "failed" && (!document2.error || document2.result || typeof document2.error.code !== "string" || typeof document2.error.message !== "string")) throw localAgentError("AGENT_INVALID_RESPONSE", "A failed visual-map task must contain only its error.");
+  const task = { taskId: document2.taskId, status: document2.status, statusMessage: document2.statusMessage, phase: document2.phase, progressPercent: document2.progressPercent, completedFrames: document2.completedFrames, totalFrames: document2.totalFrames, completedMaps: document2.completedMaps, totalMaps: document2.totalMaps, createdAt: document2.createdAt, lastUpdatedAt: document2.lastUpdatedAt, pollIntervalMs: document2.pollIntervalMs };
+  if (document2.result) task.result = normalizeVisualMapResult(document2.result, input);
+  if (document2.error) task.error = { code: document2.error.code, message: document2.error.message };
   return task;
 }
 async function createVisualMap(argumentsValue) {
   const input = normalizeVisualMapInput(argumentsValue);
-  const document = await agentJsonRequest("/tasks/visual-map", { method: "POST", body: input, timeoutMs: AGENT_TASK_TIMEOUT_MS });
-  return normalizeVisualMapTask(document, input);
+  const document2 = await agentJsonRequest("/tasks/visual-map", { method: "POST", body: input, timeoutMs: AGENT_TASK_TIMEOUT_MS });
+  return normalizeVisualMapTask(document2, input);
 }
 async function getVisualMapTask(taskId2) {
   if (typeof taskId2 !== "string" || !taskId2.trim()) throw localAgentError("INVALID_ARGUMENT", "taskId must be a non-empty string.");
-  const document = await agentJsonRequest(`/tasks/visual-map/${encodeURIComponent(taskId2)}`, { timeoutMs: AGENT_TASK_TIMEOUT_MS });
-  return normalizeVisualMapTask(document);
+  const document2 = await agentJsonRequest(`/tasks/visual-map/${encodeURIComponent(taskId2)}`, { timeoutMs: AGENT_TASK_TIMEOUT_MS });
+  return normalizeVisualMapTask(document2);
 }
 async function cancelVisualMapTask(taskId2) {
   if (typeof taskId2 !== "string" || !taskId2.trim()) throw localAgentError("INVALID_ARGUMENT", "taskId must be a non-empty string.");
-  const document = await agentJsonRequest(`/tasks/visual-map/${encodeURIComponent(taskId2)}/cancel`, { method: "POST", body: {}, timeoutMs: AGENT_TASK_TIMEOUT_MS });
-  if (!document || typeof document !== "object" || document.accepted !== true) {
+  const document2 = await agentJsonRequest(`/tasks/visual-map/${encodeURIComponent(taskId2)}/cancel`, { method: "POST", body: {}, timeoutMs: AGENT_TASK_TIMEOUT_MS });
+  if (!document2 || typeof document2 !== "object" || document2.accepted !== true) {
     throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent did not confirm visual-map cancellation.");
   }
   return { taskId: taskId2, accepted: true, message: "Cancellation request accepted. Poll visual_map_get_task for the terminal status." };
@@ -3476,9 +3714,9 @@ function normalizeCameraMode(value, field) {
   }
   return { width: value.width, height: value.height, ...value.fps === void 0 ? {} : { fps: value.fps } };
 }
-function normalizeCameraList(document) {
-  if (!document || typeof document !== "object" || Array.isArray(document) || !Array.isArray(document.cameras)) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid camera list.");
-  return { cameras: document.cameras.map((camera) => {
+function normalizeCameraList(document2) {
+  if (!document2 || typeof document2 !== "object" || Array.isArray(document2) || !Array.isArray(document2.cameras)) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid camera list.");
+  return { cameras: document2.cameras.map((camera) => {
     if (!camera || typeof camera !== "object" || Array.isArray(camera) || typeof camera.cameraId !== "string" || !camera.cameraId || typeof camera.name !== "string" || !camera.name || !camera.videoModes || typeof camera.videoModes !== "object" || Array.isArray(camera.videoModes)) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid camera metadata.");
     const keys = Object.keys(camera.videoModes);
     if (!keys.length || keys.some((key) => !Number.isFinite(Number(key)) || Number(key) <= 25 || Number(key) > 120)) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid camera video modes.");
@@ -3497,9 +3735,9 @@ function normalizeCameraCaptureInput(argumentsValue = {}) {
   if (!(/* @__PURE__ */ new Set(["png", "jpeg", "webp"])).has(targetFormat)) throw localAgentError("CAMERA_CAPTURE_INVALID", "targetFormat must be png, jpeg, or webp.");
   return { cameraId: args.cameraId, ...args.targetPath === void 0 ? {} : { targetPath: normalizeWorkspacePath(args.targetPath, "targetPath") }, targetFormat };
 }
-function normalizeCameraFrame(document, input) {
-  if (!document || typeof document !== "object" || Array.isArray(document) || document.cameraId !== input.cameraId || typeof document.taskId !== "string" || !/^cam_[A-Za-z0-9_-]{10}$/.test(document.taskId) || typeof document.workspacePath !== "string" || !(/* @__PURE__ */ new Set(["png", "jpeg", "webp"])).has(document.format) || !(/* @__PURE__ */ new Set(["image/png", "image/jpeg", "image/webp"])).has(document.mimeType) || !Number.isInteger(document.width) || document.width < 1 || !Number.isInteger(document.height) || document.height < 1 || !Number.isInteger(document.imageSizeBytes) || document.imageSizeBytes < 0) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid camera frame.");
-  return { cameraId: document.cameraId, taskId: document.taskId, workspacePath: normalizeWorkspacePath(document.workspacePath, "workspacePath"), format: document.format, mimeType: document.mimeType, width: document.width, height: document.height, imageSizeBytes: document.imageSizeBytes };
+function normalizeCameraFrame(document2, input) {
+  if (!document2 || typeof document2 !== "object" || Array.isArray(document2) || document2.cameraId !== input.cameraId || typeof document2.taskId !== "string" || !/^cam_[A-Za-z0-9_-]{10}$/.test(document2.taskId) || typeof document2.workspacePath !== "string" || !(/* @__PURE__ */ new Set(["png", "jpeg", "webp"])).has(document2.format) || !(/* @__PURE__ */ new Set(["image/png", "image/jpeg", "image/webp"])).has(document2.mimeType) || !Number.isInteger(document2.width) || document2.width < 1 || !Number.isInteger(document2.height) || document2.height < 1 || !Number.isInteger(document2.imageSizeBytes) || document2.imageSizeBytes < 0) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid camera frame.");
+  return { cameraId: document2.cameraId, taskId: document2.taskId, workspacePath: normalizeWorkspacePath(document2.workspacePath, "workspacePath"), format: document2.format, mimeType: document2.mimeType, width: document2.width, height: document2.height, imageSizeBytes: document2.imageSizeBytes };
 }
 async function cameraCaptureFrame(argumentsValue) {
   const input = normalizeCameraCaptureInput(argumentsValue);
@@ -3520,20 +3758,20 @@ function normalizeCameraAudioRecordInput(argumentsValue = {}) {
   if (typeof args.cameraId !== "string" || !args.cameraId.trim() || !Number.isInteger(args.durationSeconds) || args.durationSeconds < 1 || args.durationSeconds > 600) throw localAgentError("CAMERA_RECORD_INVALID", "cameraId and durationSeconds from 1 to 600 are required.");
   return { cameraId: args.cameraId, durationSeconds: args.durationSeconds };
 }
-function normalizeCameraRecordTask(document, input = null) {
-  if (!document || typeof document !== "object" || Array.isArray(document) || typeof document.taskId !== "string" || !/^cam_[A-Za-z0-9_-]{10}$/.test(document.taskId) || !(/* @__PURE__ */ new Set(["video", "audio"])).has(document.recordingKind) || !(/* @__PURE__ */ new Set(["working", "stopping", "completed", "failed"])).has(document.status) || !(/* @__PURE__ */ new Set(["starting", "recording", "finalizing", "completed", "failed"])).has(document.phase) || typeof document.statusMessage !== "string" || !Number.isFinite(document.progressPercent) || document.progressPercent < 0 || document.progressPercent > 100 || !Number.isFinite(document.elapsedSeconds) || document.elapsedSeconds < 0 || !Number.isInteger(document.requestedDurationSeconds) || document.requestedDurationSeconds < 1 || document.requestedDurationSeconds > 600 || document.recordingKind === "video" && (!Number.isFinite(document.targetFps) || document.targetFps <= 25 || document.targetFps > 120 || document.maxDurationSeconds !== 60) || document.recordingKind === "audio" && (document.targetFps !== null || document.maxDurationSeconds !== 600) || typeof document.createdAt !== "string" || typeof document.lastUpdatedAt !== "string" || !Number.isInteger(document.pollIntervalMs) || document.pollIntervalMs < 100) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid camera recording task.");
-  if (input && document.requestedDurationSeconds !== input.durationSeconds) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned a camera task that does not match the requested duration.");
-  if (input?.targetFps !== void 0 && Math.abs(document.targetFps - input.targetFps) > 1) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned a camera task that does not match the requested targetFps.");
-  const task = { taskId: document.taskId, recordingKind: document.recordingKind, status: document.status, phase: document.phase, statusMessage: document.statusMessage, progressPercent: document.progressPercent, elapsedSeconds: document.elapsedSeconds, requestedDurationSeconds: document.requestedDurationSeconds, targetFps: document.targetFps, maxDurationSeconds: document.maxDurationSeconds, createdAt: document.createdAt, lastUpdatedAt: document.lastUpdatedAt, pollIntervalMs: document.pollIntervalMs };
-  if (document.result) {
-    const result = document.result;
-    const video = document.recordingKind === "video";
+function normalizeCameraRecordTask(document2, input = null) {
+  if (!document2 || typeof document2 !== "object" || Array.isArray(document2) || typeof document2.taskId !== "string" || !/^cam_[A-Za-z0-9_-]{10}$/.test(document2.taskId) || !(/* @__PURE__ */ new Set(["video", "audio"])).has(document2.recordingKind) || !(/* @__PURE__ */ new Set(["working", "stopping", "completed", "failed"])).has(document2.status) || !(/* @__PURE__ */ new Set(["starting", "recording", "finalizing", "completed", "failed"])).has(document2.phase) || typeof document2.statusMessage !== "string" || !Number.isFinite(document2.progressPercent) || document2.progressPercent < 0 || document2.progressPercent > 100 || !Number.isFinite(document2.elapsedSeconds) || document2.elapsedSeconds < 0 || !Number.isInteger(document2.requestedDurationSeconds) || document2.requestedDurationSeconds < 1 || document2.requestedDurationSeconds > 600 || document2.recordingKind === "video" && (!Number.isFinite(document2.targetFps) || document2.targetFps <= 25 || document2.targetFps > 120 || document2.maxDurationSeconds !== 60) || document2.recordingKind === "audio" && (document2.targetFps !== null || document2.maxDurationSeconds !== 600) || typeof document2.createdAt !== "string" || typeof document2.lastUpdatedAt !== "string" || !Number.isInteger(document2.pollIntervalMs) || document2.pollIntervalMs < 100) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid camera recording task.");
+  if (input && document2.requestedDurationSeconds !== input.durationSeconds) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned a camera task that does not match the requested duration.");
+  if (input?.targetFps !== void 0 && Math.abs(document2.targetFps - input.targetFps) > 1) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned a camera task that does not match the requested targetFps.");
+  const task = { taskId: document2.taskId, recordingKind: document2.recordingKind, status: document2.status, phase: document2.phase, statusMessage: document2.statusMessage, progressPercent: document2.progressPercent, elapsedSeconds: document2.elapsedSeconds, requestedDurationSeconds: document2.requestedDurationSeconds, targetFps: document2.targetFps, maxDurationSeconds: document2.maxDurationSeconds, createdAt: document2.createdAt, lastUpdatedAt: document2.lastUpdatedAt, pollIntervalMs: document2.pollIntervalMs };
+  if (document2.result) {
+    const result = document2.result;
+    const video = document2.recordingKind === "video";
     if (!result || typeof result !== "object" || input && result.cameraId !== input.cameraId || typeof result.cameraId !== "string" || typeof result.filePath !== "string" || result.format !== (video ? "mp4" : "m4a") || !Number.isFinite(result.durationSeconds) || result.durationSeconds < 0 || video && (!Number.isInteger(result.width) || result.width < 1 || !Number.isInteger(result.height) || result.height < 1 || !Number.isFinite(result.fps) || result.fps <= 0 || result.hasAudio !== true) || result.stoppedEarly !== void 0 && typeof result.stoppedEarly !== "boolean") throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid camera recording result.");
     task.result = { cameraId: result.cameraId, filePath: normalizeWorkspacePath(result.filePath, "result.filePath"), format: result.format, durationSeconds: result.durationSeconds, ...video ? { width: result.width, height: result.height, fps: result.fps, hasAudio: true } : {}, ...result.stoppedEarly === void 0 ? {} : { stoppedEarly: result.stoppedEarly } };
   }
-  if (document.error) {
-    if (!document.error || typeof document.error.code !== "string" || typeof document.error.message !== "string") throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid camera recording error.");
-    task.error = { code: document.error.code, message: document.error.message };
+  if (document2.error) {
+    if (!document2.error || typeof document2.error.code !== "string" || typeof document2.error.message !== "string") throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid camera recording error.");
+    task.error = { code: document2.error.code, message: document2.error.message };
   }
   if (task.status === "completed" !== Boolean(task.result) || task.status === "failed" !== Boolean(task.error)) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an inconsistent camera recording task.");
   return task;
@@ -3558,9 +3796,9 @@ async function cameraRecordStatus(taskId2) {
 }
 async function cameraRecordStop(taskId2) {
   taskId2 = cameraTaskId(taskId2);
-  const document = await agentJsonRequest(`/tasks/camera-record/${encodeURIComponent(taskId2)}/stop`, { method: "POST", body: {}, timeoutMs: AGENT_TASK_TIMEOUT_MS });
-  if (!document || typeof document !== "object" || document.taskId !== taskId2 || typeof document.accepted !== "boolean" || typeof document.message !== "string") throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent did not confirm the camera recording stop request.");
-  return document;
+  const document2 = await agentJsonRequest(`/tasks/camera-record/${encodeURIComponent(taskId2)}/stop`, { method: "POST", body: {}, timeoutMs: AGENT_TASK_TIMEOUT_MS });
+  if (!document2 || typeof document2 !== "object" || document2.taskId !== taskId2 || typeof document2.accepted !== "boolean" || typeof document2.message !== "string") throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent did not confirm the camera recording stop request.");
+  return document2;
 }
 function normalizeScreenCaptureInput(argumentsValue = {}) {
   const args = captureFrameObject(argumentsValue, "media_capture_screen", /* @__PURE__ */ new Set(["outputPath", "image", "showInChat"]));
@@ -3578,13 +3816,13 @@ function normalizeScreenCaptureInput(argumentsValue = {}) {
   if (typeof showInChat !== "boolean") throw localAgentError("SCREEN_CAPTURE_INVALID", "showInChat must be a boolean.");
   return { image: { format, ...quality === void 0 ? {} : { quality } }, ...outputPath === void 0 ? {} : { outputPath }, showInChat };
 }
-function normalizeScreenCaptureResult(document) {
-  if (!document || typeof document !== "object" || Array.isArray(document) || typeof document.workspacePath !== "string" || !(/* @__PURE__ */ new Set(["png", "jpeg", "webp"])).has(document.format) || !(/* @__PURE__ */ new Set(["image/png", "image/jpeg", "image/webp"])).has(document.mimeType) || !Number.isInteger(document.width) || document.width < 1 || !Number.isInteger(document.height) || document.height < 1 || !Number.isInteger(document.imageSizeBytes) || document.imageSizeBytes < 0 || !Number.isInteger(document.monitorCount) || document.monitorCount < 1 || !document.virtualDesktop || typeof document.virtualDesktop !== "object" || Array.isArray(document.virtualDesktop) || !Number.isInteger(document.virtualDesktop.left) || !Number.isInteger(document.virtualDesktop.top) || !Number.isInteger(document.virtualDesktop.width) || document.virtualDesktop.width < 1 || !Number.isInteger(document.virtualDesktop.height) || document.virtualDesktop.height < 1 || document.virtualDesktop.width !== document.width || document.virtualDesktop.height !== document.height) {
+function normalizeScreenCaptureResult(document2) {
+  if (!document2 || typeof document2 !== "object" || Array.isArray(document2) || typeof document2.workspacePath !== "string" || !(/* @__PURE__ */ new Set(["png", "jpeg", "webp"])).has(document2.format) || !(/* @__PURE__ */ new Set(["image/png", "image/jpeg", "image/webp"])).has(document2.mimeType) || !Number.isInteger(document2.width) || document2.width < 1 || !Number.isInteger(document2.height) || document2.height < 1 || !Number.isInteger(document2.imageSizeBytes) || document2.imageSizeBytes < 0 || !Number.isInteger(document2.monitorCount) || document2.monitorCount < 1 || !document2.virtualDesktop || typeof document2.virtualDesktop !== "object" || Array.isArray(document2.virtualDesktop) || !Number.isInteger(document2.virtualDesktop.left) || !Number.isInteger(document2.virtualDesktop.top) || !Number.isInteger(document2.virtualDesktop.width) || document2.virtualDesktop.width < 1 || !Number.isInteger(document2.virtualDesktop.height) || document2.virtualDesktop.height < 1 || document2.virtualDesktop.width !== document2.width || document2.virtualDesktop.height !== document2.height) {
     throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid screen-capture result.");
   }
-  const expectedMimeType = { png: "image/png", jpeg: "image/jpeg", webp: "image/webp" }[document.format];
-  if (document.mimeType !== expectedMimeType) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an inconsistent screen-capture MIME type.");
-  return { workspacePath: normalizeWorkspacePath(document.workspacePath, "workspacePath"), format: document.format, mimeType: document.mimeType, width: document.width, height: document.height, imageSizeBytes: document.imageSizeBytes, showInChat: false, monitorCount: document.monitorCount, virtualDesktop: { left: document.virtualDesktop.left, top: document.virtualDesktop.top, width: document.virtualDesktop.width, height: document.virtualDesktop.height } };
+  const expectedMimeType = { png: "image/png", jpeg: "image/jpeg", webp: "image/webp" }[document2.format];
+  if (document2.mimeType !== expectedMimeType) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an inconsistent screen-capture MIME type.");
+  return { workspacePath: normalizeWorkspacePath(document2.workspacePath, "workspacePath"), format: document2.format, mimeType: document2.mimeType, width: document2.width, height: document2.height, imageSizeBytes: document2.imageSizeBytes, showInChat: false, monitorCount: document2.monitorCount, virtualDesktop: { left: document2.virtualDesktop.left, top: document2.virtualDesktop.top, width: document2.virtualDesktop.width, height: document2.virtualDesktop.height } };
 }
 async function captureScreen(argumentsValue) {
   const input = normalizeScreenCaptureInput(argumentsValue);
@@ -3614,17 +3852,17 @@ function normalizeImageCropInput(argumentsValue = {}) {
   if (typeof showInChat !== "boolean") throw localAgentError("IMAGE_CROP_INVALID", "showInChat must be a boolean.");
   return { path, crop, image: { format, ...quality === void 0 ? {} : { quality }, ...compressionLevel === void 0 ? {} : { compressionLevel } }, ...outputPath === void 0 ? {} : { outputPath }, showInChat };
 }
-function normalizeImageCropResult(document, input) {
-  const image = document?.image;
-  if (!document || typeof document !== "object" || Array.isArray(document) || document.sourcePath !== input.path || !Number.isInteger(document.sourceWidth) || document.sourceWidth < 1 || !Number.isInteger(document.sourceHeight) || document.sourceHeight < 1 || !document.crop || document.crop.x !== input.crop.x || document.crop.y !== input.crop.y || document.crop.width !== input.crop.width || document.crop.height !== input.crop.height || !image || typeof image !== "object" || Array.isArray(image) || image.format !== input.image.format || !(/* @__PURE__ */ new Set(["image/png", "image/jpeg", "image/webp"])).has(image.mimeType) || image.width !== input.crop.width || image.height !== input.crop.height || !Number.isInteger(image.imageSizeBytes) || image.imageSizeBytes < 0 || typeof image.workspacePath !== "string" || Object.hasOwn(image, "publicUrl") || Object.hasOwn(document, "inlineImageBase64")) {
+function normalizeImageCropResult(document2, input) {
+  const image = document2?.image;
+  if (!document2 || typeof document2 !== "object" || Array.isArray(document2) || document2.sourcePath !== input.path || !Number.isInteger(document2.sourceWidth) || document2.sourceWidth < 1 || !Number.isInteger(document2.sourceHeight) || document2.sourceHeight < 1 || !document2.crop || document2.crop.x !== input.crop.x || document2.crop.y !== input.crop.y || document2.crop.width !== input.crop.width || document2.crop.height !== input.crop.height || !image || typeof image !== "object" || Array.isArray(image) || image.format !== input.image.format || !(/* @__PURE__ */ new Set(["image/png", "image/jpeg", "image/webp"])).has(image.mimeType) || image.width !== input.crop.width || image.height !== input.crop.height || !Number.isInteger(image.imageSizeBytes) || image.imageSizeBytes < 0 || typeof image.workspacePath !== "string" || Object.hasOwn(image, "publicUrl") || Object.hasOwn(document2, "inlineImageBase64")) {
     throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid image-crop result.");
   }
   const expectedMimeType = { png: "image/png", jpeg: "image/jpeg", webp: "image/webp" }[image.format];
   if (image.mimeType !== expectedMimeType) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an inconsistent cropped-image MIME type.");
   return {
     sourcePath: input.path,
-    sourceWidth: document.sourceWidth,
-    sourceHeight: document.sourceHeight,
+    sourceWidth: document2.sourceWidth,
+    sourceHeight: document2.sourceHeight,
     crop: input.crop,
     showInChat: input.showInChat,
     image: { format: image.format, mimeType: image.mimeType, width: image.width, height: image.height, imageSizeBytes: image.imageSizeBytes, workspacePath: normalizeWorkspacePath(image.workspacePath, "image.workspacePath") }
@@ -3637,11 +3875,11 @@ async function imageCrop(argumentsValue) {
 }
 async function getWorkspaceImageMetadata(path) {
   const logicalPath = normalizeWorkspacePath(path, "path");
-  const document = await agentJsonRequest("/media/workspace-image-info", { method: "POST", body: { path: logicalPath }, timeoutMs: AGENT_CAPTURE_FRAME_TIMEOUT_MS });
-  if (!document || typeof document !== "object" || document.path !== logicalPath || !(/* @__PURE__ */ new Set(["image", "video", "audio"])).has(document.mediaKind) || !(/* @__PURE__ */ new Set(["image/png", "image/jpeg", "image/webp", "video/mp4", "video/webm", "video/ogg", "video/quicktime", "audio/mpeg", "audio/mp4", "audio/wav", "audio/ogg", "audio/webm"])).has(document.mimeType) || !Number.isInteger(document.sizeBytes) || document.sizeBytes < 0) {
+  const document2 = await agentJsonRequest("/media/workspace-image-info", { method: "POST", body: { path: logicalPath }, timeoutMs: AGENT_CAPTURE_FRAME_TIMEOUT_MS });
+  if (!document2 || typeof document2 !== "object" || document2.path !== logicalPath || !(/* @__PURE__ */ new Set(["image", "video", "audio"])).has(document2.mediaKind) || !(/* @__PURE__ */ new Set(["image/png", "image/jpeg", "image/webp", "video/mp4", "video/webm", "video/ogg", "video/quicktime", "audio/mpeg", "audio/mp4", "audio/wav", "audio/ogg", "audio/webm"])).has(document2.mimeType) || !Number.isInteger(document2.sizeBytes) || document2.sizeBytes < 0) {
     throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid workspace media metadata.");
   }
-  return { path: logicalPath, mediaKind: document.mediaKind, mimeType: document.mimeType, sizeBytes: document.sizeBytes };
+  return { path: logicalPath, mediaKind: document2.mediaKind, mimeType: document2.mimeType, sizeBytes: document2.sizeBytes };
 }
 async function localAgentWorkspaceImageUrl(path) {
   const logicalPath = normalizeWorkspacePath(path, "path");
@@ -3666,21 +3904,21 @@ function normalizeClipboardStatusInput(argumentsValue = {}) {
   const args = captureFrameObject(argumentsValue, "clipboard_status", /* @__PURE__ */ new Set(["sinceRevision"]));
   return args.sinceRevision === void 0 ? {} : { sinceRevision: normalizeClipboardRevision(args.sinceRevision, "sinceRevision") };
 }
-function normalizeClipboardStatusResult(document, input) {
-  if (!document || typeof document !== "object" || Array.isArray(document) || !(/* @__PURE__ */ new Set(["text", "image", "empty", "unsupported"])).has(document.type)) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid clipboard status.");
-  const result = { type: document.type, revision: normalizeClipboardRevision(document.revision, "revision") };
+function normalizeClipboardStatusResult(document2, input) {
+  if (!document2 || typeof document2 !== "object" || Array.isArray(document2) || !(/* @__PURE__ */ new Set(["text", "image", "empty", "unsupported"])).has(document2.type)) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid clipboard status.");
+  const result = { type: document2.type, revision: normalizeClipboardRevision(document2.revision, "revision") };
   if (input.sinceRevision !== void 0) {
-    if (typeof document.changed !== "boolean") throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent did not return clipboard change status.");
-    result.changed = document.changed;
+    if (typeof document2.changed !== "boolean") throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent did not return clipboard change status.");
+    result.changed = document2.changed;
   }
-  if (document.sizeBytes !== void 0) {
-    if (!Number.isInteger(document.sizeBytes) || document.sizeBytes < 0) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid clipboard size.");
-    result.sizeBytes = document.sizeBytes;
+  if (document2.sizeBytes !== void 0) {
+    if (!Number.isInteger(document2.sizeBytes) || document2.sizeBytes < 0) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid clipboard size.");
+    result.sizeBytes = document2.sizeBytes;
   }
-  if (document.type === "image") {
-    if (!Number.isInteger(document.width) || document.width < 1 || !Number.isInteger(document.height) || document.height < 1) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid clipboard image dimensions.");
-    result.width = document.width;
-    result.height = document.height;
+  if (document2.type === "image") {
+    if (!Number.isInteger(document2.width) || document2.width < 1 || !Number.isInteger(document2.height) || document2.height < 1) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid clipboard image dimensions.");
+    result.width = document2.width;
+    result.height = document2.height;
   }
   return result;
 }
@@ -3692,18 +3930,18 @@ function normalizeClipboardGetInput(argumentsValue = {}) {
   const args = captureFrameObject(argumentsValue, "clipboard_get", /* @__PURE__ */ new Set(["revision"]));
   return args.revision === void 0 ? {} : { revision: normalizeClipboardRevision(args.revision, "revision") };
 }
-function normalizeClipboardGetResult(document) {
-  if (!document || typeof document !== "object" || Array.isArray(document) || !(/* @__PURE__ */ new Set(["text", "image"])).has(document.type)) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid clipboard value.");
-  const result = { type: document.type, revision: normalizeClipboardRevision(document.revision, "revision") };
-  if (document.type === "text") {
-    if (typeof document.text !== "string") throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid clipboard text.");
-    result.text = document.text;
+function normalizeClipboardGetResult(document2) {
+  if (!document2 || typeof document2 !== "object" || Array.isArray(document2) || !(/* @__PURE__ */ new Set(["text", "image"])).has(document2.type)) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid clipboard value.");
+  const result = { type: document2.type, revision: normalizeClipboardRevision(document2.revision, "revision") };
+  if (document2.type === "text") {
+    if (typeof document2.text !== "string") throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid clipboard text.");
+    result.text = document2.text;
   } else {
-    if (typeof document.workspacePath !== "string" || !Number.isInteger(document.width) || document.width < 1 || !Number.isInteger(document.height) || document.height < 1 || !Number.isInteger(document.sizeBytes) || document.sizeBytes < 0) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid clipboard image metadata.");
-    result.workspacePath = normalizeWorkspacePath(document.workspacePath, "workspacePath");
-    result.width = document.width;
-    result.height = document.height;
-    result.sizeBytes = document.sizeBytes;
+    if (typeof document2.workspacePath !== "string" || !Number.isInteger(document2.width) || document2.width < 1 || !Number.isInteger(document2.height) || document2.height < 1 || !Number.isInteger(document2.sizeBytes) || document2.sizeBytes < 0) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid clipboard image metadata.");
+    result.workspacePath = normalizeWorkspacePath(document2.workspacePath, "workspacePath");
+    result.width = document2.width;
+    result.height = document2.height;
+    result.sizeBytes = document2.sizeBytes;
   }
   return result;
 }
@@ -3726,13 +3964,13 @@ function normalizeClipboardSetInput(argumentsValue = {}) {
   }
   return { workspacePath: normalizeWorkspacePath(args.workspacePath, "workspacePath") };
 }
-function normalizeClipboardSetResult(document) {
-  if (!document || typeof document !== "object" || Array.isArray(document) || document.success !== true || !(/* @__PURE__ */ new Set(["text", "image"])).has(document.type)) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid clipboard write result.");
-  const result = { success: true, type: document.type, revision: normalizeClipboardRevision(document.revision, "revision") };
-  if (document.type === "image") {
-    if (!Number.isInteger(document.width) || document.width < 1 || !Number.isInteger(document.height) || document.height < 1) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid clipboard image dimensions.");
-    result.width = document.width;
-    result.height = document.height;
+function normalizeClipboardSetResult(document2) {
+  if (!document2 || typeof document2 !== "object" || Array.isArray(document2) || document2.success !== true || !(/* @__PURE__ */ new Set(["text", "image"])).has(document2.type)) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid clipboard write result.");
+  const result = { success: true, type: document2.type, revision: normalizeClipboardRevision(document2.revision, "revision") };
+  if (document2.type === "image") {
+    if (!Number.isInteger(document2.width) || document2.width < 1 || !Number.isInteger(document2.height) || document2.height < 1) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid clipboard image dimensions.");
+    result.width = document2.width;
+    result.height = document2.height;
   }
   return result;
 }
@@ -3750,8 +3988,8 @@ async function ensureCaptureFrameOffscreenDocument() {
     if (!contexts.length) {
       await chrome.offscreen.createDocument({
         url: CAPTURE_FRAME_OFFSCREEN_DOCUMENT,
-        reasons: ["CLIPBOARD"],
-        justification: "Copy a user-requested ResearchTube workspace path to the local clipboard."
+        reasons: ["CLIPBOARD", "USER_MEDIA", "AUDIO_PLAYBACK"],
+        justification: "Copy a requested workspace path and capture or relay tab audio for a user-requested Google Translate speech task."
       });
     }
   })();

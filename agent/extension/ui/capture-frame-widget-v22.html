@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+      :root { color-scheme: light dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
+      body { margin: 0; padding: 14px; color: CanvasText; background: Canvas; }
+      header { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }
+      h1 { font-size: 15px; margin: 0; } p, small { margin: 7px 0 0; color: color-mix(in srgb, CanvasText 70%, Canvas); }
+      #frame { display: none; max-width: 100%; max-height: 560px; margin: 12px auto 0; border-radius: 8px; background: #111; }
+      #status[data-error="true"] { color: #d93025; } #details { overflow-wrap: anywhere; }
+      a { color: LinkText; } button { margin-top: 10px; padding: 6px 9px; }
+    </style>
+  </head>
+  <body>
+    <header><h1>ResearchTube frame</h1><small id="dimensions"></small></header>
+    <p id="status">Waiting for captured frame…</p>
+    <p id="details"></p>
+    <img id="frame" alt="Captured video frame">
+    <button id="refresh" type="button">Reload frame</button>
+    <script>
+      const image = document.querySelector("#frame");
+      const status = document.querySelector("#status");
+      const details = document.querySelector("#details");
+      const dimensions = document.querySelector("#dimensions");
+      const refresh = document.querySelector("#refresh");
+      let lastPath = null;
+      const bridge = () => window.openai;
+      const output = () => bridge()?.toolOutput ?? bridge()?.widgetState?.modelContent;
+      const setStatus = (text, error = false) => { status.textContent = text; status.dataset.error = String(error); };
+      const base64 = (value) => {
+        if (!value || typeof value !== "object") return null;
+        if (typeof value.inlineImageBase64 === "string") return value.inlineImageBase64;
+        for (const nested of Object.values(value)) { const found = nested && typeof nested === "object" ? base64(nested) : null; if (found) return found; }
+        return null;
+      };
+      async function render(force = false) {
+        const frame = output(); const info = frame?.image;
+        if (!info || typeof info.workspacePath !== "string") return;
+        if (!force && info.workspacePath === lastPath && image.src) return;
+        lastPath = info.workspacePath; image.style.display = "none";
+        setStatus("Loading captured frame…");
+        dimensions.textContent = Number.isInteger(info.width) ? `${info.width} × ${info.height}` : "";
+        details.replaceChildren();
+        const path = document.createTextNode(`${info.workspacePath} · `);
+        const link = document.createElement("a"); link.href = info.publicUrl; link.target = "_blank"; link.rel = "noreferrer"; link.textContent = "Public image URL";
+        details.append(path, link);
+        try {
+          const response = await bridge()?.callTool?.("researchtube_get_capture_frame_image", { path: info.workspacePath });
+          const bytes = base64(response) ?? base64(bridge()?.toolOutputMetadata);
+          if (!bytes) throw new Error("The Local Agent did not return image data.");
+          image.src = `data:${info.mimeType};base64,${bytes}`; image.style.display = "block";
+          setStatus("Frame loaded. The public URL is available to the model when visual inspection is useful.");
+        } catch (error) { setStatus(error instanceof Error ? error.message : "Could not load captured frame.", true); }
+      }
+      refresh.addEventListener("click", () => render(true));
+      window.addEventListener("openai:set_globals", () => render());
+      render();
+    </script>
+  </body>
+</html>

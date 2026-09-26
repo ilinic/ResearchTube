@@ -38,6 +38,16 @@ class YtDlpFormatNormalizationTests(unittest.TestCase):
             "",
         )
 
+    def test_google_translate_callbacks_have_compact_agent_log_paths(self) -> None:
+        task_id = "tsk_aBcDeFg123"
+        self.assertTrue(agent.internal_google_translate_speech_path(f"/tasks/system-speech/{task_id}/google-translate-progress"))
+        self.assertTrue(agent.internal_google_translate_speech_path(f"/tasks/system-speech/{task_id}/google-translate-audio"))
+        self.assertFalse(agent.internal_google_translate_speech_path(f"/tasks/system-speech/{task_id}"))
+        self.assertFalse(agent.internal_google_translate_speech_path(f"/tasks/system-speech/{task_id}/cancel"))
+        self.assertEqual(agent.compact_google_translate_speech_log_path(f"/tasks/system-speech/{task_id}/google-translate-complete", None), f"/tasks/{task_id}")
+        self.assertEqual(agent.compact_google_translate_speech_log_path(f"/tasks/system-speech/{task_id}", {"taskId": task_id, "engine": "googleTranslate"}), f"/tasks/{task_id}")
+        self.assertEqual(agent.compact_google_translate_speech_log_path(f"/tasks/system-speech/{task_id}", {"taskId": task_id, "engine": "windows"}), f"/tasks/system-speech/{task_id}")
+
     def test_mcp_tool_log_uses_compact_status_without_request_data(self) -> None:
         self.assertEqual(agent.mcp_tool_log("library_store_status", {"status": "submitted"}), {"status": "submitted"})
         self.assertEqual(agent.response_log_suffix("/mcp/log/library_store_status", {"status": "submitted"}), " submitted")

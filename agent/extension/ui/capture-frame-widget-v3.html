@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    :root { color-scheme: light dark; font-family: ui-sans-serif, system-ui, sans-serif; }
+    body { margin: 0; padding: 10px; color: CanvasText; background: Canvas; }
+    figure { margin: 0; display: grid; gap: 8px; }
+    canvas { display: none; max-width: 100%; max-height: 640px; margin: 0 auto; border-radius: 8px; background: color-mix(in srgb, CanvasText 8%, Canvas); }
+    figcaption { color: color-mix(in srgb, CanvasText 68%, Canvas); font-size: 12px; line-height: 1.35; overflow-wrap: anywhere; }
+    .status { min-height: 1.3em; color: color-mix(in srgb, CanvasText 68%, Canvas); font-size: 13px; }
+    .error { color: #b42318; }
+  </style>
+</head>
+<body>
+  <figure>
+    <div id="status" class="status">Loading captured frame…</div>
+    <canvas id="image" aria-label="Captured video frame"></canvas>
+    <figcaption id="caption"></figcaption>
+  </figure>
+  <script>
+    (() => {
+      const status = document.getElementById("status");
+      const image = document.getElementById("image");
+      const caption = document.getElementById("caption");
+      let lastWorkspacePath = null;
+
+      const openai = () => window.openai;
+
+      function displayStatus(message, isError = false) {
+        status.textContent = message;
+        status.classList.toggle("error", isError);
+      }
+
+      function baseName(path) {
+        return String(path || "ResearchTube frame.png").split("/").pop() || "ResearchTube frame.png";
+      }
+
+      function base64ToBlob(base64, mimeType) {
+        const binary = atob(base64);
+        const bytes = new Uint8Array(binary.length);
+        for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+        return new Blob([bytes], { type: mimeType });
+      }
+
+      function findCaptureBase64(value, visited = new Set()) {
+        if (!value || typeof value !== "object" || visited.has(value)) return null;
+        visited.add(value);
+        if (typeof value.captureFrameImageBase64 === "string") return value.captureFrameImageBase64;
+        for (const nested of Object.values(value)) {
+          const found = findCaptureBase64(nested, visited);
+          if (found) return found;
+        }
+        return null;
+      }
+
+      async function callImageTool(workspacePath) {
+        if (typeof openai()?.callTool === "function") {
+          return openai().callTool("researchtube_get_capture_frame_image", { path: workspacePath });
+        }
+        throw new Error("This ChatGPT host does not expose the MCP Apps tool-call bridge.");
+      }
+
+      function widgetToolMetadata() {
+        // The MCP Apps bridge keeps widget-only `_meta` in this canonical
+        // field. `callTool()` itself is allowed to return only structured
+        // content, so it must not be the only place we inspect.
+        return openai()?.toolResponseMetadata ?? null;
+      }
+
+      function normalizedOutput(value) {
+        if (value?.structuredContent) return value.structuredContent;
+        return value && typeof value === "object" ? value : null;
+      }
+
+      async function maybeSaveToLibrary(frame, base64) {
+        if (!frame.image.saveToLibrary || typeof openai()?.uploadFile !== "function") return null;
+        const current = openai().widgetState;
+        const saved = current?.privateContent;
+        if (saved?.workspacePath === frame.image.workspacePath && typeof saved.libraryFileId === "string") return saved.libraryFileId;
+        const file = new File([base64ToBlob(base64, frame.image.mimeType)], baseName(frame.image.workspacePath), { type: frame.image.mimeType });
+        const { fileId } = await openai().uploadFile(file, { library: true });
+        if (typeof fileId !== "string" || !fileId) throw new Error("ChatGPT Library did not return a file ID.");
+        openai().setWidgetState?.({
+          modelContent: {
+            sourcePath: frame.sourcePath,
+            workspacePath: frame.image.workspacePath,
+            libraryFileName: file.name,
+            imageAvailableToModel: true
+          },
+          privateContent: { workspacePath: frame.image.workspacePath, libraryFileId: fileId, mimeType: frame.image.mimeType },
+          imageIds: [fileId]
+        });
+        return fileId;
+      }
+
+      async function paintFrame(base64, mimeType) {
+        if (typeof createImageBitmap !== "function") {
+          throw new Error("This ChatGPT widget host cannot decode an image bitmap.");
+        }
+        const bitmap = await createImageBitmap(base64ToBlob(base64, mimeType));
+        try {
+          image.width = bitmap.width;
+          image.height = bitmap.height;
+          const context = image.getContext("2d");
+          if (!context) throw new Error("This ChatGPT widget host cannot create a canvas context.");
+          context.drawImage(bitmap, 0, 0);
+          image.style.display = "block";
+        } finally {
+          bitmap.close?.();
+        }
+      }
+
+      async function render(frame) {
+        const workspacePath = frame?.image?.workspacePath;
+        const mimeType = frame?.image?.mimeType;
+        if (typeof workspacePath !== "string" || typeof mimeType !== "string") return;
+        if (workspacePath === lastWorkspacePath && image.width > 0) return;
+        lastWorkspacePath = workspacePath;
+        image.style.display = "none";
+        displayStatus("Loading captured frame…");
+        caption.textContent = workspacePath;
+        try {
+          const response = await callImageTool(workspacePath);
+          const base64 = findCaptureBase64(widgetToolMetadata()) ?? findCaptureBase64(response);
+          const metadata = normalizedOutput(response);
+          if (!base64) throw new Error("The Local Agent did not return image data to the widget.");
+          const actualMimeType = metadata?.mimeType || mimeType;
+          // Decode the MCP base64 payload directly into a canvas. This avoids
+          // a separate URL fetch through an <img> element and works entirely
+          // inside the widget document.
+          await paintFrame(base64, actualMimeType);
+          const libraryFileId = await maybeSaveToLibrary(frame, base64);
+          displayStatus(libraryFileId ? "Saved to ChatGPT Library." : "");
+          const dimensions = `${frame.image.width}×${frame.image.height}`;
+          caption.textContent = `${dimensions} · ${workspacePath}`;
+          // Retain enough UI state to recover a frame after an iframe rerender.
+          if (!libraryFileId) {
+            openai()?.setWidgetState?.({
+              privateContent: { workspacePath, mimeType: actualMimeType },
+              modelContent: { sourcePath: frame.sourcePath, workspacePath, imageAvailableToModel: false },
+              imageIds: []
+            });
+          }
+        } catch (error) {
+          displayStatus(`Could not load captured frame: ${String(error?.message || error)}`, true);
+        }
+      }
+
+      function renderCurrent() {
+        const state = openai()?.widgetState;
+        const output = openai()?.toolOutput ?? state?.modelContent;
+        if (output?.image?.workspacePath) return render(output);
+        if (state?.privateContent?.workspacePath) {
+          return render({ sourcePath: state?.modelContent?.sourcePath ?? null, image: {
+            workspacePath: state.privateContent.workspacePath,
+            mimeType: state.privateContent.mimeType ?? "image/png",
+            width: null, height: null, saveToLibrary: false
+          }});
+        }
+      }
+
+      window.addEventListener("message", (event) => {
+        if (event.source !== window.parent) return;
+        const message = event.data;
+        if (!message || message.jsonrpc !== "2.0" || message.method !== "ui/notifications/tool-result") return;
+        render(message.params?.structuredContent);
+      }, { passive: true });
+
+      renderCurrent();
+    })();
+  </script>
+</body>
+</html>
