@@ -7,6 +7,7 @@ import asyncio
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from agent import researchtube_agent as agent
 
@@ -22,6 +23,22 @@ class _ProgressReader:
 class _ProgressProcess:
     def __init__(self, lines: list[bytes]) -> None:
         self.stdout = _ProgressReader(lines)
+
+
+class _BytesReader:
+    async def read(self) -> bytes:
+        return b""
+
+
+class _SuccessfulClipProcess:
+    def __init__(self) -> None:
+        self.stdout = _ProgressReader([])
+        self.stderr = _BytesReader()
+        self.returncode: int | None = None
+
+    async def wait(self) -> int:
+        self.returncode = 0
+        return 0
 
 
 class MediaClipTests(unittest.TestCase):
@@ -78,6 +95,54 @@ class MediaClipTests(unittest.TestCase):
         self.assertEqual(agent.media_clip_audio_extension("opus", "accurate"), "m4a")
         self.assertEqual(agent.media_clip_video_extension(Path("source.webm"), "copy"), "webm")
         self.assertEqual(agent.media_clip_video_extension(Path("source.webm"), "accurate"), "mp4")
+
+    def test_audio_output_does_not_report_an_unmapped_source_video_stream(self) -> None:
+        streams = [
+            {"index": 0, "codec_type": "video", "codec_name": "h264"},
+            {"index": 1, "codec_type": "audio", "codec_name": "aac"},
+        ]
+        payload = {
+            "outputKind": "audio", "videoStreamIndex": None,
+            "audioStreamIndex": None, "includeAudio": True,
+        }
+        video_stream, audio_stream = agent.media_clip_select_output_streams(streams, payload)
+        self.assertIsNone(video_stream)
+        self.assertEqual(audio_stream, streams[1])
+
+    def test_cancellation_during_probe_never_publishes_an_unreported_clip(self) -> None:
+        source_path = agent.WORKSPACE_PATH / "inputs" / "example.mp4"
+        source_path.parent.mkdir(parents=True)
+        source_path.write_bytes(b"source")
+        source = agent.WorkspacePathResolver().resolve_existing("inputs/example.mp4", field_name="path", expected_type="file")
+        output_directory = agent.WorkspacePathResolver().resolve_destination("clips", field_name="outputDir", error_code="MEDIA_CLIP_INVALID")
+        output_directory.physical_path.mkdir()
+        task = agent.MediaClipTask(
+            "clip_cancel", {
+                "path": "inputs/example.mp4", "outputKind": "audio", "cutMode": "copy",
+            }, agent.utc_now(), agent.utc_now(), total_clips=1,
+        )
+
+        async def create_process(*command: str, **_kwargs: object) -> _SuccessfulClipProcess:
+            Path(command[-1]).write_bytes(b"completed temporary clip")
+            return _SuccessfulClipProcess()
+
+        async def cancel_during_probe(path: Path, _executable: str) -> tuple[list[dict[str, object]], float | None]:
+            self.assertTrue(path.name.startswith("."), "ffprobe must inspect the unpublished temporary file")
+            visible_files = [item for item in output_directory.physical_path.iterdir() if not item.name.startswith(".")]
+            self.assertEqual(visible_files, [])
+            raise asyncio.CancelledError
+
+        async def exercise() -> None:
+            with patch.object(agent.asyncio, "create_subprocess_exec", side_effect=create_process), patch.object(agent, "media_clip_probe_file", side_effect=cancel_during_probe):
+                with self.assertRaises(asyncio.CancelledError):
+                    await agent.MediaClipTaskManager().create_one_clip(
+                        task, source, output_directory, "ffmpeg", "ffprobe", None,
+                        {"index": 1, "codec_type": "audio", "codec_name": "aac"},
+                        {"startSeconds": 0.0, "endSeconds": 3.0}, 0,
+                    )
+
+        asyncio.run(exercise())
+        self.assertEqual(list(output_directory.physical_path.iterdir()), [])
 
     def test_ffmpeg_progress_is_combined_across_intervals(self) -> None:
         manager = agent.MediaClipTaskManager()

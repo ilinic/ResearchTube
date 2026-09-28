@@ -34,7 +34,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote, unquote, urlparse
 from urllib.request import Request, urlopen
 
-AGENT_VERSION = "1.109.0"
+AGENT_VERSION = "1.109.1"
 INTERFACE_VERSION = 69
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
@@ -3885,6 +3885,19 @@ def media_clip_select_stream(streams: list[dict[str, Any]], codec_type: str, req
     return None
 
 
+def media_clip_select_output_streams(streams: list[dict[str, Any]], payload: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Select only streams that will actually be mapped into the output."""
+    output_kind = payload["outputKind"]
+    video_stream = None
+    if output_kind == "video":
+        video_stream = media_clip_select_stream(streams, "video", payload["videoStreamIndex"], required=True)
+    require_audio = output_kind == "audio" or payload["audioStreamIndex"] is not None
+    audio_stream = media_clip_select_stream(streams, "audio", payload["audioStreamIndex"], required=require_audio)
+    if output_kind == "video" and not payload["includeAudio"]:
+        audio_stream = None
+    return video_stream, audio_stream
+
+
 def media_clip_publish_without_overwrite(temporary_path: Path, final_path: Path) -> None:
     if final_path.exists() or final_path.is_symlink():
         raise AgentApiError("DESTINATION_EXISTS", "A media-clip output destination already exists; this tool never overwrites files.")
@@ -4016,13 +4029,16 @@ class MediaClipTaskManager:
             if task.process.returncode != 0 or not temporary.is_file() or temporary.stat().st_size == 0:
                 detail = bounded_line(stderr.decode("utf-8", errors="replace").splitlines()[-1] if stderr else "")
                 raise AgentApiError("MEDIA_CLIP_FAILED", "FFmpeg could not create the requested media clip.", detail or None)
-            media_clip_publish_without_overwrite(temporary, destination.physical_path)
-            result_streams, result_duration = await media_clip_probe_file(destination.physical_path, ffprobe_executable)
+            # Validate the completed temporary file before making it visible in
+            # Workspace.  There must be no await between publication and the
+            # caller appending the returned metadata: otherwise cancellation
+            # can leave a published file missing from clips[].
+            result_streams, result_duration = await media_clip_probe_file(temporary, ffprobe_executable)
             has_video = any(stream.get("codec_type") == "video" for stream in result_streams)
             has_audio = any(stream.get("codec_type") == "audio" for stream in result_streams)
             if (output_kind == "video" and not has_video) or (output_kind == "audio" and not has_audio):
-                destination.physical_path.unlink(missing_ok=True)
                 raise AgentApiError("MEDIA_CLIP_FAILED", "The completed clip does not contain the requested media stream.")
+            media_clip_publish_without_overwrite(temporary, destination.physical_path)
             return {
                 "index": segment_index, "sourcePath": source.logical_path, "outputKind": output_kind,
                 "startSeconds": start, "endSeconds": end, "durationSeconds": result_duration if result_duration is not None else duration,
@@ -4067,11 +4083,7 @@ class MediaClipTaskManager:
             output_directory = resolver.resolve_destination(task.payload["outputDir"], field_name="outputDir", error_code="MEDIA_CLIP_INVALID")
             output_directory.physical_path.mkdir(parents=True, exist_ok=True)
             streams, source_duration = await media_clip_probe_file(source.physical_path, ffprobe.executable)
-            video_stream = media_clip_select_stream(streams, "video", task.payload["videoStreamIndex"], required=task.payload["outputKind"] == "video")
-            require_audio = task.payload["outputKind"] == "audio" or task.payload["audioStreamIndex"] is not None
-            audio_stream = media_clip_select_stream(streams, "audio", task.payload["audioStreamIndex"], required=require_audio)
-            if task.payload["outputKind"] == "video" and not task.payload["includeAudio"]:
-                audio_stream = None
+            video_stream, audio_stream = media_clip_select_output_streams(streams, task.payload)
             segments = task.payload["segments"]
             if segments is None:
                 if source_duration is None:
