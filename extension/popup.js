@@ -68,4 +68,5 @@ $("describe-video").addEventListener("click", async () => {
   window.close();
 });
 $("settings").addEventListener("click", () => chrome.runtime.openOptionsPage());
+$("support").addEventListener("click", () => call({ type: "open-external", target: "support" }));
 load();

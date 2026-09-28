@@ -149,7 +149,8 @@ var EXTERNAL_URLS = Object.freeze({
   apiKeys: "https://platform.openai.com/settings/organization/api-keys",
   chatgpt: "https://chatgpt.com/plugins",
   chatgptNewChat: "https://chatgpt.com/",
-  chatgptSettings: "https://chatgpt.com/#settings/Connectors"
+  chatgptSettings: "https://chatgpt.com/#settings/Connectors",
+  support: "https://ko-fi.com/ilinic"
 });
 var DEFAULTS = {
   tunnelId: "",
@@ -235,7 +236,7 @@ var MCP_TOOL_SETTINGS = Object.freeze({
   online_share_status: { group: "online" },
   online_share_stop: { group: "online" }
 });
-var EXTENSION_VERSION = "2.2.27";
+var EXTENSION_VERSION = "2.2.28";
 var REQUIRED_AGENT_INTERFACE_VERSION = 69;
 var CAPTURE_FRAME_WIDGET_URI = "ui://researchtube/capture-frame-v49.html";
 var RESEARCHTUBE_DEMO_GUIDE_URL = "https://github.com/ilinic/ResearchTube/blob/main/docs/DEMO.md";

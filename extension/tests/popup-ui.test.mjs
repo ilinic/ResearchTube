@@ -1,15 +1,17 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
-const [html, script, css] = await Promise.all([
+const [html, script, css, background] = await Promise.all([
   readFile(new URL("../popup.html", import.meta.url), "utf8"),
   readFile(new URL("../popup.js", import.meta.url), "utf8"),
-  readFile(new URL("../popup.css", import.meta.url), "utf8")
+  readFile(new URL("../popup.css", import.meta.url), "utf8"),
+  readFile(new URL("../background.js", import.meta.url), "utf8")
 ]);
 
 assert.match(html, /Turn YouTube into Answers/);
 assert.match(html, /id="describe-video" hidden>Describe this video/);
 assert.match(html, /Open empty ChatGPT/);
+assert.match(html, /<nav><button id="settings"[^>]*>Settings<\/button><button id="support"[^>]*><span class="support-heart" aria-hidden="true">♥<\/span> Support<\/button><\/nav>/, "Support must appear to the right of Settings on the same row");
 assert.match(html, /<dt>Extension<\/dt><dd id="extension-status">/);
 assert.match(html, /<dt>OpenAI Tunnel<\/dt>/);
 assert.match(html, /<dt>YouTube<\/dt>/);
@@ -34,9 +36,12 @@ assert.match(script, /title: liveTab\.title/, "Describe this video must pass the
 assert.match(script, /window\.close\(\)/, "Describe this video must close the popup immediately");
 assert.match(script, /const activeTabPromise = chrome\.tabs\.query/, "video-button visibility must start before the Agent status request resolves");
 assert.match(script, /const statePromise = call\(\{ type: "status" \}\)/, "status may load in parallel with the contextual action");
+assert.match(script, /\$\("support"\)\.addEventListener\("click", \(\) => call\(\{ type: "open-external", target: "support" \}\)\)/, "Support must use the allowlisted external-link handler");
+assert.match(background, /support: "https:\/\/ko-fi\.com\/ilinic"/, "Support must open the configured Ko-fi page");
 assert.match(html, /<header>[\s\S]*?<\/header>\s*<hr class="section-divider">\s*<section class="quick-actions">/, "a divider must separate the header from the quick actions");
 assert.match(html, /<\/dl>\s*<hr class="section-divider">\s*<nav>/, "a divider must separate the status details from Settings");
 assert.match(css, /\.section-divider\{[^}]*border-top:1px solid var\(--border\)/, "popup dividers must use the standard border color");
+assert.match(css, /\.support-heart\{[^}]*color:var\(--heart\)/, "Support heart must use its dedicated red color");
 assert.doesNotMatch(script, /widget-image-delivery|save-widget-image-delivery/);
 assert.doesNotMatch(script, /cdp-attach-image|filePath/);
 console.log("popup UI: ok");

@@ -5,7 +5,8 @@ const EXTERNAL_URLS = Object.freeze({
   apiKeys: "https://platform.openai.com/settings/organization/api-keys",
   chatgpt: "https://chatgpt.com/plugins",
   chatgptNewChat: "https://chatgpt.com/",
-  chatgptSettings: "https://chatgpt.com/#settings/Connectors"
+  chatgptSettings: "https://chatgpt.com/#settings/Connectors",
+  support: "https://ko-fi.com/ilinic"
 });
 const DEFAULTS = {
   tunnelId: "",
@@ -47,7 +48,7 @@ const MCP_TOOL_SETTINGS = Object.freeze({
   clipboard_status: { group: "clipboard" }, clipboard_get: { group: "clipboard" }, clipboard_set: { group: "clipboard" },
   library_store_start: { group: "library" }, library_store_status: { group: "library" }, library_store_cancel: { group: "library" }, online_share_start: { group: "online" }, online_share_status: { group: "online" }, online_share_stop: { group: "online" }
 });
-const EXTENSION_VERSION = "2.2.27";
+const EXTENSION_VERSION = "2.2.28";
 const REQUIRED_AGENT_INTERFACE_VERSION = 69;
 // A UI resource URI is a cache key in MCP Apps. Increment it whenever the
 // rendered template changes so ChatGPT does not reuse a stale iframe bundle.
