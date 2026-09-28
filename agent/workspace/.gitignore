@@ -1,2 +1,6 @@
 *
 !.gitignore
+!demo/
+demo/*
+!demo/README.md
+!demo/researchtube-demo.mp4

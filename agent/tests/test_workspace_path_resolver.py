@@ -574,6 +574,16 @@ class CaptureFrameTests(unittest.IsolatedAsyncioTestCase):
             agent.screen_capture_region(options, {"left": -1280, "top": 0, "width": 3200, "height": 1080})
         self.assertEqual(raised.exception.code, "SCREEN_CAPTURE_INVALID")
 
+    def test_workspace_media_byte_ranges_are_bounded_and_seekable(self) -> None:
+        self.assertIsNone(agent.widget_media_byte_range(None, 0))
+        self.assertEqual(agent.widget_media_byte_range(None, 100), (0, 99))
+        self.assertEqual(agent.widget_media_byte_range("bytes=10-19", 100), (10, 19))
+        self.assertEqual(agent.widget_media_byte_range("bytes=90-", 100), (90, 99))
+        self.assertEqual(agent.widget_media_byte_range("bytes=-12", 100), (88, 99))
+        self.assertIsNone(agent.widget_media_byte_range("bytes=100-120", 100))
+        self.assertIsNone(agent.widget_media_byte_range("bytes=5-1", 100))
+        self.assertIsNone(agent.widget_media_byte_range("bytes=0-1,3-4", 100))
+
     async def test_capture_frame_honours_explicit_workspace_output_without_public_url(self) -> None:
         with patch.object(agent, "find_component", side_effect=self.discovery), patch.object(asyncio, "create_subprocess_exec", side_effect=self.subprocess):
             result = await agent.capture_frame({

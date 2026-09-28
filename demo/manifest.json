@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "workspacePath": "demo/researchtube-demo.mp4",
+  "durationSeconds": 12,
+  "video": {
+    "codec": "h264",
+    "width": 640,
+    "height": 360,
+    "frameRate": 30
+  },
+  "audio": {
+    "codec": "aac",
+    "sampleRate": 48000
+  },
+  "sizeBytes": 843925,
+  "sha256": "988376f71856c3460b16359dc931200c059a4369569258a3d4089829d30986bc"
+}

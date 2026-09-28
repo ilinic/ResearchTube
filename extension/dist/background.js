@@ -192,6 +192,9 @@ var MCP_TOOL_SETTINGS = Object.freeze({
   workspace_move: { group: "workspace" },
   workspace_delete: { group: "workspace" },
   media_probe: { group: "media" },
+  media_clip: { group: "media" },
+  media_clip_get_task: { group: "media" },
+  media_clip_cancel_task: { group: "media" },
   media_capture_frame: { group: "media" },
   media_capture_frame_get_task: { group: "media" },
   media_capture_frame_task_diagnostics: { group: "media" },
@@ -232,11 +235,12 @@ var MCP_TOOL_SETTINGS = Object.freeze({
   online_share_status: { group: "online" },
   online_share_stop: { group: "online" }
 });
-var EXTENSION_VERSION = "2.2.20";
-var REQUIRED_AGENT_INTERFACE_VERSION = 68;
-var CAPTURE_FRAME_WIDGET_URI = "ui://researchtube/capture-frame-v44.html";
-var RESEARCHTUBE_SERVER_DESCRIPTION = "ResearchTube provides YouTube research, local media and image operations, workspace management, screenshots, clipboard, and Library integration. Search this server when the user refers to ResearchTube, YouTube analysis, a previously created workspace file, captured frame, screenshot, crop, clipboard, or asks to continue a previous ResearchTube operation. In clients with deferred tools, ResearchTube is discoverable through functions.exec lazy MCP-tool discovery; search there before treating the capability as unavailable.";
-var RESEARCHTUBE_MCP_INSTRUCTIONS = "ResearchTube exposes MCP tools that may be loaded or discovered lazily by the client. When the user mentions ResearchTube, invokes @ResearchTube, asks to repeat a ResearchTube operation, or requests a capability previously provided by ResearchTube, do not infer that ResearchTube is unavailable merely because its tools are not currently visible as a top-level tool namespace. In this client, ResearchTube is available through functions.exec with lazy MCP-tool discovery: search there for the appropriate ResearchTube tool before reporting that the capability is unavailable. Only report ResearchTube as unavailable if tool discovery actually fails, the required tool cannot be found after discovery, or an actual ResearchTube tool invocation returns an availability, connection, compatibility, or transport error. Successful use earlier in the conversation is evidence that the tools may be discoverable again; rediscover them rather than assuming access has disappeared. media_capture_frame, media_capture_screen, and media_image_crop never render a widget themselves. media_capture_frame is asynchronous: poll its task and call media_image_show only for specific completed frame paths the user asks to see. For media_capture_screen and media_image_crop, when showInChat is true, after the successful creation result call media_image_show once with the returned workspace image path; otherwise do not call the display tool.";
+var EXTENSION_VERSION = "2.2.27";
+var REQUIRED_AGENT_INTERFACE_VERSION = 69;
+var CAPTURE_FRAME_WIDGET_URI = "ui://researchtube/capture-frame-v49.html";
+var RESEARCHTUBE_DEMO_GUIDE_URL = "https://github.com/ilinic/ResearchTube/blob/main/docs/DEMO.md";
+var RESEARCHTUBE_SERVER_DESCRIPTION = "ResearchTube provides YouTube research, local media and image operations, workspace management, screenshots, clipboard, Library integration, and a guided demonstration using bundled local media. Search this server when the user refers to ResearchTube, YouTube analysis, a previously created workspace file, captured frame, screenshot, crop, clipboard, or asks to continue a previous ResearchTube operation. In clients with deferred tools, ResearchTube is discoverable through functions.exec lazy MCP-tool discovery; search there before treating the capability as unavailable.";
+var RESEARCHTUBE_MCP_INSTRUCTIONS = "ResearchTube exposes MCP tools that may be loaded or discovered lazily by the client. When the user mentions ResearchTube, invokes @ResearchTube, asks to repeat a ResearchTube operation, or requests a capability previously provided by ResearchTube, do not infer that ResearchTube is unavailable merely because its tools are not currently visible as a top-level tool namespace. In this client, ResearchTube is available through functions.exec with lazy MCP-tool discovery: search there for the appropriate ResearchTube tool before reporting that the capability is unavailable. Only report ResearchTube as unavailable if tool discovery actually fails, the required tool cannot be found after discovery, or an actual ResearchTube tool invocation returns an availability, connection, compatibility, or transport error. Successful use earlier in the conversation is evidence that the tools may be discoverable again; rediscover them rather than assuming access has disappeared. On the first ResearchTube interaction in a conversation, when the user asks what ResearchTube can do or gives no concrete operation, briefly offer the guided demo. Run it only with consent, use the bundled logical Workspace path demo/researchtube-demo.mp4, follow " + RESEARCHTUBE_DEMO_GUIDE_URL + ", never modify or delete the bundled source, and explain each benefit in the user's language. media_clip and media_capture_frame are asynchronous: poll their corresponding get_task tools no faster than pollIntervalMs. media_clip creates one separate file per requested interval and never renders or concatenates results automatically. media_capture_frame, media_capture_screen, and media_image_crop never render a widget themselves. Call media_image_show only for specific completed image paths the user asks to see. For media_capture_screen and media_image_crop, when showInChat is true, after the successful creation result call media_image_show once with the returned workspace image path; otherwise do not call the display tool.";
 var CAPTURE_FRAME_OFFSCREEN_DOCUMENT = "capture-frame-offscreen.html";
 var GOOGLE_TRANSLATE_URL = "https://translate.google.com/";
 var GOOGLE_TRANSLATE_TAB_TIMEOUT_MS = 2e4;
@@ -881,6 +885,60 @@ var captureFrameTaskSchema = {
   required: ["taskId", "status", "statusMessage", "progressPercent", "completedFrames", "totalFrames", "frames", "createdAt", "lastUpdatedAt", "pollIntervalMs"]
 };
 var captureFrameCancelTaskSchema = { type: "object", additionalProperties: false, properties: { taskId: { type: "string" }, accepted: { type: "boolean" }, message: { type: "string" } }, required: ["taskId", "accepted", "message"] };
+var mediaClipSegmentInputSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    startSeconds: { type: "number", minimum: 0 },
+    endSeconds: { type: "number", exclusiveMinimum: 0 }
+  },
+  required: ["startSeconds", "endSeconds"]
+};
+var mediaClipSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    index: { type: "integer", minimum: 0 },
+    sourcePath: { type: "string", minLength: 1 },
+    outputKind: { type: "string", enum: ["video", "audio"] },
+    startSeconds: { type: "number", minimum: 0 },
+    endSeconds: { type: "number", exclusiveMinimum: 0 },
+    durationSeconds: { type: "number", exclusiveMinimum: 0 },
+    selectedVideoStreamIndex: nullableInteger,
+    selectedAudioStreamIndex: nullableInteger,
+    hasAudio: { type: "boolean" },
+    reencoded: { type: "boolean" },
+    format: { type: "string", minLength: 1 },
+    mimeType: { type: "string", minLength: 1 },
+    fileSizeBytes: { type: "integer", minimum: 1 },
+    workspacePath: { type: "string", minLength: 1 }
+  },
+  required: ["index", "sourcePath", "outputKind", "startSeconds", "endSeconds", "durationSeconds", "selectedVideoStreamIndex", "selectedAudioStreamIndex", "hasAudio", "reencoded", "format", "mimeType", "fileSizeBytes", "workspacePath"]
+};
+var mediaClipTaskSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    taskId: { type: "string", minLength: 1 },
+    sourcePath: { type: "string", minLength: 1 },
+    outputKind: { type: "string", enum: ["video", "audio"] },
+    cutMode: { type: "string", enum: ["copy", "accurate"] },
+    status: { type: "string", enum: ["working", "completed", "failed", "cancelled"] },
+    phase: { type: "string", enum: ["preparing", "processing", "completed", "failed", "cancelled"] },
+    statusMessage: { type: "string" },
+    progressPercent: { type: "number", minimum: 0, maximum: 100 },
+    completedClips: { type: "integer", minimum: 0 },
+    totalClips: { type: "integer", minimum: 1, maximum: 20 },
+    clips: { type: "array", maxItems: 20, items: mediaClipSchema },
+    failedSegment: { type: "object", additionalProperties: false, properties: { index: { type: "integer", minimum: 0, maximum: 19 }, startSeconds: { type: "number", minimum: 0 }, endSeconds: { type: "number", exclusiveMinimum: 0 } }, required: ["index", "startSeconds", "endSeconds"] },
+    error: { type: "object", additionalProperties: false, properties: { code: { type: "string" }, message: { type: "string" } }, required: ["code", "message"] },
+    createdAt: { type: "string" },
+    lastUpdatedAt: { type: "string" },
+    pollIntervalMs: { type: "integer", minimum: 100 }
+  },
+  required: ["taskId", "sourcePath", "outputKind", "cutMode", "status", "phase", "statusMessage", "progressPercent", "completedClips", "totalClips", "clips", "createdAt", "lastUpdatedAt", "pollIntervalMs"]
+};
+var mediaClipCancelTaskSchema = { type: "object", additionalProperties: false, properties: { taskId: { type: "string" }, accepted: { type: "boolean" }, message: { type: "string" } }, required: ["taskId", "accepted", "message"] };
 var captureFrameTaskDiagnosticsSchema = {
   type: "object",
   additionalProperties: false,
@@ -1310,6 +1368,47 @@ function toolDefinitions() {
       outputSchema: mediaProbeSchema
     },
     {
+      name: "media_clip",
+      title: "Cut video or audio clips",
+      description: "Start an asynchronous local Workspace edit. A video source can produce video clips or extracted audio clips; an audio source can produce audio clips. segments accepts 1\u201320 intervals and each interval creates a separate output file in the same input order; omit segments to process the entire source, for example to extract its full audio track. cutMode=copy is the default and preserves encoded streams without transcoding, so video boundaries can follow source keyframes. cutMode=accurate re-encodes for precise requested boundaries. includeAudio applies only to video output and defaults to true. Outputs default to clips/, never overwrite an existing file, never modify the source, are not concatenated, and are not shown automatically. Poll media_clip_get_task no faster than pollIntervalMs; progressPercent comes from actual FFmpeg processing progress. If a later interval fails, earlier completed clips remain available.",
+      annotations: localWorkspaceWriteAnnotations,
+      inputSchema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          path: { type: "string", minLength: 1, description: "Existing logical workspace-relative video or audio path." },
+          outputKind: { type: "string", enum: ["video", "audio"], description: "video cuts video; audio extracts or cuts an audio stream." },
+          segments: { type: "array", minItems: 1, maxItems: 20, items: mediaClipSegmentInputSchema, description: "Optional intervals in caller order. Omit to process the entire source." },
+          cutMode: { type: "string", enum: ["copy", "accurate"], default: "copy", description: "copy avoids transcoding; accurate re-encodes for precise boundaries." },
+          includeAudio: { type: "boolean", default: true, description: "Include an audio stream in video output. Available only with outputKind=video." },
+          videoStreamIndex: { type: "integer", minimum: 0, description: "Optional ffprobe streams[].index for video output." },
+          audioStreamIndex: { type: "integer", minimum: 0, description: "Optional ffprobe streams[].index for audio output or included video audio." },
+          outputDir: { type: "string", default: "clips", description: "Logical workspace-relative output directory." }
+        },
+        required: ["path", "outputKind"]
+      },
+      outputSchema: mediaClipTaskSchema,
+      _meta: { "openai/toolInvocation/invoking": "Starting media clipping\u2026", "openai/toolInvocation/invoked": "Media-clip task started." }
+    },
+    {
+      name: "media_clip_get_task",
+      title: "Get media-clip progress",
+      description: "Get the current FFmpeg-derived percentage, completed clip metadata, and terminal result for a media_clip task. Poll no faster than pollIntervalMs. Each completed clip is a separate Workspace file. A failed task preserves clips completed before the failedSegment.",
+      annotations: localAgentReadAnnotations,
+      inputSchema: { type: "object", additionalProperties: false, properties: { taskId: { type: "string", minLength: 1 } }, required: ["taskId"] },
+      outputSchema: mediaClipTaskSchema,
+      _meta: { "openai/toolInvocation/invoking": "Checking media clipping\u2026", "openai/toolInvocation/invoked": "Media-clip progress checked." }
+    },
+    {
+      name: "media_clip_cancel_task",
+      title: "Cancel media clipping",
+      description: "Request cancellation of a working media_clip task. Completed clip files are retained. Poll media_clip_get_task afterwards for the terminal state.",
+      annotations: localWorkspaceWriteAnnotations,
+      inputSchema: { type: "object", additionalProperties: false, properties: { taskId: { type: "string", minLength: 1 } }, required: ["taskId"] },
+      outputSchema: mediaClipCancelTaskSchema,
+      _meta: { "openai/toolInvocation/invoking": "Cancelling media clipping\u2026", "openai/toolInvocation/invoked": "Media-clip cancellation requested." }
+    },
+    {
       name: "media_capture_frame",
       title: "Start frame extraction from workspace or YouTube",
       description: "Start an asynchronous extraction of 1\u201320 frames from an existing workspace video or a selected YouTube video stream. For YouTube, first call youtube_download_get_formats and pass its exact numeric video formatId. The Agent groups nearby timestamps into partial yt-dlp --download-sections ranges instead of downloading the full video: windows with a gap of at most 10 seconds are merged, but one range never exceeds 60 seconds. Each resulting range is downloaded separately with a two-second gap. During an active YouTube range, progress is derived from bytes actually written to its partial download; after frames are extracted it is exact. A transient failed range is retried after 3 and 6 seconds; completed frames remain available if a later range still fails. Poll media_capture_frame_get_task no faster than pollIntervalMs. A failed task may contain completed frames and failedSection with attemptCount. Frames are saved in captures/ and are never shown automatically; use media_image_show only for specific completed frames the user asks to see.",
@@ -1557,7 +1656,7 @@ function toolDefinitions() {
     {
       name: "media_load_workspace_image",
       title: "Load a captured workspace frame for the ResearchTube widget",
-      description: "Widget-only support tool. Validates the supplied logical workspace image path and returns its loopback Local Agent URL so the widget can display or refresh it without placing image bytes in MCP. It is not available to the model and exposes no host path.",
+      description: "Widget-only support tool. Validates the supplied logical Workspace media path and returns bounded metadata only. The MCP widget never receives a loopback URL: the installed ResearchTube Extension resolves and loads local media itself. It is not available to the model and exposes no host path.",
       annotations: localAgentReadAnnotations,
       inputSchema: { type: "object", additionalProperties: false, properties: { path: { type: "string", minLength: 1, description: "Logical workspace-relative path returned by media_capture_frame.image.workspacePath." } }, required: ["path"] },
       outputSchema: {
@@ -2527,6 +2626,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       return false;
     }
     copyCaptureFramePath(message.path).then((data) => sendResponse({ ok: true, data })).catch((error) => sendResponse({ ok: false, error: safeErrorMessage(error) }));
+    return true;
+  }
+  if (message?.type === "researchtube_media_viewer_resolve") {
+    showWorkspaceImage(message.path).then((data) => sendResponse({ ok: true, data })).catch((error) => sendResponse({ ok: false, error: safeErrorMessage(error) }));
     return true;
   }
   return false;
@@ -3739,6 +3842,121 @@ async function cancelCaptureFrameTask(taskId2) {
   if (!document2 || document2.accepted !== true) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent did not confirm frame-extraction cancellation.");
   return { taskId: taskId2, accepted: true, message: "Cancellation request accepted. Poll media_capture_frame_get_task for the terminal status." };
 }
+function mediaClipInvalid(message) {
+  throw localAgentError("MEDIA_CLIP_INVALID", message);
+}
+function normalizeMediaClipInput(argumentsValue = {}) {
+  const allowed = /* @__PURE__ */ new Set(["path", "outputKind", "segments", "cutMode", "includeAudio", "videoStreamIndex", "audioStreamIndex", "outputDir"]);
+  if (!argumentsValue || typeof argumentsValue !== "object" || Array.isArray(argumentsValue) || Object.keys(argumentsValue).some((key) => !allowed.has(key))) mediaClipInvalid("media_clip accepts only documented fields.");
+  const args = argumentsValue;
+  if (typeof args.path !== "string" || !args.path) mediaClipInvalid("path must be a non-empty logical workspace media path.");
+  const path = normalizeWorkspacePath(args.path, "path");
+  if (!(/* @__PURE__ */ new Set(["video", "audio"])).has(args.outputKind)) mediaClipInvalid("outputKind must be video or audio.");
+  const cutMode = args.cutMode === void 0 ? "copy" : args.cutMode;
+  if (!(/* @__PURE__ */ new Set(["copy", "accurate"])).has(cutMode)) mediaClipInvalid("cutMode must be copy or accurate.");
+  const includeAudio = args.includeAudio === void 0 ? true : args.includeAudio;
+  if (typeof includeAudio !== "boolean") mediaClipInvalid("includeAudio must be a boolean.");
+  if (args.outputKind === "audio" && args.includeAudio !== void 0) mediaClipInvalid("includeAudio is available only for video output.");
+  const streamIndex = (value, field) => {
+    if (value === void 0) return void 0;
+    if (!Number.isInteger(value) || value < 0) mediaClipInvalid(`${field} must be a non-negative ffprobe stream index.`);
+    return value;
+  };
+  const videoStreamIndex = streamIndex(args.videoStreamIndex, "videoStreamIndex");
+  const audioStreamIndex = streamIndex(args.audioStreamIndex, "audioStreamIndex");
+  if (args.outputKind === "audio" && videoStreamIndex !== void 0) mediaClipInvalid("videoStreamIndex is available only for video output.");
+  if (args.outputKind === "video" && !includeAudio && audioStreamIndex !== void 0) mediaClipInvalid("audioStreamIndex requires includeAudio=true.");
+  let segments;
+  if (args.segments !== void 0) {
+    if (!Array.isArray(args.segments) || args.segments.length < 1 || args.segments.length > 20) mediaClipInvalid("segments must contain from 1 to 20 intervals.");
+    const seen = /* @__PURE__ */ new Set();
+    segments = args.segments.map((raw, index) => {
+      if (!raw || typeof raw !== "object" || Array.isArray(raw) || Object.keys(raw).length !== 2 || !Object.hasOwn(raw, "startSeconds") || !Object.hasOwn(raw, "endSeconds")) mediaClipInvalid(`segments[${index}] must contain only startSeconds and endSeconds.`);
+      const { startSeconds, endSeconds } = raw;
+      if (typeof startSeconds !== "number" || !Number.isFinite(startSeconds) || startSeconds < 0) mediaClipInvalid(`segments[${index}].startSeconds must be a finite non-negative number.`);
+      if (typeof endSeconds !== "number" || !Number.isFinite(endSeconds) || endSeconds <= startSeconds) mediaClipInvalid(`segments[${index}].endSeconds must be greater than startSeconds.`);
+      const key = `${startSeconds}\0${endSeconds}`;
+      if (seen.has(key)) mediaClipInvalid("segments must not contain duplicate intervals.");
+      seen.add(key);
+      return { startSeconds, endSeconds };
+    });
+  }
+  const outputDir = normalizeWorkspacePath(args.outputDir === void 0 ? "clips" : args.outputDir, "outputDir");
+  return {
+    path,
+    outputKind: args.outputKind,
+    ...segments === void 0 ? {} : { segments },
+    cutMode,
+    ...args.outputKind === "video" ? { includeAudio } : {},
+    ...videoStreamIndex === void 0 ? {} : { videoStreamIndex },
+    ...audioStreamIndex === void 0 ? {} : { audioStreamIndex },
+    outputDir
+  };
+}
+function normalizeMediaClipTask(document2, input = null) {
+  const statuses2 = /* @__PURE__ */ new Set(["working", "completed", "failed", "cancelled"]);
+  const phases = /* @__PURE__ */ new Set(["preparing", "processing", "completed", "failed", "cancelled"]);
+  if (!document2 || typeof document2 !== "object" || Array.isArray(document2) || typeof document2.taskId !== "string" || !document2.taskId || typeof document2.sourcePath !== "string" || !document2.sourcePath || !(/* @__PURE__ */ new Set(["video", "audio"])).has(document2.outputKind) || !(/* @__PURE__ */ new Set(["copy", "accurate"])).has(document2.cutMode) || !statuses2.has(document2.status) || !phases.has(document2.phase) || typeof document2.statusMessage !== "string" || !Number.isFinite(document2.progressPercent) || document2.progressPercent < 0 || document2.progressPercent > 100 || !Number.isInteger(document2.completedClips) || document2.completedClips < 0 || !Number.isInteger(document2.totalClips) || document2.totalClips < 1 || document2.totalClips > 20 || document2.completedClips > document2.totalClips || !Array.isArray(document2.clips) || document2.clips.length !== document2.completedClips || typeof document2.createdAt !== "string" || typeof document2.lastUpdatedAt !== "string" || !Number.isInteger(document2.pollIntervalMs) || document2.pollIntervalMs < 100) {
+    throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid media-clip task.");
+  }
+  if (input && (document2.sourcePath !== input.path || document2.outputKind !== input.outputKind || document2.cutMode !== input.cutMode || document2.totalClips !== (input.segments?.length ?? 1))) {
+    throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an unexpected media-clip task.");
+  }
+  const clips = document2.clips.map((clip, index) => {
+    if (!clip || typeof clip !== "object" || Array.isArray(clip) || clip.index !== index || clip.sourcePath !== document2.sourcePath || clip.outputKind !== document2.outputKind || !Number.isFinite(clip.startSeconds) || clip.startSeconds < 0 || !Number.isFinite(clip.endSeconds) || clip.endSeconds <= clip.startSeconds || !Number.isFinite(clip.durationSeconds) || clip.durationSeconds <= 0 || !(clip.selectedVideoStreamIndex === null || Number.isInteger(clip.selectedVideoStreamIndex) && clip.selectedVideoStreamIndex >= 0) || !(clip.selectedAudioStreamIndex === null || Number.isInteger(clip.selectedAudioStreamIndex) && clip.selectedAudioStreamIndex >= 0) || typeof clip.hasAudio !== "boolean" || typeof clip.reencoded !== "boolean" || clip.reencoded !== (document2.cutMode === "accurate") || typeof clip.format !== "string" || !clip.format || typeof clip.mimeType !== "string" || !clip.mimeType || !Number.isInteger(clip.fileSizeBytes) || clip.fileSizeBytes < 1 || typeof clip.workspacePath !== "string" || !clip.workspacePath) {
+      throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid media-clip metadata.");
+    }
+    if (document2.outputKind === "video" && clip.selectedVideoStreamIndex === null || document2.outputKind === "audio" && (clip.selectedVideoStreamIndex !== null || clip.selectedAudioStreamIndex === null || !clip.hasAudio)) {
+      throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned inconsistent media-clip stream metadata.");
+    }
+    return { ...clip, workspacePath: normalizeWorkspacePath(clip.workspacePath, "clip.workspacePath") };
+  });
+  const task = {
+    taskId: document2.taskId,
+    sourcePath: normalizeWorkspacePath(document2.sourcePath, "sourcePath"),
+    outputKind: document2.outputKind,
+    cutMode: document2.cutMode,
+    status: document2.status,
+    phase: document2.phase,
+    statusMessage: document2.statusMessage,
+    progressPercent: document2.progressPercent,
+    completedClips: document2.completedClips,
+    totalClips: document2.totalClips,
+    clips,
+    createdAt: document2.createdAt,
+    lastUpdatedAt: document2.lastUpdatedAt,
+    pollIntervalMs: document2.pollIntervalMs
+  };
+  if (document2.error !== void 0) {
+    if (!document2.error || typeof document2.error !== "object" || typeof document2.error.code !== "string" || typeof document2.error.message !== "string") throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid media-clip error.");
+    task.error = { code: document2.error.code, message: document2.error.message };
+  }
+  if (document2.failedSegment !== void 0) {
+    const segment = document2.failedSegment;
+    if (!segment || typeof segment !== "object" || !Number.isInteger(segment.index) || segment.index < 0 || segment.index >= document2.totalClips || !Number.isFinite(segment.startSeconds) || segment.startSeconds < 0 || !Number.isFinite(segment.endSeconds) || segment.endSeconds <= segment.startSeconds) {
+      throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid failed media segment.");
+    }
+    task.failedSegment = { index: segment.index, startSeconds: segment.startSeconds, endSeconds: segment.endSeconds };
+  }
+  if (task.status === "completed" && (task.completedClips !== task.totalClips || task.progressPercent !== 100 || task.error || task.failedSegment)) throw localAgentError("AGENT_INVALID_RESPONSE", "The completed media-clip task is inconsistent.");
+  if (task.status === "working" && task.progressPercent >= 100 || task.status === "failed" && !task.error || task.status !== "failed" && (task.error || task.failedSegment)) throw localAgentError("AGENT_INVALID_RESPONSE", "The media-clip terminal state is inconsistent.");
+  return task;
+}
+async function createMediaClipTask(argumentsValue) {
+  const input = normalizeMediaClipInput(argumentsValue);
+  const document2 = await agentJsonRequest("/tasks/media-clip", { method: "POST", body: input, timeoutMs: AGENT_TASK_TIMEOUT_MS });
+  return normalizeMediaClipTask(document2, input);
+}
+async function getMediaClipTask(taskId2) {
+  if (typeof taskId2 !== "string" || !taskId2.trim()) throw localAgentError("INVALID_ARGUMENT", "taskId must be a non-empty string.");
+  return normalizeMediaClipTask(await agentJsonRequest(`/tasks/media-clip/${encodeURIComponent(taskId2)}`, { timeoutMs: AGENT_TASK_TIMEOUT_MS }));
+}
+async function cancelMediaClipTask(taskId2) {
+  if (typeof taskId2 !== "string" || !taskId2.trim()) throw localAgentError("INVALID_ARGUMENT", "taskId must be a non-empty string.");
+  const document2 = await agentJsonRequest(`/tasks/media-clip/${encodeURIComponent(taskId2)}/cancel`, { method: "POST", body: {}, timeoutMs: AGENT_TASK_TIMEOUT_MS });
+  if (!document2 || document2.accepted !== true) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent did not confirm media-clip cancellation.");
+  return { taskId: taskId2, accepted: true, message: "Cancellation request accepted. Poll media_clip_get_task for the terminal status." };
+}
 function normalizeCaptureFrameResult(document2, input) {
   const expectedSource = input.path ?? `youtube:${input.youtube.videoId}`;
   if (!document2 || typeof document2 !== "object" || Array.isArray(document2) || document2.sourcePath !== expectedSource || document2.seekMode !== input.seekMode || document2.displayRotationApplied !== true && document2.displayRotationApplied !== false) {
@@ -4457,8 +4675,6 @@ async function readMcpResource(id, uri) {
   }
   try {
     const text = await readCaptureFrameWidgetHtml();
-    const config = await getConfig();
-    const loopbackOrigin = `http://127.0.0.1:${normalizeAgentPort(config.agentPort)}`;
     return {
       jsonrpc: "2.0",
       id,
@@ -4467,8 +4683,8 @@ async function readMcpResource(id, uri) {
           ...captureFrameWidgetResource(),
           text,
           _meta: {
-            ui: { prefersBorder: true, csp: { connectDomains: [loopbackOrigin], resourceDomains: [loopbackOrigin] } },
-            "openai/widgetDescription": "Displays a requested Workspace media file with context-specific provenance."
+            ui: { prefersBorder: true },
+            "openai/widgetDescription": "Anchors a requested Workspace media file in ChatGPT so the installed ResearchTube Extension can render it locally."
           }
         }]
       }
@@ -4603,6 +4819,18 @@ async function handleMcpRequest(request) {
     const path = request.params.arguments?.path;
     const sections = request.params.arguments?.sections;
     return executeToolCall(request.id, "media_probe", { path, sections }, () => mediaProbe(path, sections));
+  }
+  if (request?.method === "tools/call" && request.params?.name === "media_clip") {
+    const args = request.params.arguments ?? {};
+    return executeToolCall(request.id, "media_clip", args, () => createMediaClipTask(args));
+  }
+  if (request?.method === "tools/call" && request.params?.name === "media_clip_get_task") {
+    const taskId2 = request.params.arguments?.taskId;
+    return executeToolCall(request.id, "media_clip_get_task", { taskId: taskId2 }, () => getMediaClipTask(taskId2));
+  }
+  if (request?.method === "tools/call" && request.params?.name === "media_clip_cancel_task") {
+    const taskId2 = request.params.arguments?.taskId;
+    return executeToolCall(request.id, "media_clip_cancel_task", { taskId: taskId2 }, () => cancelMediaClipTask(taskId2));
   }
   if (request?.method === "tools/call" && request.params?.name === "media_capture_frame") {
     const args = request.params.arguments ?? {};
@@ -4757,15 +4985,12 @@ async function executeCaptureFrameImageToolCall(id, path) {
   const startedAt = Date.now();
   try {
     const metadata = await getWorkspaceImageMetadata(path);
-    const result = { metadata, localAgentImageUrl: await localAgentWorkspaceImageUrl(metadata.path) };
     const mcpResult = {
-      content: [{ type: "text", text: JSON.stringify(result.metadata) }],
-      structuredContent: result.metadata,
-      // Image delivery is widget-only; image bytes never enter the MCP result.
-      _meta: { researchtube: { localAgentImageUrl: result.localAgentImageUrl } },
+      content: [{ type: "text", text: JSON.stringify(metadata) }],
+      structuredContent: metadata,
       isError: false
     };
-    void recordCommandDiagnostic("succeeded", { tool: "media_load_workspace_image", elapsed_ms: Date.now() - startedAt, output: { path: result.metadata.path, mediaKind: result.metadata.mediaKind, sizeBytes: result.metadata.sizeBytes } });
+    void recordCommandDiagnostic("succeeded", { tool: "media_load_workspace_image", elapsed_ms: Date.now() - startedAt, output: { path: metadata.path, mediaKind: metadata.mediaKind, sizeBytes: metadata.sizeBytes } });
     return { jsonrpc: "2.0", id, result: mcpResult };
   } catch (error) {
     void recordCommandDiagnostic("failed", { tool: "media_load_workspace_image", elapsed_ms: Date.now() - startedAt, error_code: error?.code || null, error: searchDiagnosticMessage(error) });
@@ -4777,7 +5002,7 @@ async function executeShowWorkspaceImageToolCall(id, path) {
   try {
     const result = await showWorkspaceImage(path);
     void recordCommandDiagnostic("succeeded", { tool: "media_image_show", elapsed_ms: Date.now() - startedAt, output: result.metadata });
-    return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: "Workspace media shown." }], structuredContent: result.metadata, _meta: { researchtube: { localAgentImageUrl: result.localAgentImageUrl } }, isError: false } };
+    return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: "Workspace media shown." }], structuredContent: result.metadata, isError: false } };
   } catch (error) {
     void recordCommandDiagnostic("failed", { tool: "media_image_show", elapsed_ms: Date.now() - startedAt, error_code: error?.code || null, error: searchDiagnosticMessage(error) });
     return toolError(id, error);
@@ -4828,6 +5053,8 @@ async function executeToolCall(id, tool, input, work, operation = null) {
   }
 }
 function summarizeCommandInput(tool, input) {
+  if (tool === "media_clip") return { path: typeof input.path === "string" ? input.path : null, outputKind: input.outputKind ?? null, segmentCount: Array.isArray(input.segments) ? input.segments.length : null, cutMode: input.cutMode ?? "copy", outputDir: typeof input.outputDir === "string" ? input.outputDir : "clips" };
+  if (tool === "media_clip_get_task" || tool === "media_clip_cancel_task") return { taskId: typeof input.taskId === "string" ? input.taskId : null };
   if (tool === "media_capture_frame") return { path: typeof input.path === "string" ? input.path : null, youtube: input.youtube && typeof input.youtube === "object" ? { videoId: input.youtube.videoId ?? null, formatId: input.youtube.formatId ?? null } : null, timestampSeconds: input.timestampSeconds ?? null, videoStreamIndex: input.videoStreamIndex ?? null, seekMode: input.seekMode ?? null, outputPath: typeof input.outputPath === "string" ? input.outputPath : null };
   if (tool === "visual_map_create") return { workspacePath: typeof input.workspacePath === "string" ? input.workspacePath : null, columns: input.columns ?? null, rows: input.rows ?? null, maxTotalFrames: input.maxTotalFrames ?? null, selection: input.selection ?? "uniform" };
   if (tool === "visual_map_get_task") return { taskId: typeof input.taskId === "string" ? input.taskId : null };

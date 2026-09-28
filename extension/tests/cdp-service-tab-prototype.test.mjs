@@ -66,5 +66,5 @@ assert.doesNotMatch(libraryAttachmentFlow, /Input\.insertText/, "the Library flo
 assert.doesNotMatch(prototype, /document\.execCommand\('insertText'/);
 assert.doesNotMatch(prototype, /uploadFile|DataTransfer|dragstart|ImageContent/);
 assert.doesNotMatch(background, /chatgpt-service-tab\.png|setServiceTabFavicon|researchtube-service-favicon|favIconUrl/);
-assert.equal(parsedManifest.web_accessible_resources, undefined, "the service tab must not alter or expose a favicon resource");
+assert.deepEqual(parsedManifest.web_accessible_resources, [{ resources: ["media-viewer.html"], matches: ["https://chatgpt.com/*", "https://web-sandbox.oaiusercontent.com/*"] }], "only the local media viewer may be exposed to the ChatGPT card and its sandbox");
 console.log("CDP service-tab prototype: ok");

@@ -34,8 +34,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote, unquote, urlparse
 from urllib.request import Request, urlopen
 
-AGENT_VERSION = "1.107.0"
-INTERFACE_VERSION = 68
+AGENT_VERSION = "1.109.0"
+INTERFACE_VERSION = 69
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
 MAX_GOOGLE_TRANSLATE_AUDIO_BYTES = 16 * 1024 * 1024
@@ -88,6 +88,8 @@ YOUTUBE_CAPTURE_SECTION_DELAY_SECONDS = 2.0
 YOUTUBE_CAPTURE_SECTION_RETRY_DELAYS_SECONDS = (3.0, 6.0)
 YOUTUBE_CAPTURE_FILE_PROGRESS_INTERVAL_SECONDS = 0.5
 CAPTURE_FRAME_MAX_FRAMES = 20
+MEDIA_CLIP_MAX_SEGMENTS = 20
+DEFAULT_MEDIA_CLIP_DIRECTORY = "clips"
 DEBUG_BANNER_SWITCH = "--silent-debugger-extension-api"
 MAX_CLIPBOARD_TEXT_BYTES = 2 * 1024 * 1024
 MAX_CLIPBOARD_IMAGE_FILE_BYTES = 20 * 1024 * 1024
@@ -1278,6 +1280,75 @@ def image_crop_options(payload: Any) -> dict[str, Any]:
     if suffix not in allowed_suffixes[image["format"]]:
         raise AgentApiError("IMAGE_CROP_INVALID", f"outputPath extension must match image.format {image['format']}.")
     return {"path": payload["path"], "crop": crop, "image": image, "outputPath": path}
+
+
+def media_clip_options(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict) or set(payload) - {
+        "path", "outputKind", "segments", "cutMode", "includeAudio",
+        "videoStreamIndex", "audioStreamIndex", "outputDir",
+    }:
+        raise AgentApiError("MEDIA_CLIP_INVALID", "media_clip accepts only documented fields.")
+    path = payload.get("path")
+    if not isinstance(path, str) or not path.strip():
+        raise AgentApiError("MEDIA_CLIP_INVALID", "path must be a non-empty logical workspace media path.")
+    output_kind = payload.get("outputKind")
+    if output_kind not in {"video", "audio"}:
+        raise AgentApiError("MEDIA_CLIP_INVALID", "outputKind must be video or audio.")
+    cut_mode = payload.get("cutMode", "copy")
+    if cut_mode not in {"copy", "accurate"}:
+        raise AgentApiError("MEDIA_CLIP_INVALID", "cutMode must be copy or accurate.")
+    include_audio = payload.get("includeAudio", True)
+    if not isinstance(include_audio, bool):
+        raise AgentApiError("MEDIA_CLIP_INVALID", "includeAudio must be a boolean.")
+    if output_kind == "audio" and "includeAudio" in payload:
+        raise AgentApiError("MEDIA_CLIP_INVALID", "includeAudio is available only for video output.")
+
+    def stream_index(name: str) -> int | None:
+        value = payload.get(name)
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise AgentApiError("MEDIA_CLIP_INVALID", f"{name} must be a non-negative ffprobe stream index.")
+        return value
+
+    video_stream_index = stream_index("videoStreamIndex")
+    audio_stream_index = stream_index("audioStreamIndex")
+    if output_kind == "audio" and video_stream_index is not None:
+        raise AgentApiError("MEDIA_CLIP_INVALID", "videoStreamIndex is available only for video output.")
+    if output_kind == "video" and not include_audio and audio_stream_index is not None:
+        raise AgentApiError("MEDIA_CLIP_INVALID", "audioStreamIndex requires includeAudio=true.")
+
+    raw_segments = payload.get("segments")
+    segments: list[dict[str, float]] | None = None
+    if raw_segments is not None:
+        if not isinstance(raw_segments, list) or not 1 <= len(raw_segments) <= MEDIA_CLIP_MAX_SEGMENTS:
+            raise AgentApiError("MEDIA_CLIP_INVALID", f"segments must contain from 1 to {MEDIA_CLIP_MAX_SEGMENTS} intervals.")
+        segments = []
+        seen: set[tuple[float, float]] = set()
+        for index, segment in enumerate(raw_segments):
+            if not isinstance(segment, dict) or set(segment) != {"startSeconds", "endSeconds"}:
+                raise AgentApiError("MEDIA_CLIP_INVALID", f"segments[{index}] must contain only startSeconds and endSeconds.")
+            start, end = segment.get("startSeconds"), segment.get("endSeconds")
+            if isinstance(start, bool) or not isinstance(start, (int, float)) or not math.isfinite(start) or start < 0:
+                raise AgentApiError("MEDIA_CLIP_INVALID", f"segments[{index}].startSeconds must be a finite non-negative number.")
+            if isinstance(end, bool) or not isinstance(end, (int, float)) or not math.isfinite(end) or end <= start:
+                raise AgentApiError("MEDIA_CLIP_INVALID", f"segments[{index}].endSeconds must be a finite number greater than startSeconds.")
+            pair = (float(start), float(end))
+            if pair in seen:
+                raise AgentApiError("MEDIA_CLIP_INVALID", "segments must not contain duplicate intervals.")
+            seen.add(pair)
+            segments.append({"startSeconds": pair[0], "endSeconds": pair[1]})
+
+    output_dir_value = payload.get("outputDir", DEFAULT_MEDIA_CLIP_DIRECTORY)
+    output_dir = WorkspacePathResolver().resolve_destination(
+        output_dir_value, field_name="outputDir", error_code="MEDIA_CLIP_INVALID",
+    )
+    return {
+        "path": path.strip(), "outputKind": output_kind, "segments": segments,
+        "cutMode": cut_mode, "includeAudio": include_audio,
+        "videoStreamIndex": video_stream_index, "audioStreamIndex": audio_stream_index,
+        "outputDir": output_dir.logical_path,
+    }
 
 
 def visual_map_options(payload: Any) -> dict[str, Any]:
@@ -3712,6 +3783,348 @@ class CaptureFrameTaskManager:
 CAPTURE_FRAME_TASKS = CaptureFrameTaskManager()
 
 
+@dataclass
+class MediaClipTask:
+    task_id: str
+    payload: dict[str, Any]
+    created_at: str
+    last_updated_at: str
+    status: str = "working"
+    phase: str = "preparing"
+    status_message: str = "Preparing media clips."
+    progress_percent: float = 0.0
+    completed_clips: int = 0
+    total_clips: int = 1
+    clips: list[dict[str, Any]] = field(default_factory=list)
+    failed_segment: dict[str, Any] | None = None
+    error: dict[str, str] | None = None
+    process: asyncio.subprocess.Process | None = None
+    runner: asyncio.Task[None] | None = None
+
+    def touch(self, message: str | None = None) -> None:
+        self.last_updated_at = utc_now()
+        if message is not None:
+            self.status_message = message
+
+
+def media_clip_number_tag(value: float) -> str:
+    return f"{value:.3f}".rstrip("0").rstrip(".") or "0"
+
+
+def media_clip_audio_extension(codec_name: str | None, cut_mode: str) -> str:
+    if cut_mode == "accurate":
+        return "m4a"
+    return {
+        "aac": "m4a", "alac": "m4a", "mp3": "mp3", "opus": "opus",
+        "vorbis": "ogg", "flac": "flac", "pcm_s16le": "wav",
+        "pcm_s24le": "wav", "pcm_s32le": "wav", "pcm_f32le": "wav",
+    }.get(codec_name or "", "mka")
+
+
+def media_clip_video_extension(source: Path, cut_mode: str) -> str:
+    if cut_mode == "accurate":
+        return "mp4"
+    suffix = source.suffix.lower().removeprefix(".")
+    return suffix if suffix in {"avi", "m4v", "mkv", "mov", "mp4", "mpeg", "mpg", "ogv", "webm"} else "mkv"
+
+
+def media_clip_mime_type(extension: str, output_kind: str) -> str:
+    if output_kind == "video":
+        return {"mp4": "video/mp4", "m4v": "video/mp4", "mov": "video/quicktime", "webm": "video/webm", "ogv": "video/ogg", "mkv": "video/x-matroska", "avi": "video/x-msvideo", "mpeg": "video/mpeg", "mpg": "video/mpeg"}.get(extension, "application/octet-stream")
+    return {"m4a": "audio/mp4", "mp3": "audio/mpeg", "opus": "audio/ogg", "ogg": "audio/ogg", "flac": "audio/flac", "wav": "audio/wav", "mka": "audio/x-matroska"}.get(extension, "application/octet-stream")
+
+
+async def media_clip_probe_file(path: Path, executable: str) -> tuple[list[dict[str, Any]], float | None]:
+    command = [executable, "-v", "error", "-show_streams", "-show_format", "-of", "json", str(path)]
+    process: asyncio.subprocess.Process | None = None
+    try:
+        process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        stdout, _stderr = await asyncio.wait_for(process.communicate(), timeout=MEDIA_PROBE_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError as error:
+        if process is not None:
+            process.kill()
+            await process.communicate()
+        raise AgentApiError("MEDIA_CLIP_PROBE_FAILED", "ffprobe timed out while inspecting clip media.") from error
+    except OSError as error:
+        raise AgentApiError("MEDIA_CLIP_PROBE_FAILED", "ffprobe could not be started for media clipping.") from error
+    if process.returncode != 0:
+        raise AgentApiError("MEDIA_CLIP_PROBE_FAILED", "ffprobe could not inspect the clip media.")
+    try:
+        document = json.loads(stdout.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise AgentApiError("MEDIA_CLIP_PROBE_FAILED", "ffprobe returned invalid clip-media metadata.") from error
+    streams = document.get("streams")
+    if not isinstance(streams, list):
+        raise AgentApiError("MEDIA_CLIP_PROBE_FAILED", "ffprobe returned no usable clip-media streams.")
+    duration: float | None = None
+    candidates: list[Any] = []
+    if isinstance(document.get("format"), dict):
+        candidates.append(document["format"].get("duration"))
+    candidates.extend(stream.get("duration") for stream in streams if isinstance(stream, dict))
+    for candidate in candidates:
+        try:
+            value = float(candidate)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value) and value > 0:
+            duration = max(duration or 0.0, value)
+    return [stream for stream in streams if isinstance(stream, dict)], duration
+
+
+def media_clip_select_stream(streams: list[dict[str, Any]], codec_type: str, requested_index: int | None, *, required: bool) -> dict[str, Any] | None:
+    candidates = [stream for stream in streams if stream.get("codec_type") == codec_type and isinstance(stream.get("index"), int)]
+    if requested_index is not None:
+        selected = next((stream for stream in candidates if stream["index"] == requested_index), None)
+        if selected is None:
+            raise AgentApiError("MEDIA_CLIP_STREAM_NOT_FOUND", f"{codec_type}StreamIndex does not identify a {codec_type} stream in the source.")
+        return selected
+    if candidates:
+        return candidates[0]
+    if required:
+        raise AgentApiError("MEDIA_CLIP_STREAM_NOT_FOUND", f"The source contains no {codec_type} stream.")
+    return None
+
+
+def media_clip_publish_without_overwrite(temporary_path: Path, final_path: Path) -> None:
+    if final_path.exists() or final_path.is_symlink():
+        raise AgentApiError("DESTINATION_EXISTS", "A media-clip output destination already exists; this tool never overwrites files.")
+    try:
+        os.link(temporary_path, final_path)
+        temporary_path.unlink()
+        return
+    except FileExistsError as error:
+        raise AgentApiError("DESTINATION_EXISTS", "A media-clip output destination already exists; this tool never overwrites files.") from error
+    except OSError:
+        pass
+    try:
+        with temporary_path.open("rb") as source, final_path.open("xb") as destination:
+            shutil.copyfileobj(source, destination, length=1024 * 1024)
+        temporary_path.unlink()
+    except FileExistsError as error:
+        raise AgentApiError("DESTINATION_EXISTS", "A media-clip output destination already exists; this tool never overwrites files.") from error
+    except OSError as error:
+        try:
+            final_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise AgentApiError("MEDIA_CLIP_FAILED", "The completed media clip could not be published in the workspace.") from error
+
+
+class MediaClipTaskManager:
+    def __init__(self) -> None:
+        self.tasks: dict[str, MediaClipTask] = {}
+
+    def new_task_id(self) -> str:
+        while True:
+            task_id = f"clip_{secrets.token_urlsafe(7)}"
+            if task_id not in self.tasks:
+                return task_id
+
+    def get(self, task_id: Any) -> MediaClipTask:
+        if not isinstance(task_id, str) or task_id not in self.tasks:
+            raise AgentApiError("MEDIA_CLIP_TASK_NOT_FOUND", "The requested media-clip task does not exist.")
+        return self.tasks[task_id]
+
+    def snapshot(self, task: MediaClipTask) -> dict[str, Any]:
+        document: dict[str, Any] = {
+            "taskId": task.task_id, "sourcePath": task.payload["path"], "outputKind": task.payload["outputKind"],
+            "cutMode": task.payload["cutMode"], "status": task.status, "phase": task.phase,
+            "statusMessage": task.status_message, "progressPercent": task.progress_percent,
+            "completedClips": task.completed_clips, "totalClips": task.total_clips, "clips": task.clips,
+            "createdAt": task.created_at, "lastUpdatedAt": task.last_updated_at,
+            "pollIntervalMs": TASK_POLL_INTERVAL_MS,
+        }
+        if task.failed_segment is not None:
+            document["failedSegment"] = task.failed_segment
+        if task.error is not None:
+            document["error"] = task.error
+        return document
+
+    async def create(self, payload: Any) -> dict[str, Any]:
+        options = media_clip_options(payload)
+        WorkspacePathResolver().resolve_existing(options["path"], field_name="path", expected_type="file")
+        now = utc_now()
+        task = MediaClipTask(self.new_task_id(), options, now, now, total_clips=len(options["segments"] or [None]))
+        self.tasks[task.task_id] = task
+        task.runner = asyncio.create_task(self.run(task), name=f"researchtube-media-clip-{task.task_id}")
+        return self.snapshot(task)
+
+    async def read_progress(self, task: MediaClipTask, segment_index: int, segment_duration: float) -> None:
+        assert task.process is not None and task.process.stdout is not None
+        while line := await task.process.stdout.readline():
+            text = line.decode("utf-8", errors="replace").strip()
+            if not text.startswith(("out_time_us=", "out_time_ms=")):
+                continue
+            try:
+                processed_seconds = max(0.0, float(text.split("=", 1)[1]) / 1_000_000.0)
+            except ValueError:
+                continue
+            fraction = min(1.0, processed_seconds / segment_duration) if segment_duration > 0 else 0.0
+            task.progress_percent = max(task.progress_percent, min(99.9, (segment_index + fraction) * 100.0 / task.total_clips))
+            task.touch(f"Creating clip {segment_index + 1} of {task.total_clips}: {fraction * 100.0:.0f}%.")
+
+    async def create_one_clip(
+        self, task: MediaClipTask, source: ResolvedWorkspacePath, output_directory: ResolvedWorkspacePath,
+        ffmpeg_executable: str, ffprobe_executable: str, video_stream: dict[str, Any] | None,
+        audio_stream: dict[str, Any] | None, segment: dict[str, float], segment_index: int,
+    ) -> dict[str, Any]:
+        start, end = segment["startSeconds"], segment["endSeconds"]
+        duration = end - start
+        output_kind, cut_mode = task.payload["outputKind"], task.payload["cutMode"]
+        extension = media_clip_video_extension(source.physical_path, cut_mode) if output_kind == "video" else media_clip_audio_extension(audio_stream.get("codec_name") if audio_stream else None, cut_mode)
+        source_stem = safe_capture_title(source.physical_path.stem)[:150].rstrip(" .") or "ResearchTube media"
+        range_tag = f"clip_{media_clip_number_tag(start)}_{media_clip_number_tag(end)}"
+        file_name = f"{source_stem} [{range_tag}] [{task.task_id}].{extension}"
+        destination = WorkspacePathResolver().resolve_destination(
+            f"{output_directory.logical_path}/{file_name}", field_name="media clip output", error_code="MEDIA_CLIP_INVALID",
+        )
+        destination.physical_path.parent.mkdir(parents=True, exist_ok=True)
+        if destination.physical_path.exists() or destination.physical_path.is_symlink():
+            raise AgentApiError("DESTINATION_EXISTS", "A media-clip output destination already exists; this tool never overwrites files.")
+        temporary = destination.physical_path.with_name(f".{destination.physical_path.stem}.{secrets.token_urlsafe(5)}.tmp.{extension}")
+        command = [
+            ffmpeg_executable, "-hide_banner", "-nostdin", "-v", "error", "-progress", "pipe:1", "-nostats",
+            "-ss", f"{start:.6f}", "-i", str(source.physical_path), "-t", f"{duration:.6f}",
+        ]
+        if output_kind == "video":
+            assert video_stream is not None
+            command.extend(["-map", f"0:{video_stream['index']}"])
+            if audio_stream is not None:
+                command.extend(["-map", f"0:{audio_stream['index']}"])
+            command.extend(["-sn", "-dn"])
+            if cut_mode == "copy":
+                command.extend(["-c", "copy", "-avoid_negative_ts", "make_zero"])
+            else:
+                command.extend(["-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p"])
+                command.extend(["-c:a", "aac", "-b:a", "192k"] if audio_stream is not None else ["-an"])
+                command.extend(["-movflags", "+faststart"])
+        else:
+            assert audio_stream is not None
+            command.extend(["-map", f"0:{audio_stream['index']}", "-vn", "-sn", "-dn"])
+            if cut_mode == "copy":
+                command.extend(["-c:a", "copy", "-avoid_negative_ts", "make_zero"])
+            else:
+                command.extend(["-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"])
+        command.extend(["-n", str(temporary)])
+        stderr_task: asyncio.Task[bytes] | None = None
+        try:
+            task.process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            assert task.process.stderr is not None
+            stderr_task = asyncio.create_task(task.process.stderr.read())
+            await asyncio.gather(self.read_progress(task, segment_index, duration), task.process.wait())
+            stderr = await stderr_task
+            if task.process.returncode != 0 or not temporary.is_file() or temporary.stat().st_size == 0:
+                detail = bounded_line(stderr.decode("utf-8", errors="replace").splitlines()[-1] if stderr else "")
+                raise AgentApiError("MEDIA_CLIP_FAILED", "FFmpeg could not create the requested media clip.", detail or None)
+            media_clip_publish_without_overwrite(temporary, destination.physical_path)
+            result_streams, result_duration = await media_clip_probe_file(destination.physical_path, ffprobe_executable)
+            has_video = any(stream.get("codec_type") == "video" for stream in result_streams)
+            has_audio = any(stream.get("codec_type") == "audio" for stream in result_streams)
+            if (output_kind == "video" and not has_video) or (output_kind == "audio" and not has_audio):
+                destination.physical_path.unlink(missing_ok=True)
+                raise AgentApiError("MEDIA_CLIP_FAILED", "The completed clip does not contain the requested media stream.")
+            return {
+                "index": segment_index, "sourcePath": source.logical_path, "outputKind": output_kind,
+                "startSeconds": start, "endSeconds": end, "durationSeconds": result_duration if result_duration is not None else duration,
+                "selectedVideoStreamIndex": video_stream.get("index") if video_stream is not None else None,
+                "selectedAudioStreamIndex": audio_stream.get("index") if audio_stream is not None else None,
+                "hasAudio": has_audio, "reencoded": cut_mode == "accurate", "format": extension,
+                "mimeType": media_clip_mime_type(extension, output_kind),
+                "fileSizeBytes": destination.physical_path.stat().st_size,
+                "workspacePath": WorkspacePathResolver().logical_existing_file(destination.physical_path, error_code="MEDIA_CLIP_FAILED"),
+            }
+        except asyncio.CancelledError:
+            if task.process is not None and task.process.returncode is None:
+                task.process.terminate()
+                try:
+                    await asyncio.wait_for(task.process.wait(), timeout=3)
+                except asyncio.TimeoutError:
+                    task.process.kill()
+                    await task.process.wait()
+            if stderr_task is not None:
+                stderr_task.cancel()
+                await asyncio.gather(stderr_task, return_exceptions=True)
+            raise
+        finally:
+            task.process = None
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    async def run(self, task: MediaClipTask) -> None:
+        current_segment: dict[str, float] | None = None
+        current_index = 0
+        try:
+            ffmpeg = find_component("ffmpeg", COMPONENTS["ffmpeg"][0])
+            ffprobe = find_component("ffprobe", COMPONENTS["ffprobe"][0])
+            if ffmpeg.error or ffprobe.error:
+                raise AgentApiError("FFMPEG_DISCOVERY_ERROR", "ffmpeg or ffprobe discovery is ambiguous.", ffmpeg.error or ffprobe.error)
+            if not ffmpeg.executable or not ffprobe.executable:
+                raise AgentApiError("FFMPEG_NOT_AVAILABLE", "ffmpeg and ffprobe are required for media clipping.")
+            resolver = WorkspacePathResolver()
+            source = resolver.resolve_existing(task.payload["path"], field_name="path", expected_type="file")
+            output_directory = resolver.resolve_destination(task.payload["outputDir"], field_name="outputDir", error_code="MEDIA_CLIP_INVALID")
+            output_directory.physical_path.mkdir(parents=True, exist_ok=True)
+            streams, source_duration = await media_clip_probe_file(source.physical_path, ffprobe.executable)
+            video_stream = media_clip_select_stream(streams, "video", task.payload["videoStreamIndex"], required=task.payload["outputKind"] == "video")
+            require_audio = task.payload["outputKind"] == "audio" or task.payload["audioStreamIndex"] is not None
+            audio_stream = media_clip_select_stream(streams, "audio", task.payload["audioStreamIndex"], required=require_audio)
+            if task.payload["outputKind"] == "video" and not task.payload["includeAudio"]:
+                audio_stream = None
+            segments = task.payload["segments"]
+            if segments is None:
+                if source_duration is None:
+                    raise AgentApiError("MEDIA_CLIP_DURATION_UNAVAILABLE", "The source duration is required when segments is omitted.")
+                segments = [{"startSeconds": 0.0, "endSeconds": source_duration}]
+            if source_duration is not None:
+                for index, segment in enumerate(segments):
+                    if segment["endSeconds"] > source_duration + 0.001:
+                        raise AgentApiError("MEDIA_CLIP_RANGE_INVALID", f"segments[{index}].endSeconds exceeds the source duration.")
+            task.total_clips = len(segments)
+            task.phase = "processing"
+            task.touch(f"Creating clip 1 of {task.total_clips}.")
+            for current_index, current_segment in enumerate(segments):
+                clip = await self.create_one_clip(task, source, output_directory, ffmpeg.executable, ffprobe.executable, video_stream, audio_stream, current_segment, current_index)
+                task.clips.append(clip)
+                task.completed_clips = len(task.clips)
+                task.progress_percent = task.completed_clips * 100.0 / task.total_clips
+                task.touch(f"Created {task.completed_clips} of {task.total_clips} clips.")
+            task.status, task.phase, task.progress_percent = "completed", "completed", 100.0
+            task.touch("Media clipping completed.")
+        except asyncio.CancelledError:
+            task.status, task.phase = "cancelled", "cancelled"
+            task.touch("Media-clip task cancelled.")
+            raise
+        except AgentApiError as error:
+            if current_segment is not None:
+                task.failed_segment = {"index": current_index, **current_segment}
+            task.status, task.phase, task.error = "failed", "failed", {"code": error.code, "message": error.message}
+            task.touch("Media clipping failed.")
+        except Exception as error:
+            log(f"media-clip task {task.task_id} failed unexpectedly: {error.__class__.__name__}", error=True)
+            if current_segment is not None:
+                task.failed_segment = {"index": current_index, **current_segment}
+            task.status, task.phase, task.error = "failed", "failed", {"code": "MEDIA_CLIP_INTERNAL_ERROR", "message": "The media-clip task encountered an unexpected error."}
+            task.touch("Media clipping failed.")
+
+    async def cancel(self, task_id: Any) -> None:
+        task = self.get(task_id)
+        if task.status == "working" and task.runner is not None and not task.runner.done():
+            task.touch("Media-clip cancellation requested.")
+            task.runner.cancel()
+
+    async def shutdown(self) -> None:
+        runners = [task.runner for task in self.tasks.values() if task.runner is not None and not task.runner.done()]
+        for runner in runners:
+            runner.cancel()
+        if runners:
+            await asyncio.gather(*runners, return_exceptions=True)
+
+
+MEDIA_CLIP_TASKS = MediaClipTaskManager()
+
+
 IMAGE_MIME_TYPES = {
     ".png": "image/png",
     ".jpg": "image/jpeg",
@@ -4705,13 +5118,38 @@ def public_file_response_headers(status: str, size: int, mime_type: str) -> byte
     return "\r\n".join(headers).encode("ascii")
 
 
-def widget_image_response_headers(status: str, size: int, mime_type: str) -> bytes:
+def widget_image_response_headers(status: str, size: int, mime_type: str, *, content_range: str | None = None) -> bytes:
     headers = [
         f"HTTP/1.1 {status}", f"Content-Type: {mime_type}", f"Content-Length: {size}",
         "X-Content-Type-Options: nosniff", "Cache-Control: no-store", "Access-Control-Allow-Origin: *",
-        "Access-Control-Allow-Methods: GET, OPTIONS", "Access-Control-Allow-Private-Network: true", "Connection: close", "", "",
+        "Access-Control-Allow-Methods: GET, OPTIONS", "Access-Control-Allow-Private-Network: true", "Accept-Ranges: bytes",
+        *([f"Content-Range: {content_range}"] if content_range is not None else []), "Connection: close", "", "",
     ]
     return "\r\n".join(headers).encode("ascii")
+
+
+def widget_media_byte_range(value: str | None, size: int) -> tuple[int, int] | None:
+    """Parse one HTTP byte range for a locally served Workspace media file."""
+    if size < 1:
+        return None
+    if value is None:
+        return 0, size - 1
+    match = re.fullmatch(r"bytes=(\d*)-(\d*)", value.strip())
+    if match is None:
+        return None
+    start_text, end_text = match.groups()
+    if not start_text and not end_text:
+        return None
+    if not start_text:
+        suffix = int(end_text)
+        if suffix < 1:
+            return None
+        return max(0, size - suffix), size - 1
+    start = int(start_text)
+    end = size - 1 if not end_text else int(end_text)
+    if start >= size or end < start:
+        return None
+    return start, min(end, size - 1)
 
 
 async def read_request(reader: asyncio.StreamReader) -> tuple[str, str, dict[str, list[str]], bytes]:
@@ -5222,6 +5660,8 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             response_status, response_body = "200 OK", await SPEECH_TASKS.google_audio(task_id, tokens[0], body)
         elif method == "POST" and path == "/tasks/capture-frame":
             response_status, response_body = "201 Created", await CAPTURE_FRAME_TASKS.create(parse_json_body(body))
+        elif method == "POST" and path == "/tasks/media-clip":
+            response_status, response_body = "201 Created", await MEDIA_CLIP_TASKS.create(parse_json_body(body))
         elif method == "POST" and path == "/media/camera/list":
             response_status, response_body = "200 OK", {"cameras": [camera_public_device(device) for device in await camera_devices()]}
         elif method == "POST" and path == "/media/camera/capture-frame":
@@ -5268,6 +5708,10 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             task_id = path.removeprefix("/tasks/capture-frame/").removesuffix("/cancel").rstrip("/")
             await CAPTURE_FRAME_TASKS.cancel(task_id)
             response_status, response_body = "202 Accepted", {"accepted": True}
+        elif method == "POST" and path.startswith("/tasks/media-clip/") and path.endswith("/cancel"):
+            task_id = path.removeprefix("/tasks/media-clip/").removesuffix("/cancel").rstrip("/")
+            await MEDIA_CLIP_TASKS.cancel(task_id)
+            response_status, response_body = "202 Accepted", {"accepted": True}
         elif method == "POST" and path.startswith("/tasks/capture-frame/") and path.endswith("/diagnostics"):
             task_id = path.removeprefix("/tasks/capture-frame/").removesuffix("/diagnostics").rstrip("/")
             response_status, response_body = "200 OK", CAPTURE_FRAME_TASKS.diagnostics_snapshot(task_id)
@@ -5287,6 +5731,8 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             response_status, response_body = "200 OK", SPEECH_TASKS.snapshot(SPEECH_TASKS.get(path.removeprefix("/tasks/system-speech/")))
         elif method == "GET" and path.startswith("/tasks/capture-frame/"):
             response_status, response_body = "200 OK", CAPTURE_FRAME_TASKS.snapshot(CAPTURE_FRAME_TASKS.get(path.removeprefix("/tasks/capture-frame/")))
+        elif method == "GET" and path.startswith("/tasks/media-clip/"):
+            response_status, response_body = "200 OK", MEDIA_CLIP_TASKS.snapshot(MEDIA_CLIP_TASKS.get(path.removeprefix("/tasks/media-clip/")))
         elif method == "GET" and path.startswith("/tasks/camera-record/"):
             response_status, response_body = "200 OK", CAMERA_RECORD_TASKS.snapshot(CAMERA_RECORD_TASKS.get(path.removeprefix("/tasks/camera-record/")))
         elif method == "GET" and path.startswith("/tasks/"):
@@ -5301,13 +5747,25 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
         elif method == "GET":
             image_file, mime_type = widget_image_file(unquote(path.removeprefix("/")))
             size = image_file.stat().st_size
-            writer.write(widget_image_response_headers("200 OK", size, mime_type))
+            byte_range = widget_media_byte_range(headers.get("range"), size)
+            if byte_range is None:
+                writer.write(widget_image_response_headers("416 Range Not Satisfiable", 0, mime_type, content_range=f"bytes */{size}"))
+                await writer.drain()
+                log("GET /<workspace-image> -> 416")
+                return
+            start, end = byte_range
+            length = end - start + 1
+            partial = headers.get("range") is not None
+            writer.write(widget_image_response_headers("206 Partial Content" if partial else "200 OK", length, mime_type, content_range=f"bytes {start}-{end}/{size}" if partial else None))
             with image_file.open("rb") as source:
-                while chunk := source.read(64 * 1024):
+                source.seek(start)
+                remaining = length
+                while remaining > 0 and (chunk := source.read(min(64 * 1024, remaining))):
                     writer.write(chunk)
                     await writer.drain()
+                    remaining -= len(chunk)
             await writer.drain()
-            log("GET /<workspace-image> -> 200")
+            log(f"GET /<workspace-image> -> {'206' if partial else '200'}")
             return
         elif not method:
             response_status, response_body = "400 Bad Request", error_document(AgentApiError("BAD_REQUEST", "Invalid HTTP request."))
@@ -5318,7 +5776,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
         log_path = compact_google_translate_speech_log_path(path, response_body)
         log(f"{method or 'INVALID'} {log_path or '/'} -> {response_status.split()[0]}{response_log_suffix(path, response_body)}")
     except AgentApiError as error:
-        status = "404 Not Found" if error.code in {"TASK_NOT_FOUND", "VISUAL_MAP_TASK_NOT_FOUND", "CAMERA_RECORD_TASK_NOT_FOUND", "CAPTURE_FRAME_TASK_NOT_FOUND"} else "400 Bad Request"
+        status = "404 Not Found" if error.code in {"TASK_NOT_FOUND", "VISUAL_MAP_TASK_NOT_FOUND", "CAMERA_RECORD_TASK_NOT_FOUND", "CAPTURE_FRAME_TASK_NOT_FOUND", "MEDIA_CLIP_TASK_NOT_FOUND"} else "400 Bad Request"
         writer.write(http_response(status, error_document(error)))
         await writer.drain()
         log(f"{method or 'INVALID'} {path or '/'} -> {status.split()[0]}")
@@ -5343,6 +5801,7 @@ async def serve(port: int) -> None:
         async with PUBLIC_SHARE_LOCK:
             await stop_public_share_unlocked()
         await CAPTURE_FRAME_TASKS.shutdown()
+        await MEDIA_CLIP_TASKS.shutdown()
         await SPEECH_TASKS.shutdown()
         await STORYBOARD_TASKS.shutdown()
         await VISUAL_MAP_TASKS.shutdown()

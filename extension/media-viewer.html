@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    :root { color-scheme: light dark; font-family: ui-sans-serif, system-ui, sans-serif; }
+    * { box-sizing: border-box; } html, body { width: 100%; height: 100%; margin: 0; }
+    body { color: CanvasText; background: Canvas; } main { min-height: 100%; padding: 20px 24px 26px; display: grid; align-content: start; gap: 10px; }
+    header { display: flex; align-items: center; gap: 8px; min-width: 0; } #kind { font-size: 14px; color: color-mix(in srgb, CanvasText 76%, Canvas); } #status { min-width: 0; font-size: 13px; color: color-mix(in srgb, CanvasText 66%, Canvas); } #status.error { color: #d92d20; }
+    .actions { display: flex; gap: 7px; margin-left: auto; } button { display: grid; width: 31px; height: 31px; place-items: center; padding: 0; border: 1px solid color-mix(in srgb, CanvasText 20%, Canvas); border-radius: 8px; background: color-mix(in srgb, CanvasText 5%, Canvas); color: CanvasText; cursor: pointer; } button:disabled { cursor: progress; opacity: .7; }
+    #path { min-width: 0; overflow-wrap: anywhere; word-break: break-word; font: 12px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; }
+    #image, #video, #audio { display: none; max-width: 100%; border: 1px solid color-mix(in srgb, CanvasText 16%, Canvas); border-radius: 10px; background: color-mix(in srgb, CanvasText 8%, Canvas); box-shadow: 0 1px 3px rgb(0 0 0 / 18%); }
+    #image, #video { max-height: 560px; width: auto; height: auto; } #audio { width: min(560px, 100%); } #video::-webkit-media-controls-fullscreen-button { display: none !important; }
+  </style>
+</head>
+<body>
+  <main>
+    <header><span id="kind">Workspace Media</span><span id="status" role="status">Loading media…</span><span class="actions"><button id="refresh" title="Refresh media" aria-label="Refresh media">↻</button><button id="copy" title="Copy workspace path" aria-label="Copy workspace path">⧉</button></span></header>
+    <div id="path"></div>
+    <img id="image" alt="Workspace image"><video id="video" controls playsinline controlslist="nodownload noplaybackrate nofullscreen" disablepictureinpicture></video><audio id="audio" controls></audio>
+  </main>
+  <script>
+    (() => {
+      const image = document.getElementById("image"), video = document.getElementById("video"), audio = document.getElementById("audio"), kind = document.getElementById("kind"), status = document.getElementById("status"), path = document.getElementById("path"), refresh = document.getElementById("refresh"), copy = document.getElementById("copy");
+      let media;
+      try { media = JSON.parse(decodeURIComponent(location.hash.slice(1))); } catch (_error) { media = null; }
+      const valid = media && typeof media.workspacePath === "string" && ["image", "video", "audio"].includes(media.mediaKind) && typeof media.mimeType === "string";
+      const setStatus = (text, error = false) => { status.textContent = text; status.classList.toggle("error", error); };
+      const send = message => chrome.runtime.sendMessage(message);
+      const element = () => media.mediaKind === "video" ? video : media.mediaKind === "audio" ? audio : image;
+      function hideMedia() { for (const item of [image, video, audio]) { item.style.display = "none"; if (item !== image) { item.pause(); item.removeAttribute("src"); item.load(); } } }
+      async function load() {
+        if (!valid) { setStatus("The media anchor is invalid.", true); return; }
+        refresh.disabled = true; copy.disabled = true; hideMedia(); path.textContent = media.workspacePath; kind.textContent = media.mediaKind === "video" ? "Workspace Video" : media.mediaKind === "audio" ? "Speech / Workspace Audio" : "Workspace Image"; setStatus("Loading media…");
+        try {
+          const response = await send({ type: "researchtube_media_viewer_resolve", path: media.workspacePath });
+          if (!response?.ok || typeof response.data?.localAgentImageUrl !== "string") throw new Error(String(response?.error || "The Local Agent could not provide this media."));
+          const target = element();
+          await new Promise((resolve, reject) => { const loaded = media.mediaKind === "image" ? "load" : "loadedmetadata"; const clear = () => { target.removeEventListener(loaded, onload); target.removeEventListener("error", onerror); }; const onload = () => { clear(); resolve(); }; const onerror = () => { clear(); reject(new Error("The local media could not be loaded.")); }; target.addEventListener(loaded, onload, { once: true }); target.addEventListener("error", onerror, { once: true }); target.src = `${response.data.localAgentImageUrl}${response.data.localAgentImageUrl.includes("?") ? "&" : "?"}viewer=${Date.now()}`; if (media.mediaKind !== "image") target.load(); });
+          target.style.display = "block"; setStatus("");
+        } catch (error) { setStatus(error instanceof Error ? error.message : "The local media could not be loaded.", true); }
+        finally { refresh.disabled = false; copy.disabled = false; }
+      }
+      refresh.addEventListener("click", () => void load());
+      copy.addEventListener("click", async () => { if (!valid) return; copy.disabled = true; try { const response = await send({ type: "researchtube_capture_frame_local_action", action: "copyPath", path: media.workspacePath }); if (!response?.ok) throw new Error(String(response?.error || "Could not copy the workspace path.")); setStatus("Workspace path copied."); } catch (error) { setStatus(error instanceof Error ? error.message : "Could not copy the workspace path.", true); } finally { copy.disabled = false; } });
+      void load();
+    })();
+  </script>
+</body>
+</html>
