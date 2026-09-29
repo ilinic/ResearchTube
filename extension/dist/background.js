@@ -236,7 +236,7 @@ var MCP_TOOL_SETTINGS = Object.freeze({
   online_share_status: { group: "online" },
   online_share_stop: { group: "online" }
 });
-var EXTENSION_VERSION = "2.2.28";
+var EXTENSION_VERSION = "2.2.35";
 var REQUIRED_AGENT_INTERFACE_VERSION = 69;
 var CAPTURE_FRAME_WIDGET_URI = "ui://researchtube/capture-frame-v49.html";
 var RESEARCHTUBE_DEMO_GUIDE_URL = "https://github.com/ilinic/ResearchTube/blob/main/docs/DEMO.md";
@@ -259,6 +259,8 @@ var SEARCH_COOLDOWN_STEPS_MS = [2e3, 5e3, 1e4, 2e4, 4e4, 6e4];
 var CDP_SERVICE_TAB_STORAGE_KEY = "researchtubeCdpServiceTabId";
 var CDP_PROTOCOL_VERSION = "1.3";
 var CDP_COMPOSER_SETTLE_MS = 750;
+var CDP_COMPOSER_PROMPT_ATTEMPTS = 4;
+var CDP_COMPOSER_PROMPT_RETRY_DELAY_MS = 2e3;
 var CDP_FILE_CHOOSER_ATTEMPTS = 2;
 var CDP_IMAGE_BATCH_MAX_FILES = 5;
 var CDP_SENT_DRAFT_CLEAR_CHECK_DELAYS_MS = [500, 500, 1e3, 2e3];
@@ -1896,7 +1898,7 @@ function cdpLog(step, details = void 0) {
   else console.info(`${prefix} ${step}`, details);
 }
 function cdpErrorLog(step, error) {
-  console.error(`[ResearchTube CDP] ${step}`, error instanceof Error ? error.message : error);
+  console.warn(`[ResearchTube CDP] ${step}`, error instanceof Error ? error.message : error);
 }
 async function cdpAttach(tabId) {
   cdpLog("Debugger attach requested", { tabId, protocolVersion: CDP_PROTOCOL_VERSION });
@@ -2088,44 +2090,107 @@ async function cdpWaitForTextComposer(tabId, timeoutMs = 45e3) {
   }
   throw cdpError("Timed out waiting for the ChatGPT text Composer.");
 }
+function normalizeComposerTextForComparison(value) {
+  return String(value ?? "").normalize("NFC").replace(/\s+/gu, " ").trim();
+}
 async function cdpSetComposerText(tabId, text) {
-  const selectComposerContentsExpression = `(() => {
+  const normalizedExpectedText = normalizeComposerTextForComparison(text);
+  const focusComposerExpression = `(() => {
     const target = document.querySelector('#prompt-textarea')
       || document.querySelector('[contenteditable="true"][role="textbox"]')
       || document.querySelector('textarea');
     if (!target) return false;
     target.focus();
-    if (typeof target.select === 'function') {
-      target.select();
-      return document.activeElement === target;
-    }
-    const selection = window.getSelection();
-    if (!selection) return false;
-    const range = document.createRange();
-    range.selectNodeContents(target);
-    selection.removeAllRanges();
-    selection.addRange(range);
     return document.activeElement === target;
   })()`;
-  const exactText = `(() => {
+  const readComposerText = `(() => {
     const target = document.querySelector('#prompt-textarea')
       || document.querySelector('[contenteditable="true"][role="textbox"]')
       || document.querySelector('textarea');
-    const current = target?.value ?? target?.innerText ?? target?.textContent ?? '';
-    return current.trim() === ${JSON.stringify(text)};
+    return { found: Boolean(target), text: target ? (target.value ?? target.innerText ?? target.textContent ?? '') : null };
   })()`;
-  for (let attempt = 1; attempt <= 2; attempt += 1) {
-    const selected = (await cdpEvaluate(tabId, selectComposerContentsExpression))?.value;
-    if (selected !== true) throw cdpError("ChatGPT Composer could not receive keyboard input.");
-    await cdpCommand(tabId, "Input.insertText", { text });
-    await sleep(120);
-    if ((await cdpEvaluate(tabId, exactText))?.value === true) {
-      cdpLog("Composer prompt replaced", { tabId, attempt });
-      return;
+  let lastError = null;
+  let lastDiagnostic = null;
+  for (let attempt = 1; attempt <= CDP_COMPOSER_PROMPT_ATTEMPTS; attempt += 1) {
+    await sleep(CDP_COMPOSER_PROMPT_RETRY_DELAY_MS);
+    let observedText = null;
+    let composerFound = false;
+    try {
+      await cdpClearComposerDraft(tabId);
+      const focused = (await cdpEvaluate(tabId, focusComposerExpression))?.value;
+      if (focused !== true) throw cdpError("ChatGPT Composer could not receive keyboard input.");
+      await cdpCommand(tabId, "Input.insertText", { text });
+      for (let check = 0; check < 4; check += 1) {
+        await sleep(250);
+        const composerState = (await cdpEvaluate(tabId, readComposerText))?.value;
+        composerFound = composerState?.found === true;
+        observedText = composerFound && typeof composerState.text === "string" ? composerState.text : null;
+        const normalizedComposerText = composerFound ? normalizeComposerTextForComparison(observedText) : null;
+        if (composerFound && normalizedComposerText === normalizedExpectedText) {
+          cdpLog("Composer prompt inserted and verified", { tabId, attempt });
+          return;
+        }
+      }
+      throw cdpError("ChatGPT Composer text did not match the requested prompt after insertion.");
+    } catch (error) {
+      lastError = error;
+      if (observedText === null) {
+        const composerState = await cdpEvaluate(tabId, readComposerText).then((result) => result?.value).catch(() => null);
+        composerFound = composerState?.found === true;
+        observedText = composerFound && typeof composerState.text === "string" ? composerState.text : null;
+      }
+      const actualText = observedText ?? "<composer unavailable>";
+      const normalizedActualText = composerFound ? normalizeComposerTextForComparison(actualText) : null;
+      const firstDifferenceIndex = (() => {
+        const limit = Math.min(normalizedExpectedText.length, (normalizedActualText ?? "").length);
+        for (let index = 0; index < limit; index += 1) if (normalizedExpectedText[index] !== normalizedActualText[index]) return index;
+        return normalizedExpectedText.length === (normalizedActualText ?? "").length ? null : limit;
+      })();
+      lastDiagnostic = {
+        tabId,
+        attempt,
+        maximumAttempts: CDP_COMPOSER_PROMPT_ATTEMPTS,
+        expectedText: text,
+        composerText: actualText,
+        normalizedExpectedText,
+        normalizedComposerText: normalizedActualText,
+        expectedLength: text.length,
+        composerLength: actualText.length,
+        normalizedExpectedLength: normalizedExpectedText.length,
+        normalizedComposerLength: normalizedActualText?.length ?? null,
+        firstDifferenceIndex,
+        error: safeErrorMessage(error)
+      };
+      console.warn("[ResearchTube CDP] Composer text mismatch; retrying replacement", lastDiagnostic);
     }
   }
-  throw cdpError("ChatGPT Composer retained an older draft instead of replacing it.");
+  console.warn("[ResearchTube CDP] Composer prompt verification failed after all attempts", lastDiagnostic);
+  throw cdpError(`ChatGPT Composer could not be replaced and verified after ${CDP_COMPOSER_PROMPT_ATTEMPTS} attempts: ${safeErrorMessage(lastError)}`);
 }
+async function cdpClearComposerDraft(tabId) {
+  const selected = (await cdpEvaluate(tabId, CDP_SELECT_COMPOSER_CONTENTS_EXPRESSION))?.value;
+  if (selected !== true) throw cdpError("ChatGPT Composer draft could not be selected for clearing.");
+  await cdpCommand(tabId, "Input.dispatchKeyEvent", { type: "keyDown", key: "Backspace", code: "Backspace", windowsVirtualKeyCode: 8, nativeVirtualKeyCode: 8 });
+  await cdpCommand(tabId, "Input.dispatchKeyEvent", { type: "keyUp", key: "Backspace", code: "Backspace", windowsVirtualKeyCode: 8, nativeVirtualKeyCode: 8 });
+  if ((await cdpEvaluate(tabId, CDP_COMPOSER_EMPTY_EXPRESSION))?.value !== true) {
+    cdpLog("Backspace did not clear the Composer; trying Delete", { tabId });
+    const reselected = (await cdpEvaluate(tabId, CDP_SELECT_COMPOSER_CONTENTS_EXPRESSION))?.value;
+    if (reselected !== true) throw cdpError("ChatGPT Composer contents could not be reselected for Delete.");
+    await cdpCommand(tabId, "Input.dispatchKeyEvent", { type: "keyDown", key: "Delete", code: "Delete", windowsVirtualKeyCode: 46, nativeVirtualKeyCode: 46 });
+    await cdpCommand(tabId, "Input.dispatchKeyEvent", { type: "keyUp", key: "Delete", code: "Delete", windowsVirtualKeyCode: 46, nativeVirtualKeyCode: 46 });
+    if ((await cdpEvaluate(tabId, CDP_COMPOSER_EMPTY_EXPRESSION))?.value !== true) {
+      throw cdpError("ChatGPT Composer draft remained after Backspace and Delete.");
+    }
+  }
+  cdpLog("Composer draft cleared and verified", { tabId });
+}
+var CDP_COMPOSER_EMPTY_EXPRESSION = `(() => {
+  const composer = document.querySelector('#prompt-textarea')
+    || document.querySelector('[contenteditable="true"][role="textbox"]')
+    || document.querySelector('textarea');
+  const current = composer?.value ?? composer?.innerText ?? composer?.textContent ?? '';
+  return current.trim() === '';
+})()`;
 function canonicalYouTubeVideoUrl(value) {
   let url;
   try {
@@ -2233,18 +2298,21 @@ function cdpAbsoluteFilePath(value) {
   if (!/^(?:[A-Za-z]:[\\/]|\\\\)/.test(filePath)) throw cdpError("The image-file path must be absolute, for example C:\\Pictures\\frame.png.");
   return filePath;
 }
-var CDP_ENABLED_SEND_BUTTON_EXPRESSION = `(() => [...document.querySelectorAll('button')]
-  .some((button) => !button.disabled && button.getAttribute('aria-disabled') !== 'true' && (
-    button.dataset.testid === 'send-button'
-    || /^(send|send prompt)$/i.test(button.getAttribute('aria-label') || '')
-  )))()`;
+var CDP_ENABLED_SEND_BUTTON_EXPRESSION = `(() => {
+  const composer = document.querySelector('#prompt-textarea')
+    || document.querySelector('[contenteditable="true"][role="textbox"]')
+    || document.querySelector('textarea');
+  const form = composer?.closest('form');
+  const button = form?.querySelector('button[type="submit"]');
+  return Boolean(button && !button.disabled && button.getAttribute('aria-disabled') !== 'true');
+})()`;
 var CDP_SEND_BUTTON_CENTER_EXPRESSION = `(() => {
-  const button = [...document.querySelectorAll('button')].find((candidate) => !candidate.disabled
-    && candidate.getAttribute('aria-disabled') !== 'true' && (
-      candidate.dataset.testid === 'send-button'
-      || /^(send|send prompt)$/i.test(candidate.getAttribute('aria-label') || '')
-    ));
-  if (!button) return null;
+  const composer = document.querySelector('#prompt-textarea')
+    || document.querySelector('[contenteditable="true"][role="textbox"]')
+    || document.querySelector('textarea');
+  const form = composer?.closest('form');
+  const button = form?.querySelector('button[type="submit"]');
+  if (!button || button.disabled || button.getAttribute('aria-disabled') === 'true') return null;
   const bounds = button.getBoundingClientRect();
   if (bounds.width <= 0 || bounds.height <= 0) return null;
   return { x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2 };
@@ -2256,12 +2324,8 @@ var CDP_SUBMIT_COMPOSER_FORM_EXPRESSION = `(() => {
   if (!composer) return false;
   const form = composer.closest('form');
   if (!form) return false;
-  const submitButton = [...form.querySelectorAll('button')].find((candidate) => !candidate.disabled
-    && candidate.getAttribute('aria-disabled') !== 'true' && (
-      candidate.dataset.testid === 'send-button'
-      || /^(send|send prompt)$/i.test(candidate.getAttribute('aria-label') || '')
-    ));
-  if (!submitButton) return false;
+  const submitButton = form.querySelector('button[type="submit"]');
+  if (!submitButton || submitButton.disabled || submitButton.getAttribute('aria-disabled') === 'true') return false;
   form.requestSubmit(submitButton);
   return true;
 })()`;
@@ -2283,14 +2347,18 @@ var CDP_SELECT_COMPOSER_CONTENTS_EXPRESSION = `(() => {
     || document.querySelector('textarea');
   if (!composer) return false;
   composer.focus();
-  if (typeof composer.select === 'function') return composer.select(), document.activeElement === composer;
+  if (typeof composer.select === 'function') {
+    composer.select();
+    return document.activeElement === composer && composer.selectionStart === 0 && composer.selectionEnd === String(composer.value ?? '').length;
+  }
   const selection = window.getSelection();
   if (!selection) return false;
   const range = document.createRange();
   range.selectNodeContents(composer);
   selection.removeAllRanges();
   selection.addRange(range);
-  return document.activeElement === composer;
+  const normalize = value => String(value ?? '').normalize('NFC').replace(/\\s+/gu, ' ').trim();
+  return document.activeElement === composer && normalize(selection.toString()) === normalize(composer.innerText ?? composer.textContent ?? '');
 })()`;
 async function cdpClearSentComposerDraft(tabId, sentText) {
   for (let attempt = 0; attempt < CDP_SENT_DRAFT_CLEAR_CHECK_DELAYS_MS.length; attempt += 1) {

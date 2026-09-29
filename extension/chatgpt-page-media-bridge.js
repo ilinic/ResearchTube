@@ -11,7 +11,7 @@
   const EXTENSION_BRIDGE_METHOD = "researchtube/extension-bridge";
   const MEDIA_ATTRIBUTE = "data-researchtube-local-media";
   const SEQUENCE_ATTRIBUTE = "data-researchtube-local-media-sequence";
-  console.info(`[ResearchTube media] MAIN bridge active origin=${location.origin} top=${window === window.top}`);
+  console.info(`[ResearchTube media] MAIN bridge active origin=${location.origin}`);
 
   function isSandboxOrigin(origin) {
     try {
@@ -83,20 +83,4 @@
     frame.setAttribute(SEQUENCE_ATTRIBUTE, `${Date.now()}_${Math.random().toString(36).slice(2)}`);
     console.info(`[ResearchTube media] iframe marked kind=${media.mediaKind}`);
   }, { capture: true, passive: true });
-
-  // The MCP widget and this MAIN-world script run in the same sandbox frame.
-  // Relay its in-frame CustomEvent through shared DOM attributes so the
-  // isolated extension script can install the viewer without relying on a
-  // message reaching ChatGPT's top-level document.
-  window.addEventListener("researchtube-local-media-ready", (event) => {
-    const media = localMediaPayload(event.detail);
-    const root = document.getElementById("capture");
-    if (!media || !root) {
-      console.warn(`[ResearchTube media] widget event seen root=${Boolean(root)} payload=${Boolean(media)}`);
-      return;
-    }
-    root.setAttribute(MEDIA_ATTRIBUTE, JSON.stringify(media));
-    root.setAttribute(SEQUENCE_ATTRIBUTE, `${Date.now()}_${Math.random().toString(36).slice(2)}`);
-    console.info(`[ResearchTube media] widget DOM marker written kind=${media.mediaKind}`);
-  }, { capture: true });
 })();
