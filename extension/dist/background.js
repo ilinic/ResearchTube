@@ -236,7 +236,7 @@ var MCP_TOOL_SETTINGS = Object.freeze({
   online_share_status: { group: "online" },
   online_share_stop: { group: "online" }
 });
-var EXTENSION_VERSION = "2.2.35";
+var EXTENSION_VERSION = "2.2.36";
 var REQUIRED_AGENT_INTERFACE_VERSION = 69;
 var CAPTURE_FRAME_WIDGET_URI = "ui://researchtube/capture-frame-v49.html";
 var RESEARCHTUBE_DEMO_GUIDE_URL = "https://github.com/ilinic/ResearchTube/blob/main/docs/DEMO.md";
