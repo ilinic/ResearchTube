@@ -7,8 +7,8 @@ const timers = ['timer_start', 'timer_status', 'timer_cancel'];
 const limits = {
  mediaCaptureFrameMaxFrames:20, mediaClipMaxSegments:20,
  cameraRecordAudioMaxMinutes:10,cameraRecordVideoMaxMinutes:1,
- libraryStoreMaxFiles:5,libraryStoreMaxFileSizeMiB:100,
- mediaToChatMaxFiles:5,mediaToChatMaxFileSizeMiB:100,completedTaskHistoryLimit:2000
+ libraryStoreMaxFiles:5,libraryStoreMaxFileSizeMiB:20,
+ mediaToChatMaxFiles:5,mediaToChatMaxFileSizeMiB:20,completedTaskHistoryLimit:2000
 };
 function worker({enabledByName={},defaultEnabled=true,agentError=null}={}) {
  const storage={mcpToolPreferences:{enabledByName}};
@@ -54,9 +54,19 @@ assert.ok(filtered.result.tools.some(tool=>tool.name==='timer_status'));
 assert.ok(disabled.messages.some(message=>message.includes('disabledTimers=timer_start')));
 const developer=worker({defaultEnabled:false});
 const defaults=await developer.list();
-assert.ok(!defaults.result.tools.some(tool=>timers.includes(tool.name)));
+for(const name of timers) assert.ok(defaults.result.tools.some(tool=>tool.name===name), 'built-in timers ignore the custom-tool default');
 assert.ok(defaults.result.tools.some(tool=>tool.name==='system_agent_status'));
-// Settings can explicitly enable a timer even if developer default is false.
+// A newly discovered custom tool uses the developer default; saved choices win.
 assert.equal((await developer.context.updateMcpToolEnabled('timer_start',true)).ok,true);
 assert.ok((await developer.list()).result.tools.some(tool=>tool.name==='timer_start'));
 console.log(`shipped MCP tools/list: ${names.length} public tools; all three timers present; filters/offline discovery verified`);
+
+for (const defaultEnabled of [true,false]) {
+ const custom=worker({defaultEnabled});
+ const builtins=custom.context.publicMcpTools();
+ custom.context.publicMcpTools=()=>[...builtins,{...builtins[0],name:'custom_discovered'}];
+ assert.equal((await custom.list()).result.tools.some(tool=>tool.name==='custom_discovered'),defaultEnabled);
+ for(const name of timers) assert.ok((await custom.list()).result.tools.some(tool=>tool.name===name));
+ await custom.context.updateMcpToolEnabled('custom_discovered',!defaultEnabled);
+ assert.equal((await custom.list()).result.tools.some(tool=>tool.name==='custom_discovered'),!defaultEnabled);
+}

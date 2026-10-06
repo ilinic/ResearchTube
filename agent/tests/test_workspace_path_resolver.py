@@ -255,6 +255,23 @@ class WorkspacePathResolverTests(unittest.TestCase):
         self.assertEqual((folder / "notes.txt").read_bytes(), b"notes")
         self.assertEqual((folder / "large.zip").stat().st_size, 1024 * 1024 + 1)
 
+    def test_default_twenty_mib_boundary_for_library_and_chat(self) -> None:
+        agent.WORKSPACE_PATH.mkdir(parents=True)
+        maximum = 20 * 1024 * 1024
+        for name, size in [('at-limit.bin', maximum), ('too-large.bin', maximum + 1)]:
+            with (agent.WORKSPACE_PATH / name).open('wb') as output:
+                output.truncate(size)
+        files = [{'workspacePath': name} for name in ['at-limit.bin', 'too-large.bin']]
+        for resolve in [agent.library_store_files, agent.media_to_chat_files]:
+            result = resolve({'files': files})
+            self.assertEqual([item['workspacePath'] for item in result['files']], ['at-limit.bin'])
+            self.assertEqual(result['skippedFiles'], [{
+                'workspacePath': 'too-large.bin', 'sizeBytes': maximum + 1,
+                'maxFileSizeBytes': maximum, 'reason': 'FILE_TOO_LARGE',
+            }])
+        self.assertEqual((agent.WORKSPACE_PATH / 'at-limit.bin').stat().st_size, maximum)
+        self.assertEqual((agent.WORKSPACE_PATH / 'too-large.bin').stat().st_size, maximum + 1)
+
     def test_media_to_chat_rejects_unknown_duplicate_and_nonworkspace_files(self) -> None:
         agent.WORKSPACE_PATH.mkdir(parents=True)
         (agent.WORKSPACE_PATH / "notes.txt").write_text("notes", encoding="utf-8")

@@ -23,7 +23,7 @@ assert.match(background, /cdpOpenStableFileChooser/, "a missed chooser event mus
 assert.match(background, /CDP_FILE_CHOOSER_ATTEMPTS/, "chooser retry count must be bounded");
 assert.match(background, /result\?\.value === true/, "page-condition waits must inspect the CDP evaluation value");
 assert.match(background, /cdpWaitForAttachmentAccepted/, "attachment completion must use Composer file acceptance, not only visible preview text");
-assert.match(background, /input\.files/, "file-input selection must be accepted as browser-level attachment evidence");
+assert.match(await readFile(new URL("../chat-composer.js", import.meta.url), "utf8"), /input\.files/, "file-input selection must be accepted as browser-level attachment evidence");
 assert.match(background, /drainLibraryStoreQueue/, "Library batches must share one serialized service-tab queue");
 assert.match(background, /cdpAttachFilesNow/, "the queued public entrypoint must serialize the CDP lifecycle");
 assert.match(background, /libraryStoreMaxFiles/, "a Composer batch must use the configured file count");

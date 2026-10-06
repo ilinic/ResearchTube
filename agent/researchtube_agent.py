@@ -39,7 +39,7 @@ try:
 except ImportError:
     from task_history import TaskHistory
 
-AGENT_VERSION = "2.2.41"
+AGENT_VERSION = "2.2.50"
 INTERFACE_VERSION = 72
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
@@ -97,9 +97,9 @@ DEFAULT_TOOL_LIMITS = {
     "cameraRecordAudioMaxMinutes": 10,
     "cameraRecordVideoMaxMinutes": 1,
     "libraryStoreMaxFiles": 5,
-    "libraryStoreMaxFileSizeMiB": 100,
+    "libraryStoreMaxFileSizeMiB": 20,
     "mediaToChatMaxFiles": 5,
-    "mediaToChatMaxFileSizeMiB": 100,
+    "mediaToChatMaxFileSizeMiB": 20,
     "completedTaskHistoryLimit": 2000,
 }
 TOOL_LIMIT_CEILINGS = {

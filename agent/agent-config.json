@@ -29,16 +29,16 @@
       "comment": "Maximum Workspace files in one library_store_start batch; default 5, range 1–100."
     },
     "libraryStoreMaxFileSizeMiB": {
-      "value": 100,
-      "comment": "Maximum individual Library-upload file size in MiB (1048576 bytes). Larger files are skipped and reported; default 100, range 1–512."
+      "value": 20,
+      "comment": "Maximum individual Library-upload file size in MiB (1048576 bytes). Larger files are skipped and reported; default 20, range 1–512."
     },
     "mediaToChatMaxFiles": {
       "value": 5,
       "comment": "Maximum Workspace files in one media_to_chat batch; default 5, range 1–100. Independent of the Library limit."
     },
     "mediaToChatMaxFileSizeMiB": {
-      "value": 100,
-      "comment": "Maximum individual current-chat upload size in MiB. Larger files are skipped and reported; default 100, range 1–512."
+      "value": 20,
+      "comment": "Maximum individual current-chat upload size in MiB. Larger files are skipped and reported; default 20, range 1–512."
     },
     "completedTaskHistoryLimit": {
       "value": 2000,
@@ -47,6 +47,6 @@
   },
   "newToolsEnabledByDefault": {
     "value": true,
-    "comment": "Developer default for newly discovered tools without a saved individual preference. true enables them; false leaves them disabled. Existing per-tool choices are preserved. The Extension reads this from the Agent; if the Agent is unavailable it uses the last known value, initially true. Refresh the MCP schema after adding tools."
+    "comment": "Default activation of automatically discovered custom tools without a saved individual preference. true enables those custom tools; false leaves them disabled. Newly introduced built-in ResearchTube tools are enabled independently of this setting. Existing individual tool choices are preserved. The Extension reads this from the Agent, using its last known value (initially true) if unavailable. Refresh the MCP schema after discovering custom tools."
   }
 }

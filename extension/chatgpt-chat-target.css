@@ -1,0 +1,32 @@
+/* Chrome loads manifest CSS before constructing/displaying the page DOM.
+ * Recognize only the service iframe's existing title AND MCP sandbox URL.
+ * This is a presentation hint, never authorization or destination selection.
+ * If the host changes those attributes, the authenticated bridge still hides
+ * the exact service surface after its handshake. Keep all nodes mounted.
+ */
+iframe[title="Send workspace files to the current chat"]:is(
+  [src^="https://mcp-app-"][src*=".web-sandbox.oaiusercontent.com/"],
+  [src^="https://web-sandbox.oaiusercontent.com/"]
+),
+[data-mcp-app-frame]:has(iframe[title="Send workspace files to the current chat"]:is(
+  [src^="https://mcp-app-"][src*=".web-sandbox.oaiusercontent.com/"],
+  [src^="https://web-sandbox.oaiusercontent.com/"]
+)):not(:has(iframe:not([title="Send workspace files to the current chat"]:is(
+  [src^="https://mcp-app-"][src*=".web-sandbox.oaiusercontent.com/"],
+  [src^="https://web-sandbox.oaiusercontent.com/"]
+)))),
+[data-mcp-app-portal-target]:has(iframe[title="Send workspace files to the current chat"]:is(
+  [src^="https://mcp-app-"][src*=".web-sandbox.oaiusercontent.com/"],
+  [src^="https://web-sandbox.oaiusercontent.com/"]
+)):not(:has(iframe:not([title="Send workspace files to the current chat"]:is(
+  [src^="https://mcp-app-"][src*=".web-sandbox.oaiusercontent.com/"],
+  [src^="https://web-sandbox.oaiusercontent.com/"]
+)))) {
+  display: none !important;
+  height: 0 !important;
+  min-height: 0 !important;
+  max-height: 0 !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+}

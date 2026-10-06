@@ -1,6 +1,6 @@
 import { TIMER_TOOL_NAMES, timerDefinitions, validateTimerInput, normalizeTimerResult } from "./timers.js";
 import { pruneCompletedTasks } from "./task-history.js";
-import { inspectChatComposer, installChatComposerGuard, readChatComposerGuard, disposeChatComposerGuard } from "./chat-composer.js";
+import { resolveChatComposer, chatComposerPageExpression, inspectChatComposer, clickChatComposerAttachmentRemoval, resetChatComposerFileInputs, installChatComposerGuard, readChatComposerGuard, disposeChatComposerGuard } from "./chat-composer.js";
 import { STORYBOARD_TOOL_NAMES, storyboardDefinitions, validateStoryboardInput, normalizeStoryboardResult } from "./storyboards.js";
 const CONTROL_PLANE_BASE_URL = "https://api.openai.com";
 const EXTERNAL_URLS = Object.freeze({
@@ -54,10 +54,12 @@ const MCP_TOOL_SETTINGS = Object.freeze({
   clipboard_status: { group: "clipboard" }, clipboard_get: { group: "clipboard" }, clipboard_set: { group: "clipboard" },
   library_store_start: { group: "library" }, library_store_status: { group: "library" }, library_store_cancel: { group: "library" }, online_share_start: { group: "online" }, online_share_status: { group: "online" }, online_share_stop: { group: "online" }
 });
-const EXTENSION_VERSION = "2.2.41";
+const EXTENSION_VERSION = "2.2.50";
 const REQUIRED_AGENT_INTERFACE_VERSION = 72;
 // A UI resource URI is a cache key in MCP Apps. Increment it whenever the
 // rendered template changes so ChatGPT does not reuse a stale iframe bundle.
+const MEDIA_TO_CHAT_WIDGET_URI = "ui://researchtube/chat-target-v4.html";
+const MEDIA_TO_CHAT_BIND_TIMEOUT_MS = 30_000;
 const CAPTURE_FRAME_WIDGET_URI = "ui://researchtube/capture-frame-v49.html";
 const RESEARCHTUBE_DEMO_GUIDE_URL = "https://github.com/ilinic/ResearchTube/blob/main/docs/DEMO.md";
 const RESEARCHTUBE_SERVER_DESCRIPTION = "ResearchTube provides YouTube research, local media and image operations, workspace management, screenshots, clipboard, Library integration, real asynchronous timers, and a guided demonstration using bundled local media. Search this server when the user refers to ResearchTube, YouTube analysis, a previously created workspace file, captured frame, screenshot, crop, clipboard, or asks to continue a previous ResearchTube operation. In clients with deferred tools, ResearchTube is discoverable through functions.exec lazy MCP-tool discovery; search there before treating the capability as unavailable.";
@@ -1296,10 +1298,16 @@ function toolDefinitions() {
     {
       name: "media_to_chat",
       title: "Send workspace files to the current chat",
-      description: "Queue any selected Workspace files for attachment and sending in the active ChatGPT conversation tab. The target conversation is fixed at task creation; no new tab is opened. The tool uploads file bytes to ChatGPT using Chrome automation and presses Send without adding prompt text. Count and per-file size limits are configured by mediaToChatMaxFiles and mediaToChatMaxFileSizeMiB in agent/agent-config.json. Oversized files are listed in skippedFiles; eligible files are sent together. composerPolicy defaults to requireEmpty: refuse a Composer containing text or attachments. clear explicitly removes its text and existing attachments once, before uploading the selected files, and verifies that it is empty. After uploading starts, user edits, added or removed attachments, or a changed conversation stop the task without Send; already attached task files stay in the Composer. The task never clears again after upload begins. After receiving the task, finish this assistant response promptly: ChatGPT may keep Send unavailable while responding. Do not poll during this same assistant turn; use media_to_chat_status in a later turn, no faster than pollIntervalMs. completed confirms a Send click, not ChatGPT processing or Library storage.",
+      description: "Queue any selected Workspace files for attachment and sending in the ChatGPT conversation that invoked this tool. Its compact service widget identifies the originating Chrome tab before any Composer changes; the exact tab ID and conversation are then fixed for the entire task. Active tabs and focused windows are never used to select a destination. If the originating tab cannot be identified within 30 seconds, is duplicated in another tab, closes or changes conversation, the task fails rather than selecting another tab. The ResearchTube Extension must be able to receive the task widget handshake. No new tab is opened. The tool uploads file bytes to ChatGPT using Chrome automation and presses Send without adding prompt text. Count and per-file size limits are configured by mediaToChatMaxFiles and mediaToChatMaxFileSizeMiB in agent/agent-config.json. Oversized files are listed in skippedFiles; eligible files are sent together. composerPolicy defaults to requireEmpty: refuse a Composer containing text or attachments. clear explicitly removes its text and existing attachments once, before uploading the selected files, and verifies that it is empty. After uploading starts, user edits, added or removed attachments, or a changed conversation stop the task without Send; already attached task files stay in the Composer. The task never clears again after upload begins. After receiving the task, finish this assistant response promptly: ChatGPT may keep Send unavailable while responding. Do not poll during this same assistant turn; use media_to_chat_status in a later turn, no faster than pollIntervalMs. completed confirms a Send click, not ChatGPT processing or Library storage.",
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
       inputSchema: { type: "object", additionalProperties: false, properties: { files: { type: "array", minItems: 1, items: libraryStoreFileSchema, description: "One batch of logical Workspace paths; any file type may be selected, subject to ChatGPT upload support." }, composerPolicy: { type: "string", enum: ["requireEmpty", "clear"], default: "requireEmpty", description: "requireEmpty refuses text or attachments already in the Composer. clear explicitly discards both once before upload. New user edits after preparation always stop Send and leave uploaded files attached." } }, required: ["files"] },
-      outputSchema: mediaToChatStartSchema
+      outputSchema: mediaToChatStartSchema,
+      _meta: {
+        ui: { resourceUri: MEDIA_TO_CHAT_WIDGET_URI },
+        "openai/outputTemplate": MEDIA_TO_CHAT_WIDGET_URI,
+        "openai/toolInvocation/invoking": "Preparing files for this chat…",
+        "openai/toolInvocation/invoked": "Files-to-chat task created."
+      }
     },
     {
       name: "media_to_chat_status",
@@ -1542,7 +1550,7 @@ async function mcpToolPreferences() {
     delete preferences.enabledByName.media_image_show;
     changed = true;
   }
-  if (publicMcpTools().some((tool) => !toolSettingsMetadata(tool.name).alwaysEnabled && !Object.hasOwn(preferences.enabledByName, tool.name))) {
+  if (publicMcpTools().some((tool) => toolSettingsMetadata(tool.name).group === "custom" && !Object.hasOwn(preferences.enabledByName, tool.name))) {
     try {
       await refreshTaskHistorySettings();
     } catch (error) {
@@ -1555,7 +1563,8 @@ async function mcpToolPreferences() {
   for (const tool of publicMcpTools()) {
     const { alwaysEnabled } = toolSettingsMetadata(tool.name);
     if (!alwaysEnabled && !Object.hasOwn(preferences.enabledByName, tool.name)) {
-      preferences.enabledByName[tool.name] = preferences.newToolsEnabledByDefault;
+      preferences.enabledByName[tool.name] = toolSettingsMetadata(tool.name).group === "custom"
+        ? preferences.newToolsEnabledByDefault : true;
       changed = true;
     }
   }
@@ -1658,8 +1667,9 @@ async function cdpEvaluate(tabId, expression, { returnByValue = true } = {}) {
 }
 
 const CDP_COMPOSER_INPUT_STATE_EXPRESSION = `(() => {
-  const inputs = [...document.querySelectorAll('input[type="file"]')]
-    .filter((input) => !input.disabled);
+  const { root, form } = (${resolveChatComposer.toString()})();
+  const inputs = root ? [...document.querySelectorAll('input[type="file"]')]
+    .filter((input) => !input.disabled && (root.contains(input) || form && input.closest('form') === form || !input.closest('form'))) : [];
   const input = inputs[0] || null;
   return {
     ready: document.readyState === 'complete' && Boolean(input),
@@ -1730,10 +1740,12 @@ async function cdpOpenFileChooser(tabId, fileCount = 1) {
   // accepts DOM.setFileInputFiles only for the backendNodeId emitted by this
   // intercepted chooser event; a node obtained through DOM.querySelector is
   // not equivalent when the caller is chrome.debugger.
-  const inputs = await cdpEvaluate(tabId, `(() => [...document.querySelectorAll('input[type="file"]')].map((input, index) => ({
+  const inputs = await cdpEvaluate(tabId, `(() => {
+    const { root, form } = (${resolveChatComposer.toString()})();
+    return (root ? [...document.querySelectorAll('input[type="file"]')].filter(input => root.contains(input) || form && input.closest('form') === form || !input.closest('form')) : []).map((input, index) => ({
     index, disabled: input.disabled, accept: input.accept, multiple: input.multiple,
     hidden: input.hidden, display: getComputedStyle(input).display, visibility: getComputedStyle(input).visibility
-  })))()`);
+  })); })()`);
   const inputDetails = inputs?.value || [];
   cdpLog("Composer file-input inspection", { tabId, inputs: inputDetails });
   if (!inputDetails.some((input) => !input.disabled && (fileCount === 1 || input.multiple))) throw cdpError("The ChatGPT Composer has no file input for this batch.");
@@ -1741,7 +1753,8 @@ async function cdpOpenFileChooser(tabId, fileCount = 1) {
   cdpLog("Opening Composer file chooser", { tabId });
   await cdpCommand(tabId, "Runtime.evaluate", {
     expression: `(() => {
-      const available = [...document.querySelectorAll('input[type="file"]')].filter((item) => !item.disabled && (${fileCount} === 1 || item.multiple));
+      const { root, form } = (${resolveChatComposer.toString()})();
+      const available = root ? [...document.querySelectorAll('input[type="file"]')].filter((item) => !item.disabled && (${fileCount} === 1 || item.multiple) && (root.contains(item) || form && item.closest('form') === form || !item.closest('form'))) : [];
       const input = available.find((item) => !item.accept.trim())
         || available.find((item) => !/^image\//i.test(item.accept.trim()))
         || available[0];
@@ -1791,9 +1804,7 @@ async function cdpWaitForStableComposer(tabId, timeoutMs = 45_000) {
 }
 
 const CDP_TEXT_COMPOSER_STATE_EXPRESSION = `(() => {
-  const target = document.querySelector('#prompt-textarea')
-    || document.querySelector('[contenteditable="true"][role="textbox"]')
-    || document.querySelector('textarea');
+  const { composer: target, root: composerRoot, form: composerForm } = (${resolveChatComposer.toString()})();
   if (!target) return { ready: false, signature: null };
   const style = getComputedStyle(target);
   return {
@@ -1819,17 +1830,13 @@ function normalizeComposerTextForComparison(value) {
 async function cdpSetComposerText(tabId, text) {
   const normalizedExpectedText = normalizeComposerTextForComparison(text);
   const focusComposerExpression = `(() => {
-    const target = document.querySelector('#prompt-textarea')
-      || document.querySelector('[contenteditable="true"][role="textbox"]')
-      || document.querySelector('textarea');
+    const { composer: target, root: composerRoot, form: composerForm } = (${resolveChatComposer.toString()})();
     if (!target) return false;
     target.focus();
     return document.activeElement === target;
   })()`;
   const readComposerText = `(() => {
-    const target = document.querySelector('#prompt-textarea')
-      || document.querySelector('[contenteditable="true"][role="textbox"]')
-      || document.querySelector('textarea');
+    const { composer: target, root: composerRoot, form: composerForm } = (${resolveChatComposer.toString()})();
     return { found: Boolean(target), text: target ? (target.value ?? target.innerText ?? target.textContent ?? '') : null };
   })()`;
   let lastError = null;
@@ -1907,9 +1914,7 @@ async function cdpClearComposerDraft(tabId) {
 }
 
 const CDP_COMPOSER_EMPTY_EXPRESSION = `(() => {
-  const composer = document.querySelector('#prompt-textarea')
-    || document.querySelector('[contenteditable="true"][role="textbox"]')
-    || document.querySelector('textarea');
+  const { composer, root: composerRoot, form: composerForm } = (${resolveChatComposer.toString()})();
   const current = composer?.value ?? composer?.innerText ?? composer?.textContent ?? '';
   return Boolean(composer) && current.trim() === '';
 })()`;
@@ -1968,24 +1973,14 @@ async function describeYouTubeVideoInChatGPT(sourceTab) {
 
 function cdpAttachmentStateExpression(fileNames) {
   return `(() => {
+    const resolveChatComposer = ${resolveChatComposer.toString()};
+    const state = (${inspectChatComposer.toString()})();
     const expectedNames = ${JSON.stringify(fileNames)};
-    const inputs = [...document.querySelectorAll('input[type="file"]')];
-    const selectedNames = new Set(inputs.flatMap((input) => [...(input.files || [])].map((file) => file.name)));
-    // ChatGPT does not consistently render an attachment filename as visible
-    // text (especially for image previews).  A selected FileList is the
-    // primary, browser-level confirmation; the DOM checks are useful fallback
-    // evidence after React replaces that input with a fresh one.
-    const visibleText = document.body?.innerText || '';
-    const labeledText = [...document.querySelectorAll('[aria-label], [title], [alt]')]
-      .map((element) => [element.getAttribute('aria-label'), element.getAttribute('title'), element.getAttribute('alt')].join(' ')).join(' ');
-    const acceptedNames = expectedNames.filter((fileName) =>
-      selectedNames.has(fileName) || visibleText.includes(fileName) || labeledText.includes(fileName)
-    );
-    return {
-      accepted: acceptedNames.length === expectedNames.length,
-      acceptedNames,
-      selectedNames: [...selectedNames]
-    };
+    const selectedNames = new Set(state.selectedFiles.map(file => file.name));
+    const cardNames = state.attachments.map(card => card.name);
+    const acceptedNames = expectedNames.filter(name => selectedNames.has(name) || cardNames.includes(name));
+    return { accepted: state.found && state.attachments.length >= expectedNames.length && acceptedNames.length === expectedNames.length,
+      acceptedNames, selectedNames: [...selectedNames] };
   })()`;
 }
 
@@ -2030,19 +2025,15 @@ function cdpAbsoluteFilePath(value) {
 }
 
 const CDP_ENABLED_SEND_BUTTON_EXPRESSION = `(() => {
-  const composer = document.querySelector('#prompt-textarea')
-    || document.querySelector('[contenteditable="true"][role="textbox"]')
-    || document.querySelector('textarea');
-  const form = composer?.closest('form');
+  const { composer, root: composerRoot, form: composerForm } = (${resolveChatComposer.toString()})();
+  const form = composerRoot;
   const button = form?.querySelector('button[type="submit"]');
   return Boolean(button && !button.disabled && button.getAttribute('aria-disabled') !== 'true');
 })()`;
 
 const CDP_SEND_BUTTON_CENTER_EXPRESSION = `(() => {
-  const composer = document.querySelector('#prompt-textarea')
-    || document.querySelector('[contenteditable="true"][role="textbox"]')
-    || document.querySelector('textarea');
-  const form = composer?.closest('form');
+  const { composer, root: composerRoot, form: composerForm } = (${resolveChatComposer.toString()})();
+  const form = composerRoot;
   const button = form?.querySelector('button[type="submit"]');
   if (!button || button.disabled || button.getAttribute('aria-disabled') === 'true') return null;
   const bounds = button.getBoundingClientRect();
@@ -2051,11 +2042,9 @@ const CDP_SEND_BUTTON_CENTER_EXPRESSION = `(() => {
 })()`;
 
 const CDP_SUBMIT_COMPOSER_FORM_EXPRESSION = `(() => {
-  const composer = document.querySelector('#prompt-textarea')
-    || document.querySelector('[contenteditable="true"][role="textbox"]')
-    || document.querySelector('textarea');
+  const { composer, root: composerRoot, form: composerForm } = (${resolveChatComposer.toString()})();
   if (!composer) return false;
-  const form = composer.closest('form');
+  const form = composerForm;
   if (!form) return false;
   const submitButton = form.querySelector('button[type="submit"]');
   if (!submitButton || submitButton.disabled || submitButton.getAttribute('aria-disabled') === 'true') return false;
@@ -2065,9 +2054,7 @@ const CDP_SUBMIT_COMPOSER_FORM_EXPRESSION = `(() => {
 
 function cdpComposerTextExpression(expectedText) {
   return `(() => {
-    const composer = document.querySelector('#prompt-textarea')
-      || document.querySelector('[contenteditable="true"][role="textbox"]')
-      || document.querySelector('textarea');
+    const { composer, root: composerRoot, form: composerForm } = (${resolveChatComposer.toString()})();
     const current = composer?.value ?? composer?.innerText ?? composer?.textContent ?? '';
     return current.trim() === ${JSON.stringify(expectedText)};
   })()`;
@@ -2075,9 +2062,7 @@ function cdpComposerTextExpression(expectedText) {
 
 function cdpComposerDraftStateExpression(expectedText) {
   return `(() => {
-    const composer = document.querySelector('#prompt-textarea')
-      || document.querySelector('[contenteditable="true"][role="textbox"]')
-      || document.querySelector('textarea');
+    const { composer, root: composerRoot, form: composerForm } = (${resolveChatComposer.toString()})();
     if (!composer) return "missing";
     const current = composer.value ?? composer.innerText ?? composer.textContent ?? '';
     if (current.trim() === ${JSON.stringify(expectedText)}) return "match";
@@ -2087,9 +2072,7 @@ function cdpComposerDraftStateExpression(expectedText) {
 }
 
 const CDP_SELECT_COMPOSER_CONTENTS_EXPRESSION = `(() => {
-  const composer = document.querySelector('#prompt-textarea')
-    || document.querySelector('[contenteditable="true"][role="textbox"]')
-    || document.querySelector('textarea');
+  const { composer, root: composerRoot, form: composerForm } = (${resolveChatComposer.toString()})();
   if (!composer) return false;
   composer.focus();
   if (typeof composer.select === 'function') {
@@ -2198,7 +2181,7 @@ async function cdpAttachFilesNow(filePathValues, { onPhase = null, currentChatTa
     if (currentChatTarget) {
       await assertCurrentChatComposer(currentChatTarget);
       composerGuardToken = crypto.randomUUID();
-      const installed = (await cdpEvaluate(tab.id, `(${installChatComposerGuard.toString()})(${JSON.stringify(fileNames)}, ${JSON.stringify(composerGuardToken)})`))?.value;
+      const installed = (await cdpEvaluate(tab.id, chatComposerPageExpression(installChatComposerGuard, fileNames, composerGuardToken, inspectChatComposer)))?.value;
       if (installed !== true) throw localAgentError("MEDIA_TO_CHAT_INVALID", "The Composer could not be monitored; no files were sent.");
       await assertCurrentChatComposer(currentChatTarget);
     }
@@ -2236,21 +2219,17 @@ function chatConversationPath(value) {
   return null;
 }
 
-async function captureCurrentChatTarget() {
-  const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-  const tab = tabs[0];
-  const chatPath = chatConversationPath(tab?.url);
-  if (!Number.isInteger(tab?.id) || !chatPath) {
-    throw localAgentError("MEDIA_TO_CHAT_INVALID", "Keep the current ChatGPT conversation active when starting media_to_chat.");
-  }
-  return { tabId: tab.id, chatPath };
-}
-
 async function requireCurrentChatTarget(target) {
+  if (!Number.isInteger(target?.tabId) || !target.chatPath) {
+    throw localAgentError("MEDIA_TO_CHAT_TARGET_NOT_FOUND", "The originating ChatGPT tab could not be identified; no Composer changes were made.");
+  }
   let tab;
   try { tab = await chrome.tabs.get(target.tabId); } catch (_error) { /* closed tab */ }
-  if (!tab || chatConversationPath(tab.url) !== target.chatPath) {
-    throw localAgentError("MEDIA_TO_CHAT_INVALID", "The destination ChatGPT conversation was closed or changed; no Send click was made.");
+  if (!tab) {
+    throw localAgentError("MEDIA_TO_CHAT_TARGET_NOT_FOUND", "The originating ChatGPT tab was not found; no alternate tab will be used.");
+  }
+  if (chatConversationPath(tab.url) !== target.chatPath) {
+    throw localAgentError("MEDIA_TO_CHAT_TARGET_CHANGED", "The destination ChatGPT conversation was closed or changed; no Send click was made.");
   }
   return tab;
 }
@@ -2266,9 +2245,13 @@ function composerAttachmentCount(state) {
   return Math.max(state.attachments.length, state.selectedFiles.length, state.previewCount || 0);
 }
 
+function composerVisibleAttachmentCount(state) {
+  return Math.max(state.attachments.length, state.previewCount || 0);
+}
+
 async function currentChatComposerState(target) {
   await requireCurrentChatTarget(target);
-  const state = (await cdpEvaluate(target.tabId, `(${inspectChatComposer.toString()})()`))?.value;
+  const state = (await cdpEvaluate(target.tabId, chatComposerPageExpression(inspectChatComposer)))?.value;
   if (!state?.found || !Array.isArray(state.attachments) || !Array.isArray(state.selectedFiles) || !Array.isArray(state.removeTargets)) {
     throw localAgentError("MEDIA_TO_CHAT_INVALID", "The current ChatGPT Composer is unavailable; no Send click was made.");
   }
@@ -2292,45 +2275,102 @@ async function assertCurrentChatComposer(target, { fileNames = null, guardToken 
   }
   const selected = state.selectedFiles.map((file) => file.name).sort();
   const expected = [...fileNames].sort();
-  if (composerAttachmentCount(state) !== expected.length || (selected.length && (selected.length !== expected.length || selected.some((name, index) => name !== expected[index])))) {
+  const cards = state.attachments.map((card) => card.name).sort();
+  const namesMatch = (names) => names.length === expected.length && names.every((name, index) => name === expected[index]);
+  // File inputs are often reset by React. Count each UI card once and verify its
+  // exact filename; a matching native FileList is fallback for unnamed previews.
+  const namedCards = cards.every((name) => typeof name === "string" && name.length > 0);
+  if (composerVisibleAttachmentCount(state) !== expected.length || (namedCards ? !namesMatch(cards) : !namesMatch(selected))) {
+    cdpLog("Composer attachment verification failed", { tabId: target.tabId, expectedNames: expected, cardNames: cards, selectedNames: selected, previewCount: state.previewCount });
     throw localAgentError("MEDIA_TO_CHAT_INVALID", "The Composer attachments changed or could not be verified. No Send click was made; remaining files stay attached.");
   }
 }
 
 async function prepareCurrentChatComposer(target, policy) {
   normalizeComposerPolicy(policy);
-  if (policy === "requireEmpty") return assertCurrentChatComposer(target);
   const initial = await currentChatComposerState(target);
+  cdpLog("Initial current-chat Composer state", { tabId: target.tabId, composerPolicy: policy, editor: initial.editor, scope: initial.scope,
+    textLength: initial.textLength, attachmentNames: initial.attachments.map(card => card.name), selectedFileCount: initial.selectedFiles.length });
+  if (policy === "requireEmpty") return assertCurrentChatComposer(target);
   if (!initial.textEmpty) await cdpClearComposerDraft(target.tabId);
   // Bounded to the initial batch. A new draft is never cleared on a later retry.
   const maximumRemovals = composerAttachmentCount(initial);
+  const initialVisibleCount = composerVisibleAttachmentCount(initial);
+  let removedCount = 0;
+  cdpLog("Clearing initial Composer attachments", { tabId: target.tabId, count: maximumRemovals, removalControls: initial.removeTargets.length });
   for (let index = 0; index < maximumRemovals; index += 1) {
-    const state = await currentChatComposerState(target);
+    let state = await currentChatComposerState(target);
     if (!state.textEmpty) throw localAgentError("MEDIA_TO_CHAT_INVALID", "A new text draft appeared during preparation. No files were uploaded or sent.");
-    const count = composerAttachmentCount(state);
+    const count = composerVisibleAttachmentCount(state);
     if (!count) break;
-    const button = state.removeTargets.find((item) => item.enabled);
-    if (!button || !Number.isFinite(button.x) || !Number.isFinite(button.y)) {
-      throw localAgentError("MEDIA_TO_CHAT_INVALID", "ChatGPT did not expose an enabled attachment removal control; the Composer could not be cleared.");
-    }
+    // Use only filenames captured before explicit clear began. This calls the
+    // actual React removal button, without relying on hover in a background tab.
     await requireCurrentChatTarget(target);
-    for (const [type, buttons] of [["mouseMoved", 0], ["mousePressed", 1], ["mouseReleased", 0]]) {
-      await cdpCommand(target.tabId, "Input.dispatchMouseEvent", { type, x: button.x, y: button.y, button: type === "mouseMoved" ? "none" : "left", buttons, ...(buttons || type === "mouseReleased" ? { clickCount: 1 } : {}) });
+    const removal = (await cdpEvaluate(target.tabId, chatComposerPageExpression(clickChatComposerAttachmentRemoval,
+      initial.attachments.map((card) => card.name))))?.value;
+    if (removal?.reason === "draftNotEmpty") throw localAgentError("MEDIA_TO_CHAT_INVALID", "A new text draft appeared during preparation. No files were uploaded or sent.");
+    if (removal?.clicked) {
+      cdpLog("Composer attachment removal invoked", { tabId: target.tabId, name: removal.name, method: "labelled-control" });
+    } else {
+      let button = state.removeTargets.find((item) => item.enabled);
+      if (!button) {
+        // Some preview cards reveal their close button only on pointer hover.
+        for (const hover of (state.hoverTargets || []).slice(0, maximumRemovals)) {
+          if (!Number.isFinite(hover.x) || !Number.isFinite(hover.y)) continue;
+          await cdpCommand(target.tabId, "Input.dispatchMouseEvent", { type: "mouseMoved", x: hover.x, y: hover.y, button: "none", buttons: 0 });
+          await sleep(150);
+          state = await currentChatComposerState(target);
+          if (!state.textEmpty) throw localAgentError("MEDIA_TO_CHAT_INVALID", "A new text draft appeared during preparation. No files were uploaded or sent.");
+          button = state.removeTargets.find((item) => item.enabled);
+          if (button) break;
+        }
+      }
+      if (!button || !Number.isFinite(button.x) || !Number.isFinite(button.y)) {
+        throw localAgentError("MEDIA_TO_CHAT_INVALID", "ChatGPT did not expose an enabled attachment removal control; the Composer could not be cleared.");
+      }
+      await requireCurrentChatTarget(target);
+      for (const [type, buttons] of [["mouseMoved", 0], ["mousePressed", 1], ["mouseReleased", 0]]) {
+        await cdpCommand(target.tabId, "Input.dispatchMouseEvent", { type, x: button.x, y: button.y, button: type === "mouseMoved" ? "none" : "left", buttons, ...(buttons || type === "mouseReleased" ? { clickCount: 1 } : {}) });
+      }
     }
     const deadline = Date.now() + 5_000;
     let removed = false;
     while (Date.now() < deadline) {
       const next = await currentChatComposerState(target);
       if (!next.textEmpty) throw localAgentError("MEDIA_TO_CHAT_INVALID", "A new text draft appeared during preparation. No files were uploaded or sent.");
-      if (composerAttachmentCount(next) < count) { removed = true; break; }
+      if (composerVisibleAttachmentCount(next) < count) { removed = true; removedCount++; break; }
       await sleep(150);
     }
     if (!removed) throw localAgentError("MEDIA_TO_CHAT_INVALID", "ChatGPT did not confirm attachment removal; no files were uploaded or sent.");
+  }
+  const remaining = await currentChatComposerState(target);
+  if (!remaining.textEmpty) throw localAgentError("MEDIA_TO_CHAT_INVALID", "A new text draft appeared during preparation. No files were uploaded or sent.");
+  const selectionFingerprint = (files) => JSON.stringify(files.map(({ name, size, lastModified }) => [name, size, lastModified]).sort());
+  if (!composerVisibleAttachmentCount(remaining) && remaining.selectedFiles.length
+      && removedCount >= initialVisibleCount && initialVisibleCount >= initial.selectedFiles.length && removedCount > 0
+      && selectionFingerprint(remaining.selectedFiles) === selectionFingerprint(initial.selectedFiles)) {
+    // FileList can outlive React's removed preview. Reset only after all initial UI cards disappeared.
+    await cdpEvaluate(target.tabId, chatComposerPageExpression(resetChatComposerFileInputs));
   }
   await assertCurrentChatComposer(target);
 }
 
 function libraryStoreNow() { return new Date().toISOString(); }
+
+function createAsyncTaskId() {
+  // Same seven random bytes / ten URL-safe characters as token_urlsafe(7) in the Agent.
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+  const bytes = crypto.getRandomValues(new Uint8Array(7));
+  let encoded = "", buffer = 0, bits = 0;
+  for (const byte of bytes) {
+    buffer = (buffer << 8) | byte;
+    bits += 8;
+    while (bits >= 6) { bits -= 6; encoded += alphabet[(buffer >>> bits) & 63]; }
+    buffer &= (1 << bits) - 1;
+  }
+  if (bits) encoded += alphabet[(buffer << (6 - bits)) & 63];
+  return `tsk_${encoded}`;
+}
 
 function libraryStoreQueuePosition(taskId) {
   const index = libraryStoreQueue.indexOf(taskId);
@@ -2546,12 +2586,14 @@ async function ensureMediaToChatLoaded() {
     mediaToChatQueue = Array.isArray(stored[MEDIA_TO_CHAT_QUEUE_STORAGE_KEY])
       ? stored[MEDIA_TO_CHAT_QUEUE_STORAGE_KEY].filter((taskId) => typeof taskId === "string" && mediaToChatTasks.get(taskId)?.status === "queued") : [];
     for (const task of mediaToChatTasks.values()) {
-      if (task.status === "working") {
+      if (task.status === "working" || task.status === "queued") {
         task.status = "failed"; task.phase = "failed"; task.updatedAt = libraryStoreNow();
+        task.bindingToken = null;
         task.error = "The Extension restarted during submission. Check the conversation before retrying to avoid sending files twice.";
         task.message = task.error;
       }
     }
+    mediaToChatQueue = [];
     mediaToChatLoaded = true;
     await persistMediaToChatTasks();
   })().finally(() => { mediaToChatLoading = null; });
@@ -2562,6 +2604,7 @@ async function updateMediaToChatTask(task, phase, message, { status = "working",
   const milestones = { queued: 0, resolvingFiles: 10, attaching: 25, composerAccepted: 65, submitting: 80, submitted: 100 };
   task.progressPercent = Math.max(task.progressPercent, milestones[phase] ?? task.progressPercent);
   task.status = status; task.phase = phase; task.message = message; task.error = error; task.updatedAt = libraryStoreNow();
+  if (["completed", "failed", "cancelled"].includes(status)) task.bindingToken = null;
   await persistMediaToChatTasks();
   void reportMcpToolToAgent("media_to_chat", mediaToChatTaskDocument(task));
 }
@@ -2571,11 +2614,14 @@ async function drainMediaToChatQueue() {
   mediaToChatDraining = true;
   try {
     while (mediaToChatQueue.length) {
-      const taskId = mediaToChatQueue.shift();
+      mediaToChatQueue = mediaToChatQueue.filter((id) => mediaToChatTasks.get(id)?.status === "queued");
+      const index = mediaToChatQueue.findIndex((id) => mediaToChatTasks.get(id)?.target);
+      if (index < 0) break;
+      const [taskId] = mediaToChatQueue.splice(index, 1);
       const task = mediaToChatTasks.get(taskId);
-      if (!task || task.status !== "queued") continue;
       await updateMediaToChatTask(task, "resolvingFiles", "Resolving the selected Workspace files.");
       try {
+        await requireCurrentChatTarget(task.target);
         const { localPaths, submittedFiles, skippedFiles } = await resolveLibraryStoreFiles(task.files, "/internal/media-to-chat-files");
         task.skippedFiles = skippedFiles;
         if (!localPaths.length) {
@@ -2601,7 +2647,7 @@ async function drainMediaToChatQueue() {
         const message = error?.code && isExpectedToolError(error.code)
           ? safeErrorMessage(error)
           : "Chrome could not attach or send this file batch. Check the conversation and Extension console before retrying.";
-        await updateMediaToChatTask(task, "failed", message, { status: "failed", error: message });
+        await updateMediaToChatTask(task, "failed", message, { status: "failed", error: `${error?.code || "MEDIA_TO_CHAT_FAILED"}: ${message}` });
       }
     }
   } finally {
@@ -2614,26 +2660,105 @@ async function mediaToChatStart(argumentsValue = {}) {
     throw localAgentError("MEDIA_TO_CHAT_INVALID", "media_to_chat accepts only files and composerPolicy.");
   }
   const composerPolicy = normalizeComposerPolicy(argumentsValue.composerPolicy);
-  const target = await captureCurrentChatTarget();
   await ensureMediaToChatLoaded();
   const limits = await configuredToolLimits();
   const files = normalizeLibraryStoreFiles(argumentsValue.files, limits.mediaToChatMaxFiles, "MEDIA_TO_CHAT_INVALID");
   const createdAt = libraryStoreNow();
+  let taskId;
+  do { taskId = createAsyncTaskId(); } while (mediaToChatTasks.has(taskId));
   const task = {
-    taskId: `chat_${crypto.randomUUID()}`, target, composerPolicy,
+    taskId, target: null, bindingToken: crypto.randomUUID(), bindingDeadline: Date.now() + MEDIA_TO_CHAT_BIND_TIMEOUT_MS, composerPolicy,
     status: "queued", phase: "queued", progressPercent: 0,
     files, submittedFiles: [], skippedFiles: [], createdAt, updatedAt: createdAt, submittedAt: null,
-    message: "Queued for the current ChatGPT conversation. Finish the current assistant response so Send can become available.", error: null
+    message: "Waiting for the originating chat widget to identify its exact Chrome tab. Finish the current assistant response so Send can become available.", error: null
   };
   mediaToChatTasks.set(task.taskId, task); mediaToChatQueue.push(task.taskId);
   await persistMediaToChatTasks();
-  const result = { task: mediaToChatTaskDocument(task) };
-  void drainMediaToChatQueue();
-  return result;
+  await chrome.alarms.create(`media-chat-bind:${task.taskId}`, { when: task.bindingDeadline });
+  return { task: mediaToChatTaskDocument(task) };
+}
+
+// The MCP tunnel does not carry a Chrome tab ID. Only the result widget in
+// the invoking conversation can bind this task through a Chrome-authenticated
+// content-script sender. Never derive a destination from focus or activation.
+function mediaToChatWidgetMetadata(taskId) {
+  const task = mediaToChatTasks.get(taskId);
+  return task?.status === "queued" && task.bindingToken
+    ? { taskId, bindingToken: task.bindingToken } : null;
+}
+
+async function failMediaToChatTarget(task, code, message) {
+  mediaToChatQueue = mediaToChatQueue.filter((id) => id !== task.taskId);
+  task.bindingToken = null;
+  await updateMediaToChatTask(task, "failed", message, { status: "failed", error: `${code}: ${message}` });
+  await chrome.alarms.clear(`media-chat-bind:${task.taskId}`);
+}
+
+async function expireMediaToChatBinding(taskId) {
+  await ensureMediaToChatLoaded();
+  const task = mediaToChatTasks.get(taskId);
+  if (task?.status === "queued" && !task.target && Date.now() >= task.bindingDeadline) {
+    await failMediaToChatTarget(task, "MEDIA_TO_CHAT_TARGET_NOT_FOUND", "The originating ChatGPT tab could not be identified. No Composer changes were made and no alternate tab was selected.");
+  }
+}
+
+async function bindMediaToChatTarget(message, sender) {
+  await ensureMediaToChatLoaded();
+  const task = mediaToChatTasks.get(message?.taskId);
+  if (!task || !task.bindingToken || message.bindingToken !== task.bindingToken) {
+    throw localAgentError("MEDIA_TO_CHAT_TARGET_NOT_FOUND", "This files-to-chat binding is missing, expired or invalid.");
+  }
+  if (sender?.id !== chrome.runtime.id || !Number.isInteger(sender.tab?.id)) {
+    throw localAgentError("MEDIA_TO_CHAT_TARGET_NOT_FOUND", "A Chrome-authenticated originating tab is required.");
+  }
+  const chatPath = chatConversationPath(sender.tab.url);
+  if (!chatPath) {
+    const message = "The originating tab is not an existing ChatGPT conversation; no Composer changes were made.";
+    if (task.status === "queued" && !task.target) await failMediaToChatTarget(task, "MEDIA_TO_CHAT_TARGET_NOT_FOUND", message);
+    throw localAgentError("MEDIA_TO_CHAT_TARGET_NOT_FOUND", message);
+  }
+  const target = { tabId: sender.tab.id, chatPath };
+  if (task.target) {
+    if (task.target.tabId !== target.tabId || task.target.chatPath !== target.chatPath) {
+      throw localAgentError("MEDIA_TO_CHAT_TARGET_CHANGED", "The task is already bound to another tab and cannot be retargeted.");
+    }
+    await requireCurrentChatTarget(task.target);
+    return { ok: true };
+  }
+  if (task.status !== "queued") throw localAgentError("MEDIA_TO_CHAT_TARGET_NOT_FOUND", "The task no longer accepts a tab binding.");
+  await expireMediaToChatBinding(task.taskId);
+  if (task.status !== "queued") throw localAgentError("MEDIA_TO_CHAT_TARGET_NOT_FOUND", task.error);
+  try {
+    await requireCurrentChatTarget(target);
+    const tabs = await chrome.tabs.query({});
+    // Multiple views of the same conversation can all mount this widget. There
+    // is no trustworthy way to choose between them, so refuse before mutation.
+    const matches = tabs.filter((tab) => chatConversationPath(tab.url)?.split("/c/").pop() === chatPath.split("/c/").pop());
+    if (matches.length !== 1 || matches[0].id !== target.tabId) {
+      throw localAgentError("MEDIA_TO_CHAT_TARGET_AMBIGUOUS", "The originating conversation is open in multiple tabs or could not be uniquely located. No Composer changes were made.");
+    }
+    await expireMediaToChatBinding(task.taskId);
+    // Cancellation or a concurrent binding may have happened during Chrome I/O.
+    if (task.status !== "queued" || task.target) {
+      if (task.target?.tabId === target.tabId && task.target.chatPath === chatPath) return { ok: true };
+      throw localAgentError("MEDIA_TO_CHAT_TARGET_CHANGED", "The task no longer accepts this tab binding.");
+    }
+    task.target = target;
+    task.message = "Queued for the originating ChatGPT tab. Finish the current assistant response so Send can become available.";
+    await persistMediaToChatTasks();
+    await chrome.alarms.clear(`media-chat-bind:${task.taskId}`);
+    console.info(`[ResearchTube CDP] media_to_chat ${task.taskId} bound tabId=${target.tabId}`);
+    void drainMediaToChatQueue();
+    return { ok: true };
+  } catch (error) {
+    if (task.status === "queued" && !task.target) await failMediaToChatTarget(task, error.code || "MEDIA_TO_CHAT_TARGET_NOT_FOUND", safeErrorMessage(error));
+    throw error;
+  }
 }
 
 async function mediaToChatStatus(taskId) {
   await ensureMediaToChatLoaded();
+  await expireMediaToChatBinding(taskId);
   await refreshTaskHistorySettings();
   await persistMediaToChatTasks();
   const task = mediaToChatTasks.get(taskId);
@@ -2649,6 +2774,8 @@ async function mediaToChatCancel(taskId) {
   if (!task) throw localAgentError("MEDIA_TO_CHAT_TASK_NOT_FOUND", "The files-to-chat task was not found.");
   if (task.status !== "queued") return { task: mediaToChatTaskDocument(task), cancelled: false };
   mediaToChatQueue = mediaToChatQueue.filter((queuedTaskId) => queuedTaskId !== taskId);
+  task.bindingToken = null;
+  await chrome.alarms.clear(`media-chat-bind:${task.taskId}`);
   await updateMediaToChatTask(task, "cancelled", "Cancelled before attachment began.", { status: "cancelled" });
   return { task: mediaToChatTaskDocument(task), cancelled: true };
 }
@@ -2673,6 +2800,7 @@ chrome.runtime.onStartup.addListener(() => {
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === "tunnel-poll") void startPolling();
+  if (alarm.name.startsWith("media-chat-bind:")) void expireMediaToChatBinding(alarm.name.slice("media-chat-bind:".length));
 });
 
 async function bootstrapTunnel() {
@@ -2693,7 +2821,14 @@ async function bootstrapTunnel() {
   return startPolling();
 }
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === "researchtube_chat_target_bind") {
+    bindMediaToChatTarget(message, sender).then(sendResponse).catch((error) => {
+      console.info(`[ResearchTube CDP] Chat target binding refused: ${error.code || "MEDIA_TO_CHAT_TARGET_NOT_FOUND"} ${safeErrorMessage(error)}`);
+      sendResponse({ ok: false, errorCode: error.code || "MEDIA_TO_CHAT_TARGET_NOT_FOUND", error: safeErrorMessage(error) });
+    });
+    return true;
+  }
   if (message?.type === "poll-now") {
     startPolling();
     pollOnce().then((result) => sendResponse(result));
@@ -4966,20 +5101,31 @@ function captureFrameWidgetResource() {
   };
 }
 
+function mediaToChatWidgetResource() {
+  return { uri: MEDIA_TO_CHAT_WIDGET_URI, name: "ResearchTube current-chat task", description: "Binds a file-submission task to the Chrome tab that invoked it.", mimeType: "text/html;profile=mcp-app" };
+}
+
 async function readMcpResource(id, uri) {
-  if (uri !== CAPTURE_FRAME_WIDGET_URI) {
+  if (uri !== CAPTURE_FRAME_WIDGET_URI && uri !== MEDIA_TO_CHAT_WIDGET_URI) {
     return { jsonrpc: "2.0", id, error: { code: -32602, message: "Unknown MCP resource URI" } };
   }
   try {
-    const text = await readCaptureFrameWidgetHtml();
+    const chatTargetWidget = uri === MEDIA_TO_CHAT_WIDGET_URI;
+    let text;
+    if (chatTargetWidget) {
+      const response = await fetch(chrome.runtime.getURL("ui/chat-target-v1.html"));
+      if (!response.ok) throw new Error("The bundled chat-target widget could not be read.");
+      text = await response.text();
+    } else text = await readCaptureFrameWidgetHtml();
     return {
       jsonrpc: "2.0", id,
       result: {
         contents: [{
-          ...captureFrameWidgetResource(), text,
+          ...(chatTargetWidget ? mediaToChatWidgetResource() : captureFrameWidgetResource()), text,
           _meta: {
-            ui: { prefersBorder: true },
-            "openai/widgetDescription": "Anchors a requested Workspace media file in ChatGPT so the installed ResearchTube Extension can render it locally."
+            ui: { prefersBorder: !chatTargetWidget },
+            ...(chatTargetWidget ? { "openai/widgetPrefersBorder": false, "openai/ui": { availableDisplayModes: ["inline"] } } : {}),
+            "openai/widgetDescription": chatTargetWidget ? "Compact service widget showing ResearchTube · Adding files to chat… and identifying the originating tab. No media is displayed; media_to_chat_status reports the actual task outcome." : "Anchors a requested Workspace media file in ChatGPT so the installed ResearchTube Extension can render it locally."
           }
         }]
       }
@@ -5010,7 +5156,7 @@ async function handleMcpRequest(request) {
     return { jsonrpc: "2.0", id: request.id, result: { tools } };
   }
   if (request?.method === "resources/list") {
-    return { jsonrpc: "2.0", id: request.id, result: { resources: [captureFrameWidgetResource()] } };
+    return { jsonrpc: "2.0", id: request.id, result: { resources: [captureFrameWidgetResource(), mediaToChatWidgetResource()] } };
   }
   if (request?.method === "resources/read") {
     return readMcpResource(request.id, request.params?.uri);
@@ -5212,7 +5358,10 @@ async function handleMcpRequest(request) {
   }
   if (request?.method === "tools/call" && request.params?.name === "media_to_chat") {
     const args = request.params.arguments ?? {};
-    return executeToolCall(request.id, "media_to_chat", args, () => mediaToChatStart(args));
+    const response = await executeToolCall(request.id, "media_to_chat", args, () => mediaToChatStart(args));
+    const metadata = mediaToChatWidgetMetadata(response.result?.structuredContent?.task?.taskId);
+    if (metadata) response.result._meta = { "researchtube/chatTarget": metadata };
+    return response;
   }
   if (request?.method === "tools/call" && request.params?.name === "media_to_chat_status") {
     const taskId = request.params.arguments?.taskId;
@@ -5465,7 +5614,7 @@ function toolError(id, error) {
 
 function isExpectedToolError(code) {
   if (typeof code !== "string") return false;
-  if (new Set(["INVALID_ARGUMENT", "INVALID_REQUEST", "INVALID_VIDEO_ID", "NOT_FOUND", "TOOL_DISABLED", "CLIPBOARD_CHANGED", "CLIPBOARD_EMPTY", "CLIPBOARD_TOO_LARGE", "DESTINATION_EXISTS", "DIRECTORY_NOT_EMPTY", "FORMAT_NOT_AVAILABLE", "CAPTURE_VIDEO_FORMAT_NOT_AVAILABLE", "REQUEST_TOO_LARGE", "WORKSPACE_PATH_OUTSIDE_SANDBOX", "PUBLIC_SHARE_NOT_ACTIVE"]).has(code)) return true;
+  if (new Set(["MEDIA_TO_CHAT_TARGET_CHANGED", "MEDIA_TO_CHAT_TARGET_AMBIGUOUS", "INVALID_ARGUMENT", "INVALID_REQUEST", "INVALID_VIDEO_ID", "NOT_FOUND", "TOOL_DISABLED", "CLIPBOARD_CHANGED", "CLIPBOARD_EMPTY", "CLIPBOARD_TOO_LARGE", "DESTINATION_EXISTS", "DIRECTORY_NOT_EMPTY", "FORMAT_NOT_AVAILABLE", "CAPTURE_VIDEO_FORMAT_NOT_AVAILABLE", "REQUEST_TOO_LARGE", "WORKSPACE_PATH_OUTSIDE_SANDBOX", "PUBLIC_SHARE_NOT_ACTIVE"]).has(code)) return true;
   return code.endsWith("_INVALID") || code.endsWith("_NOT_FOUND") || code.endsWith("_DESTINATION_EXISTS");
 }
 

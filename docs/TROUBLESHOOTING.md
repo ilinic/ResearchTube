@@ -157,7 +157,8 @@ Do not close the Translate tab as a standard troubleshooting step; reuse is inte
 
 ## Files sent to the current chat
 
-- Invoke `media_to_chat` with the intended ChatGPT conversation active in the last focused Chrome window. It requires an existing conversation URL and creates no new tab.
+- `media_to_chat` identifies the originating tab through its compact service widget, independent of the active tab/window. It requires an existing conversation URL and creates no new tab. `MEDIA_TO_CHAT_TARGET_NOT_FOUND` means the tab closed or the widget handshake did not arrive within 30 seconds; no alternate tab is used. Check that the current ResearchTube Extension is installed and its content script can run in ChatGPT widget frames. The widget should show “ResearchTube · Adding files to chat…” in one compact row. It reports a 32px height through the documented sizing APIs, but ChatGPT controls the final container size. Binding success alone does not mean the files were sent; use `media_to_chat_status`. ResearchTube no longer injects hiding CSS or changes host container styles. After upgrading from a version with hiding CSS, reload the Extension and then the ChatGPT tab to remove styles already injected into the old document. Refresh MCP tools/resources if an older widget template still appears.
+- `MEDIA_TO_CHAT_TARGET_AMBIGUOUS` means that the same conversation is open in multiple tabs. Keep one tab for that conversation before retrying; different conversations may remain open in any windows.
 - The default `composerPolicy: "requireEmpty"` refuses both text and existing attachments. Choose `"clear"` explicitly to discard them once before uploading; a failed or unavailable removal control stops preparation.
 - New text or user attachment changes after preparation stop Send under either policy. Uploaded files remain attached; inspect the Composer before retrying. Editing and then deleting text also stops the task.
 - Finish the assistant response after starting the task. `submitting` may wait for Send while ChatGPT is responding; request status in a later turn.
@@ -165,6 +166,12 @@ Do not close the Translate tab as a standard troubleshooting step; reuse is inte
 - A count-limit rejection names the configured maximum. Check `mediaToChatMaxFiles` in `agent/agent-config.json`; Library uses a separate setting.
 - `skippedFiles` reports oversized files and the applicable size threshold. If every file is skipped, no chooser opens. Check `mediaToChatMaxFileSizeMiB` and ChatGPT's own upload restrictions.
 - A completed task confirms the Send click. For failures or an Extension restart, inspect the chat before retrying to avoid duplicate uploads; do not delete Workspace source files.
+
+## Current-chat task fails at attachment verification (80%)
+
+Inspect the Composer before retrying; remaining uploads and user text are preserved. The browser console reports the initial Composer scope/editor, text length and card filenames, then expected versus found filenames on a verification failure. Hidden legacy textareas must not be selected; a wrapper and its preview must count as one file. Native file inputs can be reset after upload, so ResearchTube verifies the visible cards instead of requiring their FileList to survive. A filename or count mismatch still stops Send.
+
+If `requireEmpty` adds a file over an existing draft, or `clear` adds files without removing the initial draft, collect these ResearchTube-prefixed console lines and the Extension version. Both policies must complete preparation and verify the live Composer before supplying files to the chooser.
 
 ## What to collect for a bug report
 
@@ -189,12 +196,22 @@ Timers are only in Agent memory. Restarting the Agent/computer loses their recor
 
 For an internet-clock failure, check the Agent machine's HTTPS access to `timeapi.io`; use `clockSource: system` explicitly if external synchronization is unnecessary. Confirmed system suspend fails the timer. `EXECUTION_GAP_DETECTED` alone does not establish that the computer slept. A completed timer does not initiate a new assistant response; continue polling within the initiating turn.
 
-The new-tool default is a developer parameter in `agent-config.json`, `newToolsEnabledByDefault`. It is no longer a Settings checkbox. Saved individual tool choices remain unchanged; new tools use this default when first registered. Config explanations live in each setting's `comment`; edit its adjacent `value`. `limits` remains a group containing these setting objects. The shipped config replaces the older flat format.
+The new-tool default is a developer parameter in `agent-config.json`, `newToolsEnabledByDefault`. It is no longer a Settings checkbox. Saved individual tool choices remain unchanged; automatically discovered custom tools use this default when first registered. New built-in tools default to enabled independently of this setting. Config explanations live in each setting's `comment`; edit its adjacent `value`. `limits` remains a group containing these setting objects. The shipped config replaces the older flat format.
 
 ## Timer tools missing from the MCP catalogue
 
-The public tool names are `timer_start`, `timer_status`, and `timer_cancel`. Check their individual switches in Extension Settings, in the Timers group. A developer default of false can leave newly registered tools disabled; later changing the default does not overwrite saved individual choices.
+The public tool names are `timer_start`, `timer_status`, and `timer_cancel`. Check their individual switches in Extension Settings, in the Timers group. Saved individual tool choices remain authoritative. The developer default applies only to automatically discovered custom tools; newly introduced built-in timers default to enabled. A timer disabled individually remains disabled until its switch is changed.
 
 When the client refreshes the MCP schema, the Extension console prints `[ResearchTube MCP] tools/list` with its serving release version, public tool count, enabled timer names and disabled timer names. If this line reports the three timer names, the serving Extension included them in its actual MCP response; verify that ChatGPT refreshed the intended ResearchTube connection. If the release is unexpected, check which Extension directory is loaded. Updating only the Agent does not change the MCP catalogue, because the Extension serves it.
 
-Schema discovery remains available when the Agent or its developer configuration cannot be read. The cached new-tool default (initially true) is used and the console reports the configuration issue. Actual Agent-backed operations still validate health, compatibility and configuration.
+Schema discovery remains available when the Agent or its developer configuration cannot be read. The cached custom-tool default (initially true) is used and the console reports the configuration issue. Actual Agent-backed operations still validate health, compatibility and configuration.
+
+## Text clears but Composer attachments remain
+
+Use `composerPolicy: clear` only when explicitly discarding the initial draft and attached files. Current ChatGPT preview controls use `aria-label="Remove <filename>"`; image and document controls may have `pointer-events: none` and zero opacity until the attachment card is hovered. ResearchTube invokes labelled removal controls through JavaScript, with a CDP hover/click path for unlabelled controls, then verifies the disappearance of each card. Opening the thumbnail or clicking the filename is not removal.
+
+If removal cannot be confirmed, the task fails before new files are uploaded or Send is pressed. Inspect the Extension console for the removal-control diagnostic. No later cleanup clears text or attachments added during upload. A stale native file-input selection is reset only after removal of all initial UI cards has been confirmed.
+
+### Composer image remains after explicit clear
+
+If `media_to_chat` with `composerPolicy: "clear"` clears text but leaves an image, inspect task status and the Extension console. Labelled `Remove <filename>` buttons are invoked within the live Composer even while opacity/pointer CSS hides them. ResearchTube confirms that the attachment count decreased before uploading; disabled buttons, unknown removal markup, or an unconfirmed removal stop the task before new files or Send. The current-chat service widget declares only `inline` through resource metadata; refresh MCP resources if ChatGPT still offers fullscreen/PiP for an older template.

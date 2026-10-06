@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
-  "name": "ResearchTube — YouTube Research for ChatGPT",
-  "version": "2.2.41",
+  "name": "ResearchTube \u2014 YouTube Research for ChatGPT",
+  "version": "2.2.50",
   "description": "Public YouTube research tools for ChatGPT through a local MCP connection.",
   "icons": {
     "16": "icons/researchtube-16.png",
@@ -9,8 +9,23 @@
     "48": "icons/researchtube-48.png",
     "128": "icons/researchtube-128.png"
   },
-  "permissions": ["storage", "alarms", "tabs", "scripting", "offscreen", "clipboardWrite", "debugger"],
-  "host_permissions": ["https://api.openai.com/*", "https://www.youtube.com/*", "https://translate.google.com/*", "https://chatgpt.com/*", "https://web-sandbox.oaiusercontent.com/*", "http://127.0.0.1/*"],
+  "permissions": [
+    "storage",
+    "alarms",
+    "tabs",
+    "scripting",
+    "offscreen",
+    "clipboardWrite",
+    "debugger"
+  ],
+  "host_permissions": [
+    "https://api.openai.com/*",
+    "https://www.youtube.com/*",
+    "https://translate.google.com/*",
+    "https://chatgpt.com/*",
+    "https://web-sandbox.oaiusercontent.com/*",
+    "http://127.0.0.1/*"
+  ],
   "background": {
     "service_worker": "dist/background.js",
     "type": "module"
@@ -27,25 +42,59 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://www.youtube.com/*"],
-      "js": ["youtube-page-bridge.js"],
+      "matches": [
+        "https://www.youtube.com/*"
+      ],
+      "js": [
+        "youtube-page-bridge.js"
+      ],
       "world": "MAIN",
       "run_at": "document_start"
     },
     {
-      "matches": ["https://www.youtube.com/*"],
-      "js": ["youtube-content.js"],
+      "matches": [
+        "https://www.youtube.com/*"
+      ],
+      "js": [
+        "youtube-content.js"
+      ],
       "run_at": "document_start"
     },
     {
-      "matches": ["https://chatgpt.com/*", "https://web-sandbox.oaiusercontent.com/*"],
-      "js": ["chatgpt-capture-frame-bridge.js"],
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://web-sandbox.oaiusercontent.com/*"
+      ],
+      "js": [
+        "chatgpt-capture-frame-bridge.js"
+      ],
       "run_at": "document_start",
       "all_frames": true
+    },
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://web-sandbox.oaiusercontent.com/*",
+        "https://*.web-sandbox.oaiusercontent.com/*"
+      ],
+      "js": [
+        "chatgpt-chat-target-bridge.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": true,
+      "match_about_blank": true,
+      "match_origin_as_fallback": true
     }
   ],
-  "web_accessible_resources": [{
-    "resources": ["media-viewer.html"],
-    "matches": ["https://chatgpt.com/*", "https://web-sandbox.oaiusercontent.com/*"]
-  }]
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "media-viewer.html"
+      ],
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://web-sandbox.oaiusercontent.com/*"
+      ]
+    }
+  ]
 }

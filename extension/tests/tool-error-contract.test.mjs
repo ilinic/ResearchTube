@@ -17,7 +17,7 @@ assert.deepEqual(expected.result.structuredContent, {
 const state = toolError(2, { code: "TASK_NOT_FOUND", message: "The requested task does not exist." });
 assert.equal(state.result.isError, false);
 
-for (const code of ["CAPTURE_FRAME_INVALID", "MEDIA_CLIP_INVALID", "CAMERA_RECORD_INVALID", "LIBRARY_STORE_INVALID", "MEDIA_TO_CHAT_INVALID", "MEDIA_TO_CHAT_TASK_NOT_FOUND", "CONFIG_INVALID", "TIMER_INVALID", "TIMER_NOT_FOUND"]) {
+for (const code of ["CAPTURE_FRAME_INVALID", "MEDIA_CLIP_INVALID", "CAMERA_RECORD_INVALID", "LIBRARY_STORE_INVALID", "MEDIA_TO_CHAT_INVALID", "MEDIA_TO_CHAT_TASK_NOT_FOUND", "MEDIA_TO_CHAT_TARGET_NOT_FOUND", "MEDIA_TO_CHAT_TARGET_CHANGED", "MEDIA_TO_CHAT_TARGET_AMBIGUOUS", "CONFIG_INVALID", "TIMER_INVALID", "TIMER_NOT_FOUND"]) {
   const result = toolError(4, { code, message: "Requested 3; configured maximum is 2." });
   assert.equal(result.result.isError, false, `${code} must be an ordinary rejected tool result`);
   assert.match(result.result.content[0].text, /configured maximum is 2/);

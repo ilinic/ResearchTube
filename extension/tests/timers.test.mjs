@@ -68,13 +68,13 @@ let developerDefault=false;
 const ctx=vm.createContext({
  chrome:{storage:{local:{get:async()=>storage,set:async v=>Object.assign(storage,v)}}},
  DEFAULT_MCP_TOOL_PREFERENCES:{enabledByName:{}}, developerNewToolsDefault:false,
- publicMcpTools:()=>[{name:'existing'},{name:'new_custom'}],
- toolSettingsMetadata:()=>({alwaysEnabled:false}),
+ publicMcpTools:()=>[{name:'existing'},{name:'new_custom'},{name:'new_builtin'}],
+ toolSettingsMetadata:(name)=>({alwaysEnabled:false,group:name==='new_custom'?'custom':'media'}),
  refreshTaskHistorySettings:async()=>{ctx.developerNewToolsDefault=developerDefault;}
 });
 vm.runInContext(source.slice(prefFirst,prefLast),ctx);
 let prefs=await ctx.mcpToolPreferences();
-assert.equal(prefs.enabledByName.existing,true);assert.equal(prefs.enabledByName.new_custom,false);
+assert.equal(prefs.enabledByName.new_builtin,true);assert.equal(prefs.enabledByName.existing,true);assert.equal(prefs.enabledByName.new_custom,false);
 assert.ok(!Object.hasOwn(storage.mcpToolPreferences,'newToolsEnabledByDefault'));
 developerDefault=true; prefs=await ctx.mcpToolPreferences(); assert.equal(prefs.enabledByName.new_custom,false);
 console.log('timers, task retention, routes and developer defaults: ok');

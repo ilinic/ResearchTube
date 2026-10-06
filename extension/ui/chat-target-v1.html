@@ -1,0 +1,82 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>
+html,body{height:32px;margin:0;padding:0;overflow:hidden;background:transparent;color:#374151;font:13px/20px system-ui,sans-serif;color-scheme:light dark}
+body{display:flex;align-items:center;gap:8px;padding:0 8px;box-sizing:border-box;white-space:nowrap}
+.brand{flex-shrink:0;font-weight:600}
+#status{overflow:hidden;text-overflow:ellipsis;color:#6b7280}
+@media(prefers-color-scheme:dark){html,body{color:#e5e7eb}#status{color:#9ca3af}}
+</style></head>
+<body><span class="brand">ResearchTube</span><span id="status" role="status">Adding files to chat…</span><div id="anchor" hidden></div>
+<script>
+(()=>{
+  const SOURCE='researchtube-chat-target-widget';
+  const anchor=document.getElementById('anchor');
+  const status=document.getElementById('status');
+  const HEIGHT=32;
+  const deadline=Date.now()+30_000;
+  let metadata=null, bound=false, stopped=false, bridgeReady=false;
+  const notify=(method,params)=>window.parent.postMessage({jsonrpc:'2.0',method,params},'*');
+  function reportSize() {
+    // Shared MCP Apps sizing, with the optional ChatGPT compatibility helper.
+    if(bridgeReady) notify('ui/notifications/size-changed',{height:HEIGHT});
+    try { window.openai?.notifyIntrinsicHeight?.(HEIGHT); } catch (_error) { /* optional helper */ }
+  }
+  // Read the documented canonical result wrappers, never ChatGPT page markup.
+  function binding(value) {
+    const candidates=[value,value?._meta,value?.call_tool_result?._meta,value?.mcp_tool_result?._meta,
+      value?.call_tool_result?.result?._meta,value?.mcp_tool_result?.result?._meta];
+    for(const candidate of candidates) {
+      const item=candidate?.['researchtube/chatTarget'];
+      if(item && /^tsk_[A-Za-z0-9_-]{10}$/.test(item.taskId)
+        && typeof item.bindingToken==='string' && /^[a-f0-9-]{36}$/.test(item.bindingToken)) return item;
+    }
+    return null;
+  }
+  function consume(value) { if(!metadata) metadata=binding(value); announce(); }
+  function announce() {
+    if(bound || stopped || !metadata) return;
+    const detail={source:SOURCE,...metadata};
+    anchor.setAttribute('data-researchtube-chat-target',JSON.stringify(detail));
+    window.dispatchEvent(new CustomEvent('researchtube-chat-target-ready',{detail}));
+    window.parent.postMessage(detail,'*');
+  }
+  function finish() { stopped=true; anchor.removeAttribute('data-researchtube-chat-target'); reportSize(); }
+  function result(value) {
+    if(!metadata || value?.source!==SOURCE || value.taskId!==metadata.taskId || bound || stopped) return;
+    if(value.ok) {bound=true;finish();}
+    else if(value.errorCode) {
+      // Authoritative task errors stop. A transport/reload failure can be
+      // temporary, so retry it until the binding deadline instead.
+      console.info(`[ResearchTube] Chat binding stopped: ${value.errorCode}`);
+      status.textContent='Unable to add files. Check task status.';
+      finish();
+    }
+  }
+  window.addEventListener('researchtube-chat-target-result',event=>result(event.detail));
+  window.addEventListener('openai:set_globals',event=>{consume(event.detail?.globals?.toolResponseMetadata);reportSize();});
+  const initId='researchtube-chat-target-initialize';
+  window.addEventListener('message',event=>{
+    if(event.source!==window.parent) return;
+    const value=event.data;
+    if(value?.source===SOURCE && value.type==='binding-result') {result(value);return;}
+    if(value?.jsonrpc!=='2.0') return;
+    if(value.id===initId && value.result) {bridgeReady=true;notify('ui/notifications/initialized',{});reportSize();}
+    if(value.method==='ui/notifications/tool-result') {consume(value.params);consume(window.openai?.toolResponseMetadata);}
+    if(value.method==='ui/notifications/host-context-changed') reportSize();
+    if(value.method==='ui/notifications/tool-cancelled') {status.textContent='File upload cancelled.';finish();}
+    if(value.method==='ui/resource-teardown') {finish();window.parent.postMessage({jsonrpc:'2.0',id:value.id,result:{}},'*');}
+  });
+  window.parent.postMessage({jsonrpc:'2.0',id:initId,method:'ui/initialize',params:{appInfo:{name:'researchtube-chat-target',version:'2.0.0'},appCapabilities:{},protocolVersion:'2026-01-26'}},'*');
+  reportSize();consume(window.openai?.toolResponseMetadata);
+  const timer=setInterval(()=>{
+    if(bound || stopped) {clearInterval(timer);return;}
+    if(Date.now()>=deadline) {
+      console.info('[ResearchTube] Chat binding timed out; task status contains the result.');
+      status.textContent='Unable to identify this chat. Check task status.';
+      finish();clearInterval(timer);return;
+    }
+    consume(window.openai?.toolResponseMetadata);
+  },250);
+})();
+</script></body></html>

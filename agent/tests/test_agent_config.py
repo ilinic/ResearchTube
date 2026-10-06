@@ -72,6 +72,14 @@ class AgentConfigTests(unittest.TestCase):
         with self.assertRaises(agent.AgentApiError):
             agent.configured_new_tools_default()
 
+    def test_default_upload_size_is_twenty_mib_for_both_destinations(self):
+        for key in ['libraryStoreMaxFileSizeMiB', 'mediaToChatMaxFileSizeMiB']:
+            self.assertEqual(self.original['limits'][key]['value'], 20)
+            self.assertEqual(agent.configured_tool_limits()[key], 20)
+        self.write({})
+        for key in ['libraryStoreMaxFileSizeMiB', 'mediaToChatMaxFileSizeMiB']:
+            self.assertEqual(agent.configured_tool_limits()[key], 20)
+
     def test_defaults_and_cleanup_fallback(self):
         self.write({})
         self.assertEqual(agent.configured_port(), 17843)
