@@ -601,8 +601,8 @@ var MCP_TOOL_SETTINGS = Object.freeze({
   online_share_status: { group: "online" },
   online_share_stop: { group: "online" }
 });
-var EXTENSION_VERSION = "2.2.50";
-var REQUIRED_AGENT_INTERFACE_VERSION = 72;
+var EXTENSION_VERSION = "2.2.52";
+var REQUIRED_AGENT_INTERFACE_VERSION = 73;
 var MEDIA_TO_CHAT_WIDGET_URI = "ui://researchtube/chat-target-v4.html";
 var MEDIA_TO_CHAT_BIND_TIMEOUT_MS = 3e4;
 var CAPTURE_FRAME_WIDGET_URI = "ui://researchtube/capture-frame-v49.html";
@@ -668,6 +668,8 @@ var mediaToChatQueue = [];
 var mediaToChatLoaded = false;
 var mediaToChatLoading = null;
 var mediaToChatDraining = false;
+var mediaToChatSendTimers = /* @__PURE__ */ new Map();
+var mediaToChatResuming = /* @__PURE__ */ new Set();
 var chatFileAutomationTail = Promise.resolve();
 var searchCache = /* @__PURE__ */ new Map();
 var nullableString = { type: ["string", "null"] };
@@ -869,7 +871,7 @@ var agentWorkspaceSchema = {
   additionalProperties: false,
   properties: {
     status: { type: "string", enum: ["available", "error"] },
-    availableBytes: { ...nullableInteger, minimum: 0, description: "Free bytes on the filesystem that contains the Local Agent workspace; null when the workspace cannot be inspected." }
+    availableBytes: { ...nullableInteger, minimum: 0, description: "Free bytes captured once at Agent startup on the Workspace filesystem; null when the workspace could not be inspected. This is not a live measurement." }
   },
   required: ["status", "availableBytes"]
 };
@@ -877,7 +879,7 @@ var agentComponentSchema = {
   type: "object",
   additionalProperties: false,
   properties: {
-    status: { type: "string", enum: ["available", "missing", "error"] },
+    status: { type: "string", enum: ["available", "missing", "error", "checking"] },
     version: nullableString,
     source: { anyOf: [{ type: "string", enum: ["local", "path"] }, { type: "null" }] },
     message: nullableString
@@ -899,7 +901,7 @@ var chromeAutomationSchema = {
   type: "object",
   additionalProperties: false,
   properties: {
-    state: { type: "string", enum: ["enabled", "disabled", "mixed", "unknown"] },
+    state: { type: "string", enum: ["enabled", "disabled", "mixed", "unknown", "checking"] },
     chromeRunning: { type: ["boolean", "null"] },
     browserInstances: { type: "integer", minimum: 0 },
     message: { type: "string", minLength: 1 }
@@ -918,7 +920,7 @@ var agentStatusSchema = {
     extensionInterfaceVersion: { type: "integer", minimum: 1, description: "Extension \u2194 Agent interface version required by this Extension." },
     agentVersion: nullableString,
     interfaceVersion: { ...nullableInteger, minimum: 1, description: "Local Agent interface version. null means the response did not contain a readable positive integer, so the Agent is not accepted for Agent tools." },
-    chromeAutomation: { anyOf: [chromeAutomationSchema, { type: "null" }], description: "Whether Chrome was started with the silent debugger automation switch. Unknown when the Local Agent is unavailable or cannot inspect it." },
+    chromeAutomation: { anyOf: [chromeAutomationSchema, { type: "null" }], description: "Saved startup check of the Chrome silent debugger automation switch. checking while the background check is pending; unknown when unavailable or uninspectable. Restart the Agent to refresh." },
     platform: { anyOf: [agentPlatformSchema, { type: "null" }], description: "Public operating-system information for the machine running the Local Agent. It excludes host name, user name, paths, network addresses, and other host identifiers." },
     workspace: { anyOf: [agentWorkspaceSchema, { type: "null" }] },
     components: {
@@ -1605,10 +1607,14 @@ var mediaToChatTaskSchema = {
   properties: {
     ...Object.fromEntries(mediaToChatTaskFields.map((name) => [name, libraryStoreTaskSchema.properties[name]])),
     composerPolicy: { type: "string", enum: ["requireEmpty", "clear"] },
+    phase: { type: "string", enum: [...libraryStorePhaseSchema.enum, "waitingToSend"] },
+    sendDelaySeconds: { type: "number", minimum: 0 },
+    sendNotBefore: nullableString,
+    remainingSeconds: { type: ["integer", "null"], minimum: 0 },
     progressPercent: { type: "number", minimum: 0, maximum: 100 },
     pollIntervalMs: { type: "integer", minimum: 100 }
   },
-  required: [...mediaToChatTaskFields, "progressPercent", "pollIntervalMs", "composerPolicy"]
+  required: [...mediaToChatTaskFields, "progressPercent", "pollIntervalMs", "composerPolicy", "sendDelaySeconds", "sendNotBefore", "remainingSeconds"]
 };
 var mediaToChatStartSchema = { type: "object", additionalProperties: false, properties: { task: mediaToChatTaskSchema }, required: ["task"] };
 var mediaToChatCancelSchema = { type: "object", additionalProperties: false, properties: { task: mediaToChatTaskSchema, cancelled: { type: "boolean" } }, required: ["task", "cancelled"] };
@@ -1619,7 +1625,7 @@ function toolDefinitions() {
     {
       name: "system_agent_status",
       title: "Get ResearchTube Local Agent status",
-      description: "Checks availability, compatibility, platform information, and component status of the ResearchTube Local Agent. When ResearchTube availability is uncertain, prefer discovering ResearchTube tools and calling this tool rather than concluding that ResearchTube is unavailable from tool visibility alone. Returns the serving Chrome Extension implementation version and its required Extension \u2194 Agent interface version, plus the Agent implementation version, interface version, public operating-system information, workspace health, and status, version, discovery source, and diagnostic message for yt-dlp, Deno, ffmpeg, and ffprobe. Deno is an optional local JavaScript runtime passed explicitly to yt-dlp when available. Physical host paths and host identity are intentionally never exposed through MCP. A missing or mismatched Agent interfaceVersion prevents the Extension from using Agent tools, but does not affect ordinary YouTube research tools.",
+      description: "Checks availability and compatibility of the ResearchTube Local Agent and returns its saved startup diagnostics. Component and Chrome launch-flag checks run once in the background at Agent startup; checking means the initial check is still in progress. Repeated status calls never rerun diagnostics. Restart the Agent to refresh the snapshot after changing components or Chrome launch flags. Workspace free space is also the startup snapshot, not a live measurement. When ResearchTube availability is uncertain, prefer discovering ResearchTube tools and calling this tool rather than concluding that ResearchTube is unavailable from tool visibility alone. Returns the serving Chrome Extension implementation version and its required Extension \u2194 Agent interface version, plus the Agent implementation version, interface version, public operating-system information, workspace health, and status, version, discovery source, and diagnostic message for yt-dlp, Deno, ffmpeg, and ffprobe. Deno is an optional local JavaScript runtime passed explicitly to yt-dlp when available. Physical host paths and host identity are intentionally never exposed through MCP. A missing or mismatched Agent interfaceVersion prevents the Extension from using Agent tools, but does not affect ordinary YouTube research tools.",
       annotations: localAgentReadAnnotations,
       inputSchema: { type: "object", additionalProperties: false, properties: {} },
       outputSchema: agentStatusSchema
@@ -2006,9 +2012,9 @@ function toolDefinitions() {
     {
       name: "media_to_chat",
       title: "Send workspace files to the current chat",
-      description: "Queue any selected Workspace files for attachment and sending in the ChatGPT conversation that invoked this tool. Its compact service widget identifies the originating Chrome tab before any Composer changes; the exact tab ID and conversation are then fixed for the entire task. Active tabs and focused windows are never used to select a destination. If the originating tab cannot be identified within 30 seconds, is duplicated in another tab, closes or changes conversation, the task fails rather than selecting another tab. The ResearchTube Extension must be able to receive the task widget handshake. No new tab is opened. The tool uploads file bytes to ChatGPT using Chrome automation and presses Send without adding prompt text. Count and per-file size limits are configured by mediaToChatMaxFiles and mediaToChatMaxFileSizeMiB in agent/agent-config.json. Oversized files are listed in skippedFiles; eligible files are sent together. composerPolicy defaults to requireEmpty: refuse a Composer containing text or attachments. clear explicitly removes its text and existing attachments once, before uploading the selected files, and verifies that it is empty. After uploading starts, user edits, added or removed attachments, or a changed conversation stop the task without Send; already attached task files stay in the Composer. The task never clears again after upload begins. After receiving the task, finish this assistant response promptly: ChatGPT may keep Send unavailable while responding. Do not poll during this same assistant turn; use media_to_chat_status in a later turn, no faster than pollIntervalMs. completed confirms a Send click, not ChatGPT processing or Library storage.",
+      description: "Queue any selected Workspace files for attachment and sending in the ChatGPT conversation that invoked this tool. Its compact service widget identifies the originating Chrome tab before any Composer changes; the exact tab ID and conversation are then fixed for the entire task. Active tabs and focused windows are never used to select a destination. If the originating tab cannot be identified within 30 seconds, is duplicated in another tab, closes or changes conversation, the task fails rather than selecting another tab. The ResearchTube Extension must be able to receive the task widget handshake. No new tab is opened. The tool uploads file bytes to ChatGPT using Chrome automation and presses Send without adding prompt text. Count and per-file size limits are configured by mediaToChatMaxFiles and mediaToChatMaxFileSizeMiB in agent/agent-config.json. Oversized files are listed in skippedFiles; eligible files are sent together. composerPolicy defaults to requireEmpty: refuse a Composer containing text or attachments. clear explicitly removes its text and existing attachments once, before uploading the selected files, and verifies that it is empty. After uploading starts, user edits, added or removed attachments, or a changed conversation stop the task without Send; already attached task files stay in the Composer. The task never clears again after upload begins. Optional sendDelaySeconds defaults to 0 and delays Send after all eligible files are accepted in Composer. During waitingToSend, status reports sendNotBefore (UTC) and remainingSeconds. The pause releases browser automation for other tabs; another task targeting the same Composer is refused. Cancellation before Send leaves existing text and attachments untouched. After receiving the task, finish this assistant response promptly: ChatGPT may keep Send unavailable while responding. Do not poll during this same assistant turn; use media_to_chat_status in a later turn, no faster than pollIntervalMs. completed confirms a Send click, not ChatGPT processing or Library storage.",
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
-      inputSchema: { type: "object", additionalProperties: false, properties: { files: { type: "array", minItems: 1, items: libraryStoreFileSchema, description: "One batch of logical Workspace paths; any file type may be selected, subject to ChatGPT upload support." }, composerPolicy: { type: "string", enum: ["requireEmpty", "clear"], default: "requireEmpty", description: "requireEmpty refuses text or attachments already in the Composer. clear explicitly discards both once before upload. New user edits after preparation always stop Send and leave uploaded files attached." } }, required: ["files"] },
+      inputSchema: { type: "object", additionalProperties: false, properties: { files: { type: "array", minItems: 1, items: libraryStoreFileSchema, description: "One batch of logical Workspace paths; any file type may be selected, subject to ChatGPT upload support." }, composerPolicy: { type: "string", enum: ["requireEmpty", "clear"], default: "requireEmpty", description: "requireEmpty refuses text or attachments already in the Composer. clear explicitly discards both once before upload. New user edits after preparation always stop Send and leave uploaded files attached." }, sendDelaySeconds: { type: "number", minimum: 0, default: 0, description: "Optional seconds to wait after all files are accepted in Composer, before Send. 0 sends as soon as ready; 600 waits ten minutes. Cancellation leaves files and text in place. Readiness is checked independently of this delay." } }, required: ["files"] },
       outputSchema: mediaToChatStartSchema,
       _meta: {
         ui: { resourceUri: MEDIA_TO_CHAT_WIDGET_URI },
@@ -2020,15 +2026,15 @@ function toolDefinitions() {
     {
       name: "media_to_chat_status",
       title: "Check sending files to chat",
-      description: "Return a media_to_chat task's phase, percentage, submitted files and size-rejected files. Poll only in a later conversation turn, because ChatGPT may disable Send until the initiating assistant response finishes. completed confirms that the extension pressed Send; downstream ChatGPT processing is not verified.",
+      description: "Return a media_to_chat task's phase, percentage, submitted files and size-rejected files, plus sendDelaySeconds, sendNotBefore in UTC and remainingSeconds while waitingToSend. Poll only in a later conversation turn, because ChatGPT may disable Send until the initiating assistant response finishes. completed confirms that the extension pressed Send; downstream ChatGPT processing is not verified.",
       annotations: localAgentReadAnnotations,
       inputSchema: { type: "object", additionalProperties: false, properties: { taskId: { type: "string", minLength: 1 } }, required: ["taskId"] },
       outputSchema: mediaToChatTaskSchema
     },
     {
       name: "media_to_chat_cancel",
-      title: "Cancel queued files to chat",
-      description: "Cancel a media_to_chat task while it is queued. A task that has started attaching files or clicking Send cannot be cancelled, matching library_store_cancel.",
+      title: "Cancel sending files to chat",
+      description: "Cancel a queued or working media_to_chat task before the Send click starts, including waitingToSend. Cancellation stops subsequent automation and leaves all existing Composer text and attachments untouched. After Send has started or the task is terminal, cancelled is false; an already dispatched Send is never undone.",
       annotations: localWorkspaceWriteAnnotations,
       inputSchema: { type: "object", additionalProperties: false, properties: { taskId: { type: "string", minLength: 1 } }, required: ["taskId"] },
       outputSchema: mediaToChatCancelSchema
@@ -2792,12 +2798,14 @@ async function cdpClearSentComposerDraft(tabId, sentText) {
     }
   }
 }
-async function cdpClickEnabledSendButton(tabId, timeoutMs = 45e3, beforeClick = null) {
+async function cdpClickEnabledSendButton(tabId, timeoutMs = 45e3, beforeClick = null, onSendCommit = null) {
   await cdpWaitFor(tabId, CDP_ENABLED_SEND_BUTTON_EXPRESSION, "the enabled ChatGPT Send button", timeoutMs, beforeClick);
   if (beforeClick) await beforeClick();
   const target = (await cdpEvaluate(tabId, CDP_SEND_BUTTON_CENTER_EXPRESSION))?.value;
   if (!Number.isFinite(target?.x) || !Number.isFinite(target?.y)) throw cdpError("The ChatGPT Send button was not available.");
   await cdpCommand(tabId, "Input.dispatchMouseEvent", { type: "mouseMoved", x: target.x, y: target.y, button: "none", buttons: 0 });
+  if (beforeClick) await beforeClick();
+  if (onSendCommit) onSendCommit();
   await cdpCommand(tabId, "Input.dispatchMouseEvent", { type: "mousePressed", x: target.x, y: target.y, button: "left", buttons: 1, clickCount: 1 });
   await cdpCommand(tabId, "Input.dispatchMouseEvent", { type: "mouseReleased", x: target.x, y: target.y, button: "left", buttons: 0, clickCount: 1 });
   cdpLog("Clicked ChatGPT Send button with browser input", { tabId });
@@ -2809,12 +2817,13 @@ async function cdpSendComposerText(tabId, text2) {
   cdpLog("Submitted ChatGPT Composer form", { tabId });
   await cdpClearSentComposerDraft(tabId, text2);
 }
-async function cdpSendAttachedFiles(tabId, fileCount, { beforeClick = null, timeoutMs = 9e4 } = {}) {
+async function cdpSendAttachedFiles(tabId, fileCount, { beforeClick = null, timeoutMs = 9e4, onSendCommit = null } = {}) {
   cdpLog("Sending attached file batch without Composer text", { tabId, fileCount });
-  await cdpClickEnabledSendButton(tabId, timeoutMs, beforeClick);
+  await cdpClickEnabledSendButton(tabId, timeoutMs, beforeClick, onSendCommit);
   cdpLog("Attached file batch sent", { tabId, fileCount });
 }
-async function cdpAttachFilesNow(filePathValues, { onPhase = null, currentChatTarget = null, composerPolicy = "requireEmpty" } = {}) {
+async function cdpAttachFilesNow(filePathValues, { onPhase = null, currentChatTarget = null, composerPolicy = "requireEmpty", deferSend = false, checkCancelled = null, onSendCommit = null } = {}) {
+  checkCancelled?.();
   if (!Array.isArray(filePathValues) || !filePathValues.length) {
     throw cdpError("A file batch must contain at least one eligible file.");
   }
@@ -2826,6 +2835,7 @@ async function cdpAttachFilesNow(filePathValues, { onPhase = null, currentChatTa
   if (!tab.id) throw cdpError("The ChatGPT destination tab has no tab ID.");
   let attached = false;
   let composerGuardToken = null;
+  let keepGuard = false;
   try {
     await cdpAttach(tab.id);
     attached = true;
@@ -2835,11 +2845,13 @@ async function cdpAttachFilesNow(filePathValues, { onPhase = null, currentChatTa
     cdpLog("Required CDP domains enabled", { tabId: tab.id, domains: ["Page", "DOM", "Runtime"] });
     if (currentChatTarget) {
       await cdpWaitForTextComposer(tab.id);
-      await prepareCurrentChatComposer(currentChatTarget, composerPolicy);
+      await prepareCurrentChatComposer(currentChatTarget, composerPolicy, checkCancelled);
     }
+    checkCancelled?.();
     await cdpCommand(tab.id, "Page.setInterceptFileChooserDialog", { enabled: true });
     cdpLog("File-chooser interception enabled", { tabId: tab.id });
     const chooser = await cdpOpenStableFileChooser(tab.id, filePaths.length);
+    checkCancelled?.();
     if (!Number.isInteger(chooser?.backendNodeId)) throw cdpError("ChatGPT opened a file chooser without a file-input node.");
     cdpLog("Supplying files to chooser", { tabId: tab.id, backendNodeId: chooser.backendNodeId, fileCount: filePaths.length, fileNames });
     if (currentChatTarget) {
@@ -2849,22 +2861,63 @@ async function cdpAttachFilesNow(filePathValues, { onPhase = null, currentChatTa
       if (installed !== true) throw localAgentError("MEDIA_TO_CHAT_INVALID", "The Composer could not be monitored; no files were sent.");
       await assertCurrentChatComposer(currentChatTarget);
     }
+    checkCancelled?.();
     await cdpCommand(tab.id, "DOM.setFileInputFiles", { files: filePaths, backendNodeId: chooser.backendNodeId });
     cdpLog("DOM.setFileInputFiles completed", { tabId: tab.id, backendNodeId: chooser.backendNodeId, fileCount: filePaths.length });
     await cdpWaitForAttachmentAccepted(tab.id, fileNames);
+    checkCancelled?.();
     if (onPhase) await onPhase("composerAccepted");
+    if (deferSend && currentChatTarget) {
+      await assertCurrentChatComposer(currentChatTarget, { fileNames, guardToken: composerGuardToken });
+      checkCancelled?.();
+      keepGuard = true;
+      return { fileNames, guardToken: composerGuardToken };
+    }
     if (onPhase) await onPhase("submitting");
     await cdpSendAttachedFiles(tab.id, filePaths.length, currentChatTarget ? {
       timeoutMs: 5 * 6e4,
-      beforeClick: () => assertCurrentChatComposer(currentChatTarget, { fileNames, guardToken: composerGuardToken })
+      beforeClick: async () => {
+        checkCancelled?.();
+        await assertCurrentChatComposer(currentChatTarget, { fileNames, guardToken: composerGuardToken });
+        checkCancelled?.();
+      },
+      onSendCommit
     } : {});
     cdpLog("File batch completed", { tabId: tab.id, fileCount: filePaths.length });
     return { ok: true, tabId: tab.id, fileCount: filePaths.length };
   } finally {
-    if (composerGuardToken && attached) await cdpEvaluate(tab.id, `(${disposeChatComposerGuard.toString()})(${JSON.stringify(composerGuardToken)})`).catch(() => {
+    if (composerGuardToken && attached && !keepGuard) await cdpEvaluate(tab.id, `(${disposeChatComposerGuard.toString()})(${JSON.stringify(composerGuardToken)})`).catch(() => {
     });
     if (attached) await cdpCommand(tab.id, "Page.setInterceptFileChooserDialog", { enabled: false }).then(() => cdpLog("File-chooser interception disabled", { tabId: tab.id })).catch((error2) => cdpErrorLog("Could not disable file-chooser interception", error2));
     if (attached) await cdpDetach(tab.id);
+  }
+}
+async function cdpSendPreparedChatFiles(task) {
+  const { fileNames, guardToken } = task.prepared;
+  const tab = await requireCurrentChatTarget(task.target);
+  let attached = false;
+  try {
+    assertMediaToChatNotCancelled(task);
+    await cdpAttach(tab.id);
+    attached = true;
+    await cdpCommand(tab.id, "Page.enable");
+    await cdpCommand(tab.id, "Runtime.enable");
+    await cdpSendAttachedFiles(tab.id, fileNames.length, {
+      timeoutMs: 5 * 6e4,
+      beforeClick: async () => {
+        assertMediaToChatNotCancelled(task);
+        await assertCurrentChatComposer(task.target, { fileNames, guardToken });
+        assertMediaToChatNotCancelled(task);
+      },
+      onSendCommit: () => commitMediaToChatSend(task)
+    });
+  } finally {
+    if (attached) {
+      await cdpEvaluate(tab.id, `(${disposeChatComposerGuard.toString()})(${JSON.stringify(guardToken)})`).catch(() => {
+      });
+      task.prepared.guardDisposed = true;
+      await cdpDetach(tab.id);
+    }
   }
 }
 function withChatFileAutomation(work) {
@@ -2942,9 +2995,11 @@ async function assertCurrentChatComposer(target, { fileNames = null, guardToken 
     throw localAgentError("MEDIA_TO_CHAT_INVALID", "The Composer attachments changed or could not be verified. No Send click was made; remaining files stay attached.");
   }
 }
-async function prepareCurrentChatComposer(target, policy) {
+async function prepareCurrentChatComposer(target, policy, checkCancelled = null) {
+  checkCancelled?.();
   normalizeComposerPolicy(policy);
   const initial = await currentChatComposerState(target);
+  checkCancelled?.();
   cdpLog("Initial current-chat Composer state", {
     tabId: target.tabId,
     composerPolicy: policy,
@@ -2961,11 +3016,13 @@ async function prepareCurrentChatComposer(target, policy) {
   let removedCount = 0;
   cdpLog("Clearing initial Composer attachments", { tabId: target.tabId, count: maximumRemovals, removalControls: initial.removeTargets.length });
   for (let index = 0; index < maximumRemovals; index += 1) {
+    checkCancelled?.();
     let state = await currentChatComposerState(target);
     if (!state.textEmpty) throw localAgentError("MEDIA_TO_CHAT_INVALID", "A new text draft appeared during preparation. No files were uploaded or sent.");
     const count = composerVisibleAttachmentCount(state);
     if (!count) break;
     await requireCurrentChatTarget(target);
+    checkCancelled?.();
     const removal = (await cdpEvaluate(target.tabId, chatComposerPageExpression(
       clickChatComposerAttachmentRemoval,
       initial.attachments.map((card) => card.name)
@@ -3236,6 +3293,9 @@ function mediaToChatTaskDocument(task) {
     status: task.status,
     phase: task.phase,
     composerPolicy: task.composerPolicy ?? "requireEmpty",
+    sendDelaySeconds: task.sendDelaySeconds ?? 0,
+    sendNotBefore: task.sendNotBefore ?? null,
+    remainingSeconds: task.status === "working" && task.phase === "waitingToSend" ? Math.max(0, Math.ceil((Date.parse(task.sendNotBefore) - Date.now()) / 1e3)) : null,
     files: task.files.map(({ workspacePath }) => ({ workspacePath })),
     submittedFiles: (task.submittedFiles ?? []).map(({ workspacePath }) => ({ workspacePath })),
     skippedFiles: (task.skippedFiles ?? []).map(({ workspacePath, sizeBytes, maxFileSizeBytes, reason }) => ({ workspacePath, sizeBytes, maxFileSizeBytes, reason })),
@@ -3265,6 +3325,7 @@ async function ensureMediaToChatLoaded() {
     mediaToChatTasks = new Map(tasks.filter((task) => task && typeof task.taskId === "string").map((task) => [task.taskId, task]));
     mediaToChatQueue = Array.isArray(stored[MEDIA_TO_CHAT_QUEUE_STORAGE_KEY]) ? stored[MEDIA_TO_CHAT_QUEUE_STORAGE_KEY].filter((taskId3) => typeof taskId3 === "string" && mediaToChatTasks.get(taskId3)?.status === "queued") : [];
     for (const task of mediaToChatTasks.values()) {
+      if (task.status === "working" && task.phase === "waitingToSend" && task.prepared?.guardToken && task.prepared?.fileNames?.length && task.target && Number.isFinite(Date.parse(task.sendNotBefore))) continue;
       if (task.status === "working" || task.status === "queued") {
         task.status = "failed";
         task.phase = "failed";
@@ -3277,13 +3338,17 @@ async function ensureMediaToChatLoaded() {
     mediaToChatQueue = [];
     mediaToChatLoaded = true;
     await persistMediaToChatTasks();
+    for (const task of mediaToChatTasks.values()) {
+      if (task.status === "working" && task.phase === "waitingToSend") await scheduleMediaToChatSend(task);
+    }
   })().finally(() => {
     mediaToChatLoading = null;
   });
   return mediaToChatLoading;
 }
 async function updateMediaToChatTask(task, phase, message, { status = "working", error: error2 = null } = {}) {
-  const milestones = { queued: 0, resolvingFiles: 10, attaching: 25, composerAccepted: 65, submitting: 80, submitted: 100 };
+  if (task.status === "cancelled" && status !== "cancelled") return;
+  const milestones = { queued: 0, resolvingFiles: 10, attaching: 25, composerAccepted: 65, waitingToSend: 70, submitting: 80, submitted: 100 };
   task.progressPercent = Math.max(task.progressPercent, milestones[phase] ?? task.progressPercent);
   task.status = status;
   task.phase = phase;
@@ -3293,6 +3358,103 @@ async function updateMediaToChatTask(task, phase, message, { status = "working",
   if (["completed", "failed", "cancelled"].includes(status)) task.bindingToken = null;
   await persistMediaToChatTasks();
   void reportMcpToolToAgent("media_to_chat", mediaToChatTaskDocument(task));
+}
+function normalizeMediaToChatSendDelay(value = 0) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || !Number.isFinite(value * 1e3) || Date.now() + value * 1e3 > 864e13) {
+    throw localAgentError("MEDIA_TO_CHAT_INVALID", "sendDelaySeconds must be a finite non-negative number of seconds within the supported date range.");
+  }
+  return value;
+}
+function assertMediaToChatNotCancelled(task) {
+  if (task.status === "cancelled") throw localAgentError("MEDIA_TO_CHAT_INVALID", "The files-to-chat task was cancelled. Composer contents were left unchanged.");
+}
+function commitMediaToChatSend(task) {
+  assertMediaToChatNotCancelled(task);
+  task.sendStarted = true;
+}
+function assertMediaToChatTargetAvailable(task) {
+  if ([...mediaToChatTasks.values()].some((other) => other !== task && other.target?.tabId === task.target?.tabId && other.status === "working")) {
+    throw localAgentError("MEDIA_TO_CHAT_INVALID", "Another files-to-chat task is already using this Composer, including a pending Send. Wait for it to finish or cancel it first.");
+  }
+}
+async function clearMediaToChatSendSchedule(taskId3) {
+  const timer = mediaToChatSendTimers.get(taskId3);
+  if (timer !== void 0) clearTimeout(timer);
+  mediaToChatSendTimers.delete(taskId3);
+  await chrome.alarms.clear(`media-chat-send:${taskId3}`);
+}
+async function scheduleMediaToChatSend(task) {
+  if (task.status !== "working" || task.phase !== "waitingToSend") return;
+  await clearMediaToChatSendSchedule(task.taskId);
+  const deadline = Date.parse(task.sendNotBefore);
+  await chrome.alarms.create(`media-chat-send:${task.taskId}`, { when: Math.max(Date.now() + 1, deadline) });
+  if (task.status !== "working" || task.phase !== "waitingToSend") {
+    await clearMediaToChatSendSchedule(task.taskId);
+    return;
+  }
+  const remaining = Math.max(0, deadline - Date.now());
+  if (remaining <= 3e4) {
+    const timer = setTimeout(() => {
+      void resumeDelayedMediaToChatTask(task.taskId);
+    }, remaining);
+    mediaToChatSendTimers.set(task.taskId, timer);
+  }
+}
+async function disposePreparedChatGuard(task) {
+  const prepared = task.prepared;
+  if (!prepared?.guardToken || prepared.guardDisposed || !task.target) return;
+  await withChatFileAutomation(async () => {
+    if (prepared.guardDisposed) return;
+    let attached = false;
+    try {
+      await cdpAttach(task.target.tabId);
+      attached = true;
+      await cdpEvaluate(task.target.tabId, `(${disposeChatComposerGuard.toString()})(${JSON.stringify(prepared.guardToken)})`);
+      prepared.guardDisposed = true;
+    } catch {
+    } finally {
+      if (attached) await cdpDetach(task.target.tabId);
+    }
+  });
+}
+async function failMediaToChatSubmission(task, error2) {
+  if (task.status === "cancelled") return;
+  cdpErrorLog("Sending files to the current chat failed", error2);
+  const message = error2?.code && isExpectedToolError(error2.code) ? safeErrorMessage(error2) : "Chrome could not attach or send this file batch. Check the conversation and Extension console before retrying.";
+  await updateMediaToChatTask(task, "failed", message, { status: "failed", error: `${error2?.code || "MEDIA_TO_CHAT_FAILED"}: ${message}` });
+}
+async function completeMediaToChatSubmission(task, submittedFiles) {
+  task.submittedFiles = submittedFiles;
+  task.submittedAt = libraryStoreNow();
+  await updateMediaToChatTask(task, "submitted", `Sent ${submittedFiles.length} file(s) to the selected ChatGPT conversation; skipped ${task.skippedFiles.length} oversized file(s).`, { status: "completed" });
+}
+async function resumeDelayedMediaToChatTask(taskId3) {
+  await ensureMediaToChatLoaded();
+  const task = mediaToChatTasks.get(taskId3);
+  if (!task || task.status !== "working" || task.phase !== "waitingToSend" || mediaToChatResuming.has(taskId3)) return;
+  if (Date.now() < Date.parse(task.sendNotBefore)) {
+    await scheduleMediaToChatSend(task);
+    return;
+  }
+  mediaToChatResuming.add(taskId3);
+  try {
+    await clearMediaToChatSendSchedule(taskId3);
+    await withChatFileAutomation(async () => {
+      assertMediaToChatNotCancelled(task);
+      await updateMediaToChatTask(task, "submitting", "The Send delay elapsed; verifying the original Composer before sending.");
+      await cdpSendPreparedChatFiles(task);
+    });
+    await completeMediaToChatSubmission(task, task.pendingSubmittedFiles);
+  } catch (error2) {
+    await failMediaToChatSubmission(task, error2);
+  } finally {
+    await disposePreparedChatGuard(task);
+    delete task.prepared;
+    delete task.pendingSubmittedFiles;
+    await persistMediaToChatTasks();
+    mediaToChatResuming.delete(taskId3);
+    void drainMediaToChatQueue();
+  }
 }
 async function drainMediaToChatQueue() {
   if (mediaToChatDraining) return;
@@ -3304,19 +3466,25 @@ async function drainMediaToChatQueue() {
       if (index < 0) break;
       const [taskId3] = mediaToChatQueue.splice(index, 1);
       const task = mediaToChatTasks.get(taskId3);
-      await updateMediaToChatTask(task, "resolvingFiles", "Resolving the selected Workspace files.");
       try {
+        assertMediaToChatTargetAvailable(task);
+        await updateMediaToChatTask(task, "resolvingFiles", "Resolving the selected Workspace files.");
         await requireCurrentChatTarget(task.target);
+        assertMediaToChatNotCancelled(task);
         const { localPaths, submittedFiles, skippedFiles } = await resolveLibraryStoreFiles(task.files, "/internal/media-to-chat-files");
         task.skippedFiles = skippedFiles;
         if (!localPaths.length) {
           await updateMediaToChatTask(task, "failed", `All ${skippedFiles.length} files exceed the configured per-file size limit; no files were sent.`, { status: "failed", error: "No files are within the configured per-file size limit." });
           continue;
         }
-        await withChatFileAutomation(() => cdpAttachFilesNow(localPaths, {
+        const prepared = await withChatFileAutomation(() => cdpAttachFilesNow(localPaths, {
           currentChatTarget: task.target,
           composerPolicy: task.composerPolicy ?? "requireEmpty",
+          deferSend: (task.sendDelaySeconds ?? 0) > 0,
+          checkCancelled: () => assertMediaToChatNotCancelled(task),
+          onSendCommit: () => commitMediaToChatSend(task),
           onPhase: async (phase) => {
+            assertMediaToChatNotCancelled(task);
             const messages2 = {
               attaching: "Attaching files to the selected ChatGPT conversation.",
               composerAccepted: "The ChatGPT Composer accepted the selected files.",
@@ -3325,13 +3493,22 @@ async function drainMediaToChatQueue() {
             await updateMediaToChatTask(task, phase, messages2[phase] || "Sending files to ChatGPT.");
           }
         }));
-        task.submittedFiles = submittedFiles;
-        task.submittedAt = libraryStoreNow();
-        await updateMediaToChatTask(task, "submitted", `Sent ${submittedFiles.length} file(s) to the selected ChatGPT conversation; skipped ${skippedFiles.length} oversized file(s).`, { status: "completed" });
+        if ((task.sendDelaySeconds ?? 0) > 0) {
+          task.prepared = prepared;
+          assertMediaToChatNotCancelled(task);
+          task.pendingSubmittedFiles = submittedFiles;
+          task.sendNotBefore = new Date(Date.now() + task.sendDelaySeconds * 1e3).toISOString();
+          await updateMediaToChatTask(task, "waitingToSend", `Files are attached. Waiting ${task.sendDelaySeconds} seconds before Send; cancellation leaves the Composer unchanged.`);
+          await scheduleMediaToChatSend(task);
+        } else {
+          await completeMediaToChatSubmission(task, submittedFiles);
+        }
       } catch (error2) {
-        cdpErrorLog("Sending files to the current chat failed", error2);
-        const message = error2?.code && isExpectedToolError(error2.code) ? safeErrorMessage(error2) : "Chrome could not attach or send this file batch. Check the conversation and Extension console before retrying.";
-        await updateMediaToChatTask(task, "failed", message, { status: "failed", error: `${error2?.code || "MEDIA_TO_CHAT_FAILED"}: ${message}` });
+        await failMediaToChatSubmission(task, error2);
+        await disposePreparedChatGuard(task);
+        delete task.prepared;
+        delete task.pendingSubmittedFiles;
+        await persistMediaToChatTasks();
       }
     }
   } finally {
@@ -3339,10 +3516,11 @@ async function drainMediaToChatQueue() {
   }
 }
 async function mediaToChatStart(argumentsValue = {}) {
-  if (!argumentsValue || typeof argumentsValue !== "object" || Array.isArray(argumentsValue) || Object.keys(argumentsValue).some((name) => !["files", "composerPolicy"].includes(name))) {
-    throw localAgentError("MEDIA_TO_CHAT_INVALID", "media_to_chat accepts only files and composerPolicy.");
+  if (!argumentsValue || typeof argumentsValue !== "object" || Array.isArray(argumentsValue) || Object.keys(argumentsValue).some((name) => !["files", "composerPolicy", "sendDelaySeconds"].includes(name))) {
+    throw localAgentError("MEDIA_TO_CHAT_INVALID", "media_to_chat accepts only files, composerPolicy and sendDelaySeconds.");
   }
   const composerPolicy = normalizeComposerPolicy(argumentsValue.composerPolicy);
+  const sendDelaySeconds = normalizeMediaToChatSendDelay(argumentsValue.sendDelaySeconds);
   await ensureMediaToChatLoaded();
   const limits = await configuredToolLimits();
   const files = normalizeLibraryStoreFiles(argumentsValue.files, limits.mediaToChatMaxFiles, "MEDIA_TO_CHAT_INVALID");
@@ -3357,6 +3535,9 @@ async function mediaToChatStart(argumentsValue = {}) {
     bindingToken: crypto.randomUUID(),
     bindingDeadline: Date.now() + MEDIA_TO_CHAT_BIND_TIMEOUT_MS,
     composerPolicy,
+    sendDelaySeconds,
+    sendNotBefore: null,
+    sendStarted: false,
     status: "queued",
     phase: "queued",
     progressPercent: 0,
@@ -3420,6 +3601,7 @@ async function bindMediaToChatTarget(message, sender) {
   if (task.status !== "queued") throw localAgentError("MEDIA_TO_CHAT_TARGET_NOT_FOUND", task.error);
   try {
     await requireCurrentChatTarget(target);
+    assertMediaToChatTargetAvailable({ target });
     const tabs = await chrome.tabs.query({});
     const matches2 = tabs.filter((tab) => chatConversationPath(tab.url)?.split("/c/").pop() === chatPath.split("/c/").pop());
     if (matches2.length !== 1 || matches2[0].id !== target.tabId) {
@@ -3457,11 +3639,15 @@ async function mediaToChatCancel(taskId3) {
   await persistMediaToChatTasks();
   const task = mediaToChatTasks.get(taskId3);
   if (!task) throw localAgentError("MEDIA_TO_CHAT_TASK_NOT_FOUND", "The files-to-chat task was not found.");
-  if (task.status !== "queued") return { task: mediaToChatTaskDocument(task), cancelled: false };
+  if (!["queued", "working"].includes(task.status) || task.sendStarted) return { task: mediaToChatTaskDocument(task), cancelled: false };
   mediaToChatQueue = mediaToChatQueue.filter((queuedTaskId) => queuedTaskId !== taskId3);
   task.bindingToken = null;
+  task.status = "cancelled";
+  await clearMediaToChatSendSchedule(taskId3);
   await chrome.alarms.clear(`media-chat-bind:${task.taskId}`);
-  await updateMediaToChatTask(task, "cancelled", "Cancelled before attachment began.", { status: "cancelled" });
+  await updateMediaToChatTask(task, "cancelled", "Cancelled before Send. Existing text and attachments were left in the Composer.", { status: "cancelled" });
+  if (task.prepared) void disposePreparedChatGuard(task).catch(() => {
+  });
   return { task: mediaToChatTaskDocument(task), cancelled: true };
 }
 chrome.runtime.onInstalled.addListener(({ reason }) => {
@@ -3480,6 +3666,7 @@ chrome.runtime.onStartup.addListener(() => {
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === "tunnel-poll") void startPolling();
   if (alarm.name.startsWith("media-chat-bind:")) void expireMediaToChatBinding(alarm.name.slice("media-chat-bind:".length));
+  if (alarm.name.startsWith("media-chat-send:")) void resumeDelayedMediaToChatTask(alarm.name.slice("media-chat-send:".length));
 });
 async function bootstrapTunnel() {
   await chrome.storage.local.remove([
@@ -3509,7 +3696,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
   if (message?.type === "status") {
-    getPublicConnectionState().then(sendResponse);
+    getPublicConnectionState({ includeAgent: message.includeAgent !== false }).then(sendResponse);
+    return true;
+  }
+  if (message?.type === "agent-status") {
+    getAgentStatus().then(sendResponse);
     return true;
   }
   if (message?.type === "save-connection") {
@@ -3585,10 +3776,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 async function getConfig() {
   return { ...DEFAULTS, ...await chrome.storage.local.get({ ...DEFAULTS, lastStatus: "" }) };
 }
-async function getPublicConnectionState() {
+async function getPublicConnectionState({ includeAgent = true } = {}) {
   const config = await getConfig();
   const agentPort = normalizeAgentPort(config.agentPort);
-  const agent = await getAgentStatus(agentPort);
+  const agent = includeAgent ? await getAgentStatus(agentPort) : null;
   const remainingMs = Math.max(0, Number(config.youtubeSearchCooldownUntil || 0) - Date.now());
   return {
     configured: Boolean(config.tunnelId && config.runtimeApiKey),
@@ -3658,13 +3849,13 @@ function normalizeAgentPlatform(value) {
   return operatingSystem && release && version && architecture ? { operatingSystem, release, version, architecture } : null;
 }
 function normalizeChromeAutomation(value) {
-  if (!value || typeof value !== "object" || !["enabled", "disabled", "mixed", "unknown"].includes(value.state) || !(typeof value.chromeRunning === "boolean" || value.chromeRunning === null) || !Number.isInteger(value.browserInstances) || value.browserInstances < 0 || typeof value.message !== "string" || !value.message.trim()) return null;
+  if (!value || typeof value !== "object" || !["enabled", "disabled", "mixed", "unknown", "checking"].includes(value.state) || !(typeof value.chromeRunning === "boolean" || value.chromeRunning === null) || !Number.isInteger(value.browserInstances) || value.browserInstances < 0 || typeof value.message !== "string" || !value.message.trim()) return null;
   return { state: value.state, chromeRunning: value.chromeRunning, browserInstances: value.browserInstances, message: value.message.trim() };
 }
 function normalizeAgentComponent(value) {
   const status = value?.status;
   return {
-    status: status === "available" || status === "missing" || status === "error" ? status : "error",
+    status: status === "available" || status === "missing" || status === "error" || status === "checking" ? status : "error",
     version: typeof value?.version === "string" ? value.version : null,
     source: value?.source === "local" || value?.source === "path" ? value.source : null,
     message: typeof value?.message === "string" ? value.message : null

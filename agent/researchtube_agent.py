@@ -39,8 +39,8 @@ try:
 except ImportError:
     from task_history import TaskHistory
 
-AGENT_VERSION = "2.2.50"
-INTERFACE_VERSION = 72
+AGENT_VERSION = "2.2.52"
+INTERFACE_VERSION = 73
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
 MAX_GOOGLE_TRANSLATE_AUDIO_BYTES = 16 * 1024 * 1024
@@ -417,7 +417,7 @@ def youtube_pot_provider_status(deno_executable: str | None = None) -> dict[str,
 
 async def youtube_pot_provider_health() -> tuple[str, dict[str, str | None]]:
     """Expose the installed provider as a first-class mandatory Agent tool."""
-    state = youtube_pot_provider_status()
+    state = await asyncio.to_thread(youtube_pot_provider_status)
     base = {"source": "local", "privatePath": str(YOUTUBE_POT_PROVIDER_PATH)}
     if state["state"] == "ready":
         try:
@@ -454,34 +454,106 @@ def yt_dlp_youtube_arguments(deno_executable: str | None) -> list[str]:
     return arguments
 
 
+async def health_process_output(command: tuple[str, ...], timeout: float) -> tuple[bytes, bytes]:
+    """Bound one startup probe and reap its process on timeout or shutdown."""
+    process = await asyncio.create_subprocess_exec(
+        *command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        output = await asyncio.wait_for(process.communicate(), timeout=timeout)
+        if process.returncode != 0:
+            raise OSError("Diagnostic subprocess returned a non-zero exit code.")
+        return output
+    finally:
+        if process.returncode is None:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+            await process.wait()
+
+
 async def component_health(name: str, definition: tuple[tuple[str, ...], tuple[str, ...]]) -> tuple[str, dict[str, str | None]]:
     candidates, version_args = definition
-    discovery = find_component(name, candidates)
+    discovery = await asyncio.to_thread(find_component, name, candidates)
     if discovery.error:
         return name, {"status": "error", "version": None, "source": discovery.source, "privatePath": None, "message": discovery.error}
     if not discovery.executable:
         return name, {"status": "missing", "version": None, "source": None, "privatePath": None, "message": None}
     try:
-        process = await asyncio.create_subprocess_exec(discovery.executable, *version_args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=3)
+        stdout, stderr = await health_process_output((discovery.executable, *version_args), 3)
         output = (stdout or stderr).decode("utf-8", errors="replace").strip().splitlines()
-        if process.returncode == 0:
-            return name, {"status": "available", "version": output[0] if output else None, "source": discovery.source, "privatePath": discovery.executable, "message": None}
-        return name, {"status": "error", "version": None, "source": discovery.source, "privatePath": discovery.executable, "message": "Version probe returned a non-zero exit code."}
+        return name, {"status": "available", "version": output[0] if output else None, "source": discovery.source, "privatePath": discovery.executable, "message": None}
     except (OSError, asyncio.TimeoutError):
         return name, {"status": "error", "version": None, "source": discovery.source, "privatePath": discovery.executable, "message": "Version probe could not be completed."}
 
 
-async def health_snapshot() -> dict[str, Any]:
-    component_results, chrome_automation = await asyncio.gather(
-        asyncio.gather(*(component_health(name, definition) for name, definition in COMPONENTS.items()), youtube_pot_provider_health()),
-        chrome_automation_status(),
-    )
-    return {
+# Startup diagnostics are collected once. Request handlers only read these
+# snapshots; no subprocess, filesystem probe or refresh runs on /health.
+HEALTH_SNAPSHOT: dict[str, Any] | None = None
+PUBLIC_HEALTH_SNAPSHOT: dict[str, Any] | None = None
+
+
+def initialize_health_snapshot() -> dict[str, Any]:
+    global HEALTH_SNAPSHOT, PUBLIC_HEALTH_SNAPSHOT
+    snapshot = {
         "status": "ok", "agentVersion": AGENT_VERSION, "interfaceVersion": INTERFACE_VERSION,
-        "platform": public_platform_metadata(), "workspace": workspace_health(), "components": dict(component_results),
-        "chromeAutomation": chrome_automation,
+        "platform": public_platform_metadata(), "workspace": workspace_health(),
+        "components": {
+            name: {"status": "checking", "version": None, "source": None,
+                   "privatePath": None, "message": "Startup diagnostic is checking this component."}
+            for name in (*COMPONENTS, "youtubePoTokenProvider")
+        },
+        "chromeAutomation": {
+            "state": "checking", "chromeRunning": None, "browserInstances": 0,
+            "message": "Chrome launch flags are being checked once at Agent startup.",
+        },
     }
+    HEALTH_SNAPSHOT = snapshot
+    PUBLIC_HEALTH_SNAPSHOT = public_health_document(snapshot)
+    return snapshot
+
+
+async def health_snapshot() -> dict[str, Any]:
+    if HEALTH_SNAPSHOT is None:
+        raise RuntimeError("Agent startup health has not been initialized.")
+    return HEALTH_SNAPSHOT
+
+
+def cached_public_health() -> dict[str, Any]:
+    if PUBLIC_HEALTH_SNAPSHOT is None:
+        raise RuntimeError("Agent startup health has not been initialized.")
+    return PUBLIC_HEALTH_SNAPSHOT
+
+
+async def collect_startup_health(snapshot: dict[str, Any]) -> None:
+    """Run one background batch; publish each finished check independently."""
+    def publish() -> None:
+        global PUBLIC_HEALTH_SNAPSHOT
+        if HEALTH_SNAPSHOT is snapshot:
+            PUBLIC_HEALTH_SNAPSHOT = public_health_document(snapshot)
+
+    async def collect_component(name: str) -> None:
+        try:
+            _name, result = await (youtube_pot_provider_health() if name == "youtubePoTokenProvider"
+                                   else component_health(name, COMPONENTS[name]))
+        except Exception:
+            result = {"status": "error", "version": None, "source": None,
+                      "privatePath": None, "message": "Startup component diagnostic failed."}
+        snapshot["components"][name] = result
+        publish()
+        log_component_health(name, result)
+
+    async def collect_chrome() -> None:
+        try:
+            result = await chrome_automation_status()
+        except Exception:
+            result = {"state": "unknown", "chromeRunning": None, "browserInstances": 0,
+                      "message": "Chrome startup switches could not be checked."}
+        snapshot["chromeAutomation"] = result
+        publish()
+
+    await asyncio.gather(*(collect_component(name) for name in snapshot["components"]), collect_chrome())
 
 
 def public_platform_metadata() -> dict[str, str]:
@@ -563,13 +635,9 @@ $enabled = @($browser | Where-Object {
 } | ConvertTo-Json -Compress
 '''
     try:
-        process = await asyncio.create_subprocess_exec(
-            "powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        stdout, _stderr = await health_process_output(
+            ("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script), 5,
         )
-        stdout, _stderr = await asyncio.wait_for(process.communicate(), timeout=5)
-        if process.returncode != 0:
-            return debug_banner_unknown("Chrome process information could not be read.")
         report = json.loads(stdout.decode("utf-8-sig", errors="replace"))
         return summarize_debug_banner_process_report(report)
     except (OSError, asyncio.TimeoutError, json.JSONDecodeError):
@@ -623,14 +691,19 @@ def log_startup_health(health: dict[str, Any], port: int) -> None:
     log(f"Listening on 127.0.0.1:{port}")
     log(f"Workspace: {WORKSPACE_PATH} ({health['workspace']['status']})")
     for name, component in health["components"].items():
-        label = COMPONENT_LABELS[name]
-        if component["status"] == "available":
-            origin = "PATH" if component["source"] == "path" else "local"
-            log(f"{label}: {component['version'] or 'available'} ({origin}: {component['privatePath']})")
-        elif component["status"] == "missing":
-            log(f"{label}: missing")
-        else:
-            log(f"{label}: {component['message'] or 'version probe failed'} ({component['source']}: {component['privatePath']})", error=True)
+        if component["status"] != "checking":
+            log_component_health(name, component)
+
+
+def log_component_health(name: str, component: dict[str, Any]) -> None:
+    label = COMPONENT_LABELS[name]
+    if component["status"] == "available":
+        origin = "PATH" if component["source"] == "path" else "local"
+        log(f"{label}: {component['version'] or 'available'} ({origin}: {component['privatePath']})")
+    elif component["status"] == "missing":
+        log(f"{label}: missing")
+    else:
+        log(f"{label}: {component['message'] or 'version probe failed'} ({component['source']}: {component['privatePath']})", error=True)
 
 
 def path_is_within(path: Path, parent: Path) -> bool:
@@ -5746,7 +5819,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
         if method == "OPTIONS":
             response_status, response_body = "204 No Content", None
         elif method == "GET" and path == "/health":
-            response_status, response_body = "200 OK", public_health_document(await health_snapshot())
+            response_status, response_body = "200 OK", cached_public_health()
         elif method == "GET" and path == "/internal/tool-limits":
             response_status, response_body = "200 OK", {"limits": configured_tool_limits(), "newToolsEnabledByDefault": configured_new_tools_default()}
         elif method == "POST" and path == "/timer/start":
@@ -5921,8 +5994,11 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
     except (ConnectionError, asyncio.TimeoutError, UnicodeDecodeError, asyncio.IncompleteReadError) as error:
         log(f"request failed: {error.__class__.__name__}", error=True)
     finally:
-        for manager in (TASKS, SPEECH_TASKS, VISUAL_MAP_TASKS, CAMERA_RECORD_TASKS, CAPTURE_FRAME_TASKS, MEDIA_CLIP_TASKS, STORYBOARD_TASKS, TIMER_TASKS):
-            manager.tasks.prune()
+        # Health polling only reads the startup snapshot. Task pruning reads
+        # user configuration and belongs to task/other requests and done callbacks.
+        if not (method == "GET" and path == "/health"):
+            for manager in (TASKS, SPEECH_TASKS, VISUAL_MAP_TASKS, CAMERA_RECORD_TASKS, CAPTURE_FRAME_TASKS, MEDIA_CLIP_TASKS, STORYBOARD_TASKS, TIMER_TASKS):
+                manager.tasks.prune()
         writer.close()
         try:
             await writer.wait_closed()
@@ -5931,13 +6007,16 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
 
 
 async def serve(port: int) -> None:
-    initial_health = await health_snapshot()
+    initial_health = initialize_health_snapshot()
     server = await asyncio.start_server(handle_client, host="127.0.0.1", port=port)
     log_startup_health(initial_health, port)
+    diagnostics = asyncio.create_task(collect_startup_health(initial_health), name="startup-health")
     try:
         async with server:
             await server.serve_forever()
     finally:
+        diagnostics.cancel()
+        await asyncio.gather(diagnostics, return_exceptions=True)
         async with PUBLIC_SHARE_LOCK:
             await stop_public_share_unlocked()
         await TIMER_TASKS.shutdown()

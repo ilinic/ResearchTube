@@ -9,6 +9,7 @@ function agentSummary(agent, port) {
 }
 function chromeAutomationSummary(agent) {
   const state = agent?.available ? agent.chromeAutomation?.state : "unknown";
+  if (state === "checking") return { text: "Checking…", className: "warn" };
   if (state === "enabled") return { text: "Enabled", className: "good" };
   if (state === "disabled") return { text: "Disabled", className: "bad" };
   if (state === "mixed") return { text: "Mixed", className: "warn" };
@@ -24,20 +25,38 @@ function currentYouTubeVideoTab(tabs) {
     return isWatchVideo || isShort ? tab : null;
   } catch (_error) { return null; }
 }
+function renderAgentStatus(agent, port = 17843) {
+  const summary = agentSummary(agent, port);
+  const chromeAutomation = chromeAutomationSummary(agent);
+  $("agent-status").textContent = summary.text;
+  $("agent-status").className = summary.className;
+  $("chrome-automation-status").textContent = chromeAutomation.text;
+  $("chrome-automation-status").className = chromeAutomation.className;
+}
+async function loadAgentStatus(port) {
+  $("agent-status").textContent = "Checking…";
+  $("chrome-automation-status").textContent = "Checking…";
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const agent = await call({ type: "agent-status" });
+    renderAgentStatus(agent, port);
+    if (!agent?.available || agent.chromeAutomation?.state !== "checking") return;
+    // Only read the saved startup snapshot. Never trigger another diagnostic.
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+  }
+}
 let activeYouTubeVideoTab = null;
 async function load() {
-  // The contextual action must not wait for Agent health, which can take
-  // seconds while the Local Agent is starting or unavailable.
+  $("agent-status").textContent = "Checking…";
+  $("chrome-automation-status").textContent = "Checking…";
+  // Local popup state and actions render independently of Agent availability.
   const activeTabPromise = chrome.tabs.query({ active: true, lastFocusedWindow: true });
-  const statePromise = call({ type: "status" });
+  const statePromise = call({ type: "status", includeAgent: false });
   activeYouTubeVideoTab = currentYouTubeVideoTab(await activeTabPromise);
   $("describe-video").hidden = !activeYouTubeVideoTab;
   const state = await statePromise;
   const configured = state.configured;
   const youtubeSearch = state.youtubeSearch;
   const searchLimited = Boolean(youtubeSearch?.rateLimited);
-  const agent = agentSummary(state.agent, state.agentPort || 17843);
-  const chromeAutomation = chromeAutomationSummary(state.agent);
   $("extension-status").textContent = version(state.extensionVersion);
   $("extension-status").className = "good";
   $("tunnel-status").textContent = shortTunnel(state.tunnelId);
@@ -46,10 +65,7 @@ async function load() {
   $("youtube-status").className = searchLimited ? "warn" : "good";
   $("interface-version").textContent = version(state.requiredAgentInterfaceVersion);
   $("interface-version").className = "good";
-  $("agent-status").textContent = agent.text;
-  $("agent-status").className = agent.className;
-  $("chrome-automation-status").textContent = chromeAutomation.text;
-  $("chrome-automation-status").className = chromeAutomation.className;
+  void loadAgentStatus(state.agentPort || 17843).catch((error) => console.info("[ResearchTube] Agent status unavailable", error));
 }
 $("chatgpt").addEventListener("click", () => call({ type: "open-external", target: "chatgptNewChat" }));
 $("describe-video").addEventListener("click", async () => {

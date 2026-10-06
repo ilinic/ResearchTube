@@ -34,7 +34,7 @@ const commands = [];
 const context = vm.createContext({
   pruneCompletedTasks, completedTaskHistoryLimit: 2000, developerNewToolsDefault: true, refreshTaskHistorySettings: async () => {},
   resolveChatComposer, chatComposerPageExpression, inspectChatComposer, clickChatComposerAttachmentRemoval, resetChatComposerFileInputs, installChatComposerGuard, readChatComposerGuard, disposeChatComposerGuard,
-  URL, console, Promise, crypto: webcrypto,
+  URL, console, Promise, crypto: webcrypto, setTimeout, clearTimeout,
   MEDIA_TO_CHAT_BIND_TIMEOUT_MS: 30_000,
   chrome: {
     runtime: { id:"test-extension" },
@@ -78,7 +78,7 @@ const context = vm.createContext({
   },
   cdpOpenStableFileChooser: async () => ({ backendNodeId: 7 }),
   cdpWaitForAttachmentAccepted: async () => { afterAcceptance(); },
-  cdpSendAttachedFiles: async (id, count, options) => { if (options.beforeClick) await options.beforeClick(); sends++; attachmentNames = []; },
+  cdpSendAttachedFiles: async (id, count, options) => { if (options.beforeClick) await options.beforeClick(); options.onSendCommit?.(); sends++; attachmentNames = []; },
   findOrCreateServiceTab: async () => { serviceTabs++; return { tab: { id: 43 } }; },
   libraryStoreNow: () => "2026-10-05T00:00:00Z",
   configuredToolLimits: async () => ({ mediaToChatMaxFiles: 2 }),
@@ -95,6 +95,8 @@ let mediaToChatQueue = [];
 let mediaToChatLoaded = true;
 let mediaToChatLoading = null;
 let mediaToChatDraining = true;
+const mediaToChatSendTimers = new Map();
+const mediaToChatResuming = new Set();
 ${section("async function cdpAttachFilesNow(", "\nfunction libraryStoreNow(")}
 ${section("function createAsyncTaskId(", "\nfunction libraryStoreQueuePosition(")}
 ${section("function normalizeLibraryStoreFiles(", "\nasync function resolveLibraryStoreFiles(")}

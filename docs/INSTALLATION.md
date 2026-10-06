@@ -47,7 +47,7 @@ python researchtube_agent.py
 
 The Agent reads `agent/agent-config.json`, binds to `127.0.0.1` and normally uses port `17843`. It creates or opens `agent/workspace/`.
 
-The startup summary reports Workspace health, interface version and every discovered component. Physical paths appear only in this local console.
+The Agent starts listening and prints its version/interface and Workspace summary before its background diagnostics finish. Component results appear in the console as each one-time startup check completes; health initially reports `checking` for unfinished checks. Repeated status requests read the saved startup snapshot. Restart the Agent after changing tools or Chrome launch flags to refresh it. Physical paths appear only in this local console.
 
 In Extension Settings, select **Test connection** in the Local Agent section. A successful result should show compatible Extension/Agent interface versions and component statuses.
 

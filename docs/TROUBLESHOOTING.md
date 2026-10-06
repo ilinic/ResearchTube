@@ -83,7 +83,7 @@ The API key belongs only in ResearchTube Settings. Diagnostic exports intentiona
 
 ## Local component failures
 
-Call `system_agent_status` and inspect the named component.
+Call `system_agent_status` and inspect the named component. These diagnostics, including Workspace free space, are saved at Agent startup. A `checking` state means the one-time background check has not finished; poll status again later. After replacing executables or relaunching Chrome with a different silent-automation flag, restart the Agent to obtain a new snapshot. Settings connection tests do not rerun diagnostics.
 
 - `missing`: put the executable in its documented `agent/tools/` location or install it on `PATH`.
 - `error`: discovery is ambiguous or the executable cannot report a usable version. Remove duplicate candidates and test it locally.
@@ -215,3 +215,7 @@ If removal cannot be confirmed, the task fails before new files are uploaded or 
 ### Composer image remains after explicit clear
 
 If `media_to_chat` with `composerPolicy: "clear"` clears text but leaves an image, inspect task status and the Extension console. Labelled `Remove <filename>` buttons are invoked within the live Composer even while opacity/pointer CSS hides them. ResearchTube confirms that the attachment count decreased before uploading; disabled buttons, unknown removal markup, or an unconfirmed removal stop the task before new files or Send. The current-chat service widget declares only `inline` through resource metadata; refresh MCP resources if ChatGPT still offers fullscreen/PiP for an older template.
+
+## Files are attached but delayed Send has not happened
+
+Check `media_to_chat_status`: `waitingToSend` reports `sendNotBefore` in UTC and `remainingSeconds`. The requested delay begins after attachment acceptance. At zero remaining time, Chrome still needs to run the wake callback, verify the original Composer, and find an enabled Send. Keep the same conversation/tab open; the assistant response may need to finish. If you want to stop, call `media_to_chat_cancel` before Send starts: existing files and text remain in Composer. A later edit, missing guard after page reload, navigation or closure stops sending rather than switching tabs. A second submission to a Composer reserved by another working task is refused; cancel or finish that task first.
