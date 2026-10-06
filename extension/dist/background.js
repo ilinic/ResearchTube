@@ -1,9 +1,235 @@
-// storyboards.js
+// timers.js
 var object = (properties, required = Object.keys(properties)) => ({ type: "object", additionalProperties: false, properties, required });
+var text = { type: "string" };
+var nullableText = { type: ["string", "null"] };
+var number = { type: "number", minimum: 0 };
+var nullableNumber = { type: ["number", "null"], minimum: 0 };
+var taskId = { type: "string", pattern: "^tsk_[A-Za-z0-9_-]{10}$" };
+var warning = object({ code: { enum: ["SYSTEM_CLOCK_CHANGED", "SYSTEM_LOCAL_TIME_CHANGED", "SYSTEM_SUSPEND_DETECTED", "EXECUTION_GAP_DETECTED", "INTERNET_CLOCK_STALE"] }, message: text, observedAtUtc: text, shiftSeconds: { type: ["number", "null"] }, gapSeconds: nullableNumber });
+var error = object({ code: { enum: ["TIMER_INVALID", "TIMER_SYSTEM_SUSPENDED", "TIMER_INTERNET_UNAVAILABLE", "TIMER_FAILED"] }, message: text });
+var sync = object({ provider: { const: "timeapi.io" }, sampledAtUtc: text, sampleAgeSeconds: number, roundTripMs: number, estimatedUncertaintyMs: number, systemClockOffsetSeconds: { type: "number" }, stale: { type: "boolean" } });
+var fields = {
+  taskId,
+  status: { enum: ["working", "completed", "cancelled", "failed"] },
+  phase: { enum: ["preparing", "waiting", "completed", "cancelled", "failed"] },
+  mode: { enum: ["duration", "until"] },
+  clockSource: { enum: ["system", "internet"] },
+  timeZone: text,
+  createdAtUtc: text,
+  startedAtUtc: nullableText,
+  currentUtc: nullableText,
+  targetUtc: nullableText,
+  startedAtLocal: nullableText,
+  currentLocal: nullableText,
+  targetLocal: nullableText,
+  currentUtcOffsetSeconds: { type: ["integer", "null"] },
+  targetUtcOffsetSeconds: { type: ["integer", "null"] },
+  durationSeconds: nullableNumber,
+  elapsedSeconds: nullableNumber,
+  remainingSeconds: nullableNumber,
+  progressPercent: { ...number, maximum: 100 },
+  pollIntervalMs: { type: "integer", minimum: 250 },
+  completedAtUtc: nullableText,
+  latenessSeconds: nullableNumber,
+  sleepDetection: { enum: ["systemCounters", "executionGapOnly"] },
+  warnings: { type: "array", maxItems: 20, items: warning },
+  warningCount: { type: "integer", minimum: 0 },
+  error: { anyOf: [error, { type: "null" }] },
+  clockSync: { anyOf: [sync, { type: "null" }] }
+};
+var timerTaskSchema = object(fields);
+var TIMER_TOOL_NAMES = Object.freeze(["timer_start", "timer_status", "timer_cancel"]);
+function timerDefinitions(readAnnotations, writeAnnotations) {
+  return [
+    {
+      name: "timer_start",
+      title: "Start a real timer",
+      description: "Give an LLM a real timed pause or deadline: language models have no precise internal running clock. Start an independent asynchronous Local Agent timer and return immediately. Use either duration with unit seconds/minutes/hours (fractions allowed; zero reads current time), or until with a complete ISO date/time including seconds. until accepts UTC Z, an explicit offset, or local time with timeZone; the default display/local-input zone is the browser's IANA zone. Ambiguous/nonexistent local times and past deadlines are rejected. clockSource defaults to system; internet reads UTC from timeapi.io and never silently falls back to the computer clock. Internet preparation occurs before the relative countdown starts. Relative durations use a monotonic counter and survive calendar-clock corrections; absolute deadlines follow the selected calendar clock. Clock changes are returned as warnings. System suspend fails the timer. Timer records exist only in Agent memory and are removed on restart or after configured completed-history eviction. Show the user any requested preparation instruction, then continue polling timer_status in the same assistant turn at pollIntervalMs until completed before the next dependent action. Ending the assistant response does not arrange an automatic later response or notification.",
+      annotations: { ...writeAnnotations, openWorldHint: true },
+      inputSchema: { ...object({ duration: { ...number, description: "Relative duration; mutually exclusive with until." }, unit: { enum: ["seconds", "minutes", "hours"], default: "seconds" }, until: { ...text, description: "Complete ISO timestamp; date and seconds required. Mutually exclusive with duration/unit." }, timeZone: { ...text, description: "IANA zone, for example Pacific/Auckland; defaults to browser local zone." }, clockSource: { enum: ["system", "internet"], default: "system" } }, []), oneOf: [{ required: ["duration"], not: { required: ["until"] } }, { required: ["until"], not: { anyOf: [{ required: ["duration"] }, { required: ["unit"] }] } }] },
+      outputSchema: timerTaskSchema,
+      _meta: { "openai/toolInvocation/invoking": "Starting timer\u2026", "openai/toolInvocation/invoked": "Timer started." }
+    },
+    {
+      name: "timer_status",
+      title: "Check timer progress",
+      description: "Read the actual remaining/elapsed seconds, monotonic percentage, UTC and local start/current/target timestamps, time zone and offsets, completion time, clock-change warnings and internet synchronization metadata. LLMs have no precise internal timer; use this tool to confirm elapsed time instead of guessing. Poll no faster than pollIntervalMs. The Agent enforces a short wait when repeated status calls arrive too quickly. Terminal snapshots remain available until history eviction or Agent restart. A long execution gap is a warning, not proof of system sleep. A completed timer does not automatically wake ChatGPT or initiate another assistant turn.",
+      annotations: readAnnotations,
+      inputSchema: object({ taskId }),
+      outputSchema: timerTaskSchema
+    },
+    {
+      name: "timer_cancel",
+      title: "Cancel a timer",
+      description: "Stop a working Local Agent timer without removing its retained terminal status. Returns cancelled=true only if this call cancelled active work. Repeating cancellation preserves the existing terminal result. TIMER_NOT_FOUND means the ID is invalid, history was evicted, or the Agent/computer restarted; timer records are not saved to disk.",
+      annotations: writeAnnotations,
+      inputSchema: object({ taskId }),
+      outputSchema: object({ task: timerTaskSchema, cancelled: { type: "boolean" } })
+    }
+  ];
+}
+function fail(message, code = "TIMER_INVALID") {
+  throw Object.assign(new Error(message), { code });
+}
+var plain = (value) => value && typeof value === "object" && !Array.isArray(value);
+function validateTimerInput(name, value) {
+  if (!plain(value)) fail("Timer input must be an object.");
+  if (name !== "timer_start") {
+    if (Object.keys(value).length !== 1 || typeof value.taskId !== "string" || !/^tsk_[A-Za-z0-9_-]{10}$/.test(value.taskId)) fail("Use the unchanged taskId returned by timer_start.");
+    return { taskId: value.taskId };
+  }
+  if (Object.keys(value).some((key) => !["duration", "unit", "until", "timeZone", "clockSource"].includes(key)) || Object.hasOwn(value, "duration") === Object.hasOwn(value, "until")) fail("Specify exactly one of duration or until and no unsupported fields.");
+  if (value.clockSource !== void 0 && !["system", "internet"].includes(value.clockSource)) fail("clockSource must be system or internet.");
+  if (value.timeZone !== void 0) {
+    try {
+      new Intl.DateTimeFormat("en", { timeZone: value.timeZone });
+    } catch {
+      fail("timeZone must be an available IANA time zone.");
+    }
+    if (typeof value.timeZone !== "string" || !value.timeZone) fail("timeZone must be a nonempty IANA name.");
+  }
+  if (Object.hasOwn(value, "duration")) {
+    if (typeof value.duration !== "number" || !Number.isFinite(value.duration) || value.duration < 0 || value.unit !== void 0 && !["seconds", "minutes", "hours"].includes(value.unit)) fail("duration must be nonnegative and finite; unit must be seconds, minutes or hours.");
+  } else if (Object.hasOwn(value, "unit") || typeof value.until !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})?$/.test(value.until)) fail("until must contain a complete ISO date/time including seconds; omit unit.");
+  return { ...value };
+}
+function project(schema, value) {
+  const bad = () => fail("The Local Agent returned invalid timer metadata.", "AGENT_INVALID_RESPONSE");
+  if (schema.anyOf) {
+    for (const child of schema.anyOf) {
+      try {
+        return project(child, value);
+      } catch {
+      }
+    }
+    bad();
+  }
+  if (schema.const !== void 0 && value !== schema.const || schema.enum && !schema.enum.includes(value)) bad();
+  if (value === null) {
+    if (schema.type === "null" || Array.isArray(schema.type) && schema.type.includes("null")) return null;
+    bad();
+  }
+  const type = Array.isArray(schema.type) ? schema.type.find((t) => t !== "null") : schema.type;
+  if (type === "object") {
+    if (!plain(value) || schema.required.some((key) => !Object.hasOwn(value, key))) bad();
+    return Object.fromEntries(Object.entries(schema.properties).map(([key, field]) => [key, project(field, value[key])]));
+  }
+  if (type === "array") {
+    if (!Array.isArray(value) || schema.maxItems !== void 0 && value.length > schema.maxItems) bad();
+    return value.map((item) => project(schema.items, item));
+  }
+  if (type === "number" || type === "integer") {
+    if (typeof value !== "number" || !Number.isFinite(value) || type === "integer" && !Number.isSafeInteger(value) || schema.minimum !== void 0 && value < schema.minimum || schema.maximum !== void 0 && value > schema.maximum) bad();
+  } else if (type && typeof value !== type) bad();
+  if (schema.pattern && !new RegExp(schema.pattern).test(value)) bad();
+  return value;
+}
+function normalizeTimerResult(name, value) {
+  const result = project(name === "timer_cancel" ? object({ task: timerTaskSchema, cancelled: { type: "boolean" } }) : timerTaskSchema, value);
+  const task = name === "timer_cancel" ? result.task : result;
+  if (task.status === "working" && !["preparing", "waiting"].includes(task.phase) || task.status !== "working" && task.phase !== task.status || task.status === "completed" && (task.progressPercent !== 100 || task.remainingSeconds !== 0) || task.status !== "failed" && task.error !== null || task.warningCount < task.warnings.length || task.clockSource === "system" && task.clockSync !== null) fail("The Local Agent returned inconsistent timer metadata.", "AGENT_INVALID_RESPONSE");
+  for (const key of ["createdAtUtc", "startedAtUtc", "currentUtc", "targetUtc", "completedAtUtc"]) {
+    if (task[key] !== null && (!/Z$/.test(task[key]) || !Number.isFinite(Date.parse(task[key])))) fail("The Local Agent returned invalid UTC timer metadata.", "AGENT_INVALID_RESPONSE");
+  }
+  return result;
+}
+
+// task-history.js
+function pruneCompletedTasks(tasks, maximum = 2e3) {
+  if (!Number.isSafeInteger(maximum) || maximum < 1) maximum = 2e3;
+  const terminal = [...tasks.values()].filter((task) => ["completed", "failed", "cancelled"].includes(task.status));
+  terminal.sort((a, b) => String(a.updatedAt || a.createdAt).localeCompare(String(b.updatedAt || b.createdAt)));
+  for (const task of terminal.slice(0, Math.max(0, terminal.length - maximum))) tasks.delete(task.taskId);
+}
+
+// chat-composer.js
+function inspectChatComposer() {
+  const composer = document.querySelector("#prompt-textarea") || document.querySelector('[contenteditable="true"][role="textbox"]') || document.querySelector("textarea");
+  const root = composer?.closest("form");
+  if (!root) return { found: false, textEmpty: false, attachments: [], selectedFiles: [], removeTargets: [] };
+  const visible = (element) => {
+    const bounds = element.getBoundingClientRect();
+    const style = getComputedStyle(element);
+    return bounds.width > 0 && bounds.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+  };
+  const removalButtons = [...root.querySelectorAll('button, [role="button"]')].filter((element) => {
+    const labels = ["aria-label", "title", "data-testid"].map((name) => element.getAttribute(name) || "").join(" ").trim();
+    return visible(element) && /(?:\b(?:remove|delete)\b|удалить)/i.test(labels) && (/(?:\b(?:files?|attachments?|images?|uploads?)\b|файл|вложени|изображени)/i.test(labels) || /^(?:remove|delete|удалить)\s*$/i.test(labels));
+  });
+  const selectedFiles = [...document.querySelectorAll('input[type="file"]')].filter((input) => !input.closest("form") || input.closest("form") === root).flatMap((input) => [...input.files || []].map((file) => ({ name: file.name, size: file.size, lastModified: file.lastModified })));
+  const attachments = removalButtons.map((button) => {
+    const card = button.closest('[data-file-id], [data-testid*="attachment"], [data-testid*="file"], [data-testid*="image"]') || button.parentElement;
+    const image = card?.querySelector("img");
+    const text3 = [card?.innerText || "", button.getAttribute("aria-label") || "", button.getAttribute("title") || "", image?.getAttribute("alt") || ""].join(" ");
+    return { text: text3.slice(0, 500) };
+  });
+  const removeTargets = removalButtons.map((button) => {
+    const bounds = button.getBoundingClientRect();
+    return { x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2, enabled: !button.disabled && button.getAttribute("aria-disabled") !== "true" };
+  });
+  const previewCount = [...root.querySelectorAll("img")].filter((image) => visible(image) && /^(?:blob:|data:)/i.test(image.getAttribute("src") || "")).length;
+  const text2 = composer.value ?? composer.innerText ?? composer.textContent ?? "";
+  return { found: true, textEmpty: String(text2).trim() === "", attachments, selectedFiles, removeTargets, previewCount };
+}
+function installChatComposerGuard(expectedNames, token) {
+  const key = "__researchtubeChatComposerGuard";
+  window[key]?.dispose?.();
+  const composer = document.querySelector("#prompt-textarea") || document.querySelector('[contenteditable="true"][role="textbox"]') || document.querySelector("textarea");
+  const root = composer?.closest("form");
+  if (!root) return false;
+  const expected = [...expectedNames].sort();
+  const state = { token, changed: false, ownSelectionSeen: false };
+  const listener = (event) => {
+    if (!event.isTrusted) return;
+    const target = event.target;
+    const liveComposer = document.querySelector("#prompt-textarea") || document.querySelector('[contenteditable="true"][role="textbox"]') || document.querySelector("textarea");
+    const liveRoot = liveComposer?.closest("form");
+    if (!liveRoot) {
+      state.changed = true;
+      return;
+    }
+    if (event.type === "change" && target?.matches?.('input[type="file"]')) {
+      if (target.closest("form") && target.closest("form") !== liveRoot) return;
+      const names = [...target.files || []].map((file) => file.name).sort();
+      const ownSelection = !state.ownSelectionSeen && names.length === expected.length && names.every((name, index) => name === expected[index]);
+      if (ownSelection) state.ownSelectionSeen = true;
+      else state.changed = true;
+    } else if (liveRoot.contains(target)) {
+      if (["beforeinput", "input"].includes(event.type) && (target === liveComposer || liveComposer.contains(target))) state.changed = true;
+      if (event.type === "drop" && event.dataTransfer?.files?.length) state.changed = true;
+      if (event.type === "paste" && event.clipboardData?.files?.length) state.changed = true;
+      if (event.type === "click") {
+        const button = target?.closest?.('button, [role="button"]');
+        const label = ["aria-label", "title", "data-testid"].map((name) => button?.getAttribute(name) || "").join(" ");
+        if (/(?:\b(?:remove|delete)\b|удалить)/i.test(label)) state.changed = true;
+      }
+    }
+  };
+  const types = ["beforeinput", "input", "change", "drop", "paste", "click"];
+  for (const type of types) document.addEventListener(type, listener, true);
+  state.dispose = () => {
+    for (const type of types) document.removeEventListener(type, listener, true);
+    if (window[key] === state) delete window[key];
+  };
+  window[key] = state;
+  return true;
+}
+function readChatComposerGuard(token) {
+  const state = window.__researchtubeChatComposerGuard;
+  return state?.token === token ? { present: true, changed: state.changed } : { present: false, changed: true };
+}
+function disposeChatComposerGuard(token) {
+  const state = window.__researchtubeChatComposerGuard;
+  if (state?.token === token) state.dispose();
+  return true;
+}
+
+// storyboards.js
+var object2 = (properties, required = Object.keys(properties)) => ({ type: "object", additionalProperties: false, properties, required });
 var integer = { type: "integer", minimum: 0 };
 var positive = { type: "integer", minimum: 1 };
 var videoId = { type: "string", pattern: "^[A-Za-z0-9_-]{11}$" };
-var taskId = { type: "string", pattern: "^tsk_[A-Za-z0-9_-]{10}$" };
+var taskId2 = { type: "string", pattern: "^tsk_[A-Za-z0-9_-]{10}$" };
 var variantId = { type: "string", pattern: "^storyboard_[1-9][0-9]*$" };
 var timestampPositions = ["none", "topLeft", "topRight", "bottomLeft", "bottomRight"];
 var frameTimestampPosition = { type: "string", enum: timestampPositions, default: "bottomRight" };
@@ -18,8 +244,8 @@ var messages = {
   STORYBOARD_DOWNLOAD_FAILED: "A sheet could not be downloaded or safely published. Check availability, free space, and conflicting files.",
   TASK_NOT_FOUND: "The storyboard task does not exist in this Agent session."
 };
-var errorSchema = object({ code: { type: "string", enum: Object.keys(messages) }, message: { type: "string" } });
-var variantSchema = object({
+var errorSchema = object2({ code: { type: "string", enum: Object.keys(messages) }, message: { type: "string" } });
+var variantSchema = object2({
   variantId,
   cellWidth: positive,
   cellHeight: positive,
@@ -32,24 +258,24 @@ var variantSchema = object({
   format: { const: "jpeg" }
 });
 var selectionSchema = { oneOf: [
-  object({ mode: { const: "all" } }),
-  object({ mode: { const: "range" }, startSeconds: { type: "number", minimum: 0 }, endSeconds: { type: "number", minimum: 0 } }),
-  object({ mode: { const: "sheets" }, sheetIndexes: { type: "array", minItems: 1, items: integer } })
+  object2({ mode: { const: "all" } }),
+  object2({ mode: { const: "range" }, startSeconds: { type: "number", minimum: 0 }, endSeconds: { type: "number", minimum: 0 } }),
+  object2({ mode: { const: "sheets" }, sheetIndexes: { type: "array", minItems: 1, items: integer } })
 ] };
-var rejected = object({ status: { const: "rejected" }, error: errorSchema });
+var rejected = object2({ status: { const: "rejected" }, error: errorSchema });
 var infoSchema = { type: "object", oneOf: [
-  object({ videoId, durationSeconds: { type: "number", exclusiveMinimum: 0 }, available: { const: true }, variants: { type: "array", minItems: 1, items: variantSchema } }),
-  object({ videoId, available: { const: false }, reason: { enum: reasons } }),
+  object2({ videoId, durationSeconds: { type: "number", exclusiveMinimum: 0 }, available: { const: true }, variants: { type: "array", minItems: 1, items: variantSchema } }),
+  object2({ videoId, available: { const: false }, reason: { enum: reasons } }),
   rejected
 ] };
 var statuses = ["working", "completed", "cancelled", "failed"];
-var sheetTimestampSchema = object({
+var sheetTimestampSchema = object2({
   sheetIndex: integer,
   frameTimestampsSeconds: { type: "array", minItems: 1, items: { type: "number", minimum: 0 } }
 });
-var taskSchema = object(
+var taskSchema = object2(
   {
-    taskId,
+    taskId: taskId2,
     status: { enum: statuses },
     phase: { enum: ["resolving", "downloading", "publishing", "completed", "cancelled", "failed"] },
     progressPercent: { type: "number", minimum: 0, maximum: 100 },
@@ -66,7 +292,7 @@ var taskSchema = object(
   },
   ["taskId", "status", "phase", "progressPercent", "completedSheets", "totalSheets", "downloadedSheets", "reusedSheets", "workspaceDirectory", "pollIntervalMs", "frameTimestampPosition", "sheetTimestamps"]
 );
-var cancelSchema = object({ taskId, status: { enum: statuses } });
+var cancelSchema = object2({ taskId: taskId2, status: { enum: statuses } });
 var STORYBOARD_TOOL_NAMES = Object.freeze(["youtube_storyboard_get_info", "youtube_storyboard_download", "youtube_storyboard_get_task", "youtube_storyboard_cancel_task"]);
 function storyboardDefinitions(readAnnotations, writeAnnotations) {
   const make = (name, title, description, inputSchema, outputSchema, write = false) => ({
@@ -78,39 +304,39 @@ function storyboardDefinitions(readAnnotations, writeAnnotations) {
     annotations: { ...write ? writeAnnotations : readAnnotations, openWorldHint: name.endsWith("get_info") || name.endsWith("download") }
   });
   return [
-    make(STORYBOARD_TOOL_NAMES[0], "Get YouTube storyboard variants", "Discover pre-generated timeline-preview sheet variants. Returns cell geometry, interval and sheet count. frameIntervalEstimated marks timing inferred when YouTube has no nonzero interval or the last yt-dlp fallback only provides average fps; range boundaries then use that estimate. Reads the matching open YouTube tab first, then yt-dlp metadata. Creates no files and downloads no media or sheets. variantId is opaque; retain it unchanged.", object({ videoId }), infoSchema),
-    make(STORYBOARD_TOOL_NAMES[1], "Download YouTube storyboard sheets", "Start one asynchronous task for all sheets, an inclusive time range within video duration, or zero-based sheet indexes of one discovered variant. Downloads YouTube's ready preview JPEG sheets only, never video/audio. sheetTimestamps always returns the calculated absolute time for every real tile. frameTimestampPosition controls whether those labels are drawn on the ready-made grid: bottomRight by default, or none, topLeft, topRight, or bottomLeft when explicitly requested; unused cells of a final partial sheet stay untouched. Files are directly in storyboards/ with video ID, sz_widthxheight, tstp_seconds, mesh_columnsxrows and sheet index tags in each filename. Never displays an image automatically. Poll youtube_storyboard_get_task at pollIntervalMs; use workspace_list on workspaceDirectory to find files.", object({ videoId, variantId, selection: selectionSchema, frameTimestampPosition }, ["videoId", "variantId", "selection"]), { type: "object", oneOf: [taskSchema, rejected] }, true),
-    make(STORYBOARD_TOOL_NAMES[2], "Get storyboard task progress", "Get compact sheet counts and monotonic progress. Poll no faster than pollIntervalMs. Complete sheets remain in storyboards/ after failure or cancellation. Does not return images or a sheet-path array.", object({ taskId }), { type: "object", oneOf: [taskSchema, rejected] }),
-    make(STORYBOARD_TOOL_NAMES[3], "Cancel storyboard download", "Stop current and queued transfers for one storyboard task. Preserves all completely published sheets. Repeating cancellation returns the existing terminal status.", object({ taskId }), { type: "object", oneOf: [cancelSchema, rejected] }, true)
+    make(STORYBOARD_TOOL_NAMES[0], "Get YouTube storyboard variants", "Discover pre-generated timeline-preview sheet variants. Returns cell geometry, interval and sheet count. frameIntervalEstimated marks timing inferred when YouTube has no nonzero interval or the last yt-dlp fallback only provides average fps; range boundaries then use that estimate. Reads the matching open YouTube tab first, then yt-dlp metadata. Creates no files and downloads no media or sheets. variantId is opaque; retain it unchanged.", object2({ videoId }), infoSchema),
+    make(STORYBOARD_TOOL_NAMES[1], "Download YouTube storyboard sheets", "Start one asynchronous task for all sheets, an inclusive time range within video duration, or zero-based sheet indexes of one discovered variant. Downloads YouTube's ready preview JPEG sheets only, never video/audio. sheetTimestamps always returns the calculated absolute time for every real tile. frameTimestampPosition controls whether those labels are drawn on the ready-made grid: bottomRight by default, or none, topLeft, topRight, or bottomLeft when explicitly requested; unused cells of a final partial sheet stay untouched. Files are directly in storyboards/ with video ID, sz_widthxheight, tstp_seconds, mesh_columnsxrows and sheet index tags in each filename. Never displays an image automatically. Poll youtube_storyboard_get_task at pollIntervalMs; use workspace_list on workspaceDirectory to find files.", object2({ videoId, variantId, selection: selectionSchema, frameTimestampPosition }, ["videoId", "variantId", "selection"]), { type: "object", oneOf: [taskSchema, rejected] }, true),
+    make(STORYBOARD_TOOL_NAMES[2], "Get storyboard task progress", "Get compact sheet counts and monotonic progress. Poll no faster than pollIntervalMs. Complete sheets remain in storyboards/ after failure or cancellation. Does not return images or a sheet-path array.", object2({ taskId: taskId2 }), { type: "object", oneOf: [taskSchema, rejected] }),
+    make(STORYBOARD_TOOL_NAMES[3], "Cancel storyboard download", "Stop current and queued transfers for one storyboard task. Preserves all completely published sheets. Repeating cancellation returns the existing terminal status.", object2({ taskId: taskId2 }), { type: "object", oneOf: [cancelSchema, rejected] }, true)
   ];
 }
-function fail(code = "STORYBOARD_INVALID") {
+function fail2(code = "STORYBOARD_INVALID") {
   throw Object.assign(new Error(messages[code] || "The Agent returned invalid storyboard metadata."), { code });
 }
-var plain = (value) => value && typeof value === "object" && !Array.isArray(value);
+var plain2 = (value) => value && typeof value === "object" && !Array.isArray(value);
 var matches = (schema, value) => typeof value === "string" && new RegExp(schema.pattern).test(value);
 var finite = (value) => typeof value === "number" && Number.isFinite(value);
 function validateStoryboardInput(name, args) {
   const keys = name.endsWith("get_info") ? ["videoId"] : name.endsWith("download") ? ["videoId", "variantId", "selection"] : ["taskId"];
   const allowed = name.endsWith("download") ? [...keys, "frameTimestampPosition"] : keys;
-  if (!plain(args) || Object.keys(args).some((k) => !allowed.includes(k)) || keys.some((k) => !Object.hasOwn(args, k))) fail();
+  if (!plain2(args) || Object.keys(args).some((k) => !allowed.includes(k)) || keys.some((k) => !Object.hasOwn(args, k))) fail2();
   if (keys.includes("taskId")) {
-    if (!matches(taskId, args.taskId)) fail();
+    if (!matches(taskId2, args.taskId)) fail2();
     return { taskId: args.taskId };
   }
-  if (!matches(videoId, args.videoId)) fail();
+  if (!matches(videoId, args.videoId)) fail2();
   if (name.endsWith("get_info")) return { videoId: args.videoId };
-  if (!matches(variantId, args.variantId) || !plain(args.selection) || args.frameTimestampPosition !== void 0 && !timestampPositions.includes(args.frameTimestampPosition)) fail();
+  if (!matches(variantId, args.variantId) || !plain2(args.selection) || args.frameTimestampPosition !== void 0 && !timestampPositions.includes(args.frameTimestampPosition)) fail2();
   const s = args.selection;
   const position = args.frameTimestampPosition === void 0 ? "bottomRight" : args.frameTimestampPosition;
   if (s.mode === "all" && Object.keys(s).length === 1) return { ...args, frameTimestampPosition: position, selection: { mode: "all" } };
   if (s.mode === "range" && Object.keys(s).length === 3 && finite(s.startSeconds) && finite(s.endSeconds) && 0 <= s.startSeconds && s.startSeconds <= s.endSeconds) return { ...args, frameTimestampPosition: position, selection: { mode: "range", startSeconds: s.startSeconds, endSeconds: s.endSeconds } };
   if (s.mode === "sheets" && Object.keys(s).length === 2 && Array.isArray(s.sheetIndexes) && s.sheetIndexes.length && s.sheetIndexes.every((i) => Number.isInteger(i) && i >= 0)) return { ...args, frameTimestampPosition: position, selection: { mode: "sheets", sheetIndexes: [...new Set(s.sheetIndexes)] } };
-  fail();
+  fail2();
 }
 function normalizeStoryboardResult(name, data) {
-  const bad = () => fail("AGENT_INVALID_RESPONSE");
-  if (!plain(data)) bad();
+  const bad = () => fail2("AGENT_INVALID_RESPONSE");
+  if (!plain2(data)) bad();
   if (data.status === "rejected") {
     if (!messages[data.error?.code]) bad();
     return { status: "rejected", error: { code: data.error.code, message: messages[data.error.code] } };
@@ -120,16 +346,16 @@ function normalizeStoryboardResult(name, data) {
     if (data.available === false && reasons.includes(data.reason)) return { videoId: data.videoId, available: false, reason: data.reason };
     if (data.available !== true || !finite(data.durationSeconds) || data.durationSeconds <= 0 || !Array.isArray(data.variants) || !data.variants.length) bad();
     const variants = data.variants.map((v) => {
-      if (!plain(v) || !matches(variantId, v.variantId) || v.format !== "jpeg" || typeof v.frameIntervalEstimated !== "boolean" || !finite(v.frameIntervalSeconds) || v.frameIntervalSeconds <= 0 || !["cellWidth", "cellHeight", "columns", "rows", "framesPerSheet", "sheetCount"].every((k) => Number.isInteger(v[k]) && v[k] > 0) || v.framesPerSheet !== v.columns * v.rows) bad();
+      if (!plain2(v) || !matches(variantId, v.variantId) || v.format !== "jpeg" || typeof v.frameIntervalEstimated !== "boolean" || !finite(v.frameIntervalSeconds) || v.frameIntervalSeconds <= 0 || !["cellWidth", "cellHeight", "columns", "rows", "framesPerSheet", "sheetCount"].every((k) => Number.isInteger(v[k]) && v[k] > 0) || v.framesPerSheet !== v.columns * v.rows) bad();
       return Object.fromEntries(Object.keys(variantSchema.properties).map((k) => [k, v[k]]));
     });
     if (new Set(variants.map((v) => v.variantId)).size !== variants.length) bad();
     return { videoId: data.videoId, durationSeconds: data.durationSeconds, available: true, variants };
   }
-  if (!matches(taskId, data.taskId) || !statuses.includes(data.status)) bad();
+  if (!matches(taskId2, data.taskId) || !statuses.includes(data.status)) bad();
   if (name.endsWith("cancel_task")) return { taskId: data.taskId, status: data.status };
   if (!taskSchema.properties.phase.enum.includes(data.phase) || !finite(data.progressPercent) || data.progressPercent < 0 || data.progressPercent > 100 || !["completedSheets", "totalSheets", "downloadedSheets", "reusedSheets", "pollIntervalMs"].every((k) => Number.isInteger(data[k]) && data[k] >= 0) || data.pollIntervalMs < 1e3 || data.totalSheets < 1 || data.completedSheets > data.totalSheets || data.completedSheets !== data.downloadedSheets + data.reusedSheets || data.workspaceDirectory !== "storyboards" || !timestampPositions.includes(data.frameTimestampPosition) || !Array.isArray(data.sheetTimestamps) || data.sheetTimestamps.length !== data.totalSheets) bad();
-  if (new Set(data.sheetTimestamps.map((sheet) => sheet?.sheetIndex)).size !== data.sheetTimestamps.length || data.sheetTimestamps.some((sheet) => !plain(sheet) || !Number.isInteger(sheet.sheetIndex) || sheet.sheetIndex < 0 || !Array.isArray(sheet.frameTimestampsSeconds) || !sheet.frameTimestampsSeconds.length || sheet.frameTimestampsSeconds.some((timestamp) => !finite(timestamp) || timestamp < 0))) bad();
+  if (new Set(data.sheetTimestamps.map((sheet) => sheet?.sheetIndex)).size !== data.sheetTimestamps.length || data.sheetTimestamps.some((sheet) => !plain2(sheet) || !Number.isInteger(sheet.sheetIndex) || sheet.sheetIndex < 0 || !Array.isArray(sheet.frameTimestampsSeconds) || !sheet.frameTimestampsSeconds.length || sheet.frameTimestampsSeconds.some((timestamp) => !finite(timestamp) || timestamp < 0))) bad();
   if (data.status !== "working" && data.phase !== data.status || data.status === "working" && !["resolving", "downloading", "publishing"].includes(data.phase)) bad();
   if (data.status === "completed" && (data.progressPercent !== 100 || data.completedSheets !== data.totalSheets)) bad();
   if (data.status !== "failed" && data.error) bad();
@@ -164,6 +390,7 @@ var DEFAULTS = {
 var DEFAULT_MCP_TOOL_PREFERENCES = Object.freeze({ newToolsEnabledByDefault: true, enabledByName: {} });
 var MCP_TOOL_GROUPS = Object.freeze({
   system: { title: "System", order: 10 },
+  timers: { title: "Timers", order: 12 },
   speech: { title: "Text to Speech", order: 15 },
   workspace: { title: "Workspace", order: 20 },
   media: { title: "Media and images", order: 30 },
@@ -183,6 +410,9 @@ var MCP_TOOL_SETTINGS = Object.freeze({
   youtube_storyboard_get_task: { group: "storyboards" },
   youtube_storyboard_cancel_task: { group: "storyboards" },
   system_agent_status: { group: "system", alwaysEnabled: true },
+  timer_start: { group: "timers" },
+  timer_status: { group: "timers" },
+  timer_cancel: { group: "timers" },
   system_speech_list_voices: { group: "speech" },
   system_speech_speak: { group: "speech" },
   system_speech_status: { group: "speech" },
@@ -202,11 +432,14 @@ var MCP_TOOL_SETTINGS = Object.freeze({
   media_capture_frame_cancel_task: { group: "media" },
   media_capture_screen: { group: "media" },
   media_image_crop: { group: "media" },
-  media_image_show: { group: "media" },
+  media_show: { group: "media" },
   media_image_inspect: { group: "media" },
   visual_map_create: { group: "visualMaps" },
   visual_map_get_task: { group: "visualMaps" },
   visual_map_cancel_task: { group: "visualMaps" },
+  media_to_chat: { group: "media" },
+  media_to_chat_status: { group: "media" },
+  media_to_chat_cancel: { group: "media" },
   camera_list: { group: "camera" },
   camera_capture_frame: { group: "camera" },
   camera_record_video: { group: "camera" },
@@ -236,12 +469,12 @@ var MCP_TOOL_SETTINGS = Object.freeze({
   online_share_status: { group: "online" },
   online_share_stop: { group: "online" }
 });
-var EXTENSION_VERSION = "2.2.36";
-var REQUIRED_AGENT_INTERFACE_VERSION = 69;
+var EXTENSION_VERSION = "2.2.41";
+var REQUIRED_AGENT_INTERFACE_VERSION = 72;
 var CAPTURE_FRAME_WIDGET_URI = "ui://researchtube/capture-frame-v49.html";
 var RESEARCHTUBE_DEMO_GUIDE_URL = "https://github.com/ilinic/ResearchTube/blob/main/docs/DEMO.md";
-var RESEARCHTUBE_SERVER_DESCRIPTION = "ResearchTube provides YouTube research, local media and image operations, workspace management, screenshots, clipboard, Library integration, and a guided demonstration using bundled local media. Search this server when the user refers to ResearchTube, YouTube analysis, a previously created workspace file, captured frame, screenshot, crop, clipboard, or asks to continue a previous ResearchTube operation. In clients with deferred tools, ResearchTube is discoverable through functions.exec lazy MCP-tool discovery; search there before treating the capability as unavailable.";
-var RESEARCHTUBE_MCP_INSTRUCTIONS = "ResearchTube exposes MCP tools that may be loaded or discovered lazily by the client. When the user mentions ResearchTube, invokes @ResearchTube, asks to repeat a ResearchTube operation, or requests a capability previously provided by ResearchTube, do not infer that ResearchTube is unavailable merely because its tools are not currently visible as a top-level tool namespace. In this client, ResearchTube is available through functions.exec with lazy MCP-tool discovery: search there for the appropriate ResearchTube tool before reporting that the capability is unavailable. Only report ResearchTube as unavailable if tool discovery actually fails, the required tool cannot be found after discovery, or an actual ResearchTube tool invocation returns an availability, connection, compatibility, or transport error. Successful use earlier in the conversation is evidence that the tools may be discoverable again; rediscover them rather than assuming access has disappeared. On the first ResearchTube interaction in a conversation, when the user asks what ResearchTube can do or gives no concrete operation, briefly offer the guided demo. Run it only with consent, use the bundled logical Workspace path demo/researchtube-demo.mp4, follow " + RESEARCHTUBE_DEMO_GUIDE_URL + ", never modify or delete the bundled source, and explain each benefit in the user's language. media_clip and media_capture_frame are asynchronous: poll their corresponding get_task tools no faster than pollIntervalMs. media_clip creates one separate file per requested interval and never renders or concatenates results automatically. media_capture_frame, media_capture_screen, and media_image_crop never render a widget themselves. Call media_image_show only for specific completed image paths the user asks to see. For media_capture_screen and media_image_crop, when showInChat is true, after the successful creation result call media_image_show once with the returned workspace image path; otherwise do not call the display tool.";
+var RESEARCHTUBE_SERVER_DESCRIPTION = "ResearchTube provides YouTube research, local media and image operations, workspace management, screenshots, clipboard, Library integration, real asynchronous timers, and a guided demonstration using bundled local media. Search this server when the user refers to ResearchTube, YouTube analysis, a previously created workspace file, captured frame, screenshot, crop, clipboard, or asks to continue a previous ResearchTube operation. In clients with deferred tools, ResearchTube is discoverable through functions.exec lazy MCP-tool discovery; search there before treating the capability as unavailable.";
+var RESEARCHTUBE_MCP_INSTRUCTIONS = "ResearchTube exposes MCP tools that may be loaded or discovered lazily by the client. When the user mentions ResearchTube, invokes @ResearchTube, asks to repeat a ResearchTube operation, or requests a capability previously provided by ResearchTube, do not infer that ResearchTube is unavailable merely because its tools are not currently visible as a top-level tool namespace. In this client, ResearchTube is available through functions.exec with lazy MCP-tool discovery: search there for the appropriate ResearchTube tool before reporting that the capability is unavailable. Only report ResearchTube as unavailable if tool discovery actually fails, the required tool cannot be found after discovery, or an actual ResearchTube tool invocation returns an availability, connection, compatibility, or transport error. Successful use earlier in the conversation is evidence that the tools may be discoverable again; rediscover them rather than assuming access has disappeared. On the first ResearchTube interaction in a conversation, when the user asks what ResearchTube can do or gives no concrete operation, briefly offer the guided demo. Run it only with consent, use the bundled logical Workspace path demo/researchtube-demo.mp4, follow " + RESEARCHTUBE_DEMO_GUIDE_URL + ", never modify or delete the bundled source, and explain each benefit in the user's language. media_clip and media_capture_frame are asynchronous: poll their corresponding get_task tools no faster than pollIntervalMs. media_clip creates one separate file per requested interval and never renders or concatenates results automatically. media_capture_frame, media_capture_screen, and media_image_crop never render a widget themselves. Call media_show only for specific completed image paths the user asks to see. For media_capture_screen and media_image_crop, when showInChat is true, after the successful creation result call media_show once with the returned workspace image path; otherwise do not call the display tool. timer_start, timer_status, and timer_cancel provide real timed pauses because LLMs have no precise internal running clock. Show the user any requested preparation instruction, start a timer, and continue status calls at pollIntervalMs within the same turn until completed before dependent actions. An ended assistant turn is not automatically resumed by a timer. media_to_chat queues attachments for the current ChatGPT conversation. Finish the assistant response after starting it; do not poll in the same turn because Send may remain unavailable until the response ends.";
 var CAPTURE_FRAME_OFFSCREEN_DOCUMENT = "capture-frame-offscreen.html";
 var GOOGLE_TRANSLATE_URL = "https://translate.google.com/";
 var GOOGLE_TRANSLATE_TAB_TIMEOUT_MS = 2e4;
@@ -262,10 +495,11 @@ var CDP_COMPOSER_SETTLE_MS = 750;
 var CDP_COMPOSER_PROMPT_ATTEMPTS = 4;
 var CDP_COMPOSER_PROMPT_RETRY_DELAY_MS = 2e3;
 var CDP_FILE_CHOOSER_ATTEMPTS = 2;
-var CDP_IMAGE_BATCH_MAX_FILES = 5;
 var CDP_SENT_DRAFT_CLEAR_CHECK_DELAYS_MS = [500, 500, 1e3, 2e3];
 var LIBRARY_STORE_TASK_STORAGE_KEY = "researchtubeLibraryStoreTasksV1";
 var LIBRARY_STORE_QUEUE_STORAGE_KEY = "researchtubeLibraryStoreQueueV1";
+var MEDIA_TO_CHAT_TASK_STORAGE_KEY = "researchtubeMediaToChatTasksV1";
+var MEDIA_TO_CHAT_QUEUE_STORAGE_KEY = "researchtubeMediaToChatQueueV1";
 var SEARCH_DIAGNOSTIC_MAX_ENTRIES = 250;
 var SEARCH_DIAGNOSTIC_MAX_QUERY_LENGTH = 360;
 var COMMAND_DIAGNOSTIC_MAX_ENTRIES = 300;
@@ -288,11 +522,19 @@ var recentDescribeVideoRequests = /* @__PURE__ */ new Map();
 var captureFrameOffscreenPromise = null;
 var googleTranslateSpeechRunners = /* @__PURE__ */ new Map();
 var googleTranslateSpeechTabId = null;
+var completedTaskHistoryLimit = 2e3;
+var developerNewToolsDefault = true;
 var libraryStoreTasks = /* @__PURE__ */ new Map();
 var libraryStoreQueue = [];
 var libraryStoreLoaded = false;
 var libraryStoreLoading = null;
 var libraryStoreDraining = false;
+var mediaToChatTasks = /* @__PURE__ */ new Map();
+var mediaToChatQueue = [];
+var mediaToChatLoaded = false;
+var mediaToChatLoading = null;
+var mediaToChatDraining = false;
+var chatFileAutomationTail = Promise.resolve();
 var searchCache = /* @__PURE__ */ new Map();
 var nullableString = { type: ["string", "null"] };
 var rejectedToolResultSchema = {
@@ -310,7 +552,7 @@ var rejectedToolResultSchema = {
   required: ["status", "error"]
 };
 var nullableInteger = { type: ["integer", "null"] };
-var nullableNumber = { type: ["number", "null"] };
+var nullableNumber2 = { type: ["number", "null"] };
 var downloadFormatSchema = {
   type: "object",
   additionalProperties: false,
@@ -322,7 +564,7 @@ var downloadFormatSchema = {
     audioCodec: { ...nullableString, description: "Audio codec identifier announced by YouTube, for example mp4a or opus; null for video-only tracks." },
     width: { ...nullableInteger, minimum: 0, description: "Encoded video width in pixels; null for audio-only tracks or when YouTube omits it." },
     height: { ...nullableInteger, minimum: 0, description: "Encoded video height in pixels; null for audio-only tracks or when YouTube omits it." },
-    fps: { ...nullableNumber, minimum: 0, description: "Encoded video frames per second; null for audio-only tracks or when YouTube omits it." },
+    fps: { ...nullableNumber2, minimum: 0, description: "Encoded video frames per second; null for audio-only tracks or when YouTube omits it." },
     bitrateBps: { ...nullableInteger, minimum: 0, description: "Advertised average or nominal stream bitrate in bits per second; null when YouTube omits it." },
     audioSampleRateHz: { ...nullableInteger, minimum: 0, description: "Audio sample rate in hertz; null when YouTube omits it or the track has no audio." },
     audioChannels: { ...nullableInteger, minimum: 0, description: "Number of audio channels; null when YouTube omits it or the track has no audio." },
@@ -847,7 +1089,7 @@ var captureFrameSchema = {
     sourceTitle: { type: "string", description: "Title obtained by the same yt-dlp operation for a partial YouTube capture." },
     partialDownload: { type: "object", additionalProperties: false, properties: { startSeconds: { type: "number", minimum: 0 }, endSeconds: { type: "number", minimum: 0 } }, required: ["startSeconds", "endSeconds"] },
     requestedTimestampSeconds: { type: "number", minimum: 0 },
-    actualTimestampSeconds: { ...nullableNumber, minimum: 0, description: "Decoded-frame timestamp reported by ffmpeg when available; null only when ffmpeg did not report it." },
+    actualTimestampSeconds: { ...nullableNumber2, minimum: 0, description: "Decoded-frame timestamp reported by ffmpeg when available; null only when ffmpeg did not report it." },
     selectedVideoStreamIndex: { type: "integer", minimum: 0, description: "ffprobe streams[].index of the video stream used." },
     seekMode: { type: "string", enum: ["accurate", "fast"] },
     displayRotationApplied: { type: "boolean" },
@@ -931,9 +1173,9 @@ var mediaClipTaskSchema = {
     statusMessage: { type: "string" },
     progressPercent: { type: "number", minimum: 0, maximum: 100 },
     completedClips: { type: "integer", minimum: 0 },
-    totalClips: { type: "integer", minimum: 1, maximum: 20 },
-    clips: { type: "array", maxItems: 20, items: mediaClipSchema },
-    failedSegment: { type: "object", additionalProperties: false, properties: { index: { type: "integer", minimum: 0, maximum: 19 }, startSeconds: { type: "number", minimum: 0 }, endSeconds: { type: "number", exclusiveMinimum: 0 } }, required: ["index", "startSeconds", "endSeconds"] },
+    totalClips: { type: "integer", minimum: 1 },
+    clips: { type: "array", items: mediaClipSchema },
+    failedSegment: { type: "object", additionalProperties: false, properties: { index: { type: "integer", minimum: 0 }, startSeconds: { type: "number", minimum: 0 }, endSeconds: { type: "number", exclusiveMinimum: 0 } }, required: ["index", "startSeconds", "endSeconds"] },
     error: { type: "object", additionalProperties: false, properties: { code: { type: "string" }, message: { type: "string" } }, required: ["code", "message"] },
     createdAt: { type: "string" },
     lastUpdatedAt: { type: "string" },
@@ -1039,7 +1281,7 @@ var cameraRecordResultSchema = {
 var cameraRecordTaskSchema = {
   type: "object",
   additionalProperties: false,
-  properties: { taskId: { type: "string", minLength: 1 }, recordingKind: { type: "string", enum: ["video", "audio"] }, status: { type: "string", enum: ["working", "stopping", "completed", "failed"] }, phase: { type: "string", enum: ["starting", "recording", "finalizing", "completed", "failed"] }, statusMessage: { type: "string" }, progressPercent: { type: "number", minimum: 0, maximum: 100 }, elapsedSeconds: { type: "number", minimum: 0 }, requestedDurationSeconds: { type: "integer", minimum: 1, maximum: 600 }, targetFps: { type: ["number", "null"], exclusiveMinimum: 25, maximum: 120 }, maxDurationSeconds: { type: "integer", enum: [60, 600] }, createdAt: { type: "string" }, lastUpdatedAt: { type: "string" }, pollIntervalMs: { type: "integer", minimum: 100 }, result: cameraRecordResultSchema, error: { type: "object", additionalProperties: false, properties: { code: { type: "string" }, message: { type: "string" } }, required: ["code", "message"] } },
+  properties: { taskId: { type: "string", minLength: 1 }, recordingKind: { type: "string", enum: ["video", "audio"] }, status: { type: "string", enum: ["working", "stopping", "completed", "failed"] }, phase: { type: "string", enum: ["starting", "recording", "finalizing", "completed", "failed"] }, statusMessage: { type: "string" }, progressPercent: { type: "number", minimum: 0, maximum: 100 }, elapsedSeconds: { type: "number", minimum: 0 }, requestedDurationSeconds: { type: "integer", minimum: 1 }, targetFps: { type: ["number", "null"], exclusiveMinimum: 25, maximum: 120 }, maxDurationSeconds: { type: "integer", minimum: 60 }, createdAt: { type: "string" }, lastUpdatedAt: { type: "string" }, pollIntervalMs: { type: "integer", minimum: 100 }, result: cameraRecordResultSchema, error: { type: "object", additionalProperties: false, properties: { code: { type: "string" }, message: { type: "string" } }, required: ["code", "message"] } },
   required: ["taskId", "recordingKind", "status", "phase", "statusMessage", "progressPercent", "elapsedSeconds", "requestedDurationSeconds", "targetFps", "maxDurationSeconds", "createdAt", "lastUpdatedAt", "pollIntervalMs"]
 };
 var cameraStopSchema = { type: "object", additionalProperties: false, properties: { taskId: { type: "string", minLength: 1 }, accepted: { type: "boolean" }, message: { type: "string" } }, required: ["taskId", "accepted", "message"] };
@@ -1195,7 +1437,7 @@ var localWorkspaceDeleteAnnotations = { readOnlyHint: false, destructiveHint: tr
 var libraryStoreFileSchema = {
   type: "object",
   additionalProperties: false,
-  properties: { workspacePath: { type: "string", minLength: 1, description: "Logical workspace-relative PNG, JPEG, or WebP file path. It is never an absolute host path." } },
+  properties: { workspacePath: { type: "string", minLength: 1, description: "Logical workspace-relative file path of any file type. It is never an absolute host path." } },
   required: ["workspacePath"]
 };
 var libraryStorePhaseSchema = { type: "string", enum: ["queued", "resolvingFiles", "attaching", "composerAccepted", "submitting", "submitted", "failed", "cancelled"] };
@@ -1206,7 +1448,9 @@ var libraryStoreTaskSchema = {
     taskId: { type: "string", minLength: 1 },
     status: { type: "string", enum: ["queued", "working", "completed", "failed", "cancelled"] },
     phase: libraryStorePhaseSchema,
-    files: { type: "array", minItems: 1, maxItems: 5, items: libraryStoreFileSchema },
+    files: { type: "array", minItems: 1, items: libraryStoreFileSchema },
+    submittedFiles: { type: "array", items: libraryStoreFileSchema },
+    skippedFiles: { type: "array", items: { type: "object", additionalProperties: false, properties: { workspacePath: { type: "string" }, sizeBytes: { type: "integer", minimum: 0 }, maxFileSizeBytes: { type: "integer", minimum: 1 }, reason: { type: "string", const: "FILE_TOO_LARGE" } }, required: ["workspacePath", "sizeBytes", "maxFileSizeBytes", "reason"] } },
     queuePosition: { ...nullableInteger, minimum: 1 },
     createdAt: { type: "string", format: "date-time" },
     updatedAt: { type: "string", format: "date-time" },
@@ -1215,14 +1459,29 @@ var libraryStoreTaskSchema = {
     message: { type: "string", minLength: 1 },
     error: nullableString
   },
-  required: ["taskId", "status", "phase", "files", "queuePosition", "createdAt", "updatedAt", "submittedAt", "libraryAvailability", "message", "error"]
+  required: ["taskId", "status", "phase", "files", "submittedFiles", "skippedFiles", "queuePosition", "createdAt", "updatedAt", "submittedAt", "libraryAvailability", "message", "error"]
 };
 var libraryStoreStartSchema = { type: "object", additionalProperties: false, properties: { task: libraryStoreTaskSchema }, required: ["task"] };
 var libraryStoreStatusSchema = libraryStoreTaskSchema;
 var libraryStoreCancelSchema = { type: "object", additionalProperties: false, properties: { task: libraryStoreTaskSchema, cancelled: { type: "boolean" } }, required: ["task", "cancelled"] };
+var mediaToChatTaskFields = libraryStoreTaskSchema.required.filter((name) => name !== "libraryAvailability");
+var mediaToChatTaskSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    ...Object.fromEntries(mediaToChatTaskFields.map((name) => [name, libraryStoreTaskSchema.properties[name]])),
+    composerPolicy: { type: "string", enum: ["requireEmpty", "clear"] },
+    progressPercent: { type: "number", minimum: 0, maximum: 100 },
+    pollIntervalMs: { type: "integer", minimum: 100 }
+  },
+  required: [...mediaToChatTaskFields, "progressPercent", "pollIntervalMs", "composerPolicy"]
+};
+var mediaToChatStartSchema = { type: "object", additionalProperties: false, properties: { task: mediaToChatTaskSchema }, required: ["task"] };
+var mediaToChatCancelSchema = { type: "object", additionalProperties: false, properties: { task: mediaToChatTaskSchema, cancelled: { type: "boolean" } }, required: ["task", "cancelled"] };
 function toolDefinitions() {
   return [
     ...storyboardDefinitions(localAgentReadAnnotations, localWorkspaceWriteAnnotations),
+    ...timerDefinitions(localAgentReadAnnotations, localWorkspaceWriteAnnotations),
     {
       name: "system_agent_status",
       title: "Get ResearchTube Local Agent status",
@@ -1269,15 +1528,15 @@ function toolDefinitions() {
     {
       name: "library_store_start",
       title: "Store a batch of workspace images in ChatGPT Library",
-      description: "Queue one indivisible batch of 1 to 5 PNG, JPEG, or WebP images from the ResearchTube workspace for ChatGPT Library storage. ResearchTube uses one dedicated background ChatGPT service tab, attaches the batch, and presses Send without inserting any text into the Composer. The returned taskId must be polled with library_store_status. A completed task means ResearchTube confirmed Composer acceptance and clicked Send; it never claims that the later ChatGPT Library update is complete.",
+      description: "Queue one batch of any Workspace files for ChatGPT Library storage. Batch count and individual file-size limits are configured in agent/agent-config.json. Files larger than the configured limit are skipped and listed with sizes in library_store_status; remaining files are submitted together. ResearchTube uses a dedicated background ChatGPT service tab, attaches the eligible files, and presses Send without inserting any text into the Composer. A completed task confirms local submission only; later Library availability is not verified. Poll library_store_status for the result.",
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
-      inputSchema: { type: "object", additionalProperties: false, properties: { files: { type: "array", minItems: 1, maxItems: 5, uniqueItems: true, items: libraryStoreFileSchema, description: "One immutable batch. Files are attached and submitted together, never split or mixed with another task." } }, required: ["files"] },
+      inputSchema: { type: "object", additionalProperties: false, properties: { files: { type: "array", minItems: 1, items: libraryStoreFileSchema, description: "Workspace files in one batch. The configured count limit is checked at runtime; eligible files are submitted together." } }, required: ["files"] },
       outputSchema: libraryStoreStartSchema
     },
     {
       name: "library_store_status",
       title: "Check a Library storage task",
-      description: "Return the current local status of one ResearchTube Library storage task. submitted means ResearchTube confirmed the image batch in Composer and clicked Send without adding instruction text; libraryAvailability remains not_verified because ResearchTube cannot observe the later Library update.",
+      description: "Return local status, submitted Workspace paths in submittedFiles, and any size-rejected paths with their actual and maximum bytes in skippedFiles. completed means ResearchTube confirmed eligible files in Composer and clicked Send; libraryAvailability remains not_verified.",
       annotations: localAgentReadAnnotations,
       inputSchema: { type: "object", additionalProperties: false, properties: { taskId: { type: "string", minLength: 1 } }, required: ["taskId"] },
       outputSchema: libraryStoreStatusSchema
@@ -1373,7 +1632,7 @@ function toolDefinitions() {
     {
       name: "media_clip",
       title: "Cut video or audio clips",
-      description: "Start an asynchronous local Workspace edit. A video source can produce video clips or extracted audio clips; an audio source can produce audio clips. segments accepts 1\u201320 intervals and each interval creates a separate output file in the same input order; omit segments to process the entire source, for example to extract its full audio track. cutMode=copy is the default and preserves encoded streams without transcoding, so video boundaries can follow source keyframes. cutMode=accurate re-encodes for precise requested boundaries. includeAudio applies only to video output and defaults to true. Outputs default to clips/, never overwrite an existing file, never modify the source, are not concatenated, and are not shown automatically. Poll media_clip_get_task no faster than pollIntervalMs; progressPercent comes from actual FFmpeg processing progress. If a later interval fails, earlier completed clips remain available.",
+      description: "Start an asynchronous local Workspace edit. A video source can produce video clips or extracted audio clips; an audio source can produce audio clips. The maximum number of segments is configured in agent/agent-config.json; each interval creates a separate output file in input order. Omit segments to process the entire source. cutMode=copy preserves encoded streams without transcoding; accurate re-encodes for precise boundaries. includeAudio applies only to video output. Outputs default to clips/, never overwrite an existing file or modify the source, and are not shown automatically. Poll media_clip_get_task no faster than pollIntervalMs. Completed clips remain available if a later interval fails.",
       annotations: localWorkspaceWriteAnnotations,
       inputSchema: {
         type: "object",
@@ -1381,7 +1640,7 @@ function toolDefinitions() {
         properties: {
           path: { type: "string", minLength: 1, description: "Existing logical workspace-relative video or audio path." },
           outputKind: { type: "string", enum: ["video", "audio"], description: "video cuts video; audio extracts or cuts an audio stream." },
-          segments: { type: "array", minItems: 1, maxItems: 20, items: mediaClipSegmentInputSchema, description: "Optional intervals in caller order. Omit to process the entire source." },
+          segments: { type: "array", minItems: 1, items: mediaClipSegmentInputSchema, description: "Optional intervals in caller order, subject to the configured maximum. Omit to process the entire source." },
           cutMode: { type: "string", enum: ["copy", "accurate"], default: "copy", description: "copy avoids transcoding; accurate re-encodes for precise boundaries." },
           includeAudio: { type: "boolean", default: true, description: "Include an audio stream in video output. Available only with outputKind=video." },
           videoStreamIndex: { type: "integer", minimum: 0, description: "Optional ffprobe streams[].index for video output." },
@@ -1414,7 +1673,7 @@ function toolDefinitions() {
     {
       name: "media_capture_frame",
       title: "Start frame extraction from workspace or YouTube",
-      description: "Start an asynchronous extraction of 1\u201320 frames from an existing workspace video or a selected YouTube video stream. For YouTube, first call youtube_download_get_formats and pass its exact numeric video formatId. The Agent groups nearby timestamps into partial yt-dlp --download-sections ranges instead of downloading the full video: windows with a gap of at most 10 seconds are merged, but one range never exceeds 60 seconds. Each resulting range is downloaded separately with a two-second gap. During an active YouTube range, progress is derived from bytes actually written to its partial download; after frames are extracted it is exact. A transient failed range is retried after 3 and 6 seconds; completed frames remain available if a later range still fails. Poll media_capture_frame_get_task no faster than pollIntervalMs. A failed task may contain completed frames and failedSection with attemptCount. Frames are saved in captures/ and are never shown automatically; use media_image_show only for specific completed frames the user asks to see.",
+      description: "Start an asynchronous extraction of frames from an existing workspace video or a selected YouTube video stream. Maximum frame count is configured in agent/agent-config.json. For YouTube, first call youtube_download_get_formats and pass its exact numeric video formatId. The Agent groups timestamps into partial yt-dlp --download-sections ranges: windows with a gap of at most 10 seconds are merged, but one range never exceeds 60 seconds. During an active YouTube range, progress is derived from downloaded bytes; afterwards it is exact. Failed ranges are retried; completed frames remain available. Poll media_capture_frame_get_task no faster than pollIntervalMs. Frames are saved in captures/ and are never shown automatically; use media_show to display selected frames.",
       annotations: localWorkspaceWriteAnnotations,
       inputSchema: {
         type: "object",
@@ -1422,7 +1681,7 @@ function toolDefinitions() {
         properties: {
           path: { description: "Logical workspace-relative path of the source media file." },
           youtube: { description: "YouTube source object with videoId and numeric formatId from youtube_download_get_formats." },
-          timestampsSeconds: { description: "Array of 1\u201320 unique non-negative frame timestamps in seconds. Results are ordered by timestamp." },
+          timestampsSeconds: { type: "array", minItems: 1, items: { type: "number", minimum: 0 }, description: "Unique non-negative timestamps, up to the configured frame limit. Results are ordered by timestamp." },
           videoStreamIndex: { description: "Optional non-negative ffprobe video-stream index; allowed only for path." },
           seekMode: { description: "accurate or fast; defaults to accurate." },
           applyDisplayRotation: { description: "Boolean; defaults to true." },
@@ -1468,7 +1727,7 @@ function toolDefinitions() {
     {
       name: "visual_map_create",
       title: "Start a video visual map",
-      description: "Start an asynchronous task that creates chronological PNG contact sheets from an existing Workspace video. selection=uniform samples evenly. selection=sceneDetect uses FFmpeg's native scdet filter; sceneDetectThreshold is its percentage threshold from 0 to 100 and defaults to 10. It de-duplicates changes closer than two seconds and retains the strongest maxTotalFrames. selection=hybrid also uses scdet, but divides the requested range into maxTotalFrames equal intervals and chooses each interval's strongest detected change; an empty interval uses its midpoint. Results are chronological. Never downloads media. Poll visual_map_get_task no faster than pollIntervalMs until it completes; then display a specific map with media_image_show if needed.",
+      description: "Start an asynchronous task that creates chronological PNG contact sheets from an existing Workspace video. selection=uniform samples evenly. selection=sceneDetect uses FFmpeg's native scdet filter; sceneDetectThreshold is its percentage threshold from 0 to 100 and defaults to 10. It de-duplicates changes closer than two seconds and retains the strongest maxTotalFrames. selection=hybrid also uses scdet, but divides the requested range into maxTotalFrames equal intervals and chooses each interval's strongest detected change; an empty interval uses its midpoint. Results are chronological. Never downloads media. Poll visual_map_get_task no faster than pollIntervalMs until it completes; then display a specific map with media_show if needed.",
       annotations: localWorkspaceWriteAnnotations,
       inputSchema: {
         type: "object",
@@ -1529,7 +1788,7 @@ function toolDefinitions() {
     {
       name: "camera_capture_frame",
       title: "Capture a camera frame",
-      description: "Capture one current frame from a camera returned by camera_list, using its automatically selected maximum native mode. Stores a PNG by default directly under captures/. This does not display the image; call media_image_show once afterwards only when the user asks to see it.",
+      description: "Capture one current frame from a camera returned by camera_list, using its automatically selected maximum native mode. Stores a PNG by default directly under captures/. This does not display the image; call media_show once afterwards only when the user asks to see it.",
       annotations: localWorkspaceWriteAnnotations,
       inputSchema: { type: "object", additionalProperties: false, properties: { cameraId: { type: "string", minLength: 1 }, targetPath: { type: "string", minLength: 1 }, targetFormat: { type: "string", enum: ["png", "jpeg", "webp"], default: "png" } }, required: ["cameraId"] },
       outputSchema: cameraFrameSchema
@@ -1539,15 +1798,15 @@ function toolDefinitions() {
       title: "Record a camera video",
       description: "Start an asynchronous H.264 MP4 recording with video and the microphone paired with a listed local camera. targetFps is optional; when supplied, the largest native resolution close to that FPS is used. When omitted, the Agent prefers a mode near 60 FPS, then one near 30 FPS. The terminal result reports ffprobe-verified width, height, duration, and actual file FPS. Poll camera_record_status until terminal; recording never exposes a partial output file.",
       annotations: localWorkspaceWriteAnnotations,
-      inputSchema: { type: "object", additionalProperties: false, properties: { cameraId: { type: "string", minLength: 1 }, durationSeconds: { type: "integer", minimum: 1, maximum: 60 }, targetFps: { type: "number", exclusiveMinimum: 25, maximum: 120 } }, required: ["cameraId", "durationSeconds"] },
+      inputSchema: { type: "object", additionalProperties: false, properties: { cameraId: { type: "string", minLength: 1 }, durationSeconds: { type: "integer", minimum: 1, description: "Maximum duration in minutes is set by cameraRecordVideoMaxMinutes in agent-config.json." }, targetFps: { type: "number", exclusiveMinimum: 25, maximum: 120 } }, required: ["cameraId", "durationSeconds"] },
       outputSchema: cameraRecordTaskSchema
     },
     {
       name: "camera_record_audio",
       title: "Record camera audio",
-      description: "Start an asynchronous audio-only recording from the microphone paired with a listed local camera. Stores an M4A file under sound/. The maximum duration is 10 minutes. Poll camera_record_status until terminal; use camera_record_stop for an early graceful stop.",
+      description: "Start an asynchronous audio-only recording from the microphone paired with a listed local camera. Stores an M4A file under sound/. The maximum duration in minutes is configured by cameraRecordAudioMaxMinutes in agent/agent-config.json. Poll camera_record_status until terminal; use camera_record_stop for an early graceful stop.",
       annotations: localWorkspaceWriteAnnotations,
-      inputSchema: { type: "object", additionalProperties: false, properties: { cameraId: { type: "string", minLength: 1 }, durationSeconds: { type: "integer", minimum: 1, maximum: 600 } }, required: ["cameraId", "durationSeconds"] },
+      inputSchema: { type: "object", additionalProperties: false, properties: { cameraId: { type: "string", minLength: 1 }, durationSeconds: { type: "integer", minimum: 1, description: "Maximum duration in minutes is set by cameraRecordAudioMaxMinutes in agent-config.json." } }, required: ["cameraId", "durationSeconds"] },
       outputSchema: cameraRecordTaskSchema
     },
     {
@@ -1578,7 +1837,7 @@ function toolDefinitions() {
           outputPath: { type: "string", minLength: 1, description: "Optional logical workspace-relative image path. If omitted, media_capture_screen creates a uniquely named file under screenshots/. It never overwrites an existing file." },
           region: screenCaptureRegionSchema,
           image: screenCaptureImageInputSchema,
-          showInChat: { type: "boolean", default: false, description: "Set true only when the user needs this screenshot displayed inline. After a successful result, call media_image_show for its workspacePath. Default false keeps the chat compact and must not create a display widget." }
+          showInChat: { type: "boolean", default: false, description: "Set true only when the user needs this screenshot displayed inline. After a successful result, call media_show for its workspacePath. Default false keeps the chat compact and must not create a display widget." }
         }
       },
       outputSchema: screenCaptureSchema,
@@ -1600,7 +1859,7 @@ function toolDefinitions() {
           crop: captureFrameCropSchema,
           image: captureFrameImageInputSchema,
           outputPath: { type: "string", minLength: 1, description: "Optional logical workspace-relative path for the new cropped image. If omitted, the Agent creates a unique PNG under crops/. It never overwrites an existing file." },
-          showInChat: { type: "boolean", default: false, description: "Set true only when the user needs this cropped image displayed inline. After a successful result, call media_image_show for its returned image.workspacePath. Default false keeps the chat compact and must not create a display widget." }
+          showInChat: { type: "boolean", default: false, description: "Set true only when the user needs this cropped image displayed inline. After a successful result, call media_show for its returned image.workspacePath. Default false keeps the chat compact and must not create a display widget." }
         },
         required: ["path", "crop"]
       },
@@ -1611,9 +1870,33 @@ function toolDefinitions() {
       }
     },
     {
-      name: "media_image_show",
+      name: "media_to_chat",
+      title: "Send workspace files to the current chat",
+      description: "Queue any selected Workspace files for attachment and sending in the active ChatGPT conversation tab. The target conversation is fixed at task creation; no new tab is opened. The tool uploads file bytes to ChatGPT using Chrome automation and presses Send without adding prompt text. Count and per-file size limits are configured by mediaToChatMaxFiles and mediaToChatMaxFileSizeMiB in agent/agent-config.json. Oversized files are listed in skippedFiles; eligible files are sent together. composerPolicy defaults to requireEmpty: refuse a Composer containing text or attachments. clear explicitly removes its text and existing attachments once, before uploading the selected files, and verifies that it is empty. After uploading starts, user edits, added or removed attachments, or a changed conversation stop the task without Send; already attached task files stay in the Composer. The task never clears again after upload begins. After receiving the task, finish this assistant response promptly: ChatGPT may keep Send unavailable while responding. Do not poll during this same assistant turn; use media_to_chat_status in a later turn, no faster than pollIntervalMs. completed confirms a Send click, not ChatGPT processing or Library storage.",
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+      inputSchema: { type: "object", additionalProperties: false, properties: { files: { type: "array", minItems: 1, items: libraryStoreFileSchema, description: "One batch of logical Workspace paths; any file type may be selected, subject to ChatGPT upload support." }, composerPolicy: { type: "string", enum: ["requireEmpty", "clear"], default: "requireEmpty", description: "requireEmpty refuses text or attachments already in the Composer. clear explicitly discards both once before upload. New user edits after preparation always stop Send and leave uploaded files attached." } }, required: ["files"] },
+      outputSchema: mediaToChatStartSchema
+    },
+    {
+      name: "media_to_chat_status",
+      title: "Check sending files to chat",
+      description: "Return a media_to_chat task's phase, percentage, submitted files and size-rejected files. Poll only in a later conversation turn, because ChatGPT may disable Send until the initiating assistant response finishes. completed confirms that the extension pressed Send; downstream ChatGPT processing is not verified.",
+      annotations: localAgentReadAnnotations,
+      inputSchema: { type: "object", additionalProperties: false, properties: { taskId: { type: "string", minLength: 1 } }, required: ["taskId"] },
+      outputSchema: mediaToChatTaskSchema
+    },
+    {
+      name: "media_to_chat_cancel",
+      title: "Cancel queued files to chat",
+      description: "Cancel a media_to_chat task while it is queued. A task that has started attaching files or clicking Send cannot be cancelled, matching library_store_cancel.",
+      annotations: localWorkspaceWriteAnnotations,
+      inputSchema: { type: "object", additionalProperties: false, properties: { taskId: { type: "string", minLength: 1 } }, required: ["taskId"] },
+      outputSchema: mediaToChatCancelSchema
+    },
+    {
+      name: "media_show",
       title: "Show workspace media in chat",
-      description: "Show a supported ResearchTube Workspace image, video, or audio file inline in ChatGPT. Use this after a creation tool only when inline display was requested, or whenever the user asks to show a prior capture, recording, screenshot, crop, or Workspace media file. A successful result means the card has already been shown; do not call it again for the same file. It uses the Local Agent only and never exposes host paths or media bytes to the model.",
+      description: "Show a supported ResearchTube Workspace image, video, or audio file inline in ChatGPT. Use this after a creation tool only when inline display was requested, or whenever the user asks to show a prior capture, recording, screenshot, crop, or Workspace media file. A successful result means the card has already been shown; do not call it again for the same file. This renders a viewer card; use media_to_chat to upload and send file attachments. It uses the Local Agent only and never exposes host paths or media bytes to the model.",
       annotations: localAgentReadAnnotations,
       inputSchema: { type: "object", additionalProperties: false, properties: { path: { type: "string", minLength: 1, description: "Logical workspace-relative path of an existing supported image, video, or audio file." } }, required: ["path"] },
       outputSchema: showWorkspaceImageSchema,
@@ -1826,6 +2109,19 @@ async function mcpToolPreferences() {
   const stored = await chrome.storage.local.get("mcpToolPreferences");
   const preferences = normalizeMcpToolPreferences(stored.mcpToolPreferences ?? DEFAULT_MCP_TOOL_PREFERENCES);
   let changed = false;
+  if (!Object.hasOwn(preferences.enabledByName, "media_show") && Object.hasOwn(preferences.enabledByName, "media_image_show")) {
+    preferences.enabledByName.media_show = preferences.enabledByName.media_image_show;
+    delete preferences.enabledByName.media_image_show;
+    changed = true;
+  }
+  if (publicMcpTools().some((tool) => !toolSettingsMetadata(tool.name).alwaysEnabled && !Object.hasOwn(preferences.enabledByName, tool.name))) {
+    try {
+      await refreshTaskHistorySettings();
+    } catch (error2) {
+      console.warn(`[ResearchTube MCP] new-tool default unavailable (${error2?.code || "AGENT_UNAVAILABLE"}); using cached default=${developerNewToolsDefault}.`);
+    }
+    preferences.newToolsEnabledByDefault = developerNewToolsDefault;
+  }
   for (const tool of publicMcpTools()) {
     const { alwaysEnabled } = toolSettingsMetadata(tool.name);
     if (!alwaysEnabled && !Object.hasOwn(preferences.enabledByName, tool.name)) {
@@ -1833,7 +2129,7 @@ async function mcpToolPreferences() {
       changed = true;
     }
   }
-  if (changed) await chrome.storage.local.set({ mcpToolPreferences: preferences });
+  if (changed) await chrome.storage.local.set({ mcpToolPreferences: { enabledByName: preferences.enabledByName } });
   return preferences;
 }
 async function mcpToolSettingsCatalog() {
@@ -1873,32 +2169,25 @@ async function updateMcpToolEnabled(name, enabled) {
   if (typeof enabled !== "boolean") return { ok: false, errorCode: "MCP_TOOL_INVALID", message: "enabled must be a boolean." };
   const preferences = await mcpToolPreferences();
   preferences.enabledByName[name] = enabled;
-  await chrome.storage.local.set({ mcpToolPreferences: preferences });
+  await chrome.storage.local.set({ mcpToolPreferences: { enabledByName: preferences.enabledByName } });
   return { ok: true, name, enabled };
-}
-async function updateNewToolsEnabledByDefault(enabled) {
-  if (typeof enabled !== "boolean") return { ok: false, errorCode: "MCP_TOOL_INVALID", message: "newToolsEnabledByDefault must be a boolean." };
-  const preferences = await mcpToolPreferences();
-  preferences.newToolsEnabledByDefault = enabled;
-  await chrome.storage.local.set({ mcpToolPreferences: preferences });
-  return { ok: true, newToolsEnabledByDefault: enabled };
 }
 function sleep(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 function cdpError(message, cause = null) {
-  const error = new Error(message);
-  error.code = "RESEARCHTUBE_CDP_TEST_FAILED";
-  if (cause) error.cause = cause;
-  return error;
+  const error2 = new Error(message);
+  error2.code = "RESEARCHTUBE_CDP_TEST_FAILED";
+  if (cause) error2.cause = cause;
+  return error2;
 }
 function cdpLog(step, details = void 0) {
   const prefix = "[ResearchTube CDP]";
   if (details === void 0) console.info(`${prefix} ${step}`);
   else console.info(`${prefix} ${step}`, details);
 }
-function cdpErrorLog(step, error) {
-  console.warn(`[ResearchTube CDP] ${step}`, error instanceof Error ? error.message : error);
+function cdpErrorLog(step, error2) {
+  console.warn(`[ResearchTube CDP] ${step}`, error2 instanceof Error ? error2.message : error2);
 }
 async function cdpAttach(tabId) {
   cdpLog("Debugger attach requested", { tabId, protocolVersion: CDP_PROTOCOL_VERSION });
@@ -1909,16 +2198,16 @@ async function cdpDetach(tabId) {
   try {
     await chrome.debugger.detach({ tabId });
     cdpLog("Debugger detached", { tabId });
-  } catch (error) {
-    cdpLog("Debugger already detached or service tab closed", { tabId, error: safeErrorMessage(error) });
+  } catch (error2) {
+    cdpLog("Debugger already detached or service tab closed", { tabId, error: safeErrorMessage(error2) });
   }
 }
 async function cdpCommand(tabId, method, params = {}) {
   try {
     return await chrome.debugger.sendCommand({ tabId }, method, params);
-  } catch (error) {
-    cdpErrorLog(`CDP command failed: ${method}`, { tabId, params, error: safeErrorMessage(error) });
-    throw error;
+  } catch (error2) {
+    cdpErrorLog(`CDP command failed: ${method}`, { tabId, params, error: safeErrorMessage(error2) });
+    throw error2;
   }
 }
 async function cdpEvaluate(tabId, expression, { returnByValue = true } = {}) {
@@ -2013,19 +2302,22 @@ function waitForDebuggerEvent(tabId, method, timeoutMs = 15e3) {
     chrome.debugger.onEvent.addListener(onEvent);
   });
 }
-async function cdpOpenFileChooser(tabId) {
+async function cdpOpenFileChooser(tabId, fileCount = 1) {
   const inputs = await cdpEvaluate(tabId, `(() => [...document.querySelectorAll('input[type="file"]')].map((input, index) => ({
     index, disabled: input.disabled, accept: input.accept, multiple: input.multiple,
     hidden: input.hidden, display: getComputedStyle(input).display, visibility: getComputedStyle(input).visibility
   })))()`);
   const inputDetails = inputs?.value || [];
   cdpLog("Composer file-input inspection", { tabId, inputs: inputDetails });
-  if (!inputDetails.some((input) => !input.disabled)) throw cdpError("The ChatGPT Composer file input was not found.");
+  if (!inputDetails.some((input) => !input.disabled && (fileCount === 1 || input.multiple))) throw cdpError("The ChatGPT Composer has no file input for this batch.");
   const opened = waitForDebuggerEvent(tabId, "Page.fileChooserOpened");
   cdpLog("Opening Composer file chooser", { tabId });
   await cdpCommand(tabId, "Runtime.evaluate", {
     expression: `(() => {
-      const input = [...document.querySelectorAll('input[type="file"]')].find((item) => !item.disabled);
+      const available = [...document.querySelectorAll('input[type="file"]')].filter((item) => !item.disabled && (${fileCount} === 1 || item.multiple));
+      const input = available.find((item) => !item.accept.trim())
+        || available.find((item) => !/^image//i.test(item.accept.trim()))
+        || available[0];
       if (!input) throw new Error("ChatGPT Composer file input disappeared.");
       input.click();
     })()`,
@@ -2034,12 +2326,13 @@ async function cdpOpenFileChooser(tabId) {
   cdpLog("Composer input.click() command completed", { tabId });
   return opened;
 }
-async function cdpWaitFor(tabId, expression, description, timeoutMs = 45e3) {
+async function cdpWaitFor(tabId, expression, description, timeoutMs = 45e3, onPoll = null) {
   const deadline = Date.now() + timeoutMs;
   let attempts = 0;
   cdpLog("Waiting for page condition", { tabId, description, timeoutMs });
   while (Date.now() < deadline) {
     attempts += 1;
+    if (onPoll) await onPoll();
     const result = await cdpEvaluate(tabId, expression);
     if (result?.value === true) {
       cdpLog("Page condition satisfied", { tabId, description, attempts });
@@ -2093,8 +2386,8 @@ async function cdpWaitForTextComposer(tabId, timeoutMs = 45e3) {
 function normalizeComposerTextForComparison(value) {
   return String(value ?? "").normalize("NFC").replace(/\s+/gu, " ").trim();
 }
-async function cdpSetComposerText(tabId, text) {
-  const normalizedExpectedText = normalizeComposerTextForComparison(text);
+async function cdpSetComposerText(tabId, text2) {
+  const normalizedExpectedText = normalizeComposerTextForComparison(text2);
   const focusComposerExpression = `(() => {
     const target = document.querySelector('#prompt-textarea')
       || document.querySelector('[contenteditable="true"][role="textbox"]')
@@ -2119,7 +2412,7 @@ async function cdpSetComposerText(tabId, text) {
       await cdpClearComposerDraft(tabId);
       const focused = (await cdpEvaluate(tabId, focusComposerExpression))?.value;
       if (focused !== true) throw cdpError("ChatGPT Composer could not receive keyboard input.");
-      await cdpCommand(tabId, "Input.insertText", { text });
+      await cdpCommand(tabId, "Input.insertText", { text: text2 });
       for (let check = 0; check < 4; check += 1) {
         await sleep(250);
         const composerState = (await cdpEvaluate(tabId, readComposerText))?.value;
@@ -2132,8 +2425,8 @@ async function cdpSetComposerText(tabId, text) {
         }
       }
       throw cdpError("ChatGPT Composer text did not match the requested prompt after insertion.");
-    } catch (error) {
-      lastError = error;
+    } catch (error2) {
+      lastError = error2;
       if (observedText === null) {
         const composerState = await cdpEvaluate(tabId, readComposerText).then((result) => result?.value).catch(() => null);
         composerFound = composerState?.found === true;
@@ -2150,16 +2443,16 @@ async function cdpSetComposerText(tabId, text) {
         tabId,
         attempt,
         maximumAttempts: CDP_COMPOSER_PROMPT_ATTEMPTS,
-        expectedText: text,
+        expectedText: text2,
         composerText: actualText,
         normalizedExpectedText,
         normalizedComposerText: normalizedActualText,
-        expectedLength: text.length,
+        expectedLength: text2.length,
         composerLength: actualText.length,
         normalizedExpectedLength: normalizedExpectedText.length,
         normalizedComposerLength: normalizedActualText?.length ?? null,
         firstDifferenceIndex,
-        error: safeErrorMessage(error)
+        error: safeErrorMessage(error2)
       };
       console.warn("[ResearchTube CDP] Composer text mismatch; retrying replacement", lastDiagnostic);
     }
@@ -2189,7 +2482,7 @@ var CDP_COMPOSER_EMPTY_EXPRESSION = `(() => {
     || document.querySelector('[contenteditable="true"][role="textbox"]')
     || document.querySelector('textarea');
   const current = composer?.value ?? composer?.innerText ?? composer?.textContent ?? '';
-  return current.trim() === '';
+  return Boolean(composer) && current.trim() === '';
 })()`;
 function canonicalYouTubeVideoUrl(value) {
   let url;
@@ -2232,9 +2525,9 @@ async function describeYouTubeVideoInChatGPT(sourceTab) {
     await cdpSendComposerText(chatTab.id, prompt);
     cdpLog("Sent video-description prompt", { tabId: chatTab.id, videoUrl });
     return { ok: true, videoUrl, chatTabId: chatTab.id };
-  } catch (error) {
+  } catch (error2) {
     recentDescribeVideoRequests.delete(videoUrl);
-    throw error;
+    throw error2;
   } finally {
     if (attached) await cdpDetach(chatTab.id);
   }
@@ -2269,33 +2562,33 @@ async function cdpWaitForAttachmentAccepted(tabId, fileNames, timeoutMs = 15e3) 
     attempts += 1;
     const state = (await cdpEvaluate(tabId, cdpAttachmentStateExpression(fileNames)))?.value;
     if (state?.accepted) {
-      cdpLog("Composer accepted image attachment", { tabId, fileNames, attempts, state });
+      cdpLog("Composer accepted file attachment", { tabId, fileNames, attempts, state });
       return;
     }
     await sleep(150);
   }
-  throw cdpError("ChatGPT did not confirm that it accepted the selected image file.");
+  throw cdpError("ChatGPT did not confirm that it accepted the selected file.");
 }
-async function cdpOpenStableFileChooser(tabId) {
+async function cdpOpenStableFileChooser(tabId, fileCount = 1) {
   let lastError = null;
   for (let attempt = 1; attempt <= CDP_FILE_CHOOSER_ATTEMPTS; attempt += 1) {
     await cdpWaitForStableComposer(tabId);
     try {
       cdpLog("File chooser attempt", { tabId, attempt, maximumAttempts: CDP_FILE_CHOOSER_ATTEMPTS });
-      return await cdpOpenFileChooser(tabId);
-    } catch (error) {
-      lastError = error;
-      const chooserWasMissed = String(error?.message || error).includes("Page.fileChooserOpened");
-      if (!chooserWasMissed || attempt === CDP_FILE_CHOOSER_ATTEMPTS) throw error;
+      return await cdpOpenFileChooser(tabId, fileCount);
+    } catch (error2) {
+      lastError = error2;
+      const chooserWasMissed = String(error2?.message || error2).includes("Page.fileChooserOpened");
+      if (!chooserWasMissed || attempt === CDP_FILE_CHOOSER_ATTEMPTS) throw error2;
       cdpLog("File chooser event was missed; retrying after Composer re-check", { tabId, nextAttempt: attempt + 1 });
     }
   }
   throw lastError || cdpError("The ChatGPT file chooser could not be opened.");
 }
 function cdpAbsoluteFilePath(value) {
-  if (typeof value !== "string" || !value.trim()) throw cdpError("Enter an absolute local image-file path.");
+  if (typeof value !== "string" || !value.trim()) throw cdpError("The Agent did not return an absolute file path.");
   const filePath = value.trim();
-  if (!/^(?:[A-Za-z]:[\\/]|\\\\)/.test(filePath)) throw cdpError("The image-file path must be absolute, for example C:\\Pictures\\frame.png.");
+  if (!/^(?:[A-Za-z]:[\\/]|\\\\|\/)/.test(filePath)) throw cdpError("The Agent file path must be absolute.");
   return filePath;
 }
 var CDP_ENABLED_SEND_BUTTON_EXPRESSION = `(() => {
@@ -2377,14 +2670,15 @@ async function cdpClearSentComposerDraft(tabId, sentText) {
       await cdpCommand(tabId, "Input.dispatchKeyEvent", { type: "keyDown", key: "Backspace", code: "Backspace", windowsVirtualKeyCode: 8, nativeVirtualKeyCode: 8 });
       await cdpCommand(tabId, "Input.dispatchKeyEvent", { type: "keyUp", key: "Backspace", code: "Backspace", windowsVirtualKeyCode: 8, nativeVirtualKeyCode: 8 });
       cdpLog("Cleared delayed Composer draft after submission", { tabId, attempt: attempt + 1 });
-    } catch (error) {
-      cdpLog("Stopped Composer draft cleanup", { tabId, attempt: attempt + 1, error: safeErrorMessage(error) });
+    } catch (error2) {
+      cdpLog("Stopped Composer draft cleanup", { tabId, attempt: attempt + 1, error: safeErrorMessage(error2) });
       return;
     }
   }
 }
-async function cdpClickEnabledSendButton(tabId, timeoutMs = 45e3) {
-  await cdpWaitFor(tabId, CDP_ENABLED_SEND_BUTTON_EXPRESSION, "the enabled ChatGPT Send button", timeoutMs);
+async function cdpClickEnabledSendButton(tabId, timeoutMs = 45e3, beforeClick = null) {
+  await cdpWaitFor(tabId, CDP_ENABLED_SEND_BUTTON_EXPRESSION, "the enabled ChatGPT Send button", timeoutMs, beforeClick);
+  if (beforeClick) await beforeClick();
   const target = (await cdpEvaluate(tabId, CDP_SEND_BUTTON_CENTER_EXPRESSION))?.value;
   if (!Number.isFinite(target?.x) || !Number.isFinite(target?.y)) throw cdpError("The ChatGPT Send button was not available.");
   await cdpCommand(tabId, "Input.dispatchMouseEvent", { type: "mouseMoved", x: target.x, y: target.y, button: "none", buttons: 0 });
@@ -2392,29 +2686,30 @@ async function cdpClickEnabledSendButton(tabId, timeoutMs = 45e3) {
   await cdpCommand(tabId, "Input.dispatchMouseEvent", { type: "mouseReleased", x: target.x, y: target.y, button: "left", buttons: 0, clickCount: 1 });
   cdpLog("Clicked ChatGPT Send button with browser input", { tabId });
 }
-async function cdpSendComposerText(tabId, text) {
+async function cdpSendComposerText(tabId, text2) {
   await cdpWaitFor(tabId, CDP_ENABLED_SEND_BUTTON_EXPRESSION, "the enabled ChatGPT Send button", 5e3);
   const submitted = (await cdpEvaluate(tabId, CDP_SUBMIT_COMPOSER_FORM_EXPRESSION))?.value;
   if (submitted !== true) throw cdpError("The ChatGPT Composer form could not be submitted.");
   cdpLog("Submitted ChatGPT Composer form", { tabId });
-  await cdpClearSentComposerDraft(tabId, text);
+  await cdpClearSentComposerDraft(tabId, text2);
 }
-async function cdpSendAttachedImages(tabId, fileCount) {
-  cdpLog("Sending attached image batch without Composer text", { tabId, fileCount });
-  await cdpClickEnabledSendButton(tabId, 9e4);
-  cdpLog("Attached image batch sent", { tabId, fileCount });
+async function cdpSendAttachedFiles(tabId, fileCount, { beforeClick = null, timeoutMs = 9e4 } = {}) {
+  cdpLog("Sending attached file batch without Composer text", { tabId, fileCount });
+  await cdpClickEnabledSendButton(tabId, timeoutMs, beforeClick);
+  cdpLog("Attached file batch sent", { tabId, fileCount });
 }
-async function cdpAttachImagesNow(filePathValues, { onPhase = null } = {}) {
-  if (!Array.isArray(filePathValues) || !filePathValues.length || filePathValues.length > CDP_IMAGE_BATCH_MAX_FILES) {
-    throw cdpError(`An image batch must contain between 1 and ${CDP_IMAGE_BATCH_MAX_FILES} files.`);
+async function cdpAttachFilesNow(filePathValues, { onPhase = null, currentChatTarget = null, composerPolicy = "requireEmpty" } = {}) {
+  if (!Array.isArray(filePathValues) || !filePathValues.length) {
+    throw cdpError("A file batch must contain at least one eligible file.");
   }
   const filePaths = filePathValues.map(cdpAbsoluteFilePath);
   const fileNames = filePaths.map((filePath) => filePath.split(/[/\\\\]/).pop());
-  cdpLog("Image batch attachment started", { fileCount: filePaths.length, fileNames });
+  cdpLog("File batch attachment started", { fileCount: filePaths.length, fileNames });
   if (onPhase) await onPhase("attaching");
-  const { tab } = await findOrCreateServiceTab();
-  if (!tab.id) throw cdpError("The ChatGPT service tab has no tab ID.");
+  const tab = currentChatTarget ? await requireCurrentChatTarget(currentChatTarget) : (await findOrCreateServiceTab()).tab;
+  if (!tab.id) throw cdpError("The ChatGPT destination tab has no tab ID.");
   let attached = false;
+  let composerGuardToken = null;
   try {
     await cdpAttach(tab.id);
     attached = true;
@@ -2422,29 +2717,150 @@ async function cdpAttachImagesNow(filePathValues, { onPhase = null } = {}) {
     await cdpCommand(tab.id, "DOM.enable");
     await cdpCommand(tab.id, "Runtime.enable");
     cdpLog("Required CDP domains enabled", { tabId: tab.id, domains: ["Page", "DOM", "Runtime"] });
+    if (currentChatTarget) {
+      await cdpWaitForTextComposer(tab.id);
+      await prepareCurrentChatComposer(currentChatTarget, composerPolicy);
+    }
     await cdpCommand(tab.id, "Page.setInterceptFileChooserDialog", { enabled: true });
     cdpLog("File-chooser interception enabled", { tabId: tab.id });
-    const chooser = await cdpOpenStableFileChooser(tab.id);
+    const chooser = await cdpOpenStableFileChooser(tab.id, filePaths.length);
     if (!Number.isInteger(chooser?.backendNodeId)) throw cdpError("ChatGPT opened a file chooser without a file-input node.");
     cdpLog("Supplying files to chooser", { tabId: tab.id, backendNodeId: chooser.backendNodeId, fileCount: filePaths.length, fileNames });
+    if (currentChatTarget) {
+      await assertCurrentChatComposer(currentChatTarget);
+      composerGuardToken = crypto.randomUUID();
+      const installed = (await cdpEvaluate(tab.id, `(${installChatComposerGuard.toString()})(${JSON.stringify(fileNames)}, ${JSON.stringify(composerGuardToken)})`))?.value;
+      if (installed !== true) throw localAgentError("MEDIA_TO_CHAT_INVALID", "The Composer could not be monitored; no files were sent.");
+      await assertCurrentChatComposer(currentChatTarget);
+    }
     await cdpCommand(tab.id, "DOM.setFileInputFiles", { files: filePaths, backendNodeId: chooser.backendNodeId });
     cdpLog("DOM.setFileInputFiles completed", { tabId: tab.id, backendNodeId: chooser.backendNodeId, fileCount: filePaths.length });
     await cdpWaitForAttachmentAccepted(tab.id, fileNames);
     if (onPhase) await onPhase("composerAccepted");
     if (onPhase) await onPhase("submitting");
-    await cdpSendAttachedImages(tab.id, filePaths.length);
-    cdpLog("Image batch completed", { tabId: tab.id, fileCount: filePaths.length });
+    await cdpSendAttachedFiles(tab.id, filePaths.length, currentChatTarget ? {
+      timeoutMs: 5 * 6e4,
+      beforeClick: () => assertCurrentChatComposer(currentChatTarget, { fileNames, guardToken: composerGuardToken })
+    } : {});
+    cdpLog("File batch completed", { tabId: tab.id, fileCount: filePaths.length });
     return { ok: true, tabId: tab.id, fileCount: filePaths.length };
   } finally {
-    if (attached) await cdpCommand(tab.id, "Page.setInterceptFileChooserDialog", { enabled: false }).then(() => cdpLog("File-chooser interception disabled", { tabId: tab.id })).catch((error) => cdpErrorLog("Could not disable file-chooser interception", error));
+    if (composerGuardToken && attached) await cdpEvaluate(tab.id, `(${disposeChatComposerGuard.toString()})(${JSON.stringify(composerGuardToken)})`).catch(() => {
+    });
+    if (attached) await cdpCommand(tab.id, "Page.setInterceptFileChooserDialog", { enabled: false }).then(() => cdpLog("File-chooser interception disabled", { tabId: tab.id })).catch((error2) => cdpErrorLog("Could not disable file-chooser interception", error2));
     if (attached) await cdpDetach(tab.id);
   }
+}
+function withChatFileAutomation(work) {
+  const pending = chatFileAutomationTail.catch(() => {
+  }).then(work);
+  chatFileAutomationTail = pending.catch(() => {
+  });
+  return pending;
+}
+function chatConversationPath(value) {
+  try {
+    const url = new URL(value);
+    if (url.origin === "https://chatgpt.com" && /\/c\/[^/]+\/?$/.test(url.pathname)) return url.pathname.replace(/\/$/, "");
+  } catch (_error) {
+  }
+  return null;
+}
+async function captureCurrentChatTarget() {
+  const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  const tab = tabs[0];
+  const chatPath = chatConversationPath(tab?.url);
+  if (!Number.isInteger(tab?.id) || !chatPath) {
+    throw localAgentError("MEDIA_TO_CHAT_INVALID", "Keep the current ChatGPT conversation active when starting media_to_chat.");
+  }
+  return { tabId: tab.id, chatPath };
+}
+async function requireCurrentChatTarget(target) {
+  let tab;
+  try {
+    tab = await chrome.tabs.get(target.tabId);
+  } catch (_error) {
+  }
+  if (!tab || chatConversationPath(tab.url) !== target.chatPath) {
+    throw localAgentError("MEDIA_TO_CHAT_INVALID", "The destination ChatGPT conversation was closed or changed; no Send click was made.");
+  }
+  return tab;
+}
+function normalizeComposerPolicy(value = "requireEmpty") {
+  if (!["requireEmpty", "clear"].includes(value)) {
+    throw localAgentError("MEDIA_TO_CHAT_INVALID", "composerPolicy must be requireEmpty or clear.");
+  }
+  return value;
+}
+function composerAttachmentCount(state) {
+  return Math.max(state.attachments.length, state.selectedFiles.length, state.previewCount || 0);
+}
+async function currentChatComposerState(target) {
+  await requireCurrentChatTarget(target);
+  const state = (await cdpEvaluate(target.tabId, `(${inspectChatComposer.toString()})()`))?.value;
+  if (!state?.found || !Array.isArray(state.attachments) || !Array.isArray(state.selectedFiles) || !Array.isArray(state.removeTargets)) {
+    throw localAgentError("MEDIA_TO_CHAT_INVALID", "The current ChatGPT Composer is unavailable; no Send click was made.");
+  }
+  return state;
+}
+async function assertCurrentChatComposer(target, { fileNames = null, guardToken = null } = {}) {
+  const state = await currentChatComposerState(target);
+  if (!state.textEmpty) {
+    throw localAgentError("MEDIA_TO_CHAT_INVALID", fileNames ? "The current ChatGPT Composer contains a draft added during upload. No Send click was made; uploaded files remain attached." : "The current ChatGPT Composer contains a draft. Use composerPolicy clear to discard it explicitly, or clear/send it yourself.");
+  }
+  if (!fileNames) {
+    if (composerAttachmentCount(state)) throw localAgentError("MEDIA_TO_CHAT_INVALID", "The current ChatGPT Composer already contains attachments. Use composerPolicy clear to discard them explicitly, or remove them yourself.");
+    return;
+  }
+  const guard = (await cdpEvaluate(target.tabId, `(${readChatComposerGuard.toString()})(${JSON.stringify(guardToken)})`))?.value;
+  if (!guard?.present || guard.changed) {
+    throw localAgentError("MEDIA_TO_CHAT_INVALID", "The Composer was edited during upload. No Send click was made; uploaded files remain attached.");
+  }
+  const selected = state.selectedFiles.map((file) => file.name).sort();
+  const expected = [...fileNames].sort();
+  if (composerAttachmentCount(state) !== expected.length || selected.length && (selected.length !== expected.length || selected.some((name, index) => name !== expected[index]))) {
+    throw localAgentError("MEDIA_TO_CHAT_INVALID", "The Composer attachments changed or could not be verified. No Send click was made; remaining files stay attached.");
+  }
+}
+async function prepareCurrentChatComposer(target, policy) {
+  normalizeComposerPolicy(policy);
+  if (policy === "requireEmpty") return assertCurrentChatComposer(target);
+  const initial = await currentChatComposerState(target);
+  if (!initial.textEmpty) await cdpClearComposerDraft(target.tabId);
+  const maximumRemovals = composerAttachmentCount(initial);
+  for (let index = 0; index < maximumRemovals; index += 1) {
+    const state = await currentChatComposerState(target);
+    if (!state.textEmpty) throw localAgentError("MEDIA_TO_CHAT_INVALID", "A new text draft appeared during preparation. No files were uploaded or sent.");
+    const count = composerAttachmentCount(state);
+    if (!count) break;
+    const button = state.removeTargets.find((item) => item.enabled);
+    if (!button || !Number.isFinite(button.x) || !Number.isFinite(button.y)) {
+      throw localAgentError("MEDIA_TO_CHAT_INVALID", "ChatGPT did not expose an enabled attachment removal control; the Composer could not be cleared.");
+    }
+    await requireCurrentChatTarget(target);
+    for (const [type, buttons] of [["mouseMoved", 0], ["mousePressed", 1], ["mouseReleased", 0]]) {
+      await cdpCommand(target.tabId, "Input.dispatchMouseEvent", { type, x: button.x, y: button.y, button: type === "mouseMoved" ? "none" : "left", buttons, ...buttons || type === "mouseReleased" ? { clickCount: 1 } : {} });
+    }
+    const deadline = Date.now() + 5e3;
+    let removed = false;
+    while (Date.now() < deadline) {
+      const next = await currentChatComposerState(target);
+      if (!next.textEmpty) throw localAgentError("MEDIA_TO_CHAT_INVALID", "A new text draft appeared during preparation. No files were uploaded or sent.");
+      if (composerAttachmentCount(next) < count) {
+        removed = true;
+        break;
+      }
+      await sleep(150);
+    }
+    if (!removed) throw localAgentError("MEDIA_TO_CHAT_INVALID", "ChatGPT did not confirm attachment removal; no files were uploaded or sent.");
+  }
+  await assertCurrentChatComposer(target);
 }
 function libraryStoreNow() {
   return (/* @__PURE__ */ new Date()).toISOString();
 }
-function libraryStoreQueuePosition(taskId2) {
-  const index = libraryStoreQueue.indexOf(taskId2);
+function libraryStoreQueuePosition(taskId3) {
+  const index = libraryStoreQueue.indexOf(taskId3);
   return index < 0 ? null : index + 1;
 }
 function libraryStoreTaskDocument(task) {
@@ -2453,6 +2869,8 @@ function libraryStoreTaskDocument(task) {
     status: task.status,
     phase: task.phase,
     files: task.files.map(({ workspacePath }) => ({ workspacePath })),
+    submittedFiles: (task.submittedFiles ?? []).map(({ workspacePath }) => ({ workspacePath })),
+    skippedFiles: task.skippedFiles ?? [],
     queuePosition: libraryStoreQueuePosition(task.taskId),
     createdAt: task.createdAt,
     updatedAt: task.updatedAt,
@@ -2463,6 +2881,7 @@ function libraryStoreTaskDocument(task) {
   };
 }
 async function persistLibraryStoreTasks() {
+  pruneCompletedTasks(libraryStoreTasks, completedTaskHistoryLimit);
   await chrome.storage.local.set({
     [LIBRARY_STORE_TASK_STORAGE_KEY]: [...libraryStoreTasks.values()],
     [LIBRARY_STORE_QUEUE_STORAGE_KEY]: libraryStoreQueue
@@ -2475,7 +2894,7 @@ async function ensureLibraryStoreLoaded() {
     const stored = await chrome.storage.local.get({ [LIBRARY_STORE_TASK_STORAGE_KEY]: [], [LIBRARY_STORE_QUEUE_STORAGE_KEY]: [] });
     const tasks = Array.isArray(stored[LIBRARY_STORE_TASK_STORAGE_KEY]) ? stored[LIBRARY_STORE_TASK_STORAGE_KEY] : [];
     libraryStoreTasks = new Map(tasks.filter((task) => task && typeof task.taskId === "string").map((task) => [task.taskId, task]));
-    libraryStoreQueue = Array.isArray(stored[LIBRARY_STORE_QUEUE_STORAGE_KEY]) ? stored[LIBRARY_STORE_QUEUE_STORAGE_KEY].filter((taskId2) => typeof taskId2 === "string" && libraryStoreTasks.get(taskId2)?.status === "queued") : [];
+    libraryStoreQueue = Array.isArray(stored[LIBRARY_STORE_QUEUE_STORAGE_KEY]) ? stored[LIBRARY_STORE_QUEUE_STORAGE_KEY].filter((taskId3) => typeof taskId3 === "string" && libraryStoreTasks.get(taskId3)?.status === "queued") : [];
     for (const task of libraryStoreTasks.values()) {
       if (task.status === "working") {
         task.status = "failed";
@@ -2492,62 +2911,98 @@ async function ensureLibraryStoreLoaded() {
   });
   return libraryStoreLoading;
 }
-async function updateLibraryStoreTask(task, phase, message, { status = "working", error = null, submittedAt = task.submittedAt } = {}) {
+async function updateLibraryStoreTask(task, phase, message, { status = "working", error: error2 = null, submittedAt = task.submittedAt } = {}) {
   task.status = status;
   task.phase = phase;
   task.message = message;
-  task.error = error;
+  task.error = error2;
   task.submittedAt = submittedAt;
   task.updatedAt = libraryStoreNow();
   await persistLibraryStoreTasks();
 }
-function normalizeLibraryStoreFiles(value) {
-  if (!Array.isArray(value) || value.length < 1 || value.length > CDP_IMAGE_BATCH_MAX_FILES) {
-    throw localAgentError("LIBRARY_STORE_INVALID", `files must contain between 1 and ${CDP_IMAGE_BATCH_MAX_FILES} items.`);
+async function configuredToolLimits() {
+  const document2 = await agentJsonRequest("/internal/tool-limits");
+  const values = document2?.limits;
+  const names = ["mediaCaptureFrameMaxFrames", "mediaClipMaxSegments", "cameraRecordAudioMaxMinutes", "cameraRecordVideoMaxMinutes", "libraryStoreMaxFiles", "libraryStoreMaxFileSizeMiB", "mediaToChatMaxFiles", "mediaToChatMaxFileSizeMiB"];
+  if (!values || typeof values !== "object" || names.some((name) => !Number.isSafeInteger(values[name]) || values[name] < 1)) {
+    throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid tool limits.");
+  }
+  if (!Number.isSafeInteger(values.completedTaskHistoryLimit) || values.completedTaskHistoryLimit < 1 || values.completedTaskHistoryLimit > 1e5 || typeof document2.newToolsEnabledByDefault !== "boolean") {
+    throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid task history or developer settings.");
+  }
+  completedTaskHistoryLimit = values.completedTaskHistoryLimit;
+  developerNewToolsDefault = document2.newToolsEnabledByDefault;
+  return values;
+}
+async function refreshTaskHistorySettings() {
+  try {
+    await configuredToolLimits();
+  } catch (error2) {
+    if (error2?.code === "CONFIG_INVALID" || error2?.code === "AGENT_INVALID_RESPONSE") throw error2;
+  }
+}
+function normalizeLibraryStoreFiles(value, maximum, errorCode = "LIBRARY_STORE_INVALID") {
+  if (!Array.isArray(value) || value.length < 1 || value.length > maximum) {
+    throw localAgentError(errorCode, `files must contain from 1 to ${maximum} items (configured maximum).`);
   }
   const paths = value.map((entry) => {
     if (!entry || typeof entry !== "object" || Array.isArray(entry) || Object.keys(entry).length !== 1 || typeof entry.workspacePath !== "string") {
-      throw localAgentError("LIBRARY_STORE_INVALID", "Each files item must contain only workspacePath.");
+      throw localAgentError(errorCode, "Each files item must contain only workspacePath.");
     }
     return normalizeWorkspacePath(entry.workspacePath, "files.workspacePath");
   });
-  if (new Set(paths).size !== paths.length) throw localAgentError("LIBRARY_STORE_INVALID", "files must not repeat the same workspacePath.");
+  if (new Set(paths).size !== paths.length) throw localAgentError(errorCode, "files must not repeat the same workspacePath.");
   return paths.map((workspacePath) => ({ workspacePath }));
 }
-async function resolveLibraryStoreFiles(files) {
-  const document2 = await agentJsonRequest("/internal/library-store-files", { method: "POST", body: { files } });
-  if (!document2 || typeof document2 !== "object" || !Array.isArray(document2.files) || document2.files.length !== files.length) {
-    throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid Library file resolution.");
+async function resolveLibraryStoreFiles(files, endpoint = "/internal/library-store-files") {
+  const document2 = await agentJsonRequest(endpoint, { method: "POST", body: { files } });
+  if (!document2 || typeof document2 !== "object" || !Array.isArray(document2.files) || !Array.isArray(document2.skippedFiles) || document2.files.length + document2.skippedFiles.length !== files.length) {
+    throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid file-transfer resolution.");
   }
-  return document2.files.map((entry, index) => {
-    if (!entry || typeof entry !== "object" || entry.workspacePath !== files[index].workspacePath || typeof entry.localPath !== "string") {
-      throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid Library file resolution.");
+  const expected = new Set(files.map((file) => file.workspacePath));
+  const localPaths = document2.files.map((entry) => {
+    if (!entry || typeof entry !== "object" || !expected.delete(entry.workspacePath) || typeof entry.localPath !== "string" || !Number.isSafeInteger(entry.sizeBytes) || entry.sizeBytes < 0) {
+      throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid file-transfer resolution.");
     }
     return entry.localPath;
   });
+  const skippedFiles = document2.skippedFiles.map((entry) => {
+    if (!entry || !expected.delete(entry.workspacePath) || entry.reason !== "FILE_TOO_LARGE" || !Number.isSafeInteger(entry.sizeBytes) || !Number.isSafeInteger(entry.maxFileSizeBytes) || entry.sizeBytes <= entry.maxFileSizeBytes || entry.maxFileSizeBytes < 1) {
+      throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid skipped-file metadata.");
+    }
+    return { workspacePath: entry.workspacePath, sizeBytes: entry.sizeBytes, maxFileSizeBytes: entry.maxFileSizeBytes, reason: "FILE_TOO_LARGE" };
+  });
+  if (expected.size) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent omitted a requested transfer file.");
+  return { localPaths, submittedFiles: document2.files.map(({ workspacePath }) => ({ workspacePath })), skippedFiles };
 }
 async function drainLibraryStoreQueue() {
   if (libraryStoreDraining) return;
   libraryStoreDraining = true;
   try {
     while (libraryStoreQueue.length) {
-      const taskId2 = libraryStoreQueue.shift();
-      const task = libraryStoreTasks.get(taskId2);
+      const taskId3 = libraryStoreQueue.shift();
+      const task = libraryStoreTasks.get(taskId3);
       if (!task || task.status !== "queued") continue;
-      await updateLibraryStoreTask(task, "resolvingFiles", "Resolving the workspace image batch.");
+      await updateLibraryStoreTask(task, "resolvingFiles", "Resolving the workspace file batch.");
       try {
-        const localPaths = await resolveLibraryStoreFiles(task.files);
-        await cdpAttachImagesNow(localPaths, { onPhase: async (phase) => {
-          const messages2 = { attaching: "Attaching the image batch to the background ChatGPT Composer.", composerAccepted: "The ChatGPT Composer accepted the image batch.", submitting: "Sending the attached image batch to ChatGPT without Composer text." };
-          await updateLibraryStoreTask(task, phase, messages2[phase] || "Processing the attached image batch.");
-        } });
+        const { localPaths, submittedFiles, skippedFiles } = await resolveLibraryStoreFiles(task.files);
+        task.skippedFiles = skippedFiles;
+        if (!localPaths.length) {
+          await updateLibraryStoreTask(task, "failed", `All ${skippedFiles.length} files exceed the configured per-file size limit; no files were submitted.`, { status: "failed", error: "All requested files exceed the configured per-file size limit." });
+          continue;
+        }
+        await withChatFileAutomation(() => cdpAttachFilesNow(localPaths, { onPhase: async (phase) => {
+          const messages2 = { attaching: "Attaching the file batch to the background ChatGPT Composer.", composerAccepted: "The ChatGPT Composer accepted the file batch.", submitting: "Sending the attached file batch to ChatGPT without Composer text." };
+          await updateLibraryStoreTask(task, phase, messages2[phase] || "Processing the attached file batch.");
+        } }));
+        task.submittedFiles = submittedFiles;
         task.libraryAvailability = "not_verified";
-        await updateLibraryStoreTask(task, "submitted", "ResearchTube sent the attached image batch to ChatGPT without Composer text. Library completion cannot be verified.", {
+        await updateLibraryStoreTask(task, "submitted", `ResearchTube submitted ${submittedFiles.length} file(s) to ChatGPT; ${skippedFiles.length} over-limit file(s) skipped. Library completion cannot be verified.`, {
           status: "completed",
           submittedAt: libraryStoreNow()
         });
-      } catch (error) {
-        await updateLibraryStoreTask(task, "failed", "ResearchTube could not submit this Library request.", { status: "failed", error: safeErrorMessage(error) });
+      } catch (error2) {
+        await updateLibraryStoreTask(task, "failed", "ResearchTube could not submit this Library request.", { status: "failed", error: safeErrorMessage(error2) });
       }
     }
   } finally {
@@ -2556,13 +3011,16 @@ async function drainLibraryStoreQueue() {
 }
 async function libraryStoreStart(filesValue) {
   await ensureLibraryStoreLoaded();
-  const files = normalizeLibraryStoreFiles(filesValue);
+  const limits = await configuredToolLimits();
+  const files = normalizeLibraryStoreFiles(filesValue, limits.libraryStoreMaxFiles);
   const createdAt = libraryStoreNow();
   const task = {
     taskId: `library_${crypto.randomUUID()}`,
     status: "queued",
     phase: "queued",
     files,
+    submittedFiles: [],
+    skippedFiles: [],
     createdAt,
     updatedAt: createdAt,
     submittedAt: null,
@@ -2576,24 +3034,184 @@ async function libraryStoreStart(filesValue) {
   void drainLibraryStoreQueue();
   return { task: libraryStoreTaskDocument(task) };
 }
-async function libraryStoreStatus(taskId2) {
+async function libraryStoreStatus(taskId3) {
   await ensureLibraryStoreLoaded();
-  const task = libraryStoreTasks.get(taskId2);
+  await refreshTaskHistorySettings();
+  await persistLibraryStoreTasks();
+  const task = libraryStoreTasks.get(taskId3);
   if (!task) throw localAgentError("LIBRARY_STORE_TASK_NOT_FOUND", "The Library storage task was not found.");
   return libraryStoreTaskDocument(task);
 }
-async function libraryStoreCancel(taskId2) {
+async function libraryStoreCancel(taskId3) {
   await ensureLibraryStoreLoaded();
-  const task = libraryStoreTasks.get(taskId2);
+  await refreshTaskHistorySettings();
+  await persistLibraryStoreTasks();
+  const task = libraryStoreTasks.get(taskId3);
   if (!task) throw localAgentError("LIBRARY_STORE_TASK_NOT_FOUND", "The Library storage task was not found.");
   if (task.status !== "queued") return { task: libraryStoreTaskDocument(task), cancelled: false };
-  libraryStoreQueue = libraryStoreQueue.filter((queuedTaskId) => queuedTaskId !== taskId2);
+  libraryStoreQueue = libraryStoreQueue.filter((queuedTaskId) => queuedTaskId !== taskId3);
   await updateLibraryStoreTask(task, "cancelled", "Cancelled before ChatGPT attachment began.", { status: "cancelled" });
   return { task: libraryStoreTaskDocument(task), cancelled: true };
+}
+function mediaToChatTaskDocument(task) {
+  const index = mediaToChatQueue.indexOf(task.taskId);
+  return {
+    taskId: task.taskId,
+    status: task.status,
+    phase: task.phase,
+    composerPolicy: task.composerPolicy ?? "requireEmpty",
+    files: task.files.map(({ workspacePath }) => ({ workspacePath })),
+    submittedFiles: (task.submittedFiles ?? []).map(({ workspacePath }) => ({ workspacePath })),
+    skippedFiles: (task.skippedFiles ?? []).map(({ workspacePath, sizeBytes, maxFileSizeBytes, reason }) => ({ workspacePath, sizeBytes, maxFileSizeBytes, reason })),
+    queuePosition: index < 0 ? null : index + 1,
+    createdAt: task.createdAt,
+    updatedAt: task.updatedAt,
+    submittedAt: task.submittedAt,
+    progressPercent: task.progressPercent,
+    pollIntervalMs: 1e3,
+    message: task.message,
+    error: task.error
+  };
+}
+async function persistMediaToChatTasks() {
+  pruneCompletedTasks(mediaToChatTasks, completedTaskHistoryLimit);
+  await chrome.storage.local.set({
+    [MEDIA_TO_CHAT_TASK_STORAGE_KEY]: [...mediaToChatTasks.values()],
+    [MEDIA_TO_CHAT_QUEUE_STORAGE_KEY]: mediaToChatQueue
+  });
+}
+async function ensureMediaToChatLoaded() {
+  if (mediaToChatLoaded) return;
+  if (mediaToChatLoading) return mediaToChatLoading;
+  mediaToChatLoading = (async () => {
+    const stored = await chrome.storage.local.get({ [MEDIA_TO_CHAT_TASK_STORAGE_KEY]: [], [MEDIA_TO_CHAT_QUEUE_STORAGE_KEY]: [] });
+    const tasks = Array.isArray(stored[MEDIA_TO_CHAT_TASK_STORAGE_KEY]) ? stored[MEDIA_TO_CHAT_TASK_STORAGE_KEY] : [];
+    mediaToChatTasks = new Map(tasks.filter((task) => task && typeof task.taskId === "string").map((task) => [task.taskId, task]));
+    mediaToChatQueue = Array.isArray(stored[MEDIA_TO_CHAT_QUEUE_STORAGE_KEY]) ? stored[MEDIA_TO_CHAT_QUEUE_STORAGE_KEY].filter((taskId3) => typeof taskId3 === "string" && mediaToChatTasks.get(taskId3)?.status === "queued") : [];
+    for (const task of mediaToChatTasks.values()) {
+      if (task.status === "working") {
+        task.status = "failed";
+        task.phase = "failed";
+        task.updatedAt = libraryStoreNow();
+        task.error = "The Extension restarted during submission. Check the conversation before retrying to avoid sending files twice.";
+        task.message = task.error;
+      }
+    }
+    mediaToChatLoaded = true;
+    await persistMediaToChatTasks();
+  })().finally(() => {
+    mediaToChatLoading = null;
+  });
+  return mediaToChatLoading;
+}
+async function updateMediaToChatTask(task, phase, message, { status = "working", error: error2 = null } = {}) {
+  const milestones = { queued: 0, resolvingFiles: 10, attaching: 25, composerAccepted: 65, submitting: 80, submitted: 100 };
+  task.progressPercent = Math.max(task.progressPercent, milestones[phase] ?? task.progressPercent);
+  task.status = status;
+  task.phase = phase;
+  task.message = message;
+  task.error = error2;
+  task.updatedAt = libraryStoreNow();
+  await persistMediaToChatTasks();
+  void reportMcpToolToAgent("media_to_chat", mediaToChatTaskDocument(task));
+}
+async function drainMediaToChatQueue() {
+  if (mediaToChatDraining) return;
+  mediaToChatDraining = true;
+  try {
+    while (mediaToChatQueue.length) {
+      const taskId3 = mediaToChatQueue.shift();
+      const task = mediaToChatTasks.get(taskId3);
+      if (!task || task.status !== "queued") continue;
+      await updateMediaToChatTask(task, "resolvingFiles", "Resolving the selected Workspace files.");
+      try {
+        const { localPaths, submittedFiles, skippedFiles } = await resolveLibraryStoreFiles(task.files, "/internal/media-to-chat-files");
+        task.skippedFiles = skippedFiles;
+        if (!localPaths.length) {
+          await updateMediaToChatTask(task, "failed", `All ${skippedFiles.length} files exceed the configured per-file size limit; no files were sent.`, { status: "failed", error: "No files are within the configured per-file size limit." });
+          continue;
+        }
+        await withChatFileAutomation(() => cdpAttachFilesNow(localPaths, {
+          currentChatTarget: task.target,
+          composerPolicy: task.composerPolicy ?? "requireEmpty",
+          onPhase: async (phase) => {
+            const messages2 = {
+              attaching: "Attaching files to the selected ChatGPT conversation.",
+              composerAccepted: "The ChatGPT Composer accepted the selected files.",
+              submitting: "Waiting for ChatGPT Send to become ready. The current assistant response may need to finish first."
+            };
+            await updateMediaToChatTask(task, phase, messages2[phase] || "Sending files to ChatGPT.");
+          }
+        }));
+        task.submittedFiles = submittedFiles;
+        task.submittedAt = libraryStoreNow();
+        await updateMediaToChatTask(task, "submitted", `Sent ${submittedFiles.length} file(s) to the selected ChatGPT conversation; skipped ${skippedFiles.length} oversized file(s).`, { status: "completed" });
+      } catch (error2) {
+        cdpErrorLog("Sending files to the current chat failed", error2);
+        const message = error2?.code && isExpectedToolError(error2.code) ? safeErrorMessage(error2) : "Chrome could not attach or send this file batch. Check the conversation and Extension console before retrying.";
+        await updateMediaToChatTask(task, "failed", message, { status: "failed", error: message });
+      }
+    }
+  } finally {
+    mediaToChatDraining = false;
+  }
+}
+async function mediaToChatStart(argumentsValue = {}) {
+  if (!argumentsValue || typeof argumentsValue !== "object" || Array.isArray(argumentsValue) || Object.keys(argumentsValue).some((name) => !["files", "composerPolicy"].includes(name))) {
+    throw localAgentError("MEDIA_TO_CHAT_INVALID", "media_to_chat accepts only files and composerPolicy.");
+  }
+  const composerPolicy = normalizeComposerPolicy(argumentsValue.composerPolicy);
+  const target = await captureCurrentChatTarget();
+  await ensureMediaToChatLoaded();
+  const limits = await configuredToolLimits();
+  const files = normalizeLibraryStoreFiles(argumentsValue.files, limits.mediaToChatMaxFiles, "MEDIA_TO_CHAT_INVALID");
+  const createdAt = libraryStoreNow();
+  const task = {
+    taskId: `chat_${crypto.randomUUID()}`,
+    target,
+    composerPolicy,
+    status: "queued",
+    phase: "queued",
+    progressPercent: 0,
+    files,
+    submittedFiles: [],
+    skippedFiles: [],
+    createdAt,
+    updatedAt: createdAt,
+    submittedAt: null,
+    message: "Queued for the current ChatGPT conversation. Finish the current assistant response so Send can become available.",
+    error: null
+  };
+  mediaToChatTasks.set(task.taskId, task);
+  mediaToChatQueue.push(task.taskId);
+  await persistMediaToChatTasks();
+  const result = { task: mediaToChatTaskDocument(task) };
+  void drainMediaToChatQueue();
+  return result;
+}
+async function mediaToChatStatus(taskId3) {
+  await ensureMediaToChatLoaded();
+  await refreshTaskHistorySettings();
+  await persistMediaToChatTasks();
+  const task = mediaToChatTasks.get(taskId3);
+  if (!task) throw localAgentError("MEDIA_TO_CHAT_TASK_NOT_FOUND", "The files-to-chat task was not found.");
+  return mediaToChatTaskDocument(task);
+}
+async function mediaToChatCancel(taskId3) {
+  await ensureMediaToChatLoaded();
+  await refreshTaskHistorySettings();
+  await persistMediaToChatTasks();
+  const task = mediaToChatTasks.get(taskId3);
+  if (!task) throw localAgentError("MEDIA_TO_CHAT_TASK_NOT_FOUND", "The files-to-chat task was not found.");
+  if (task.status !== "queued") return { task: mediaToChatTaskDocument(task), cancelled: false };
+  mediaToChatQueue = mediaToChatQueue.filter((queuedTaskId) => queuedTaskId !== taskId3);
+  await updateMediaToChatTask(task, "cancelled", "Cancelled before attachment began.", { status: "cancelled" });
+  return { task: mediaToChatTaskDocument(task), cancelled: true };
 }
 chrome.runtime.onInstalled.addListener(({ reason }) => {
   void bootstrapTunnel();
   void ensureLibraryStoreLoaded().then(drainLibraryStoreQueue);
+  void ensureMediaToChatLoaded().then(drainMediaToChatQueue);
   if (reason === "install") {
     void chrome.tabs.create({ url: chrome.runtime.getURL("settings.html"), active: true });
   }
@@ -2601,6 +3219,7 @@ chrome.runtime.onInstalled.addListener(({ reason }) => {
 chrome.runtime.onStartup.addListener(() => {
   void bootstrapTunnel();
   void ensureLibraryStoreLoaded().then(drainLibraryStoreQueue);
+  void ensureMediaToChatLoaded().then(drainMediaToChatQueue);
 });
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === "tunnel-poll") void startPolling();
@@ -2630,7 +3249,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
   if (message?.type === "save-connection") {
-    saveConnection(message.payload).then(sendResponse).catch((error) => sendResponse({ ok: false, error: safeErrorMessage(error) }));
+    saveConnection(message.payload).then(sendResponse).catch((error2) => sendResponse({ ok: false, error: safeErrorMessage(error2) }));
     return true;
   }
   if (message?.type === "clear-api-key") {
@@ -2638,27 +3257,23 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       await chrome.storage.local.set({ lastConnectionTest: null });
       await refreshActionBadge();
       sendResponse({ ok: true });
-    }).catch((error) => sendResponse({ ok: false, error: safeErrorMessage(error) }));
+    }).catch((error2) => sendResponse({ ok: false, error: safeErrorMessage(error2) }));
     return true;
   }
   if (message?.type === "test-connection") {
-    testConnection().then(sendResponse).catch((error) => sendResponse(connectionFailure("UNKNOWN_ERROR", "Connection test failed.", error)));
+    testConnection().then(sendResponse).catch((error2) => sendResponse(connectionFailure("UNKNOWN_ERROR", "Connection test failed.", error2)));
     return true;
   }
   if (message?.type === "save-agent-port") {
-    saveAgentPort(message.payload).then(sendResponse).catch((error) => sendResponse({ ok: false, error: safeErrorMessage(error) }));
+    saveAgentPort(message.payload).then(sendResponse).catch((error2) => sendResponse({ ok: false, error: safeErrorMessage(error2) }));
     return true;
   }
   if (message?.type === "get-mcp-tool-settings") {
-    mcpToolPreferences().then(async (preferences) => sendResponse({ ok: true, preferences, tools: await mcpToolSettingsCatalog(), groups: MCP_TOOL_GROUPS })).catch((error) => sendResponse({ ok: false, error: safeErrorMessage(error) }));
+    mcpToolSettingsCatalog().then((tools) => sendResponse({ ok: true, tools, groups: MCP_TOOL_GROUPS })).catch((error2) => sendResponse({ ok: false, error: safeErrorMessage(error2) }));
     return true;
   }
   if (message?.type === "set-mcp-tool-enabled") {
-    updateMcpToolEnabled(message.payload?.name, message.payload?.enabled).then(sendResponse).catch((error) => sendResponse({ ok: false, error: safeErrorMessage(error) }));
-    return true;
-  }
-  if (message?.type === "set-mcp-new-tools-default") {
-    updateNewToolsEnabledByDefault(message.payload?.enabled).then(sendResponse).catch((error) => sendResponse({ ok: false, error: safeErrorMessage(error) }));
+    updateMcpToolEnabled(message.payload?.name, message.payload?.enabled).then(sendResponse).catch((error2) => sendResponse({ ok: false, error: safeErrorMessage(error2) }));
     return true;
   }
   if (message?.type === "test-agent-connection") {
@@ -2666,11 +3281,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
   if (message?.type === "get-diagnostics") {
-    getDiagnosticsExport().then(sendResponse).catch((error) => sendResponse({ ok: false, error: safeErrorMessage(error) }));
+    getDiagnosticsExport().then(sendResponse).catch((error2) => sendResponse({ ok: false, error: safeErrorMessage(error2) }));
     return true;
   }
   if (message?.type === "clear-diagnostics") {
-    clearDiagnostics().then(sendResponse).catch((error) => sendResponse({ ok: false, error: safeErrorMessage(error) }));
+    clearDiagnostics().then(sendResponse).catch((error2) => sendResponse({ ok: false, error: safeErrorMessage(error2) }));
     return true;
   }
   if (message?.type === "open-external") {
@@ -2679,13 +3294,13 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       sendResponse({ ok: false, error: "Unknown destination" });
       return false;
     }
-    chrome.tabs.create({ url, active: true }).then(() => sendResponse({ ok: true })).catch((error) => sendResponse({ ok: false, error: safeErrorMessage(error) }));
+    chrome.tabs.create({ url, active: true }).then(() => sendResponse({ ok: true })).catch((error2) => sendResponse({ ok: false, error: safeErrorMessage(error2) }));
     return true;
   }
   if (message?.type === "describe-youtube-video") {
-    describeYouTubeVideoInChatGPT(message.tab).then(sendResponse).catch((error) => {
-      cdpErrorLog("Describe this video failed", error);
-      sendResponse({ ok: false, error: safeErrorMessage(error) });
+    describeYouTubeVideoInChatGPT(message.tab).then(sendResponse).catch((error2) => {
+      cdpErrorLog("Describe this video failed", error2);
+      sendResponse({ ok: false, error: safeErrorMessage(error2) });
     });
     return true;
   }
@@ -2694,11 +3309,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       sendResponse({ ok: false, error: "This widget action is not available." });
       return false;
     }
-    copyCaptureFramePath(message.path).then((data) => sendResponse({ ok: true, data })).catch((error) => sendResponse({ ok: false, error: safeErrorMessage(error) }));
+    copyCaptureFramePath(message.path).then((data) => sendResponse({ ok: true, data })).catch((error2) => sendResponse({ ok: false, error: safeErrorMessage(error2) }));
     return true;
   }
   if (message?.type === "researchtube_media_viewer_resolve") {
-    showWorkspaceImage(message.path).then((data) => sendResponse({ ok: true, data })).catch((error) => sendResponse({ ok: false, error: safeErrorMessage(error) }));
+    showWorkspaceImage(message.path).then((data) => sendResponse({ ok: true, data })).catch((error2) => sendResponse({ ok: false, error: safeErrorMessage(error2) }));
     return true;
   }
   return false;
@@ -2845,10 +3460,10 @@ async function testAgentConnection(payload = {}) {
   return { ok: agentInterfaceIsCompatible(status), ...status };
 }
 function localAgentError(code, message, detail = null) {
-  const error = new Error(message);
-  error.code = code;
-  error.detail = detail;
-  return error;
+  const error2 = new Error(message);
+  error2.code = code;
+  error2.detail = detail;
+  return error2;
 }
 async function requireCompatibleAgent(port) {
   const status = await getAgentStatus(port);
@@ -2887,8 +3502,8 @@ async function agentJsonRequest(path, { method = "GET", body = null, port = null
     }
     if (!document2 || typeof document2 !== "object") throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid JSON.");
     return document2;
-  } catch (error) {
-    if (error?.code) throw error;
+  } catch (error2) {
+    if (error2?.code) throw error2;
     throw localAgentError("AGENT_UNAVAILABLE", `ResearchTube Local Agent is not available on port ${resolvedPort}.`);
   } finally {
     clearTimeout(timeout);
@@ -2954,12 +3569,12 @@ async function speechSpeak(argumentsValue) {
 function googleTranslateAbort(signal) {
   if (signal?.aborted) throw new DOMException("Google Translate speech was cancelled.", "AbortError");
 }
-async function googleTranslateProgress(taskId2, uploadToken, phase, progressPercent) {
-  await agentJsonRequest(`/tasks/system-speech/${encodeURIComponent(taskId2)}/google-translate-progress`, { method: "POST", body: { uploadToken, phase, progressPercent } });
+async function googleTranslateProgress(taskId3, uploadToken, phase, progressPercent) {
+  await agentJsonRequest(`/tasks/system-speech/${encodeURIComponent(taskId3)}/google-translate-progress`, { method: "POST", body: { uploadToken, phase, progressPercent } });
 }
-async function googleTranslateFail(taskId2, uploadToken, code) {
+async function googleTranslateFail(taskId3, uploadToken, code) {
   try {
-    await agentJsonRequest(`/tasks/system-speech/${encodeURIComponent(taskId2)}/google-translate-fail`, { method: "POST", body: { uploadToken, code } });
+    await agentJsonRequest(`/tasks/system-speech/${encodeURIComponent(taskId3)}/google-translate-fail`, { method: "POST", body: { uploadToken, code } });
   } catch (_error) {
   }
 }
@@ -2989,7 +3604,7 @@ async function waitForGoogleTranslateTab(tabId, signal) {
   }
   throw new Error("Google Translate did not finish loading its text input.");
 }
-async function googleTranslateSetText(tabId, text, signal) {
+async function googleTranslateSetText(tabId, text2, signal) {
   googleTranslateAbort(signal);
   const [{ result }] = await chrome.scripting.executeScript({
     target: { tabId },
@@ -3015,7 +3630,7 @@ async function googleTranslateSetText(tabId, text, signal) {
       setValue(value);
       return { present: true, value: field instanceof HTMLTextAreaElement ? field.value : field.textContent };
     },
-    args: [text]
+    args: [text2]
   });
   if (result?.present !== true) throw new Error("Google Translate text field is unavailable.");
   const deadline = Date.now() + GOOGLE_TRANSLATE_TAB_TIMEOUT_MS;
@@ -3034,7 +3649,7 @@ async function googleTranslateSetText(tabId, text, signal) {
         return { present: true, value: field instanceof HTMLTextAreaElement ? field.value : field.textContent };
       }
     });
-    if (current?.present === true && current.value === text) return;
+    if (current?.present === true && current.value === text2) return;
     await sleep(150);
   }
   throw new Error("Google Translate text field did not retain the requested text.");
@@ -3228,9 +3843,9 @@ async function googleTranslateNetworkAudioCapture(tabId) {
       maxTotalBufferSize: GOOGLE_TRANSLATE_MAX_AUDIO_BYTES + 1024 * 1024,
       maxResourceBufferSize: GOOGLE_TRANSLATE_MAX_AUDIO_BYTES + 1024 * 1024
     });
-  } catch (error) {
+  } catch (error2) {
     chrome.debugger.onEvent.removeListener(onEvent);
-    throw error;
+    throw error2;
   }
   return {
     async waitForAudio(signal) {
@@ -3251,10 +3866,10 @@ async function googleTranslateNetworkAudioCapture(tabId) {
     }
   };
 }
-async function uploadGoogleTranslateAudio(taskId2, uploadToken, audio) {
+async function uploadGoogleTranslateAudio(taskId3, uploadToken, audio) {
   const config = await getConfig();
   const port = normalizeAgentPort(config.agentPort);
-  const response = await fetch(`http://127.0.0.1:${port}/tasks/system-speech/${encodeURIComponent(taskId2)}/google-translate-audio?token=${encodeURIComponent(uploadToken)}`, {
+  const response = await fetch(`http://127.0.0.1:${port}/tasks/system-speech/${encodeURIComponent(taskId3)}/google-translate-audio?token=${encodeURIComponent(uploadToken)}`, {
     method: "POST",
     headers: { "Content-Type": "audio/mpeg" },
     body: audio
@@ -3267,16 +3882,16 @@ async function uploadGoogleTranslateAudio(taskId2, uploadToken, audio) {
   if (!response.ok) throw new Error(typeof document2?.error?.message === "string" ? document2.error.message : "The Local Agent could not save Google Translate source audio.");
   return normalizeSpeechTask(document2);
 }
-async function startGoogleTranslateSpeechTask(taskId2, uploadToken, input) {
+async function startGoogleTranslateSpeechTask(taskId3, uploadToken, input) {
   const controller = new AbortController();
   const active = { controller, tabId: null };
-  googleTranslateSpeechRunners.set(taskId2, active);
+  googleTranslateSpeechRunners.set(taskId3, active);
   let completed = false;
   let focusEmulationAttached = false;
   let audioCapture = null;
   let restoreGoogleTranslateTabMute = false;
   try {
-    await googleTranslateProgress(taskId2, uploadToken, "openingTranslate", 5);
+    await googleTranslateProgress(taskId3, uploadToken, "openingTranslate", 5);
     const tab = await acquireGoogleTranslateTab();
     active.tabId = tab.id;
     await cdpAttach(tab.id);
@@ -3284,15 +3899,15 @@ async function startGoogleTranslateSpeechTask(taskId2, uploadToken, input) {
     await cdpCommand(tab.id, "Emulation.setFocusEmulationEnabled", { enabled: true });
     try {
       await cdpCommand(tab.id, "Page.setWebLifecycleState", { state: "active" });
-    } catch (error) {
-      cdpLog("Google Translate active lifecycle emulation is unavailable", { tabId: tab.id, error: safeErrorMessage(error) });
+    } catch (error2) {
+      cdpLog("Google Translate active lifecycle emulation is unavailable", { tabId: tab.id, error: safeErrorMessage(error2) });
     }
     if (input.outputMode !== "speakers") audioCapture = await googleTranslateNetworkAudioCapture(tab.id);
     await waitForGoogleTranslateTab(tab.id, controller.signal);
     await googleTranslateSetText(tab.id, input.text, controller.signal);
-    await googleTranslateProgress(taskId2, uploadToken, "synthesizing", 20);
+    await googleTranslateProgress(taskId3, uploadToken, "synthesizing", 20);
     await waitForGoogleTranslateListenControl(tab.id, controller.signal);
-    await googleTranslateProgress(taskId2, uploadToken, "playing", 28);
+    await googleTranslateProgress(taskId3, uploadToken, "playing", 28);
     if (input.outputMode === "file") {
       const currentTab = await chrome.tabs.get(tab.id);
       if (currentTab.mutedInfo?.muted !== true) {
@@ -3302,55 +3917,55 @@ async function startGoogleTranslateSpeechTask(taskId2, uploadToken, input) {
     }
     await googleTranslatePressListen(tab.id, controller.signal, true);
     if (input.outputMode === "speakers") {
-      await agentJsonRequest(`/tasks/system-speech/${encodeURIComponent(taskId2)}/google-translate-complete`, { method: "POST", body: { uploadToken } });
+      await agentJsonRequest(`/tasks/system-speech/${encodeURIComponent(taskId3)}/google-translate-complete`, { method: "POST", body: { uploadToken } });
       completed = true;
       return;
     }
-    await googleTranslateProgress(taskId2, uploadToken, "capturing", 35);
+    await googleTranslateProgress(taskId3, uploadToken, "capturing", 35);
     const audio = await audioCapture.waitForAudio(controller.signal);
     if (input.outputMode === "file") await waitForGoogleTranslatePlaybackEnd(tab.id, controller.signal);
-    await googleTranslateProgress(taskId2, uploadToken, "saving", 75);
-    await uploadGoogleTranslateAudio(taskId2, uploadToken, audio);
+    await googleTranslateProgress(taskId3, uploadToken, "saving", 75);
+    await uploadGoogleTranslateAudio(taskId3, uploadToken, audio);
     completed = true;
-  } catch (error) {
-    if (error?.name !== "AbortError") {
-      const text = String(error?.message || error || "");
-      const code = /audio|network|response|mp3/i.test(text) ? "GOOGLE_TRANSLATE_AUDIO_UNAVAILABLE" : /listen|play/i.test(text) ? "GOOGLE_TRANSLATE_PLAYBACK_FAILED" : "GOOGLE_TRANSLATE_UNAVAILABLE";
-      await googleTranslateFail(taskId2, uploadToken, code);
+  } catch (error2) {
+    if (error2?.name !== "AbortError") {
+      const text2 = String(error2?.message || error2 || "");
+      const code = /audio|network|response|mp3/i.test(text2) ? "GOOGLE_TRANSLATE_AUDIO_UNAVAILABLE" : /listen|play/i.test(text2) ? "GOOGLE_TRANSLATE_PLAYBACK_FAILED" : "GOOGLE_TRANSLATE_UNAVAILABLE";
+      await googleTranslateFail(taskId3, uploadToken, code);
     }
   } finally {
     audioCapture?.dispose();
     if (restoreGoogleTranslateTabMute && Number.isInteger(active.tabId)) {
-      await chrome.tabs.update(active.tabId, { muted: false }).catch((error) => cdpErrorLog("Could not restore Google Translate tab audio", { tabId: active.tabId, error: safeErrorMessage(error) }));
+      await chrome.tabs.update(active.tabId, { muted: false }).catch((error2) => cdpErrorLog("Could not restore Google Translate tab audio", { tabId: active.tabId, error: safeErrorMessage(error2) }));
     }
     if (focusEmulationAttached && Number.isInteger(active.tabId)) {
       try {
         await cdpCommand(active.tabId, "Emulation.setFocusEmulationEnabled", { enabled: false });
-      } catch (error) {
-        cdpErrorLog("Could not disable Google Translate focus emulation", { tabId: active.tabId, error: safeErrorMessage(error) });
+      } catch (error2) {
+        cdpErrorLog("Could not disable Google Translate focus emulation", { tabId: active.tabId, error: safeErrorMessage(error2) });
       }
       await cdpDetach(active.tabId);
     }
-    googleTranslateSpeechRunners.delete(taskId2);
+    googleTranslateSpeechRunners.delete(taskId3);
   }
 }
-async function speechStatus(taskId2) {
-  return normalizeSpeechTask(await agentJsonRequest(`/tasks/system-speech/${encodeURIComponent(normalizeSpeechTaskId(taskId2))}`));
+async function speechStatus(taskId3) {
+  return normalizeSpeechTask(await agentJsonRequest(`/tasks/system-speech/${encodeURIComponent(normalizeSpeechTaskId(taskId3))}`));
 }
-async function speechCancel(taskId2) {
-  taskId2 = normalizeSpeechTaskId(taskId2);
-  const active = googleTranslateSpeechRunners.get(taskId2);
+async function speechCancel(taskId3) {
+  taskId3 = normalizeSpeechTaskId(taskId3);
+  const active = googleTranslateSpeechRunners.get(taskId3);
   if (active) {
     active.controller.abort();
   }
-  const document2 = await agentJsonRequest(`/tasks/system-speech/${encodeURIComponent(taskId2)}/cancel`, { method: "POST", body: {} });
-  if (!document2 || document2.taskId !== taskId2 || !["cancelled", "completed", "failed"].includes(document2.status)) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent did not confirm speech cancellation.");
-  return { taskId: taskId2, status: document2.status };
+  const document2 = await agentJsonRequest(`/tasks/system-speech/${encodeURIComponent(taskId3)}/cancel`, { method: "POST", body: {} });
+  if (!document2 || document2.taskId !== taskId3 || !["cancelled", "completed", "failed"].includes(document2.status)) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent did not confirm speech cancellation.");
+  return { taskId: taskId3, status: document2.status };
 }
 function mcpLogStatus(value, failed = false) {
   const task = value && typeof value === "object" && value.task && typeof value.task === "object" ? value.task : null;
   const candidate = task?.phase ?? value?.phase ?? task?.status ?? value?.status;
-  if (typeof candidate === "string" && /^[a-z0-9_-]{1,40}$/.test(candidate)) return candidate;
+  if (typeof candidate === "string" && /^[a-z0-9_-]{1,40}$/i.test(candidate)) return candidate.toLowerCase();
   return failed ? "error" : "completed";
 }
 async function reportMcpToolToAgent(tool, value, failed = false) {
@@ -3363,7 +3978,10 @@ async function reportMcpToolToAgent(tool, value, failed = false) {
       await fetch(`http://127.0.0.1:${port}/mcp/log/${tool}`, {
         method: "POST",
         headers: { Accept: "application/json", "Content-Type": "application/json" },
-        body: JSON.stringify({ status: mcpLogStatus(value, failed) }),
+        body: JSON.stringify({
+          status: mcpLogStatus(value, failed),
+          ...Number.isFinite(value?.progressPercent) ? { progressPercent: value.progressPercent } : {}
+        }),
         signal: controller.signal
       });
     } finally {
@@ -3498,9 +4116,9 @@ function nullableAgentString(value) {
 function nullableAgentNumber(value, integer2 = false) {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 && (!integer2 || Number.isInteger(value)) ? value : null;
 }
-async function getYouTubeDownloadTask(taskId2) {
-  if (typeof taskId2 !== "string" || !taskId2) throw localAgentError("TASK_NOT_FOUND", "taskId is required.");
-  return publicDownloadTask(normalizeAgentTask(await agentJsonRequest(`/tasks/${encodeURIComponent(taskId2)}`)));
+async function getYouTubeDownloadTask(taskId3) {
+  if (typeof taskId3 !== "string" || !taskId3) throw localAgentError("TASK_NOT_FOUND", "taskId is required.");
+  return publicDownloadTask(normalizeAgentTask(await agentJsonRequest(`/tasks/${encodeURIComponent(taskId3)}`)));
 }
 function normalizeDownloadTaskDiagnostics(value) {
   if (!value || typeof value !== "object" || typeof value.taskId !== "string" || !["working", "completed", "failed", "cancelled"].includes(value.status) || !["preparing", "downloadingCombined", "downloadingVideo", "downloadingAudio", "merging", "completed", "failed", "cancelled"].includes(value.phase) || !Array.isArray(value.events) || !value.process || typeof value.process !== "object") {
@@ -3535,19 +4153,19 @@ function normalizeDownloadTaskDiagnostics(value) {
     nextEventId: Number.isInteger(value.nextEventId) && value.nextEventId >= 0 ? value.nextEventId : 0
   };
 }
-async function getYouTubeDownloadTaskDiagnostics(taskId2, args = {}) {
-  if (typeof taskId2 !== "string" || !taskId2) throw localAgentError("TASK_NOT_FOUND", "taskId is required.");
+async function getYouTubeDownloadTaskDiagnostics(taskId3, args = {}) {
+  if (typeof taskId3 !== "string" || !taskId3) throw localAgentError("TASK_NOT_FOUND", "taskId is required.");
   const afterEventId = args.afterEventId === void 0 ? 0 : args.afterEventId;
   const limit = args.limit === void 0 ? 100 : args.limit;
   if (!Number.isInteger(afterEventId) || afterEventId < 0 || !Number.isInteger(limit) || limit < 1 || limit > 100) {
     throw localAgentError("INVALID_ARGUMENT", "afterEventId and limit are invalid.");
   }
-  return normalizeDownloadTaskDiagnostics(await agentJsonRequest(`/tasks/${encodeURIComponent(taskId2)}/diagnostics`, { method: "POST", body: { afterEventId, limit } }));
+  return normalizeDownloadTaskDiagnostics(await agentJsonRequest(`/tasks/${encodeURIComponent(taskId3)}/diagnostics`, { method: "POST", body: { afterEventId, limit } }));
 }
-async function cancelYouTubeDownloadTask(taskId2) {
-  if (typeof taskId2 !== "string" || !taskId2) throw localAgentError("TASK_NOT_FOUND", "taskId is required.");
-  await agentJsonRequest(`/tasks/${encodeURIComponent(taskId2)}/cancel`, { method: "POST", body: {} });
-  return { taskId: taskId2, accepted: true, message: "Cancellation request accepted. Poll youtube_download_get_task for the terminal status." };
+async function cancelYouTubeDownloadTask(taskId3) {
+  if (typeof taskId3 !== "string" || !taskId3) throw localAgentError("TASK_NOT_FOUND", "taskId is required.");
+  await agentJsonRequest(`/tasks/${encodeURIComponent(taskId3)}/cancel`, { method: "POST", body: {} });
+  return { taskId: taskId3, accepted: true, message: "Cancellation request accepted. Poll youtube_download_get_task for the terminal status." };
 }
 function normalizeWorkspacePath(value, fieldName, { allowRoot = false } = {}) {
   if (allowRoot && value === "") return "";
@@ -3830,7 +4448,7 @@ function normalizeCaptureFrameInput(argumentsValue = {}) {
 }
 function normalizeCaptureFrameBatchInput(argumentsValue = {}) {
   const args = captureFrameObject(argumentsValue, "media_capture_frame", /* @__PURE__ */ new Set(["path", "youtube", "timestampsSeconds", "videoStreamIndex", "seekMode", "applyDisplayRotation", "crop", "resize", "image"]));
-  if (!Array.isArray(args.timestampsSeconds) || args.timestampsSeconds.length < 1 || args.timestampsSeconds.length > 20) throw localAgentError("CAPTURE_FRAME_INVALID", "timestampsSeconds must contain from 1 to 20 timestamps.");
+  if (!Array.isArray(args.timestampsSeconds) || args.timestampsSeconds.length < 1) throw localAgentError("CAPTURE_FRAME_INVALID", "timestampsSeconds must contain at least one timestamp; the configured maximum is checked by the Local Agent.");
   const timestampsSeconds = args.timestampsSeconds.map((value) => captureFrameFiniteNumber(value, "timestampsSeconds", { minimum: 0 })).sort((left, right) => left - right);
   if (new Set(timestampsSeconds).size !== timestampsSeconds.length) throw localAgentError("CAPTURE_FRAME_INVALID", "timestampsSeconds must not contain duplicates.");
   const { timestampsSeconds: _timestampsSeconds, ...singleArgs } = args;
@@ -3868,19 +4486,19 @@ async function createCaptureFrameTask(argumentsValue) {
   const document2 = await agentJsonRequest("/tasks/capture-frame", { method: "POST", body: input, timeoutMs: AGENT_TASK_TIMEOUT_MS });
   return normalizeCaptureFrameTask(document2, input);
 }
-async function getCaptureFrameTask(taskId2) {
-  if (typeof taskId2 !== "string" || !taskId2.trim()) throw localAgentError("INVALID_ARGUMENT", "taskId must be a non-empty string.");
-  return normalizeCaptureFrameTask(await agentJsonRequest(`/tasks/capture-frame/${encodeURIComponent(taskId2)}`, { timeoutMs: AGENT_TASK_TIMEOUT_MS }));
+async function getCaptureFrameTask(taskId3) {
+  if (typeof taskId3 !== "string" || !taskId3.trim()) throw localAgentError("INVALID_ARGUMENT", "taskId must be a non-empty string.");
+  return normalizeCaptureFrameTask(await agentJsonRequest(`/tasks/capture-frame/${encodeURIComponent(taskId3)}`, { timeoutMs: AGENT_TASK_TIMEOUT_MS }));
 }
 function normalizeCaptureFrameTaskDiagnostics(document2) {
   if (!document2 || typeof document2 !== "object" || typeof document2.taskId !== "string" || !["working", "completed", "failed", "cancelled"].includes(document2.status)) {
     throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid frame-extraction diagnostics.");
   }
-  const error = document2.error === null ? null : document2.error;
-  if (error !== null && (!error || typeof error !== "object" || typeof error.code !== "string" || typeof error.message !== "string")) {
+  const error2 = document2.error === null ? null : document2.error;
+  if (error2 !== null && (!error2 || typeof error2 !== "object" || typeof error2.code !== "string" || typeof error2.message !== "string")) {
     throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid frame-extraction diagnostics.");
   }
-  if (document2.youtube === null) return { taskId: document2.taskId, status: document2.status, error, youtube: null };
+  if (document2.youtube === null) return { taskId: document2.taskId, status: document2.status, error: error2, youtube: null };
   const youtube = document2.youtube;
   if (!youtube || typeof youtube !== "object" || typeof youtube.formatId !== "string" || !Number.isInteger(youtube.sectionCount) || youtube.sectionCount < 1 || !Array.isArray(youtube.sections) || !youtube.poTokenProvider || typeof youtube.poTokenProvider !== "object" || !["ready", "notInstalled", "incomplete", "notReady", "runtimeMissing"].includes(youtube.poTokenProvider.state) || youtube.poTokenProvider.provider !== "bgutil" || !(youtube.ytDlpExitCode === null || Number.isInteger(youtube.ytDlpExitCode)) || !Array.isArray(youtube.output) || youtube.output.length > 20 || youtube.output.some((line) => typeof line !== "string" || line.length > 240)) {
     throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid frame-extraction diagnostics.");
@@ -3899,17 +4517,17 @@ function normalizeCaptureFrameTaskDiagnostics(document2) {
     }
     failedSection = { sectionIndex: section.sectionIndex, startSeconds: section.startSeconds, endSeconds: section.endSeconds, frameCount: section.frameCount, attemptCount: section.attemptCount };
   }
-  return { taskId: document2.taskId, status: document2.status, error, youtube: { formatId: youtube.formatId, sectionCount: youtube.sectionCount, sections, ...failedSection === void 0 ? {} : { failedSection }, poTokenProvider: { state: youtube.poTokenProvider.state, provider: "bgutil" }, ytDlpExitCode: youtube.ytDlpExitCode, output: youtube.output } };
+  return { taskId: document2.taskId, status: document2.status, error: error2, youtube: { formatId: youtube.formatId, sectionCount: youtube.sectionCount, sections, ...failedSection === void 0 ? {} : { failedSection }, poTokenProvider: { state: youtube.poTokenProvider.state, provider: "bgutil" }, ytDlpExitCode: youtube.ytDlpExitCode, output: youtube.output } };
 }
-async function getCaptureFrameTaskDiagnostics(taskId2) {
-  if (typeof taskId2 !== "string" || !taskId2.trim()) throw localAgentError("INVALID_ARGUMENT", "taskId must be a non-empty string.");
-  return normalizeCaptureFrameTaskDiagnostics(await agentJsonRequest(`/tasks/capture-frame/${encodeURIComponent(taskId2)}/diagnostics`, { method: "POST", body: {}, timeoutMs: AGENT_TASK_TIMEOUT_MS }));
+async function getCaptureFrameTaskDiagnostics(taskId3) {
+  if (typeof taskId3 !== "string" || !taskId3.trim()) throw localAgentError("INVALID_ARGUMENT", "taskId must be a non-empty string.");
+  return normalizeCaptureFrameTaskDiagnostics(await agentJsonRequest(`/tasks/capture-frame/${encodeURIComponent(taskId3)}/diagnostics`, { method: "POST", body: {}, timeoutMs: AGENT_TASK_TIMEOUT_MS }));
 }
-async function cancelCaptureFrameTask(taskId2) {
-  if (typeof taskId2 !== "string" || !taskId2.trim()) throw localAgentError("INVALID_ARGUMENT", "taskId must be a non-empty string.");
-  const document2 = await agentJsonRequest(`/tasks/capture-frame/${encodeURIComponent(taskId2)}/cancel`, { method: "POST", body: {}, timeoutMs: AGENT_TASK_TIMEOUT_MS });
+async function cancelCaptureFrameTask(taskId3) {
+  if (typeof taskId3 !== "string" || !taskId3.trim()) throw localAgentError("INVALID_ARGUMENT", "taskId must be a non-empty string.");
+  const document2 = await agentJsonRequest(`/tasks/capture-frame/${encodeURIComponent(taskId3)}/cancel`, { method: "POST", body: {}, timeoutMs: AGENT_TASK_TIMEOUT_MS });
   if (!document2 || document2.accepted !== true) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent did not confirm frame-extraction cancellation.");
-  return { taskId: taskId2, accepted: true, message: "Cancellation request accepted. Poll media_capture_frame_get_task for the terminal status." };
+  return { taskId: taskId3, accepted: true, message: "Cancellation request accepted. Poll media_capture_frame_get_task for the terminal status." };
 }
 function mediaClipInvalid(message) {
   throw localAgentError("MEDIA_CLIP_INVALID", message);
@@ -3937,7 +4555,7 @@ function normalizeMediaClipInput(argumentsValue = {}) {
   if (args.outputKind === "video" && !includeAudio && audioStreamIndex !== void 0) mediaClipInvalid("audioStreamIndex requires includeAudio=true.");
   let segments;
   if (args.segments !== void 0) {
-    if (!Array.isArray(args.segments) || args.segments.length < 1 || args.segments.length > 20) mediaClipInvalid("segments must contain from 1 to 20 intervals.");
+    if (!Array.isArray(args.segments) || args.segments.length < 1) mediaClipInvalid("segments must contain at least one interval; the configured maximum is checked by the Local Agent.");
     const seen = /* @__PURE__ */ new Set();
     segments = args.segments.map((raw, index) => {
       if (!raw || typeof raw !== "object" || Array.isArray(raw) || Object.keys(raw).length !== 2 || !Object.hasOwn(raw, "startSeconds") || !Object.hasOwn(raw, "endSeconds")) mediaClipInvalid(`segments[${index}] must contain only startSeconds and endSeconds.`);
@@ -3965,7 +4583,7 @@ function normalizeMediaClipInput(argumentsValue = {}) {
 function normalizeMediaClipTask(document2, input = null) {
   const statuses2 = /* @__PURE__ */ new Set(["working", "completed", "failed", "cancelled"]);
   const phases = /* @__PURE__ */ new Set(["preparing", "processing", "completed", "failed", "cancelled"]);
-  if (!document2 || typeof document2 !== "object" || Array.isArray(document2) || typeof document2.taskId !== "string" || !document2.taskId || typeof document2.sourcePath !== "string" || !document2.sourcePath || !(/* @__PURE__ */ new Set(["video", "audio"])).has(document2.outputKind) || !(/* @__PURE__ */ new Set(["copy", "accurate"])).has(document2.cutMode) || !statuses2.has(document2.status) || !phases.has(document2.phase) || typeof document2.statusMessage !== "string" || !Number.isFinite(document2.progressPercent) || document2.progressPercent < 0 || document2.progressPercent > 100 || !Number.isInteger(document2.completedClips) || document2.completedClips < 0 || !Number.isInteger(document2.totalClips) || document2.totalClips < 1 || document2.totalClips > 20 || document2.completedClips > document2.totalClips || !Array.isArray(document2.clips) || document2.clips.length !== document2.completedClips || typeof document2.createdAt !== "string" || typeof document2.lastUpdatedAt !== "string" || !Number.isInteger(document2.pollIntervalMs) || document2.pollIntervalMs < 100) {
+  if (!document2 || typeof document2 !== "object" || Array.isArray(document2) || typeof document2.taskId !== "string" || !document2.taskId || typeof document2.sourcePath !== "string" || !document2.sourcePath || !(/* @__PURE__ */ new Set(["video", "audio"])).has(document2.outputKind) || !(/* @__PURE__ */ new Set(["copy", "accurate"])).has(document2.cutMode) || !statuses2.has(document2.status) || !phases.has(document2.phase) || typeof document2.statusMessage !== "string" || !Number.isFinite(document2.progressPercent) || document2.progressPercent < 0 || document2.progressPercent > 100 || !Number.isInteger(document2.completedClips) || document2.completedClips < 0 || !Number.isInteger(document2.totalClips) || document2.totalClips < 1 || document2.completedClips > document2.totalClips || !Array.isArray(document2.clips) || document2.clips.length !== document2.completedClips || typeof document2.createdAt !== "string" || typeof document2.lastUpdatedAt !== "string" || !Number.isInteger(document2.pollIntervalMs) || document2.pollIntervalMs < 100) {
     throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid media-clip task.");
   }
   if (input && (document2.sourcePath !== input.path || document2.outputKind !== input.outputKind || document2.cutMode !== input.cutMode || document2.totalClips !== (input.segments?.length ?? 1))) {
@@ -4016,15 +4634,15 @@ async function createMediaClipTask(argumentsValue) {
   const document2 = await agentJsonRequest("/tasks/media-clip", { method: "POST", body: input, timeoutMs: AGENT_TASK_TIMEOUT_MS });
   return normalizeMediaClipTask(document2, input);
 }
-async function getMediaClipTask(taskId2) {
-  if (typeof taskId2 !== "string" || !taskId2.trim()) throw localAgentError("INVALID_ARGUMENT", "taskId must be a non-empty string.");
-  return normalizeMediaClipTask(await agentJsonRequest(`/tasks/media-clip/${encodeURIComponent(taskId2)}`, { timeoutMs: AGENT_TASK_TIMEOUT_MS }));
+async function getMediaClipTask(taskId3) {
+  if (typeof taskId3 !== "string" || !taskId3.trim()) throw localAgentError("INVALID_ARGUMENT", "taskId must be a non-empty string.");
+  return normalizeMediaClipTask(await agentJsonRequest(`/tasks/media-clip/${encodeURIComponent(taskId3)}`, { timeoutMs: AGENT_TASK_TIMEOUT_MS }));
 }
-async function cancelMediaClipTask(taskId2) {
-  if (typeof taskId2 !== "string" || !taskId2.trim()) throw localAgentError("INVALID_ARGUMENT", "taskId must be a non-empty string.");
-  const document2 = await agentJsonRequest(`/tasks/media-clip/${encodeURIComponent(taskId2)}/cancel`, { method: "POST", body: {}, timeoutMs: AGENT_TASK_TIMEOUT_MS });
+async function cancelMediaClipTask(taskId3) {
+  if (typeof taskId3 !== "string" || !taskId3.trim()) throw localAgentError("INVALID_ARGUMENT", "taskId must be a non-empty string.");
+  const document2 = await agentJsonRequest(`/tasks/media-clip/${encodeURIComponent(taskId3)}/cancel`, { method: "POST", body: {}, timeoutMs: AGENT_TASK_TIMEOUT_MS });
   if (!document2 || document2.accepted !== true) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent did not confirm media-clip cancellation.");
-  return { taskId: taskId2, accepted: true, message: "Cancellation request accepted. Poll media_clip_get_task for the terminal status." };
+  return { taskId: taskId3, accepted: true, message: "Cancellation request accepted. Poll media_clip_get_task for the terminal status." };
 }
 function normalizeCaptureFrameResult(document2, input) {
   const expectedSource = input.path ?? `youtube:${input.youtube.videoId}`;
@@ -4160,18 +4778,18 @@ async function createVisualMap(argumentsValue) {
   const document2 = await agentJsonRequest("/tasks/visual-map", { method: "POST", body: input, timeoutMs: AGENT_TASK_TIMEOUT_MS });
   return normalizeVisualMapTask(document2, input);
 }
-async function getVisualMapTask(taskId2) {
-  if (typeof taskId2 !== "string" || !taskId2.trim()) throw localAgentError("INVALID_ARGUMENT", "taskId must be a non-empty string.");
-  const document2 = await agentJsonRequest(`/tasks/visual-map/${encodeURIComponent(taskId2)}`, { timeoutMs: AGENT_TASK_TIMEOUT_MS });
+async function getVisualMapTask(taskId3) {
+  if (typeof taskId3 !== "string" || !taskId3.trim()) throw localAgentError("INVALID_ARGUMENT", "taskId must be a non-empty string.");
+  const document2 = await agentJsonRequest(`/tasks/visual-map/${encodeURIComponent(taskId3)}`, { timeoutMs: AGENT_TASK_TIMEOUT_MS });
   return normalizeVisualMapTask(document2);
 }
-async function cancelVisualMapTask(taskId2) {
-  if (typeof taskId2 !== "string" || !taskId2.trim()) throw localAgentError("INVALID_ARGUMENT", "taskId must be a non-empty string.");
-  const document2 = await agentJsonRequest(`/tasks/visual-map/${encodeURIComponent(taskId2)}/cancel`, { method: "POST", body: {}, timeoutMs: AGENT_TASK_TIMEOUT_MS });
+async function cancelVisualMapTask(taskId3) {
+  if (typeof taskId3 !== "string" || !taskId3.trim()) throw localAgentError("INVALID_ARGUMENT", "taskId must be a non-empty string.");
+  const document2 = await agentJsonRequest(`/tasks/visual-map/${encodeURIComponent(taskId3)}/cancel`, { method: "POST", body: {}, timeoutMs: AGENT_TASK_TIMEOUT_MS });
   if (!document2 || typeof document2 !== "object" || document2.accepted !== true) {
     throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent did not confirm visual-map cancellation.");
   }
-  return { taskId: taskId2, accepted: true, message: "Cancellation request accepted. Poll visual_map_get_task for the terminal status." };
+  return { taskId: taskId3, accepted: true, message: "Cancellation request accepted. Poll visual_map_get_task for the terminal status." };
 }
 function normalizeCameraMode(value, field) {
   if (!value || typeof value !== "object" || Array.isArray(value) || !Number.isInteger(value.width) || value.width < 1 || !Number.isInteger(value.height) || value.height < 1 || value.fps !== void 0 && (!Number.isFinite(value.fps) || value.fps <= 0)) {
@@ -4208,23 +4826,23 @@ async function cameraCaptureFrame(argumentsValue) {
   const input = normalizeCameraCaptureInput(argumentsValue);
   return normalizeCameraFrame(await agentJsonRequest("/media/camera/capture-frame", { method: "POST", body: input, timeoutMs: AGENT_CAPTURE_FRAME_TIMEOUT_MS }), input);
 }
-function cameraTaskId(taskId2) {
-  if (typeof taskId2 !== "string" || !taskId2.trim()) throw localAgentError("INVALID_ARGUMENT", "taskId must be a non-empty string.");
-  return taskId2;
+function cameraTaskId(taskId3) {
+  if (typeof taskId3 !== "string" || !taskId3.trim()) throw localAgentError("INVALID_ARGUMENT", "taskId must be a non-empty string.");
+  return taskId3;
 }
 function normalizeCameraRecordInput(argumentsValue = {}) {
   const args = captureFrameObject(argumentsValue, "camera_record_video", /* @__PURE__ */ new Set(["cameraId", "durationSeconds", "targetFps"]));
-  if (typeof args.cameraId !== "string" || !args.cameraId.trim() || !Number.isInteger(args.durationSeconds) || args.durationSeconds < 1 || args.durationSeconds > 60) throw localAgentError("CAMERA_RECORD_INVALID", "cameraId and durationSeconds from 1 to 60 are required.");
+  if (typeof args.cameraId !== "string" || !args.cameraId.trim() || !Number.isInteger(args.durationSeconds) || args.durationSeconds < 1) throw localAgentError("CAMERA_RECORD_INVALID", "cameraId and a positive integer durationSeconds are required; the configured maximum is checked by the Local Agent.");
   if (args.targetFps !== void 0 && (!Number.isFinite(args.targetFps) || args.targetFps <= 25 || args.targetFps > 120)) throw localAgentError("CAMERA_RECORD_INVALID", "targetFps, when supplied, must be greater than 25 and no greater than 120.");
   return { cameraId: args.cameraId, durationSeconds: args.durationSeconds, ...args.targetFps === void 0 ? {} : { targetFps: args.targetFps } };
 }
 function normalizeCameraAudioRecordInput(argumentsValue = {}) {
   const args = captureFrameObject(argumentsValue, "camera_record_audio", /* @__PURE__ */ new Set(["cameraId", "durationSeconds"]));
-  if (typeof args.cameraId !== "string" || !args.cameraId.trim() || !Number.isInteger(args.durationSeconds) || args.durationSeconds < 1 || args.durationSeconds > 600) throw localAgentError("CAMERA_RECORD_INVALID", "cameraId and durationSeconds from 1 to 600 are required.");
+  if (typeof args.cameraId !== "string" || !args.cameraId.trim() || !Number.isInteger(args.durationSeconds) || args.durationSeconds < 1) throw localAgentError("CAMERA_RECORD_INVALID", "cameraId and a positive integer durationSeconds are required; the configured maximum is checked by the Local Agent.");
   return { cameraId: args.cameraId, durationSeconds: args.durationSeconds };
 }
 function normalizeCameraRecordTask(document2, input = null) {
-  if (!document2 || typeof document2 !== "object" || Array.isArray(document2) || typeof document2.taskId !== "string" || !/^cam_[A-Za-z0-9_-]{10}$/.test(document2.taskId) || !(/* @__PURE__ */ new Set(["video", "audio"])).has(document2.recordingKind) || !(/* @__PURE__ */ new Set(["working", "stopping", "completed", "failed"])).has(document2.status) || !(/* @__PURE__ */ new Set(["starting", "recording", "finalizing", "completed", "failed"])).has(document2.phase) || typeof document2.statusMessage !== "string" || !Number.isFinite(document2.progressPercent) || document2.progressPercent < 0 || document2.progressPercent > 100 || !Number.isFinite(document2.elapsedSeconds) || document2.elapsedSeconds < 0 || !Number.isInteger(document2.requestedDurationSeconds) || document2.requestedDurationSeconds < 1 || document2.requestedDurationSeconds > 600 || document2.recordingKind === "video" && (!Number.isFinite(document2.targetFps) || document2.targetFps <= 25 || document2.targetFps > 120 || document2.maxDurationSeconds !== 60) || document2.recordingKind === "audio" && (document2.targetFps !== null || document2.maxDurationSeconds !== 600) || typeof document2.createdAt !== "string" || typeof document2.lastUpdatedAt !== "string" || !Number.isInteger(document2.pollIntervalMs) || document2.pollIntervalMs < 100) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid camera recording task.");
+  if (!document2 || typeof document2 !== "object" || Array.isArray(document2) || typeof document2.taskId !== "string" || !/^cam_[A-Za-z0-9_-]{10}$/.test(document2.taskId) || !(/* @__PURE__ */ new Set(["video", "audio"])).has(document2.recordingKind) || !(/* @__PURE__ */ new Set(["working", "stopping", "completed", "failed"])).has(document2.status) || !(/* @__PURE__ */ new Set(["starting", "recording", "finalizing", "completed", "failed"])).has(document2.phase) || typeof document2.statusMessage !== "string" || !Number.isFinite(document2.progressPercent) || document2.progressPercent < 0 || document2.progressPercent > 100 || !Number.isFinite(document2.elapsedSeconds) || document2.elapsedSeconds < 0 || !Number.isInteger(document2.requestedDurationSeconds) || document2.requestedDurationSeconds < 1 || !Number.isInteger(document2.maxDurationSeconds) || document2.maxDurationSeconds < 60 || document2.requestedDurationSeconds > document2.maxDurationSeconds || document2.recordingKind === "video" && (!Number.isFinite(document2.targetFps) || document2.targetFps <= 25 || document2.targetFps > 120) || document2.recordingKind === "audio" && document2.targetFps !== null || typeof document2.createdAt !== "string" || typeof document2.lastUpdatedAt !== "string" || !Number.isInteger(document2.pollIntervalMs) || document2.pollIntervalMs < 100) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid camera recording task.");
   if (input && document2.requestedDurationSeconds !== input.durationSeconds) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned a camera task that does not match the requested duration.");
   if (input?.targetFps !== void 0 && Math.abs(document2.targetFps - input.targetFps) > 1) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned a camera task that does not match the requested targetFps.");
   const task = { taskId: document2.taskId, recordingKind: document2.recordingKind, status: document2.status, phase: document2.phase, statusMessage: document2.statusMessage, progressPercent: document2.progressPercent, elapsedSeconds: document2.elapsedSeconds, requestedDurationSeconds: document2.requestedDurationSeconds, targetFps: document2.targetFps, maxDurationSeconds: document2.maxDurationSeconds, createdAt: document2.createdAt, lastUpdatedAt: document2.lastUpdatedAt, pollIntervalMs: document2.pollIntervalMs };
@@ -4253,16 +4871,16 @@ async function cameraRecordAudio(argumentsValue) {
   updateCameraRecordingBadge(task);
   return task;
 }
-async function cameraRecordStatus(taskId2) {
-  taskId2 = cameraTaskId(taskId2);
-  const task = normalizeCameraRecordTask(await agentJsonRequest(`/tasks/camera-record/${encodeURIComponent(taskId2)}`, { timeoutMs: AGENT_TASK_TIMEOUT_MS }));
+async function cameraRecordStatus(taskId3) {
+  taskId3 = cameraTaskId(taskId3);
+  const task = normalizeCameraRecordTask(await agentJsonRequest(`/tasks/camera-record/${encodeURIComponent(taskId3)}`, { timeoutMs: AGENT_TASK_TIMEOUT_MS }));
   updateCameraRecordingBadge(task);
   return task;
 }
-async function cameraRecordStop(taskId2) {
-  taskId2 = cameraTaskId(taskId2);
-  const document2 = await agentJsonRequest(`/tasks/camera-record/${encodeURIComponent(taskId2)}/stop`, { method: "POST", body: {}, timeoutMs: AGENT_TASK_TIMEOUT_MS });
-  if (!document2 || typeof document2 !== "object" || document2.taskId !== taskId2 || typeof document2.accepted !== "boolean" || typeof document2.message !== "string") throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent did not confirm the camera recording stop request.");
+async function cameraRecordStop(taskId3) {
+  taskId3 = cameraTaskId(taskId3);
+  const document2 = await agentJsonRequest(`/tasks/camera-record/${encodeURIComponent(taskId3)}/stop`, { method: "POST", body: {}, timeoutMs: AGENT_TASK_TIMEOUT_MS });
+  if (!document2 || typeof document2 !== "object" || document2.taskId !== taskId3 || typeof document2.accepted !== "boolean" || typeof document2.message !== "string") throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent did not confirm the camera recording stop request.");
   return document2;
 }
 function normalizeScreenCaptureInput(argumentsValue = {}) {
@@ -4420,11 +5038,11 @@ function normalizeClipboardGetResult(document2) {
 async function clipboardGet(argumentsValue) {
   try {
     return normalizeClipboardGetResult(await agentJsonRequest("/clipboard/get", { method: "POST", body: normalizeClipboardGetInput(argumentsValue), timeoutMs: AGENT_CAPTURE_FRAME_TIMEOUT_MS }));
-  } catch (error) {
-    if (error?.code === "CLIPBOARD_CHANGED") {
+  } catch (error2) {
+    if (error2?.code === "CLIPBOARD_CHANGED") {
       return { ok: false, status: "clipboard_changed", message: "The clipboard changed after the supplied revision." };
     }
-    throw error;
+    throw error2;
   }
 }
 function normalizeClipboardSetInput(argumentsValue = {}) {
@@ -4467,11 +5085,11 @@ async function ensureCaptureFrameOffscreenDocument() {
   })();
   try {
     await captureFrameOffscreenPromise;
-  } catch (error) {
+  } catch (error2) {
     captureFrameOffscreenPromise = null;
-    if (error?.code) throw error;
-    const detail = String(error?.message || error || "Unknown offscreen-document error.");
-    console.error("[ResearchTube] Chrome could not open the offscreen clipboard document.", error);
+    if (error2?.code) throw error2;
+    const detail = String(error2?.message || error2 || "Unknown offscreen-document error.");
+    console.error("[ResearchTube] Chrome could not open the offscreen clipboard document.", error2);
     throw localAgentError("CLIPBOARD_UNAVAILABLE", "Chrome could not open its local clipboard helper.", detail);
   }
 }
@@ -4484,10 +5102,10 @@ async function copyCaptureFrameToClipboard(message) {
       console.error("[ResearchTube] The offscreen clipboard document rejected the request.", { kind: message.kind, detail });
       throw localAgentError("CLIPBOARD_UNAVAILABLE", "Chrome could not update the local clipboard.", detail);
     }
-  } catch (error) {
-    if (error?.code) throw error;
-    const detail = String(error?.message || error || "Unknown clipboard messaging error.");
-    console.error("[ResearchTube] Chrome clipboard messaging failed.", error);
+  } catch (error2) {
+    if (error2?.code) throw error2;
+    const detail = String(error2?.message || error2 || "Unknown clipboard messaging error.");
+    console.error("[ResearchTube] Chrome clipboard messaging failed.", error2);
     throw localAgentError("CLIPBOARD_UNAVAILABLE", "Chrome could not update the local clipboard.", detail);
   }
 }
@@ -4577,11 +5195,11 @@ async function pollOnceInternal() {
     await chrome.storage.local.set({ lastStatus: `handled ${commands.length} command(s)` });
     await refreshActionBadge();
     return { ok: true, handled: commands.length };
-  } catch (error) {
-    console.warn("ResearchTube:", error);
-    await chrome.storage.local.set({ lastStatus: `error: ${String(error)}` });
+  } catch (error2) {
+    console.warn("ResearchTube:", error2);
+    await chrome.storage.local.set({ lastStatus: `error: ${String(error2)}` });
     await setActionBadge("connection-error");
-    return { ok: false, error: String(error) };
+    return { ok: false, error: String(error2) };
   } finally {
     polling = false;
   }
@@ -4623,8 +5241,8 @@ async function setActionBadge(state) {
     await chrome.action.setBadgeText({ text: appearance.text });
     if (appearance.textColor && typeof chrome.action.setBadgeTextColor === "function") await chrome.action.setBadgeTextColor({ color: appearance.textColor });
     await chrome.action.setTitle({ title: appearance.title });
-  } catch (error) {
-    console.debug("ResearchTube badge update failed:", error);
+  } catch (error2) {
+    console.debug("ResearchTube badge update failed:", error2);
   }
 }
 async function paintCameraRecordingBadge() {
@@ -4635,8 +5253,8 @@ async function paintCameraRecordingBadge() {
     if (typeof chrome.action.setBadgeTextColor === "function") await chrome.action.setBadgeTextColor({ color: "#ffffff" });
     await chrome.action.setBadgeText({ text: cameraRecordingBadgeVisible ? isVideo ? "CAM" : "MIC" : "" });
     await chrome.action.setTitle({ title: isVideo ? "ResearchTube: camera video recording" : "ResearchTube: camera audio recording" });
-  } catch (error) {
-    console.debug("ResearchTube camera recording badge update failed:", error);
+  } catch (error2) {
+    console.debug("ResearchTube camera recording badge update failed:", error2);
   }
 }
 function clearCameraRecordingBadge() {
@@ -4706,24 +5324,24 @@ async function testConnection() {
   return result;
 }
 function createTunnelHttpError(status, operation = "poll") {
-  const error = new Error(`${operation} HTTP ${status}`);
-  error.httpStatus = status;
-  return error;
+  const error2 = new Error(`${operation} HTTP ${status}`);
+  error2.httpStatus = status;
+  return error2;
 }
 function connectionFailureFromPoll(result) {
-  const error = String(result?.error || "");
-  if (/HTTP 401/i.test(error)) return connectionFailure("API_KEY_INVALID", "The OpenAI API key was rejected.");
-  if (/HTTP 403/i.test(error)) return connectionFailure("TUNNEL_PERMISSION_DENIED", "The API key is valid, but it cannot access this tunnel.");
-  if (/HTTP 404/i.test(error)) return connectionFailure("TUNNEL_NOT_FOUND", "The tunnel could not be found.");
-  if (/Failed to fetch|NetworkError|network/i.test(error)) return connectionFailure("NETWORK_ERROR", "ResearchTube could not reach OpenAI.");
+  const error2 = String(result?.error || "");
+  if (/HTTP 401/i.test(error2)) return connectionFailure("API_KEY_INVALID", "The OpenAI API key was rejected.");
+  if (/HTTP 403/i.test(error2)) return connectionFailure("TUNNEL_PERMISSION_DENIED", "The API key is valid, but it cannot access this tunnel.");
+  if (/HTTP 404/i.test(error2)) return connectionFailure("TUNNEL_NOT_FOUND", "The tunnel could not be found.");
+  if (/Failed to fetch|NetworkError|network/i.test(error2)) return connectionFailure("NETWORK_ERROR", "ResearchTube could not reach OpenAI.");
   if (result?.reason === "not-configured") return connectionFailure("NOT_CONFIGURED", "Enter your Tunnel ID and OpenAI API key.");
-  return connectionFailure("OPENAI_ERROR", "Connection test failed.", error);
+  return connectionFailure("OPENAI_ERROR", "Connection test failed.", error2);
 }
 function connectionFailure(errorCode, message, detail = null) {
   return { ok: false, errorCode, message, detail: detail ? safeErrorMessage(detail) : null };
 }
-function safeErrorMessage(error) {
-  return String(error?.message || error || "Unknown error").replace(/sk-[A-Za-z0-9_-]+/g, "[redacted]");
+function safeErrorMessage(error2) {
+  return String(error2?.message || error2 || "Unknown error").replace(/sk-[A-Za-z0-9_-]+/g, "[redacted]");
 }
 async function readCaptureFrameWidgetHtml() {
   const response = await fetch(chrome.runtime.getURL("ui/capture-frame-widget-v27.html"));
@@ -4743,14 +5361,14 @@ async function readMcpResource(id, uri) {
     return { jsonrpc: "2.0", id, error: { code: -32602, message: "Unknown MCP resource URI" } };
   }
   try {
-    const text = await readCaptureFrameWidgetHtml();
+    const text2 = await readCaptureFrameWidgetHtml();
     return {
       jsonrpc: "2.0",
       id,
       result: {
         contents: [{
           ...captureFrameWidgetResource(),
-          text,
+          text: text2,
           _meta: {
             ui: { prefersBorder: true },
             "openai/widgetDescription": "Anchors a requested Workspace media file in ChatGPT so the installed ResearchTube Extension can render it locally."
@@ -4758,8 +5376,8 @@ async function readMcpResource(id, uri) {
         }]
       }
     };
-  } catch (error) {
-    return { jsonrpc: "2.0", id, error: { code: -32603, message: safeErrorMessage(error) } };
+  } catch (error2) {
+    return { jsonrpc: "2.0", id, error: { code: -32603, message: safeErrorMessage(error2) } };
   }
 }
 async function handleMcpRequest(request) {
@@ -4777,7 +5395,11 @@ async function handleMcpRequest(request) {
   }
   if (request?.method === "notifications/initialized") return null;
   if (request?.method === "tools/list") {
-    return { jsonrpc: "2.0", id: request.id, result: { tools: await enabledMcpToolDefinitions() } };
+    const tools = await enabledMcpToolDefinitions();
+    const enabledTimers = TIMER_TOOL_NAMES.filter((name) => tools.some((tool) => tool.name === name));
+    const disabledTimers = TIMER_TOOL_NAMES.filter((name) => !enabledTimers.includes(name));
+    console.info(`[ResearchTube MCP] tools/list extension=${EXTENSION_VERSION} tools=${tools.length} timers=${enabledTimers.join(",") || "none"} disabledTimers=${disabledTimers.join(",") || "none"}`);
+    return { jsonrpc: "2.0", id: request.id, result: { tools } };
   }
   if (request?.method === "resources/list") {
     return { jsonrpc: "2.0", id: request.id, result: { resources: [captureFrameWidgetResource()] } };
@@ -4798,20 +5420,33 @@ async function handleMcpRequest(request) {
     return executeToolCall(request.id, "youtube_download_get_formats", { videoId: videoId2 }, () => getYouTubeDownloadFormats(videoId2));
   }
   if (request?.method === "tools/call" && request.params?.name === "youtube_download_get_task") {
-    const taskId2 = String(request.params.arguments?.taskId ?? "").trim();
-    if (!taskId2) return toolError(request.id, localAgentError("INVALID_ARGUMENT", "taskId is required."));
-    return executeToolCall(request.id, "youtube_download_get_task", { taskId: taskId2 }, () => getYouTubeDownloadTask(taskId2));
+    const taskId3 = String(request.params.arguments?.taskId ?? "").trim();
+    if (!taskId3) return toolError(request.id, localAgentError("INVALID_ARGUMENT", "taskId is required."));
+    return executeToolCall(request.id, "youtube_download_get_task", { taskId: taskId3 }, () => getYouTubeDownloadTask(taskId3));
   }
   if (request?.method === "tools/call" && request.params?.name === "youtube_download_task_diagnostics") {
     const args = request.params.arguments ?? {};
-    const taskId2 = String(args.taskId ?? "").trim();
-    if (!taskId2) return toolError(request.id, localAgentError("INVALID_ARGUMENT", "taskId is required."));
-    return executeToolCall(request.id, "youtube_download_task_diagnostics", { taskId: taskId2, afterEventId: args.afterEventId ?? 0, limit: args.limit ?? 100 }, () => getYouTubeDownloadTaskDiagnostics(taskId2, args));
+    const taskId3 = String(args.taskId ?? "").trim();
+    if (!taskId3) return toolError(request.id, localAgentError("INVALID_ARGUMENT", "taskId is required."));
+    return executeToolCall(request.id, "youtube_download_task_diagnostics", { taskId: taskId3, afterEventId: args.afterEventId ?? 0, limit: args.limit ?? 100 }, () => getYouTubeDownloadTaskDiagnostics(taskId3, args));
   }
   if (request?.method === "tools/call" && request.params?.name === "youtube_download_cancel_task") {
-    const taskId2 = String(request.params.arguments?.taskId ?? "").trim();
-    if (!taskId2) return toolError(request.id, localAgentError("INVALID_ARGUMENT", "taskId is required."));
-    return executeToolCall(request.id, "youtube_download_cancel_task", { taskId: taskId2 }, () => cancelYouTubeDownloadTask(taskId2));
+    const taskId3 = String(request.params.arguments?.taskId ?? "").trim();
+    if (!taskId3) return toolError(request.id, localAgentError("INVALID_ARGUMENT", "taskId is required."));
+    return executeToolCall(request.id, "youtube_download_cancel_task", { taskId: taskId3 }, () => cancelYouTubeDownloadTask(taskId3));
+  }
+  if (request?.method === "tools/call" && TIMER_TOOL_NAMES.includes(request.params?.name)) {
+    const name = request.params.name;
+    const input = request.params.arguments ?? {};
+    return executeToolCall(request.id, name, input, async () => {
+      const args = validateTimerInput(name, input);
+      const route = name === "timer_start" ? "/timer/start" : `/tasks/timer/${args.taskId}${name === "timer_cancel" ? "/cancel" : ""}`;
+      const options = name === "timer_start" ? { method: "POST", body: { ...args, localTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone }, timeoutMs: AGENT_TASK_TIMEOUT_MS } : name === "timer_cancel" ? { method: "POST", body: {}, timeoutMs: AGENT_TASK_TIMEOUT_MS } : { timeoutMs: AGENT_TASK_TIMEOUT_MS };
+      const result = normalizeTimerResult(name, await agentJsonRequest(route, options));
+      const task = name === "timer_cancel" ? result.task : result;
+      if (task.taskId !== (args.taskId ?? task.taskId)) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned another timer task.");
+      return result;
+    });
   }
   if (request?.method === "tools/call" && request.params?.name === "system_agent_status") {
     return executeToolCall(request.id, "system_agent_status", {}, () => getAgentStatus());
@@ -4824,28 +5459,28 @@ async function handleMcpRequest(request) {
     return executeToolCall(request.id, "system_speech_speak", args, () => speechSpeak(args));
   }
   if (request?.method === "tools/call" && request.params?.name === "system_speech_status") {
-    const taskId2 = String(request.params.arguments?.taskId ?? "").trim();
-    if (!taskId2) return toolError(request.id, localAgentError("INVALID_ARGUMENT", "taskId is required."));
-    return executeToolCall(request.id, "system_speech_status", { taskId: taskId2 }, () => speechStatus(taskId2));
+    const taskId3 = String(request.params.arguments?.taskId ?? "").trim();
+    if (!taskId3) return toolError(request.id, localAgentError("INVALID_ARGUMENT", "taskId is required."));
+    return executeToolCall(request.id, "system_speech_status", { taskId: taskId3 }, () => speechStatus(taskId3));
   }
   if (request?.method === "tools/call" && request.params?.name === "system_speech_cancel") {
-    const taskId2 = String(request.params.arguments?.taskId ?? "").trim();
-    if (!taskId2) return toolError(request.id, localAgentError("INVALID_ARGUMENT", "taskId is required."));
-    return executeToolCall(request.id, "system_speech_cancel", { taskId: taskId2 }, () => speechCancel(taskId2));
+    const taskId3 = String(request.params.arguments?.taskId ?? "").trim();
+    if (!taskId3) return toolError(request.id, localAgentError("INVALID_ARGUMENT", "taskId is required."));
+    return executeToolCall(request.id, "system_speech_cancel", { taskId: taskId3 }, () => speechCancel(taskId3));
   }
   if (request?.method === "tools/call" && request.params?.name === "library_store_start") {
     const files = request.params.arguments?.files;
     return executeToolCall(request.id, "library_store_start", { files }, () => libraryStoreStart(files));
   }
   if (request?.method === "tools/call" && request.params?.name === "library_store_status") {
-    const taskId2 = String(request.params.arguments?.taskId ?? "").trim();
-    if (!taskId2) return toolError(request.id, localAgentError("INVALID_ARGUMENT", "taskId is required."));
-    return executeToolCall(request.id, "library_store_status", { taskId: taskId2 }, () => libraryStoreStatus(taskId2));
+    const taskId3 = String(request.params.arguments?.taskId ?? "").trim();
+    if (!taskId3) return toolError(request.id, localAgentError("INVALID_ARGUMENT", "taskId is required."));
+    return executeToolCall(request.id, "library_store_status", { taskId: taskId3 }, () => libraryStoreStatus(taskId3));
   }
   if (request?.method === "tools/call" && request.params?.name === "library_store_cancel") {
-    const taskId2 = String(request.params.arguments?.taskId ?? "").trim();
-    if (!taskId2) return toolError(request.id, localAgentError("INVALID_ARGUMENT", "taskId is required."));
-    return executeToolCall(request.id, "library_store_cancel", { taskId: taskId2 }, () => libraryStoreCancel(taskId2));
+    const taskId3 = String(request.params.arguments?.taskId ?? "").trim();
+    if (!taskId3) return toolError(request.id, localAgentError("INVALID_ARGUMENT", "taskId is required."));
+    return executeToolCall(request.id, "library_store_cancel", { taskId: taskId3 }, () => libraryStoreCancel(taskId3));
   }
   if (request?.method === "tools/call" && request.params?.name === "workspace_list") {
     const args = request.params.arguments ?? {};
@@ -4894,28 +5529,28 @@ async function handleMcpRequest(request) {
     return executeToolCall(request.id, "media_clip", args, () => createMediaClipTask(args));
   }
   if (request?.method === "tools/call" && request.params?.name === "media_clip_get_task") {
-    const taskId2 = request.params.arguments?.taskId;
-    return executeToolCall(request.id, "media_clip_get_task", { taskId: taskId2 }, () => getMediaClipTask(taskId2));
+    const taskId3 = request.params.arguments?.taskId;
+    return executeToolCall(request.id, "media_clip_get_task", { taskId: taskId3 }, () => getMediaClipTask(taskId3));
   }
   if (request?.method === "tools/call" && request.params?.name === "media_clip_cancel_task") {
-    const taskId2 = request.params.arguments?.taskId;
-    return executeToolCall(request.id, "media_clip_cancel_task", { taskId: taskId2 }, () => cancelMediaClipTask(taskId2));
+    const taskId3 = request.params.arguments?.taskId;
+    return executeToolCall(request.id, "media_clip_cancel_task", { taskId: taskId3 }, () => cancelMediaClipTask(taskId3));
   }
   if (request?.method === "tools/call" && request.params?.name === "media_capture_frame") {
     const args = request.params.arguments ?? {};
     return executeToolCall(request.id, "media_capture_frame", args, () => createCaptureFrameTask(args));
   }
   if (request?.method === "tools/call" && request.params?.name === "media_capture_frame_get_task") {
-    const taskId2 = request.params.arguments?.taskId;
-    return executeToolCall(request.id, "media_capture_frame_get_task", { taskId: taskId2 }, () => getCaptureFrameTask(taskId2));
+    const taskId3 = request.params.arguments?.taskId;
+    return executeToolCall(request.id, "media_capture_frame_get_task", { taskId: taskId3 }, () => getCaptureFrameTask(taskId3));
   }
   if (request?.method === "tools/call" && request.params?.name === "media_capture_frame_task_diagnostics") {
-    const taskId2 = request.params.arguments?.taskId;
-    return executeToolCall(request.id, "media_capture_frame_task_diagnostics", { taskId: taskId2 }, () => getCaptureFrameTaskDiagnostics(taskId2));
+    const taskId3 = request.params.arguments?.taskId;
+    return executeToolCall(request.id, "media_capture_frame_task_diagnostics", { taskId: taskId3 }, () => getCaptureFrameTaskDiagnostics(taskId3));
   }
   if (request?.method === "tools/call" && request.params?.name === "media_capture_frame_cancel_task") {
-    const taskId2 = request.params.arguments?.taskId;
-    return executeToolCall(request.id, "media_capture_frame_cancel_task", { taskId: taskId2 }, () => cancelCaptureFrameTask(taskId2));
+    const taskId3 = request.params.arguments?.taskId;
+    return executeToolCall(request.id, "media_capture_frame_cancel_task", { taskId: taskId3 }, () => cancelCaptureFrameTask(taskId3));
   }
   if (request?.method === "tools/call" && STORYBOARD_TOOL_NAMES.includes(request.params?.name)) {
     const name = request.params.name;
@@ -4927,12 +5562,12 @@ async function handleMcpRequest(request) {
     return executeToolCall(request.id, "visual_map_create", args, () => createVisualMap(args));
   }
   if (request?.method === "tools/call" && request.params?.name === "visual_map_get_task") {
-    const taskId2 = request.params.arguments?.taskId;
-    return executeToolCall(request.id, "visual_map_get_task", { taskId: taskId2 }, () => getVisualMapTask(taskId2));
+    const taskId3 = request.params.arguments?.taskId;
+    return executeToolCall(request.id, "visual_map_get_task", { taskId: taskId3 }, () => getVisualMapTask(taskId3));
   }
   if (request?.method === "tools/call" && request.params?.name === "visual_map_cancel_task") {
-    const taskId2 = request.params.arguments?.taskId;
-    return executeToolCall(request.id, "visual_map_cancel_task", { taskId: taskId2 }, () => cancelVisualMapTask(taskId2));
+    const taskId3 = request.params.arguments?.taskId;
+    return executeToolCall(request.id, "visual_map_cancel_task", { taskId: taskId3 }, () => cancelVisualMapTask(taskId3));
   }
   if (request?.method === "tools/call" && request.params?.name === "camera_list") {
     return executeToolCall(request.id, "camera_list", {}, cameraList);
@@ -4950,12 +5585,12 @@ async function handleMcpRequest(request) {
     return executeToolCall(request.id, "camera_record_audio", args, () => cameraRecordAudio(args));
   }
   if (request?.method === "tools/call" && request.params?.name === "camera_record_status") {
-    const taskId2 = request.params.arguments?.taskId;
-    return executeToolCall(request.id, "camera_record_status", { taskId: taskId2 }, () => cameraRecordStatus(taskId2));
+    const taskId3 = request.params.arguments?.taskId;
+    return executeToolCall(request.id, "camera_record_status", { taskId: taskId3 }, () => cameraRecordStatus(taskId3));
   }
   if (request?.method === "tools/call" && request.params?.name === "camera_record_stop") {
-    const taskId2 = request.params.arguments?.taskId;
-    return executeToolCall(request.id, "camera_record_stop", { taskId: taskId2 }, () => cameraRecordStop(taskId2));
+    const taskId3 = request.params.arguments?.taskId;
+    return executeToolCall(request.id, "camera_record_stop", { taskId: taskId3 }, () => cameraRecordStop(taskId3));
   }
   if (request?.method === "tools/call" && request.params?.name === "media_capture_screen") {
     const args = request.params.arguments ?? {};
@@ -4965,7 +5600,19 @@ async function handleMcpRequest(request) {
     const args = request.params.arguments ?? {};
     return executeToolCall(request.id, "media_image_crop", args, () => imageCrop(args));
   }
-  if (request?.method === "tools/call" && request.params?.name === "media_image_show") {
+  if (request?.method === "tools/call" && request.params?.name === "media_to_chat") {
+    const args = request.params.arguments ?? {};
+    return executeToolCall(request.id, "media_to_chat", args, () => mediaToChatStart(args));
+  }
+  if (request?.method === "tools/call" && request.params?.name === "media_to_chat_status") {
+    const taskId3 = request.params.arguments?.taskId;
+    return executeToolCall(request.id, "media_to_chat_status", { taskId: taskId3 }, () => mediaToChatStatus(taskId3));
+  }
+  if (request?.method === "tools/call" && request.params?.name === "media_to_chat_cancel") {
+    const taskId3 = request.params.arguments?.taskId;
+    return executeToolCall(request.id, "media_to_chat_cancel", { taskId: taskId3 }, () => mediaToChatCancel(taskId3));
+  }
+  if (request?.method === "tools/call" && request.params?.name === "media_show") {
     return executeShowWorkspaceImageToolCall(request.id, request.params.arguments?.path);
   }
   if (request?.method === "tools/call" && request.params?.name === "media_image_inspect") {
@@ -5061,20 +5708,20 @@ async function executeCaptureFrameImageToolCall(id, path) {
     };
     void recordCommandDiagnostic("succeeded", { tool: "media_load_workspace_image", elapsed_ms: Date.now() - startedAt, output: { path: metadata.path, mediaKind: metadata.mediaKind, sizeBytes: metadata.sizeBytes } });
     return { jsonrpc: "2.0", id, result: mcpResult };
-  } catch (error) {
-    void recordCommandDiagnostic("failed", { tool: "media_load_workspace_image", elapsed_ms: Date.now() - startedAt, error_code: error?.code || null, error: searchDiagnosticMessage(error) });
-    return toolError(id, error);
+  } catch (error2) {
+    void recordCommandDiagnostic("failed", { tool: "media_load_workspace_image", elapsed_ms: Date.now() - startedAt, error_code: error2?.code || null, error: searchDiagnosticMessage(error2) });
+    return toolError(id, error2);
   }
 }
 async function executeShowWorkspaceImageToolCall(id, path) {
   const startedAt = Date.now();
   try {
     const result = await showWorkspaceImage(path);
-    void recordCommandDiagnostic("succeeded", { tool: "media_image_show", elapsed_ms: Date.now() - startedAt, output: result.metadata });
+    void recordCommandDiagnostic("succeeded", { tool: "media_show", elapsed_ms: Date.now() - startedAt, output: result.metadata });
     return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: "Workspace media shown." }], structuredContent: result.metadata, isError: false } };
-  } catch (error) {
-    void recordCommandDiagnostic("failed", { tool: "media_image_show", elapsed_ms: Date.now() - startedAt, error_code: error?.code || null, error: searchDiagnosticMessage(error) });
-    return toolError(id, error);
+  } catch (error2) {
+    void recordCommandDiagnostic("failed", { tool: "media_show", elapsed_ms: Date.now() - startedAt, error_code: error2?.code || null, error: searchDiagnosticMessage(error2) });
+    return toolError(id, error2);
   }
 }
 async function executeCaptureFrameWidgetActionToolCall(id, tool, path, action) {
@@ -5083,19 +5730,19 @@ async function executeCaptureFrameWidgetActionToolCall(id, tool, path, action) {
     const result = await action(path);
     void recordCommandDiagnostic("succeeded", { tool, elapsed_ms: Date.now() - startedAt, output: result });
     return jsonToolResult(id, result);
-  } catch (error) {
-    console.error(`[ResearchTube] ${tool} failed.`, error);
-    void recordCommandDiagnostic("failed", { tool, elapsed_ms: Date.now() - startedAt, error_code: error?.code || null, error: searchDiagnosticMessage(error) });
-    if (typeof error?.detail === "string" && error.detail) {
-      const detailedError = localAgentError(error.code || "TOOL_ERROR", `${String(error.message)} Detail: ${error.detail}`, error.detail);
+  } catch (error2) {
+    console.error(`[ResearchTube] ${tool} failed.`, error2);
+    void recordCommandDiagnostic("failed", { tool, elapsed_ms: Date.now() - startedAt, error_code: error2?.code || null, error: searchDiagnosticMessage(error2) });
+    if (typeof error2?.detail === "string" && error2.detail) {
+      const detailedError = localAgentError(error2.code || "TOOL_ERROR", `${String(error2.message)} Detail: ${error2.detail}`, error2.detail);
       return toolError(id, detailedError);
     }
-    return toolError(id, error);
+    return toolError(id, error2);
   }
 }
 async function executeToolCall(id, tool, input, work, operation = null) {
   const startedAt = Date.now();
-  const reportsLongOperationStatus = tool === "library_store_status";
+  const reportsLongOperationStatus = tool === "library_store_status" || tool === "media_to_chat_status";
   void recordCommandDiagnostic("started", { tool, input: summarizeCommandInput(tool, input) });
   await setActionBadge("working");
   try {
@@ -5108,10 +5755,10 @@ async function executeToolCall(id, tool, input, work, operation = null) {
       output: summarizeCommandOutput(value)
     });
     return jsonToolResult(id, value);
-  } catch (error) {
+  } catch (error2) {
     if (reportsLongOperationStatus) await reportMcpToolToAgent(tool, null, true);
     await refreshActionBadge();
-    const contextualError = operation && !error?.code ? new Error(`${operation}: ${String(error?.message || error)}`, { cause: error }) : error;
+    const contextualError = operation && !error2?.code ? new Error(`${operation}: ${String(error2?.message || error2)}`, { cause: error2 }) : error2;
     void recordCommandDiagnostic("failed", {
       tool,
       elapsed_ms: Date.now() - startedAt,
@@ -5122,6 +5769,7 @@ async function executeToolCall(id, tool, input, work, operation = null) {
   }
 }
 function summarizeCommandInput(tool, input) {
+  if (TIMER_TOOL_NAMES.includes(tool)) return { taskId: input.taskId ?? null, duration: input.duration ?? null, unit: input.unit ?? null, until: input.until ?? null, clockSource: input.clockSource ?? "system", timeZone: input.timeZone ?? null };
   if (tool === "media_clip") return { path: typeof input.path === "string" ? input.path : null, outputKind: input.outputKind ?? null, segmentCount: Array.isArray(input.segments) ? input.segments.length : null, cutMode: input.cutMode ?? "copy", outputDir: typeof input.outputDir === "string" ? input.outputDir : "clips" };
   if (tool === "media_clip_get_task" || tool === "media_clip_cancel_task") return { taskId: typeof input.taskId === "string" ? input.taskId : null };
   if (tool === "media_capture_frame") return { path: typeof input.path === "string" ? input.path : null, youtube: input.youtube && typeof input.youtube === "object" ? { videoId: input.youtube.videoId ?? null, formatId: input.youtube.formatId ?? null } : null, timestampSeconds: input.timestampSeconds ?? null, videoStreamIndex: input.videoStreamIndex ?? null, seekMode: input.seekMode ?? null, outputPath: typeof input.outputPath === "string" ? input.outputPath : null };
@@ -5156,16 +5804,16 @@ function summarizeCommandOutput(value) {
   }
   return summary;
 }
-function toolError(id, error) {
-  const code = error?.code;
-  const message = String(error?.message ?? error);
-  const text = typeof code === "string" ? `[${code}] ${message}` : message;
-  const errorDocument = { code: typeof code === "string" ? code : "TOOL_ERROR", message, detail: typeof error?.detail === "string" ? error.detail : null };
+function toolError(id, error2) {
+  const code = error2?.code;
+  const message = String(error2?.message ?? error2);
+  const text2 = typeof code === "string" ? `[${code}] ${message}` : message;
+  const errorDocument = { code: typeof code === "string" ? code : "TOOL_ERROR", message, detail: typeof error2?.detail === "string" ? error2.detail : null };
   if (isExpectedToolError(errorDocument.code)) {
     const rejected2 = { status: "rejected", error: errorDocument };
-    return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text }], structuredContent: rejected2, isError: false } };
+    return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: text2 }], structuredContent: rejected2, isError: false } };
   }
-  return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text }], structuredContent: { error: errorDocument }, isError: true } };
+  return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: text2 }], structuredContent: { error: errorDocument }, isError: true } };
 }
 function isExpectedToolError(code) {
   if (typeof code !== "string") return false;
@@ -5198,8 +5846,8 @@ function delay(milliseconds) {
 function searchDiagnosticQuery(query) {
   return String(query ?? "").replace(/\s+/g, " ").trim().slice(0, SEARCH_DIAGNOSTIC_MAX_QUERY_LENGTH);
 }
-function recordCommandDiagnostic(event, fields = {}) {
-  const entry = { event, timestamp: (/* @__PURE__ */ new Date()).toISOString(), ...fields };
+function recordCommandDiagnostic(event, fields2 = {}) {
+  const entry = { event, timestamp: (/* @__PURE__ */ new Date()).toISOString(), ...fields2 };
   commandDiagnosticWrite = commandDiagnosticWrite.catch(() => void 0).then(async () => {
     const { commandDiagnostics = [] } = await chrome.storage.local.get({ commandDiagnostics: [] });
     const next = Array.isArray(commandDiagnostics) ? [...commandDiagnostics, entry] : [entry];
@@ -5211,14 +5859,14 @@ function recordCommandDiagnostic(event, fields = {}) {
 function searchDiagnosticMessage(value) {
   return String(value?.message ?? value ?? "Unknown error").replace(/sk-[A-Za-z0-9_-]+/g, "[redacted]").replace(/https?:\/\/[^\s]+/g, "[url]").replace(/\s+/g, " ").slice(0, 280);
 }
-function recordSearchDiagnostic(event, fields = {}) {
-  const entry = { timestamp: (/* @__PURE__ */ new Date()).toISOString(), event, ...fields };
+function recordSearchDiagnostic(event, fields2 = {}) {
+  const entry = { timestamp: (/* @__PURE__ */ new Date()).toISOString(), event, ...fields2 };
   searchDiagnosticWrite = searchDiagnosticWrite.catch(() => void 0).then(async () => {
     const { searchDiagnostics = [] } = await chrome.storage.local.get({ searchDiagnostics: [] });
     const entries = Array.isArray(searchDiagnostics) ? searchDiagnostics : [];
     entries.push(entry);
     await chrome.storage.local.set({ searchDiagnostics: entries.slice(-SEARCH_DIAGNOSTIC_MAX_ENTRIES) });
-  }).catch((error) => console.debug("ResearchTube search diagnostics write failed:", error));
+  }).catch((error2) => console.debug("ResearchTube search diagnostics write failed:", error2));
   return searchDiagnosticWrite;
 }
 async function getDiagnosticsExport() {
@@ -5226,7 +5874,7 @@ async function getDiagnosticsExport() {
   const { searchDiagnostics = [], commandDiagnostics = [] } = await chrome.storage.local.get({ searchDiagnostics: [], commandDiagnostics: [] });
   const searchEntries = Array.isArray(searchDiagnostics) ? searchDiagnostics : [];
   const commandEntries = Array.isArray(commandDiagnostics) ? commandDiagnostics : [];
-  const text = [
+  const text2 = [
     "ResearchTube Diagnostics",
     `Exported: ${(/* @__PURE__ */ new Date()).toISOString()}`,
     "Contains concise local tool timing, safe request summaries, errors, search queue state, and YouTube HTTP status. It never includes OpenAI API keys, Tunnel IDs, YouTube cookies, request headers, response bodies, transcript text, or comment text.",
@@ -5237,7 +5885,7 @@ async function getDiagnosticsExport() {
     "Search events:",
     ...searchEntries.map((entry) => JSON.stringify(entry))
   ].join("\n");
-  return { ok: true, commandEntryCount: commandEntries.length, searchEntryCount: searchEntries.length, text };
+  return { ok: true, commandEntryCount: commandEntries.length, searchEntryCount: searchEntries.length, text: text2 };
 }
 async function clearDiagnostics() {
   await Promise.all([searchDiagnosticWrite, commandDiagnosticWrite]);
@@ -5285,17 +5933,17 @@ async function youtubeSearch(query, limit) {
   task.catch(() => searchCache.delete(key));
   task.then(
     () => finishQueuedSearch(context, "completed"),
-    (error) => finishQueuedSearch(context, "failed", error)
+    (error2) => finishQueuedSearch(context, "failed", error2)
   );
   return task;
 }
-function finishQueuedSearch(context, outcome, error = null) {
+function finishQueuedSearch(context, outcome, error2 = null) {
   searchQueueDepth = Math.max(0, searchQueueDepth - 1);
   void recordSearchDiagnostic("queue_finished", {
     request_id: context.request_id,
     outcome,
     queue_depth: searchQueueDepth,
-    ...error ? { error: searchDiagnosticMessage(error) } : {}
+    ...error2 ? { error: searchDiagnosticMessage(error2) } : {}
   });
 }
 async function runQueuedYouTubeSearch(query, limit, context) {
@@ -5327,13 +5975,13 @@ async function runQueuedYouTubeSearch(query, limit, context) {
       elapsed_ms: Date.now() - lastSearchStartedAt
     });
     return result;
-  } catch (error) {
-    if (error?.code === "YOUTUBE_SEARCH_VERIFICATION") {
+  } catch (error2) {
+    if (error2?.code === "YOUTUBE_SEARCH_VERIFICATION") {
       void recordSearchDiagnostic("verification_rejected", {
         request_id: context.request_id,
         http_requests: context.http_requests,
         elapsed_ms: Date.now() - lastSearchStartedAt,
-        ...error.search_diagnostic ?? {}
+        ...error2.search_diagnostic ?? {}
       });
       const retryAfterSeconds = await applySearchCooldown(context);
       throw new YouTubeSearchRateLimitError(retryAfterSeconds);
@@ -5342,9 +5990,9 @@ async function runQueuedYouTubeSearch(query, limit, context) {
       request_id: context.request_id,
       http_requests: context.http_requests,
       elapsed_ms: Date.now() - lastSearchStartedAt,
-      error: searchDiagnosticMessage(error)
+      error: searchDiagnosticMessage(error2)
     });
-    throw error;
+    throw error2;
   }
 }
 async function throwIfSearchCooldown(context = null) {
@@ -5395,10 +6043,10 @@ async function applySearchCooldown(context = null) {
   return retryAfterSeconds;
 }
 function createSearchVerificationError(searchDiagnostic = {}) {
-  const error = new Error("YouTube redirected or rejected this anonymous search request");
-  error.code = "YOUTUBE_SEARCH_VERIFICATION";
-  error.search_diagnostic = searchDiagnostic;
-  return error;
+  const error2 = new Error("YouTube redirected or rejected this anonymous search request");
+  error2.code = "YOUTUBE_SEARCH_VERIFICATION";
+  error2.search_diagnostic = searchDiagnostic;
+  return error2;
 }
 async function youtubeSearchViaPageContext(query, limit, context) {
   const pageResult = await runYouTubePageTool("search", null, { query, limit });
@@ -5586,8 +6234,8 @@ function optionalContinuation(value) {
 async function runYouTubePageTool(action, videoId2, args) {
   try {
     return await runYouTubePageToolAttempt(action, videoId2, args);
-  } catch (error) {
-    if (!isRecoverablePageContextError(error)) throw error;
+  } catch (error2) {
+    if (!isRecoverablePageContextError(error2)) throw error2;
     try {
       return await runYouTubePageToolAttempt(action, videoId2, args);
     } catch (retryError) {
@@ -5625,11 +6273,11 @@ async function runYouTubePageToolAttempt(action, videoId2, args) {
         redirected: Boolean(item.redirected)
       });
     }
-  } catch (error) {
+  } catch (error2) {
     void recordCommandDiagnostic("page_diagnostics_unavailable", {
       action,
       ...videoId2 ? { videoId: videoId2 } : {},
-      error: searchDiagnosticMessage(error)
+      error: searchDiagnosticMessage(error2)
     });
   }
   if (!response) throw createPageContextError("The YouTube page bridge did not return a result");
@@ -5637,14 +6285,14 @@ async function runYouTubePageToolAttempt(action, videoId2, args) {
   return response.data;
 }
 function createPageContextError(message, cause) {
-  const error = new Error(message);
-  error.code = "RESEARCHTUBE_PAGE_CONTEXT_UNAVAILABLE";
-  if (cause) error.cause = cause;
-  return error;
+  const error2 = new Error(message);
+  error2.code = "RESEARCHTUBE_PAGE_CONTEXT_UNAVAILABLE";
+  if (cause) error2.cause = cause;
+  return error2;
 }
-function isRecoverablePageContextError(error) {
-  if (error?.code === "RESEARCHTUBE_PAGE_CONTEXT_UNAVAILABLE") return true;
-  const message = String(error?.message || error || "");
+function isRecoverablePageContextError(error2) {
+  if (error2?.code === "RESEARCHTUBE_PAGE_CONTEXT_UNAVAILABLE") return true;
+  const message = String(error2?.message || error2 || "");
   return /No tab with id|tab was closed|Receiving end does not exist|Could not establish connection|message port closed|frame with ID .* was removed|Cannot access contents of url|MAIN-world bridge timed out/i.test(message);
 }
 async function getOrCreateYouTubeTab() {
@@ -5691,12 +6339,12 @@ async function waitForYouTubeTab(tabId, timeoutMs = 45e3) {
 async function sendYouTubePageTool(tabId, message) {
   try {
     return await chrome.tabs.sendMessage(tabId, message);
-  } catch (error) {
-    if (!/Receiving end does not exist|Could not establish connection/i.test(String(error?.message || error))) {
-      if (isRecoverablePageContextError(error)) {
-        throw createPageContextError("The selected YouTube tab is no longer available", error);
+  } catch (error2) {
+    if (!/Receiving end does not exist|Could not establish connection/i.test(String(error2?.message || error2))) {
+      if (isRecoverablePageContextError(error2)) {
+        throw createPageContextError("The selected YouTube tab is no longer available", error2);
       }
-      throw error;
+      throw error2;
     }
   }
   try {
@@ -5713,11 +6361,11 @@ async function sendYouTubePageTool(tabId, message) {
       injectImmediately: true
     });
     return await chrome.tabs.sendMessage(tabId, message);
-  } catch (error) {
-    if (isRecoverablePageContextError(error)) {
-      throw createPageContextError("The selected YouTube tab became unavailable while preparing the page bridge", error);
+  } catch (error2) {
+    if (isRecoverablePageContextError(error2)) {
+      throw createPageContextError("The selected YouTube tab became unavailable while preparing the page bridge", error2);
     }
-    throw error;
+    throw error2;
   }
 }
 async function fetchVideoPage(videoId2) {
@@ -5744,15 +6392,15 @@ async function fetchStandardWatchPage(videoId2) {
       redirected: response.redirected
     });
     return response;
-  } catch (error) {
+  } catch (error2) {
     void recordCommandDiagnostic("youtube_http_network_error", {
       action: "youtube_get_video",
       videoId: videoId2,
       endpoint: "/watch",
       method: "GET",
-      error: searchDiagnosticMessage(error)
+      error: searchDiagnosticMessage(error2)
     });
-    throw error;
+    throw error2;
   }
 }
 function captionTracks(player) {
@@ -5780,9 +6428,9 @@ function findLikeText(value) {
       node.likeButtonViewModel?.toggleButtonViewModel?.defaultButtonViewModel?.buttonViewModel?.accessibilityText
     ];
     for (const candidate of candidates) {
-      const text = textOf(candidate) || (typeof candidate === "string" ? candidate : "");
-      if (isLikeCountText(text)) {
-        likes = text;
+      const text2 = textOf(candidate) || (typeof candidate === "string" ? candidate : "");
+      if (isLikeCountText(text2)) {
+        likes = text2;
         break;
       }
     }
@@ -5790,8 +6438,8 @@ function findLikeText(value) {
   return likes;
 }
 function isLikeCountText(value) {
-  const text = String(value || "").replace(/\s+/g, " ").trim();
-  return /\d/.test(text) && /\b(?:likes?|thumbs up)\b|нравится|отмет(?:ок|ки)?\s+[«\"]?нравится/i.test(text);
+  const text2 = String(value || "").replace(/\s+/g, " ").trim();
+  return /\d/.test(text2) && /\b(?:likes?|thumbs up)\b|нравится|отмет(?:ок|ки)?\s+[«\"]?нравится/i.test(text2);
 }
 function findViewText(value) {
   let views = null;
@@ -5812,13 +6460,13 @@ function findCommentCountText(value) {
   return count;
 }
 function normalizeText(value) {
-  const text = String(value?.toString?.() ?? value ?? "").trim();
-  return text || null;
+  const text2 = String(value?.toString?.() ?? value ?? "").trim();
+  return text2 || null;
 }
 function parseYouTubeCount(value) {
-  const text = normalizeText(value);
-  if (!text) return null;
-  const compact = text.replace(/[\u00A0\u202F\s]/g, "");
+  const text2 = normalizeText(value);
+  if (!text2) return null;
+  const compact = text2.replace(/[\u00A0\u202F\s]/g, "");
   const suffix = compact.match(/(\d+(?:[.,]\d+)?)\s*([KMBT])/);
   if (suffix) {
     const amount = Number(suffix[1].replace(",", "."));
@@ -5833,23 +6481,23 @@ function walk(value, visitor) {
   if (!value || typeof value !== "object") return;
   for (const child of Object.values(value)) walk(child, visitor);
 }
-function extractAnyJson(text, markers) {
+function extractAnyJson(text2, markers) {
   for (const marker of markers) {
-    const result = extractJsonAfterMarker(text, marker);
+    const result = extractJsonAfterMarker(text2, marker);
     if (result) return result;
   }
   return null;
 }
-function extractJsonAfterMarker(text, marker) {
-  const start = text.indexOf(marker);
+function extractJsonAfterMarker(text2, marker) {
+  const start = text2.indexOf(marker);
   if (start < 0) return null;
-  const objectStart = text.indexOf("{", start + marker.length);
+  const objectStart = text2.indexOf("{", start + marker.length);
   if (objectStart < 0) return null;
   let depth = 0;
   let inString = false;
   let escaped = false;
-  for (let i = objectStart; i < text.length; i += 1) {
-    const ch = text[i];
+  for (let i = objectStart; i < text2.length; i += 1) {
+    const ch = text2[i];
     if (inString) {
       if (escaped) escaped = false;
       else if (ch === "\\") escaped = true;
@@ -5863,7 +6511,7 @@ function extractJsonAfterMarker(text, marker) {
     if (ch === "{") depth += 1;
     else if (ch === "}" && --depth === 0) {
       try {
-        return JSON.parse(text.slice(objectStart, i + 1));
+        return JSON.parse(text2.slice(objectStart, i + 1));
       } catch {
         return null;
       }

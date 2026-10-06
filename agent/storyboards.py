@@ -353,7 +353,7 @@ class StoryboardService:
     def __init__(self, host):
         self.host = host
         self.cache = {}
-        self.tasks = {}
+        self.tasks = host.TaskHistory(host.configured_task_history_limit)
         self.published = {}
         self.slots = asyncio.Semaphore(3)
 
@@ -529,6 +529,8 @@ class StoryboardService:
                                         raise ValueError('Destination already exists')
                                     reused = True
                         self.published[logical] = (identity, digest)
+                        while len(self.published) > self.host.configured_task_history_limit():
+                            self.published.pop(next(iter(self.published)))
                     task.reused += int(reused)
                     task.downloaded += int(not reused)
                     task.completed += 1

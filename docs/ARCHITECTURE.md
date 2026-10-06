@@ -30,6 +30,7 @@ The tunnel is outbound-only from the Extension. The Agent binds only to loopback
 | Local media viewer | `extension/media-viewer.html` | Loads image, video or audio bytes from loopback with Extension permissions |
 | Settings and popup | `extension/settings.*`, `extension/popup.*` | Connection, Agent status, tool availability and bounded diagnostics |
 | Local Agent | `agent/researchtube_agent.py` | Workspace, executable discovery, downloads, FFmpeg operations, speech callbacks and loopback media serving |
+| Timer Agent module | `agent/timers.py`, `agent/task_history.py` | Real durations/deadlines, clock diagnostics and bounded terminal-task history |
 | Storyboard Agent module | `agent/storyboards.py` | Storyboard discovery, selection, downloads, timestamps and task lifecycle |
 
 Generated files are `extension/dist/background.js` and `extension/youtube-page-bridge.js`. Their source files must be changed first.
@@ -96,6 +97,12 @@ A start call returns a task ID, initial state and `pollIntervalMs`. Status respo
 
 FFmpeg tasks use native progress or completed-unit counts rather than fabricated timers. The Agent log appends the percentage to ordinary task status requests without dumping tool inputs or internal callback routes.
 
+All Agent task managers retain only the latest `limits.completedTaskHistoryLimit` terminal records (default 2000), after each runner actually finishes. Queued/working tasks are preserved. Eviction releases task metadata, diagnostics and result references, never Workspace files. Extension-owned Library and current-chat tasks apply the same configured per-manager cap to their Maps and persisted task records. Limits are read on demand. Storyboard publication fingerprints are also bounded; eviction only requires content verification again when reusing a file.
+
+Timers use the same task lifecycle, ordinary short task IDs and compact percentage logs. `agent/timers.py` separates monotonic relative duration from calendar deadlines, obtains an optional HTTPS UTC sample, returns clock-change warnings and detects suspend where system counters support it. Timers remain only in memory; restart/history eviction gives a meaningful not-found result. They cannot independently wake ChatGPT. See [TIMERS.md](features/TIMERS.md).
+
+The developer default for newly discovered tools lives in `agent-config.json` as `newToolsEnabledByDefault`, not in the Settings UI. Individual saved tool choices remain authoritative. The Extension reads the default when registering a previously unknown tool and uses its last known default (initially true) if the Agent is unavailable.
+
 ## Media processing
 
 - `ffprobe` supplies stream, format, chapter and program metadata.
@@ -105,13 +112,21 @@ FFmpeg tasks use native progress or completed-unit counts rather than fabricated
 - Google Translate TTS is driven in a retained background tab. Source text is inserted by script, the listen control is clicked with CDP browser input, and file output is collected from CDP network response bodies.
 - Windows TTS uses Windows speech voices and produces WAV output.
 
-Media creation tools return Workspace metadata and normally do not render a widget. `media_image_show` is the explicit presentation action.
+Media creation tools return Workspace metadata and normally do not render a widget. `media_show` is the explicit presentation action.
 
 ## ChatGPT local-media viewer
 
 An MCP widget remains the conversation anchor but cannot reliably fetch loopback media under ChatGPT's iframe CSP. The widget announces its identity. The ResearchTube content script locates the exact iframe by `event.source` and overlays an Extension-owned `media-viewer.html` frame in the same position.
 
 The viewer receives verified logical metadata, constructs the loopback request in the Extension security context and loads bytes directly from the Agent. Images are loaded normally; video and audio use HTTP byte ranges for seeking. Media bytes, loopback URLs and physical paths are not placed in the MCP result.
+
+## ChatGPT file submission
+
+Library storage and `media_to_chat` share serialized CDP file-chooser, attachment and Send automation. The Agent resolves logical Workspace paths through separate private endpoints and partitions eligible files from files exceeding each feature's configured size limit. Physical paths stay in the private Extension–Agent exchange; public task documents expose only logical paths.
+
+Library uses a dedicated background service conversation. `media_to_chat` binds to the active ChatGPT conversation in the last focused Chrome window when the task is created; MCP transport itself supplies no originating tab ID. The task rechecks that tab and conversation before attachment and Send. `composerPolicy` either requires no text/attachments (default), or explicitly clears both once through the existing text-clear routine and scoped attachment removal controls. The page-side Composer helper in `extension/chat-composer.js` inspects only the draft area and tracks trusted user edits during upload. A later edit stops Send and leaves uploaded files in place; cleanup removes only its event listeners. It never creates or activates another tab. Tasks persist in Extension storage, use phase-based monotonic progress, and support cancellation while queued. Interrupted submissions are not replayed after restart.
+
+Current-chat attachment can wait for the initiating assistant response to finish before Send becomes enabled. The start tool returns immediately; its caller must finish that response and poll in a later turn. Completion means a Send click, without claiming downstream upload processing or Library availability.
 
 ## Speech path
 
@@ -131,7 +146,7 @@ For file-only output, the tab is muted during playback. ResearchTube waits for p
 
 ## Compatibility and versions
 
-Extension and Agent implementation versions can change independently. Compatibility is governed only by the interface version. The Extension refuses Agent-backed calls when the versions do not match, while browser-only YouTube research remains available.
+Extension and Agent share the same release version. Compatibility is governed by the separate interface version. The Extension refuses Agent-backed calls when the versions do not match, while browser-only YouTube research remains available.
 
 Current values must be read from code or `system_agent_status`; documentation does not hard-code release numbers.
 

@@ -50,7 +50,7 @@ Call `media_capture_frame` with:
 }
 ```
 
-Poll `media_capture_frame_get_task` no faster than `pollIntervalMs`. After completion, call `media_image_show` only for the first returned frame. Explain that batch extraction avoids repeated setup and can also work from selected YouTube ranges.
+Poll `media_capture_frame_get_task` no faster than `pollIntervalMs`. After completion, call `media_show` only for the first returned frame. Explain that batch extraction avoids repeated setup and can also work from selected YouTube ranges.
 
 ### 4. Build a visual map
 
@@ -67,7 +67,7 @@ Call `visual_map_create` with:
 }
 ```
 
-Poll `visual_map_get_task`, then show the first returned map through `media_image_show`. Explain how a visual map provides a compact timeline and how scene-detect or hybrid selection can be used for real videos.
+Poll `visual_map_get_task`, then show the first returned map through `media_show`. Explain how a visual map provides a compact timeline and how scene-detect or hybrid selection can be used for real videos.
 
 ### 5. Cut two video intervals
 

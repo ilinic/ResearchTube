@@ -50,3 +50,5 @@ This directory is the canonical documentation set for ResearchTube. Source code 
 - Use logical Workspace paths in examples; never publish a developer's physical path.
 - Keep user instructions executable by the user or ChatGPT. Do not tell a chat to reload software, inspect a local console or edit files as if it could do those actions itself.
 - Update this index when adding, moving or removing a document.
+
+- [Real timers](features/TIMERS.md): duration/deadline tasks, system or internet time, clock warnings and history retention.

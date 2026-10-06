@@ -55,7 +55,7 @@ class CameraContractTests(unittest.TestCase):
 
     def test_audio_task_exposes_no_video_fps_and_can_be_stopping(self) -> None:
         manager = agent.CameraRecordTaskManager()
-        task = agent.CameraRecordTask("cam_abcdefghij", "Ab3xY9", "audio", 8, None, "2026-09-24T00:00:00Z", "2026-09-24T00:00:00Z")
+        task = agent.CameraRecordTask("cam_abcdefghij", "Ab3xY9", "audio", 8, None, "2026-09-24T00:00:00Z", "2026-09-24T00:00:00Z", 600)
         task.status, task.phase = "stopping", "finalizing"
         document = manager.snapshot(task)
         self.assertEqual(document["recordingKind"], "audio")

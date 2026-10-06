@@ -42,7 +42,7 @@ Expected successful result:
 - every `partialDownload` is a short range around its timestamp, not the full
   video duration;
 - no Workspace Image card appears automatically. Optionally call
-  `media_image_show` once for one completed frame only.
+  `media_show` once for one completed frame only.
 
 If the task fails, do **not** repeat it yet. Call
 `media_capture_frame_task_diagnostics` once with the task ID.

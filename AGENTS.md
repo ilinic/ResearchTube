@@ -9,8 +9,11 @@ Read this file before changing the repository. Then read `docs/ARCHITECTURE.md` 
 - `extension/youtube-page-bridge.src.js` is the source for the MAIN-world YouTube bridge.
 - `extension/youtube-content.js` is the isolated YouTube content script.
 - `extension/chatgpt-capture-frame-bridge.js` and `extension/media-viewer.html` implement the ChatGPT local-media bridge.
+- `extension/chat-composer.js` owns scoped Composer inspection and user-edit monitoring for file submission.
 - `agent/researchtube_agent.py` is the loopback Agent and most Agent services.
 - `agent/storyboards.py` owns Agent-side storyboard discovery and tasks.
+- `agent/timers.py` owns real timer tasks; `agent/task_history.py` bounds all Agent terminal-task histories.
+- `extension/timers.js` owns timer schemas/normalization; `extension/task-history.js` bounds browser task Maps.
 - `agent/tests/` and `extension/tests/` are required contract coverage.
 - `docs/` is the canonical documentation root.
 
@@ -29,7 +32,7 @@ Do not implement a fix only in a generated file. Change the source and run `npm 
 4. Never return credentials, cookies, signed media URLs, tokens, host paths or unbounded process output through MCP.
 5. Existing output files are never overwritten silently.
 6. Asynchronous tools return a task immediately, expose monotonic `progressPercent`, publish `pollIntervalMs`, support bounded status polling and preserve completed outputs on later failure where practical.
-7. A creation tool does not display media automatically unless its documented contract explicitly says so. Use `media_image_show` for deliberate presentation.
+7. A creation tool does not display media automatically unless its documented contract explicitly says so. Use `media_show` for deliberate presentation.
 8. Public MCP inputs and Agent responses are allowlisted with strict schemas or explicit normalization.
 9. Expected input, availability and state errors use stable structured codes; unexpected transport or implementation failures remain tool errors.
 10. Browser automation must not steal focus unless the public tool contract explicitly requires it.
@@ -37,7 +40,7 @@ Do not implement a fix only in a generated file. Change the source and run `npm 
 ## Version policy
 
 - Extension implementation version: `extension/package.json`, `extension/package-lock.json`, `extension/manifest.json` and `EXTENSION_VERSION` in `extension/background.js` must agree.
-- Agent implementation version: `AGENT_VERSION` in `agent/researchtube_agent.py`.
+- Agent release version: `AGENT_VERSION` in `agent/researchtube_agent.py` must equal the Extension release version.
 - Compatibility version: `INTERFACE_VERSION` in the Agent must equal `REQUIRED_AGENT_INTERFACE_VERSION` in the Extension.
 - Increment the interface version only when the Extension ↔ Agent contract becomes incompatible or gains a required contract surface.
 - An Extension-only implementation or documentation bootstrap change does not require an interface-version increment.

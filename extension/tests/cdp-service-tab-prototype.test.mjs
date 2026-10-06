@@ -25,11 +25,11 @@ assert.match(background, /result\?\.value === true/, "page-condition waits must 
 assert.match(background, /cdpWaitForAttachmentAccepted/, "attachment completion must use Composer file acceptance, not only visible preview text");
 assert.match(background, /input\.files/, "file-input selection must be accepted as browser-level attachment evidence");
 assert.match(background, /drainLibraryStoreQueue/, "Library batches must share one serialized service-tab queue");
-assert.match(background, /cdpAttachImagesNow/, "the queued public entrypoint must serialize the CDP lifecycle");
-assert.match(background, /CDP_IMAGE_BATCH_MAX_FILES = 5/, "a Composer batch must be capped at five images");
+assert.match(background, /cdpAttachFilesNow/, "the queued public entrypoint must serialize the CDP lifecycle");
+assert.match(background, /libraryStoreMaxFiles/, "a Composer batch must use the configured file count");
 assert.match(background, /libraryStoreQueue/, "Library batches must be queued independently");
 assert.match(background, /DOM\.setFileInputFiles", \{ files: filePaths/, "one chooser operation must receive the whole batch");
-assert.match(background, /cdpSendAttachedImages/, "the queued image batch must still be sent through ChatGPT");
+assert.match(background, /cdpSendAttachedFiles/, "the queued file batch must still be sent through ChatGPT");
 assert.match(background, /cdpClickEnabledSendButton/, "all Composer sends must use the same browser-level click helper");
 assert.match(background, /Input\.dispatchMouseEvent/, "the shortcut must dispatch trusted browser mouse input to ChatGPT Send");
 assert.match(background, /mousePressed/, "the send click must include a press event");
@@ -77,7 +77,7 @@ assert.match(background, /Composer draft changed by user; stopping cleanup/, "dr
 assert.match(background, /Input\.dispatchKeyEvent/, "draft cleanup must use browser-level input rather than an untrusted DOM edit");
 assert.doesNotMatch(background, /Store this image in the Library\.|Store these images in the Library\./, "the Library flow must not insert a second storage instruction into Composer");
 const prototype = background.slice(background.indexOf("const CDP_SERVICE_TAB_STORAGE_KEY"), background.indexOf("chrome.runtime.onInstalled"));
-const libraryAttachmentFlow = background.slice(background.indexOf("async function cdpAttachImagesNow"), background.indexOf("function libraryStoreNow"));
+const libraryAttachmentFlow = background.slice(background.indexOf("async function cdpAttachFilesNow"), background.indexOf("function libraryStoreNow"));
 assert.doesNotMatch(libraryAttachmentFlow, /Input\.insertText/, "the Library flow must not insert text into Composer");
 assert.doesNotMatch(prototype, /document\.execCommand\('insertText'/);
 assert.doesNotMatch(prototype, /uploadFile|DataTransfer|dragstart|ImageContent/);

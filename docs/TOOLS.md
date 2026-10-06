@@ -2,6 +2,18 @@
 
 This is a behavioral index, not a duplicate of the JSON Schemas. Exact schemas and defaults are authoritative in `extension/background.js` and `extension/storyboards.js`.
 
+## Timers
+
+LLMs have no precise internal running clock. These tools provide real elapsed-time checks for pauses, test preparation and calendar deadlines. See [timer behavior](features/TIMERS.md).
+
+| Tool | Purpose |
+| --- | --- |
+| `timer_start` | Start an independent duration or absolute-deadline task using system or internet time; returns immediately. |
+| `timer_status` | Read real remaining time, UTC/local timestamps, progress, synchronization details and warnings. |
+| `timer_cancel` | Stop active countdown and retain its terminal status. |
+
+Timers live only in Agent memory. They do not wake a finished chat. Old terminal records may be evicted under `limits.completedTaskHistoryLimit`.
+
 ## Common behavior
 
 - Public tool availability is configurable by exact name in ResearchTube Settings.
@@ -10,7 +22,7 @@ This is a behavioral index, not a duplicate of the JSON Schemas. Exact schemas a
 - Workspace paths are logical `/`-separated paths, never physical paths.
 - Creation tools do not overwrite existing files silently.
 - Long operations return a task ID. Poll the matching status tool no faster than `pollIntervalMs`.
-- Local media is shown only through an explicit `media_image_show` call unless a tool description states otherwise.
+- Local media is shown only through an explicit `media_show` call unless a tool description states otherwise.
 
 ## System
 
@@ -42,16 +54,19 @@ This is a behavioral index, not a duplicate of the JSON Schemas. Exact schemas a
 | Tool | Behavior |
 | --- | --- |
 | `media_probe` | Returns selected ffprobe format, stream, chapter and program metadata without the physical filename. |
-| `media_clip` | Starts one task that creates separate video or audio files for up to 20 ordered intervals, or processes the whole source when intervals are omitted. |
+| `media_clip` | Starts one task that creates separate video or audio files for up to `limits.mediaClipMaxSegments` ordered intervals, or processes the whole source when intervals are omitted. |
 | `media_clip_get_task` | Returns real FFmpeg-derived progress and completed clip metadata. |
 | `media_clip_cancel_task` | Cancels clipping and preserves clips already published. |
-| `media_capture_frame` | Starts extraction of 1–20 frames from a Workspace video or selected YouTube format/ranges. |
+| `media_capture_frame` | Starts extraction of frames from a Workspace video or selected YouTube format/ranges, up to `limits.mediaCaptureFrameMaxFrames`. |
 | `media_capture_frame_get_task` | Returns extraction/download progress and completed frame paths. |
 | `media_capture_frame_task_diagnostics` | Returns bounded sanitized diagnostics for failed YouTube frame extraction. |
 | `media_capture_frame_cancel_task` | Cancels frame extraction and preserves completed frames. |
 | `media_capture_screen` | Captures the complete virtual desktop or an explicit global `x`, `y`, `width`, `height` region. |
 | `media_image_crop` | Writes a rectangular crop from an existing PNG, JPEG or WebP source. |
-| `media_image_show` | Creates the conversation anchor used by the Extension-owned viewer for image, video or audio. |
+| `media_show` | Displays image, video or audio through the Extension-owned viewer. It does not upload attachments. |
+| `media_to_chat` | Queues selected Workspace files of any type for upload and Send in the current active ChatGPT conversation. Uses independent configured count and per-file size limits. |
+| `media_to_chat_status` | Reports phase, approximate percentage, submitted files and oversized skipped files. Poll in a later conversation turn. |
+| `media_to_chat_cancel` | Cancels only a task that is still queued, like Library storage. |
 | `media_image_inspect` | Verifies image format, dimensions and byte size without returning image bytes. |
 
 `media_load_workspace_image` and `media_copy_workspace_path` are private widget actions. They are not normal public tools and do not appear in Settings.
@@ -70,8 +85,8 @@ This is a behavioral index, not a duplicate of the JSON Schemas. Exact schemas a
 | --- | --- |
 | `camera_list` | Lists opaque camera handles and supported public capture modes without native device paths. |
 | `camera_capture_frame` | Captures one image from a selected camera. |
-| `camera_record_video` | Starts bounded video recording with optional camera audio. |
-| `camera_record_audio` | Starts bounded audio-only recording from a camera microphone. |
+| `camera_record_video` | Starts video recording with optional camera audio; duration is limited by `limits.cameraRecordVideoMaxMinutes`. |
+| `camera_record_audio` | Starts audio-only recording from a camera microphone; duration is limited by `limits.cameraRecordAudioMaxMinutes`. |
 | `camera_record_status` | Returns recording or stopping state, progress and output metadata. |
 | `camera_record_stop` | Requests graceful stop and finalization of a working recording. |
 
@@ -119,12 +134,24 @@ This is a behavioral index, not a duplicate of the JSON Schemas. Exact schemas a
 
 | Tool | Behavior |
 | --- | --- |
-| `library_store_start` | Queues one indivisible batch of 1–5 Workspace images for attachment and submission in a dedicated background ChatGPT service tab. |
-| `library_store_status` | Reports local queue/submission state; it does not claim later Library availability. |
+| `library_store_start` | Queues any Workspace files, up to `limits.libraryStoreMaxFiles`, for attachment and submission in a dedicated background ChatGPT service tab. |
+| `library_store_status` | Reports submitted files and size-rejected files (with actual size and configured maximum). It does not claim later Library availability. |
 | `library_store_cancel` | Cancels a Library task only while it is still queued. |
 | `online_share_start` | Explicitly starts one temporary cloudflared folder or exact-file share with optional independent image reachability verification. |
 | `online_share_status` | Reports current share state and can repeat the configured external probe. |
 | `online_share_stop` | Stops the active public share without deleting Workspace files. |
+
+## Files in the current chat
+
+`media_to_chat` accepts `files: [{"workspacePath": "reports/notes.txt"}]`. It captures the active ChatGPT conversation in the last focused Chrome window when called, reuses that exact tab, and never opens a service tab. Keep the intended conversation active at invocation. `composerPolicy` defaults to `"requireEmpty"`: text or existing attachments stop the task without changing them. `"clear"` explicitly clears the text and removes the initial attached files through their Composer removal controls, verifies emptiness, then uploads the selected files. It never clears again once upload starts. If removal cannot be verified, no new files are uploaded or sent.
+
+Before Send and while waiting for it, ResearchTube checks for text, attachment changes, user editing and a changed conversation. If the user types text (even if it is subsequently deleted), adds/removes files, or changes the destination, Send is not clicked. The uploaded task files and any user text remain in the Composer. Removal from the Composer does not delete source Workspace files. Task status includes the chosen `composerPolicy`.
+
+After starting, finish the assistant response promptly. ChatGPT may keep Send disabled while the assistant is responding, so do not poll this task in the initiating turn. Ask for `media_to_chat_status` in a later turn; respect `pollIntervalMs`. Approximate percentages represent processing phases and are also logged by the Agent. `completed` confirms that Send was clicked, not that ChatGPT finished processing every upload.
+
+`limits.mediaToChatMaxFiles` defaults to 5 and `limits.mediaToChatMaxFileSizeMiB` to 100 in `agent/agent-config.json`. Library has its own independent keys. Count limits accept 1–100 and file size 1–512 MiB. Exceeding the count rejects the whole request as an ordinary structured result (`isError: false`) with the configured maximum. Oversized files appear in `skippedFiles`, including actual and maximum byte sizes; eligible files are sent together. If all files are oversized, the task fails without opening a chooser. ChatGPT's own file-type and upload limits still apply.
+
+The original Workspace files are unchanged. A restarted Extension marks an interrupted submission as failed and does not automatically resend it. Check the chat before retrying to avoid duplicate attachments.
 
 ## Platform limits
 

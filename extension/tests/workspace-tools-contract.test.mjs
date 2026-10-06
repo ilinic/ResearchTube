@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 
 const background = await readFile(new URL("../background.js", import.meta.url), "utf8");
 
-for (const tool of ["system_agent_status", "workspace_list", "workspace_stat", "workspace_mkdir", "workspace_move", "workspace_delete", "online_share_start", "online_share_status", "online_share_stop", "media_probe", "media_clip", "media_clip_get_task", "media_clip_cancel_task", "media_capture_frame", "media_capture_frame_get_task", "media_capture_frame_task_diagnostics", "media_capture_frame_cancel_task", "visual_map_create", "visual_map_get_task", "visual_map_cancel_task", "camera_list", "camera_capture_frame", "camera_record_video", "camera_record_audio", "camera_record_status", "camera_record_stop", "media_capture_screen", "media_image_crop", "media_image_show", "media_image_inspect", "clipboard_status", "clipboard_get", "clipboard_set", "media_load_workspace_image", "media_copy_workspace_path"]) {
+for (const tool of ["system_agent_status", "workspace_list", "workspace_stat", "workspace_mkdir", "workspace_move", "workspace_delete", "online_share_start", "online_share_status", "online_share_stop", "media_probe", "media_clip", "media_clip_get_task", "media_clip_cancel_task", "media_capture_frame", "media_capture_frame_get_task", "media_capture_frame_task_diagnostics", "media_capture_frame_cancel_task", "visual_map_create", "visual_map_get_task", "visual_map_cancel_task", "camera_list", "camera_capture_frame", "camera_record_video", "camera_record_audio", "camera_record_status", "camera_record_stop", "media_capture_screen", "media_image_crop", "media_show", "media_image_inspect", "clipboard_status", "clipboard_get", "clipboard_set", "media_load_workspace_image", "media_copy_workspace_path"]) {
   assert.match(background, new RegExp(`name: "${tool}"`), `${tool} must be published in tools/list`);
 }
 for (const tool of ["system_speech_list_voices", "system_speech_speak", "system_speech_status", "system_speech_cancel"]) {
@@ -13,7 +13,7 @@ assert.match(background, /speech: \{ title: "Text to Speech"/, "speech tools mus
 for (const tool of ["library_store_start", "library_store_status", "library_store_cancel"]) {
   assert.match(background, new RegExp(`name: "${tool}"`), `${tool} must be published in tools/list`);
 }
-assert.match(background, /maxItems: 5/, "Library upload batches must be capped at five files");
+assert.match(background, /normalizeLibraryStoreFiles\(filesValue, limits\.libraryStoreMaxFiles\)/, "Library batch count must use the Agent configuration");
 assert.match(background, /libraryAvailability = "not_verified"/, "Library completion must not be claimed after ChatGPT submission");
 assert.match(background, /presses Send without inserting any text into the Composer/, "Library storage must not create a second text instruction");
 assert.match(background, /"\/internal\/library-store-files"/, "only the Agent may resolve workspace paths for CDP");
@@ -28,7 +28,7 @@ for (const tool of ["youtube_download_get_formats", "youtube_download_get_task",
 assert.match(background, /youtubeFormats: youtubeFormatsSchema/);
 assert.match(background, /youtube_download_get_formats\.downloadFormats/);
 assert.match(background, /afterEventId/);
-assert.match(background, /const REQUIRED_AGENT_INTERFACE_VERSION = 69;/);
+assert.match(background, /const REQUIRED_AGENT_INTERFACE_VERSION = 72;/);
 assert.match(background, /outputMode: \{ type: "string", enum: \["file", "speakers", "both"\]/, "speech must choose exactly one output mode");
 assert.match(background, /voiceName: \{ type: "string", minLength: 1 \}/, "speech status must report the selected voice name");
 assert.match(background, /engine: \{ type: "string", enum: \["googleTranslate", "windows"\], default: "googleTranslate" \}/, "Google Translate must be the default TTS engine");
@@ -105,7 +105,7 @@ assert.doesNotMatch(background, /researchtube-busy-/, "ordinary MCP work must re
 assert.match(background, /state === "working" && cameraRecordingBadgeKind/, "a camera recording badge must take precedence over the general MCP hourglass");
 assert.match(background, /showInChat defaults to false/);
 assert.match(background, /never render a widget themselves/, "creation tools must not create blank static-template iframes");
-assert.match(background, /After a successful result, call media_image_show/, "showInChat must route presentation through the dedicated display tool");
+assert.match(background, /After a successful result, call media_show/, "showInChat must route presentation through the dedicated display tool");
 assert.match(background, /A successful result means the card has already been shown; do not call it again for the same file/, "the display tool must prevent duplicate retries");
 assert.match(background, /text: "Workspace media shown\."/, "the display tool must return an explicit compact success result to the model");
 assert.match(background, /Independently validate one PNG, JPEG, or WebP image/, "image inspection must be distinct from generic workspace stat");

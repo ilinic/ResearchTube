@@ -10,6 +10,7 @@ ResearchTube uses stable public error codes so an assisting chat can distinguish
 | `AGENT_INTERFACE_INCOMPATIBLE` | Extension and Agent interface versions differ | Install matching components, reload/restart, refresh MCP schema |
 | `AGENT_INVALID_RESPONSE` | Agent response violated the Extension's allowlisted contract | Record versions and report a compatibility/implementation defect |
 | `AGENT_REQUEST_FAILED` | Loopback request failed after connection | Check Agent console and bounded diagnostics; do not expose paths |
+| `CONFIG_INVALID` | A configured limit in `agent-config.json` is invalid | Use an integer within the documented range in `agent/README.md` |
 | `API_KEY_MISSING` | Tunnel API key absent | Enter a dedicated restricted key in Settings |
 | `API_KEY_INVALID` | OpenAI rejected the key | Replace/check the key locally |
 | `TUNNEL_ID_MISSING` | Tunnel ID absent | Enter the `tunnel_...` identifier |
@@ -84,6 +85,16 @@ ResearchTube uses stable public error codes so an assisting chat can distinguish
 | `IMAGE_CROP_INVALID` | Crop or output format invalid | Keep rectangle inside stored image bounds and match extension |
 | `SCREEN_CAPTURE_UNAVAILABLE` | Current display backend is unsupported/unavailable | Check OS permission/backend; Wayland is unsupported |
 
+## Chat file submission
+
+| Code | Meaning | Corrective action |
+| --- | --- | --- |
+| `MEDIA_TO_CHAT_INVALID` | Invalid batch, configured count exceeded, wrong active tab, changed conversation, invalid Composer policy, existing draft/attachments, or user editing during upload | Inspect the Composer before retrying. Use an empty Composer or explicitly choose composerPolicy clear for initial text/attachments; neither policy clears edits made during upload. Count rejections include the maximum. |
+| `MEDIA_TO_CHAT_TASK_NOT_FOUND` | Unknown current-chat submission task ID | Use the task ID returned by `media_to_chat`. |
+| `LIBRARY_STORE_INVALID` | Invalid Library file batch or configured count exceeded | Correct logical file paths and the batch count. |
+
+These are ordinary structured rejections with `isError: false`. Oversized individual files are reported in task `skippedFiles`, rather than rejecting eligible files. Browser upload failures are reported in the task's terminal state.
+
 ## Speech, clipboard, camera and sharing
 
 | Code | Meaning | Corrective action |
@@ -106,3 +117,13 @@ ResearchTube uses stable public error codes so an assisting chat can distinguish
 `TASK_NOT_FOUND` and feature-specific `*_TASK_NOT_FOUND` codes mean task IDs are Agent-session-local or Extension-session-local. Restarting the owning component loses in-memory task status but does not delete fully published Workspace files.
 
 For an unlisted code, preserve its exact code and bounded message, collect component/interface versions, and consult [Troubleshooting](TROUBLESHOOTING.md). Do not replace a stable code with an inferred explanation.
+
+## Timers and retained task history
+
+- `TIMER_INVALID`: mutually exclusive inputs, invalid duration/units/ISO timestamp/zone, ambiguous or missing local time, offset conflict or past deadline. Expected rejection, `isError: false`.
+- `TIMER_NOT_FOUND`: no retained timer record; possible invalid ID, history eviction or Agent/computer restart. Expected rejection, `isError: false`; the cause is not asserted.
+- `TIMER_INTERNET_UNAVAILABLE`: task preparation failed or the internet-clock sample exceeded the permitted age. Returned inside a failed task, without silently falling back to system time.
+- `TIMER_SYSTEM_SUSPENDED`: confirmed system suspend interrupted a working timer; it was not restored.
+- `TIMER_FAILED`: unexpected timer execution failure, represented in the failed task without provider/host details.
+
+Clock-change and execution-gap warnings are task metadata rather than MCP tool errors. Other asynchronous not-found codes can also result from terminal-history eviction. Output files remain available in Workspace after their task record is removed.

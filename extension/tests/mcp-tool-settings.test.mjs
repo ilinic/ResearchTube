@@ -13,14 +13,14 @@ assert.match(background, /system_agent_status: \{ group: "system", alwaysEnabled
 assert.match(background, /enabledMcpToolDefinitions/);
 assert.match(background, /isMcpToolEnabled/);
 assert.match(background, /updateMcpToolEnabled/);
-assert.match(background, /updateNewToolsEnabledByDefault/);
+assert.doesNotMatch(background, /updateNewToolsEnabledByDefault/);
 assert.match(background, /enabledByName/);
 assert.match(background, /name: tool\.name/);
-assert.match(background, /tools: await enabledMcpToolDefinitions\(\)/);
+assert.match(background, /const tools = await enabledMcpToolDefinitions\(\)/);
 assert.match(background, /description: String\(tool\.description \|\| tool\.title \|\| tool\.name\)/, "Settings must keep each tool's complete description");
 assert.doesNotMatch(background, /localWorkspaceReadAnnotations/, "all tool annotation constants must be defined");
 assert.match(html, /MCP tool availability/);
-assert.match(html, /id="new-tools-enabled"/);
+assert.doesNotMatch(html, /id="new-tools-enabled"/);
 assert.match(html, /ChatGPT Plugins/);
 assert.doesNotMatch(html, /<h2>Status<\/h2>/, "Settings must not display the obsolete connection-status section");
 assert.doesNotMatch(script, /formatStatus\(/, "Settings must not maintain obsolete connection-status rendering");
@@ -29,7 +29,7 @@ assert.match(html, /Click <strong>Refresh<\/strong> to reload the MCP tool schem
 assert.match(html, /data-open="chatgpt"/);
 assert.match(script, /get-mcp-tool-settings/);
 assert.match(script, /set-mcp-tool-enabled/);
-assert.match(script, /set-mcp-new-tools-default/);
+assert.doesNotMatch(script, /set-mcp-new-tools-default/);
 assert.match(script, /ResearchTube → Manage → Refresh/);
 assert.match(script, /tools\.sort\(\(left, right\) => left\.name\.localeCompare\(right\.name\)\)/, "each Settings group must be ordered by MCP command name");
 assert.match(script, /tool-heading/, "tool titles and MCP names must share a heading line");

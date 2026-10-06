@@ -34,8 +34,13 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote, unquote, urlparse
 from urllib.request import Request, urlopen
 
-AGENT_VERSION = "1.109.1"
-INTERFACE_VERSION = 69
+try:
+    from .task_history import TaskHistory
+except ImportError:
+    from task_history import TaskHistory
+
+AGENT_VERSION = "2.2.41"
+INTERFACE_VERSION = 72
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
 MAX_GOOGLE_TRANSLATE_AUDIO_BYTES = 16 * 1024 * 1024
@@ -65,7 +70,6 @@ MAX_PUBLIC_SHARE_DIRECTORY_ENTRIES = 500
 MEDIA_PROBE_TIMEOUT_SECONDS = 15
 CAPTURE_FRAME_TIMEOUT_SECONDS = 60
 CAMERA_CAPTURE_TIMEOUT_SECONDS = 20
-CAMERA_RECORD_MAX_DURATION_SECONDS = 60
 CAMERA_AUTO_TARGET_FPS = (60.0, 30.0)
 CAMERA_MIN_ADVERTISED_FPS = 25.0
 CAMERA_MAX_ADVERTISED_FPS = 120.0
@@ -87,8 +91,28 @@ YOUTUBE_CAPTURE_MAX_SECTION_SECONDS = 60.0
 YOUTUBE_CAPTURE_SECTION_DELAY_SECONDS = 2.0
 YOUTUBE_CAPTURE_SECTION_RETRY_DELAYS_SECONDS = (3.0, 6.0)
 YOUTUBE_CAPTURE_FILE_PROGRESS_INTERVAL_SECONDS = 0.5
-CAPTURE_FRAME_MAX_FRAMES = 20
-MEDIA_CLIP_MAX_SEGMENTS = 20
+DEFAULT_TOOL_LIMITS = {
+    "mediaCaptureFrameMaxFrames": 20,
+    "mediaClipMaxSegments": 20,
+    "cameraRecordAudioMaxMinutes": 10,
+    "cameraRecordVideoMaxMinutes": 1,
+    "libraryStoreMaxFiles": 5,
+    "libraryStoreMaxFileSizeMiB": 100,
+    "mediaToChatMaxFiles": 5,
+    "mediaToChatMaxFileSizeMiB": 100,
+    "completedTaskHistoryLimit": 2000,
+}
+TOOL_LIMIT_CEILINGS = {
+    "mediaCaptureFrameMaxFrames": 100,
+    "mediaClipMaxSegments": 100,
+    "cameraRecordAudioMaxMinutes": 1440,
+    "cameraRecordVideoMaxMinutes": 1440,
+    "libraryStoreMaxFiles": 100,
+    "libraryStoreMaxFileSizeMiB": 512,
+    "mediaToChatMaxFiles": 100,
+    "mediaToChatMaxFileSizeMiB": 512,
+    "completedTaskHistoryLimit": 100_000,
+}
 DEFAULT_MEDIA_CLIP_DIRECTORY = "clips"
 DEBUG_BANNER_SWITCH = "--silent-debugger-extension-api"
 MAX_CLIPBOARD_TEXT_BYTES = 2 * 1024 * 1024
@@ -199,21 +223,79 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
+def read_agent_config() -> dict[str, Any]:
+    """Unwrap editable value/comment entries at the single configuration boundary."""
+    try:
+        document = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise AgentApiError("CONFIG_INVALID", "agent-config.json could not be read as JSON.") from error
+    if not isinstance(document, dict):
+        raise AgentApiError("CONFIG_INVALID", "agent-config.json must contain an object.")
+
+    def setting(entry: Any, name: str) -> Any:
+        if not isinstance(entry, dict) or "value" not in entry or set(entry) - {"value", "comment"}:
+            raise AgentApiError("CONFIG_INVALID", f"{name} must be an object containing value and an optional comment.")
+        if "comment" in entry and not isinstance(entry["comment"], str):
+            raise AgentApiError("CONFIG_INVALID", f"{name}.comment must be text.")
+        return entry["value"]
+
+    result = {}
+    for name, entry in document.items():
+        if name == "limits":
+            if not isinstance(entry, dict):
+                raise AgentApiError("CONFIG_INVALID", "limits in agent-config.json must be an object.")
+            result[name] = {key: setting(value, f"limits.{key}") for key, value in entry.items()}
+        else:
+            result[name] = setting(entry, name)
+    return result
+
+
 def configured_port() -> int:
     try:
-        port = json.loads(CONFIG_PATH.read_text(encoding="utf-8")).get("port")
-        if isinstance(port, int) and 1 <= port <= 65535:
+        port = read_agent_config().get("port")
+        if isinstance(port, int) and not isinstance(port, bool) and 1 <= port <= 65535:
             return port
-    except (OSError, json.JSONDecodeError, AttributeError):
+    except AgentApiError:
         pass
     return DEFAULT_PORT
+
+
+def configured_tool_limits() -> dict[str, int]:
+    """Read the single user config on demand, so edits apply to the next call."""
+    config = read_agent_config()
+    values = config.get("limits", {})
+    if not isinstance(values, dict):
+        raise AgentApiError("CONFIG_INVALID", "limits in agent-config.json must be an object.")
+    result = dict(DEFAULT_TOOL_LIMITS)
+    for name, value in values.items():
+        if name not in result:
+            raise AgentApiError("CONFIG_INVALID", f"limits.{name} is not a supported setting.")
+        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= TOOL_LIMIT_CEILINGS[name]:
+            raise AgentApiError("CONFIG_INVALID", f"limits.{name} must be an integer from 1 to {TOOL_LIMIT_CEILINGS[name]}.")
+        result[name] = value
+    return result
+
+
+def configured_task_history_limit() -> int:
+    # Cleanup must remain bounded even while a user is editing invalid JSON.
+    try:
+        return configured_tool_limits()["completedTaskHistoryLimit"]
+    except AgentApiError:
+        return DEFAULT_TOOL_LIMITS["completedTaskHistoryLimit"]
+
+
+def configured_new_tools_default() -> bool:
+    value = read_agent_config().get("newToolsEnabledByDefault", True)
+    if not isinstance(value, bool):
+        raise AgentApiError("CONFIG_INVALID", "newToolsEnabledByDefault must be a boolean.")
+    return value
 
 
 def configured_visual_map_timestamp_font() -> str:
     """Return the configured font filename, never a path outside tools/fonts."""
     try:
-        value = json.loads(CONFIG_PATH.read_text(encoding="utf-8")).get("visualMapTimestampFont", DEFAULT_VISUAL_MAP_TIMESTAMP_FONT)
-    except (OSError, json.JSONDecodeError, AttributeError):
+        value = read_agent_config().get("visualMapTimestampFont", DEFAULT_VISUAL_MAP_TIMESTAMP_FONT)
+    except AgentApiError:
         return DEFAULT_VISUAL_MAP_TIMESTAMP_FONT
     if not isinstance(value, str) or not value or "/" in value or "\\" in value or Path(value).name != value or Path(value).suffix.lower() not in {".ttf", ".otf"}:
         raise AgentApiError("VISUAL_MAP_TIMESTAMP_FONT_INVALID", "visualMapTimestampFont must be a .ttf or .otf filename from tools/fonts.")
@@ -1239,8 +1321,9 @@ def capture_frames_options(payload: Any) -> dict[str, Any]:
     if (path is None) == (youtube_value is None):
         raise AgentApiError("CAPTURE_FRAME_INVALID", "media_capture_frame requires exactly one source: path or youtube.")
     timestamps_value = payload.get("timestampsSeconds")
-    if not isinstance(timestamps_value, list) or not 1 <= len(timestamps_value) <= CAPTURE_FRAME_MAX_FRAMES:
-        raise AgentApiError("CAPTURE_FRAME_INVALID", f"timestampsSeconds must contain from 1 to {CAPTURE_FRAME_MAX_FRAMES} timestamps.")
+    maximum = configured_tool_limits()["mediaCaptureFrameMaxFrames"]
+    if not isinstance(timestamps_value, list) or not 1 <= len(timestamps_value) <= maximum:
+        raise AgentApiError("CAPTURE_FRAME_INVALID", f"timestampsSeconds must contain from 1 to {maximum} timestamps (configured maximum).")
     timestamps = [finite_number(value, field_name="timestampsSeconds", minimum=0) for value in timestamps_value]
     if len(set(timestamps)) != len(timestamps):
         raise AgentApiError("CAPTURE_FRAME_INVALID", "timestampsSeconds must not contain duplicates.")
@@ -1321,8 +1404,9 @@ def media_clip_options(payload: Any) -> dict[str, Any]:
     raw_segments = payload.get("segments")
     segments: list[dict[str, float]] | None = None
     if raw_segments is not None:
-        if not isinstance(raw_segments, list) or not 1 <= len(raw_segments) <= MEDIA_CLIP_MAX_SEGMENTS:
-            raise AgentApiError("MEDIA_CLIP_INVALID", f"segments must contain from 1 to {MEDIA_CLIP_MAX_SEGMENTS} intervals.")
+        maximum = configured_tool_limits()["mediaClipMaxSegments"]
+        if not isinstance(raw_segments, list) or not 1 <= len(raw_segments) <= maximum:
+            raise AgentApiError("MEDIA_CLIP_INVALID", f"segments must contain from 1 to {maximum} intervals (configured maximum).")
         segments = []
         seen: set[tuple[float, float]] = set()
         for index, segment in enumerate(raw_segments):
@@ -2292,7 +2376,7 @@ class SpeechTask:
 
 
 class SpeechTaskManager:
-    def __init__(self) -> None: self.tasks: dict[str, SpeechTask] = {}
+    def __init__(self) -> None: self.tasks: dict[str, SpeechTask] = TaskHistory(configured_task_history_limit)
 
     def new_task_id(self) -> str:
         while True:
@@ -2549,7 +2633,7 @@ class VisualMapTask:
 
 class VisualMapTaskManager:
     def __init__(self) -> None:
-        self.tasks: dict[str, VisualMapTask] = {}
+        self.tasks: dict[str, VisualMapTask] = TaskHistory(configured_task_history_limit)
 
     def new_task_id(self) -> str:
         while True:
@@ -3006,6 +3090,7 @@ class CameraRecordTask:
     target_fps: float | None
     created_at: str
     last_updated_at: str
+    max_duration_seconds: int = 60
     status: str = "working"
     phase: str = "starting"
     status_message: str = "Starting camera recording."
@@ -3026,7 +3111,7 @@ class CameraRecordTask:
 
 class CameraRecordTaskManager:
     def __init__(self) -> None:
-        self.tasks: dict[str, CameraRecordTask] = {}
+        self.tasks: dict[str, CameraRecordTask] = TaskHistory(configured_task_history_limit)
 
     def get(self, task_id: Any) -> CameraRecordTask:
         if not isinstance(task_id, str) or task_id not in self.tasks:
@@ -3044,7 +3129,7 @@ class CameraRecordTaskManager:
             task.elapsed_seconds = min(float(task.requested_duration_seconds), max(0.0, time.monotonic() - task.started_monotonic))
             if task.status == "working" and task.phase == "recording":
                 task.progress_percent = min(99.0, task.elapsed_seconds * 100.0 / task.requested_duration_seconds)
-        document: dict[str, Any] = {"taskId": task.task_id, "recordingKind": task.recording_kind, "status": task.status, "phase": task.phase, "statusMessage": task.status_message, "progressPercent": task.progress_percent, "elapsedSeconds": task.elapsed_seconds, "requestedDurationSeconds": task.requested_duration_seconds, "targetFps": task.target_fps, "maxDurationSeconds": 600 if task.recording_kind == "audio" else CAMERA_RECORD_MAX_DURATION_SECONDS, "createdAt": task.created_at, "lastUpdatedAt": task.last_updated_at, "pollIntervalMs": TASK_POLL_INTERVAL_MS}
+        document: dict[str, Any] = {"taskId": task.task_id, "recordingKind": task.recording_kind, "status": task.status, "phase": task.phase, "statusMessage": task.status_message, "progressPercent": task.progress_percent, "elapsedSeconds": task.elapsed_seconds, "requestedDurationSeconds": task.requested_duration_seconds, "targetFps": task.target_fps, "maxDurationSeconds": task.max_duration_seconds, "createdAt": task.created_at, "lastUpdatedAt": task.last_updated_at, "pollIntervalMs": TASK_POLL_INTERVAL_MS}
         if task.result is not None:
             document["result"] = task.result
         if task.error is not None:
@@ -3054,7 +3139,7 @@ class CameraRecordTaskManager:
     async def create(self, payload: Any, *, recording_kind: str = "video") -> dict[str, Any]:
         allowed = {"cameraId", "durationSeconds", "targetFps"} if recording_kind == "video" else {"cameraId", "durationSeconds"}
         tool_name = "camera_record_video" if recording_kind == "video" else "camera_record_audio"
-        maximum = CAMERA_RECORD_MAX_DURATION_SECONDS if recording_kind == "video" else 600
+        maximum = configured_tool_limits()["cameraRecordVideoMaxMinutes" if recording_kind == "video" else "cameraRecordAudioMaxMinutes"] * 60
         if not isinstance(payload, dict) or set(payload) - allowed:
             raise AgentApiError("CAMERA_RECORD_INVALID", f"{tool_name} accepts only documented fields.")
         duration = payload.get("durationSeconds")
@@ -3077,7 +3162,7 @@ class CameraRecordTaskManager:
         # Audio-only recording has no video mode. Keep targetFps null in its
         # public task document; selecting a mode above is only needed for the
         # video branch and must not leak into the audio contract.
-        task = CameraRecordTask(self.new_task_id(), payload["cameraId"], recording_kind, duration, mode.fps if recording_kind == "video" and mode is not None else None, now, now)
+        task = CameraRecordTask(self.new_task_id(), payload["cameraId"], recording_kind, duration, mode.fps if recording_kind == "video" and mode is not None else None, now, now, maximum)
         self.tasks[task.task_id] = task
         task.runner = asyncio.create_task(self.run(task), name=f"researchtube-camera-record-{task.task_id}")
         return self.snapshot(task)
@@ -3719,7 +3804,7 @@ class CaptureFrameTask:
 
 
 class CaptureFrameTaskManager:
-    def __init__(self) -> None: self.tasks: dict[str, CaptureFrameTask] = {}
+    def __init__(self) -> None: self.tasks: dict[str, CaptureFrameTask] = TaskHistory(configured_task_history_limit)
     def get(self, task_id: str) -> CaptureFrameTask:
         if not isinstance(task_id, str) or task_id not in self.tasks: raise AgentApiError("CAPTURE_FRAME_TASK_NOT_FOUND", "The requested frame-extraction task does not exist.")
         return self.tasks[task_id]
@@ -3925,7 +4010,7 @@ def media_clip_publish_without_overwrite(temporary_path: Path, final_path: Path)
 
 class MediaClipTaskManager:
     def __init__(self) -> None:
-        self.tasks: dict[str, MediaClipTask] = {}
+        self.tasks: dict[str, MediaClipTask] = TaskHistory(configured_task_history_limit)
 
     def new_task_id(self) -> str:
         while True:
@@ -4591,32 +4676,47 @@ async def clipboard_set(payload: Any) -> dict[str, Any]:
         clipboard.close()
 
 
-def library_store_files(payload: Any) -> dict[str, Any]:
-    """Resolve a small image batch for the Extension's private CDP workflow.
-
-    This endpoint is deliberately not an MCP response.  The Extension needs
-    physical paths for DOM.setFileInputFiles, but the model receives only
-    logical workspace paths through library_store_* tools.
-    """
+def resolve_chat_transfer_files(payload: Any, *, destination: str) -> dict[str, Any]:
+    """Private CDP path resolution: host paths never enter public MCP results."""
+    if destination == "library":
+        error_code, count_setting, size_setting = "LIBRARY_STORE_INVALID", "libraryStoreMaxFiles", "libraryStoreMaxFileSizeMiB"
+    elif destination == "chat":
+        error_code, count_setting, size_setting = "MEDIA_TO_CHAT_INVALID", "mediaToChatMaxFiles", "mediaToChatMaxFileSizeMiB"
+    else:
+        raise AgentApiError("INVALID_ARGUMENT", "Unknown file-transfer destination.")
     if not isinstance(payload, dict) or set(payload) != {"files"} or not isinstance(payload["files"], list):
-        raise AgentApiError("LIBRARY_STORE_INVALID", "library file resolution requires files.")
+        raise AgentApiError(error_code, "workspace file resolution requires files.")
     requested = payload["files"]
-    if not 1 <= len(requested) <= 5:
-        raise AgentApiError("LIBRARY_STORE_INVALID", "library file resolution accepts between 1 and 5 files.")
-    resolved_files: list[dict[str, str]] = []
+    limits = configured_tool_limits()
+    maximum = limits[count_setting]
+    if not 1 <= len(requested) <= maximum:
+        raise AgentApiError(error_code, f"files must contain from 1 to {maximum} items (configured maximum).")
+    resolved_files: list[dict[str, Any]] = []
+    skipped_files: list[dict[str, Any]] = []
     seen_paths: set[str] = set()
     resolver = WorkspacePathResolver()
     for entry in requested:
         if not isinstance(entry, dict) or set(entry) != {"workspacePath"} or not isinstance(entry["workspacePath"], str):
-            raise AgentApiError("LIBRARY_STORE_INVALID", "each library file requires workspacePath.")
+            raise AgentApiError(error_code, "each workspace file requires workspacePath.")
         item = resolver.resolve_existing(entry["workspacePath"], field_name="workspacePath", expected_type="file")
         if item.logical_path in seen_paths:
-            raise AgentApiError("LIBRARY_STORE_INVALID", "library file paths must be unique within one batch.")
-        if item.physical_path.suffix.lower() not in IMAGE_MIME_TYPES:
-            raise AgentApiError("LIBRARY_STORE_INVALID", "library files must be PNG, JPEG, or WebP images.")
+            raise AgentApiError(error_code, "workspace file paths must be unique within one batch.")
         seen_paths.add(item.logical_path)
-        resolved_files.append({"workspacePath": item.logical_path, "localPath": str(item.physical_path)})
-    return {"files": resolved_files}
+        size = item.physical_path.stat().st_size
+        size_limit = limits[size_setting] * 1024 * 1024
+        if size > size_limit:
+            skipped_files.append({"workspacePath": item.logical_path, "sizeBytes": size, "maxFileSizeBytes": size_limit, "reason": "FILE_TOO_LARGE"})
+        else:
+            resolved_files.append({"workspacePath": item.logical_path, "localPath": str(item.physical_path), "sizeBytes": size})
+    return {"files": resolved_files, "skippedFiles": skipped_files}
+
+
+def library_store_files(payload: Any) -> dict[str, Any]:
+    return resolve_chat_transfer_files(payload, destination="library")
+
+
+def media_to_chat_files(payload: Any) -> dict[str, Any]:
+    return resolve_chat_transfer_files(payload, destination="chat")
 
 
 def media_probe_sections(payload: dict[str, Any]) -> list[str]:
@@ -4736,7 +4836,7 @@ class DownloadTaskManager:
     """In-memory task state: no queue and no artificial concurrency ceiling."""
 
     def __init__(self) -> None:
-        self.tasks: dict[str, DownloadTask] = {}
+        self.tasks: dict[str, DownloadTask] = TaskHistory(configured_task_history_limit)
 
     def record_event(
         self, task: DownloadTask, kind: str, *, message: str | None = None,
@@ -5371,6 +5471,8 @@ async def handle_public_share_client(reader: asyncio.StreamReader, writer: async
         except ConnectionError:
             pass
     finally:
+        for manager in (TASKS, SPEECH_TASKS, VISUAL_MAP_TASKS, CAMERA_RECORD_TASKS, CAPTURE_FRAME_TASKS, MEDIA_CLIP_TASKS, STORYBOARD_TASKS, TIMER_TASKS):
+            manager.tasks.prune()
         writer.close()
         try:
             await writer.wait_closed()
@@ -5574,7 +5676,9 @@ def response_log_suffix(path: str, body: dict[str, Any] | None) -> str:
     if not isinstance(body, dict):
         return ""
     if path.startswith("/mcp/log/") and isinstance(body.get("status"), str):
-        return f" {body['status']}"
+        progress = body.get("progressPercent")
+        percentage = f" {progress:g}%" if isinstance(progress, (int, float)) and not isinstance(progress, bool) and 0 <= progress <= 100 else ""
+        return f" {body['status']}{percentage}"
     if not path.startswith("/tasks/") or "taskId" not in body:
         return ""
     progress = body.get("progressPercent")
@@ -5609,18 +5713,28 @@ def compact_google_translate_speech_log_path(path: str, body: dict[str, Any] | N
 def mcp_tool_log(tool: str, payload: Any) -> dict[str, Any]:
     if not re.fullmatch(r"[a-z0-9_]{1,80}", tool):
         raise AgentApiError("MCP_LOG_INVALID", "The MCP tool name is invalid.")
-    if not isinstance(payload, dict) or set(payload) != {"status"} or not isinstance(payload["status"], str):
-        raise AgentApiError("MCP_LOG_INVALID", "The MCP log request must contain only a status string.")
+    if not isinstance(payload, dict) or "status" not in payload or set(payload) - {"status", "progressPercent"} or not isinstance(payload["status"], str):
+        raise AgentApiError("MCP_LOG_INVALID", "The MCP log request requires status and optional progressPercent.")
     status = payload["status"].strip()
     if not re.fullmatch(r"[a-z0-9_-]{1,40}", status):
         raise AgentApiError("MCP_LOG_INVALID", "The MCP log status is invalid.")
-    return {"status": status}
+    progress = payload.get("progressPercent")
+    if "progressPercent" in payload and (isinstance(progress, bool) or not isinstance(progress, (int, float)) or not math.isfinite(progress) or not 0 <= progress <= 100):
+        raise AgentApiError("MCP_LOG_INVALID", "progressPercent must be a finite number from 0 to 100.")
+    return {"status": status, **({"progressPercent": progress} if progress is not None else {})}
 
 
 try:
     from .storyboards import StoryboardService
 except ImportError:  # Direct python researchtube_agent.py launch.
     from storyboards import StoryboardService
+
+try:
+    from .timers import TimerService
+except ImportError:
+    from timers import TimerService
+
+TIMER_TASKS = TimerService(sys.modules[__name__])
 
 STORYBOARD_TASKS = StoryboardService(sys.modules[__name__])
 
@@ -5633,6 +5747,16 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             response_status, response_body = "204 No Content", None
         elif method == "GET" and path == "/health":
             response_status, response_body = "200 OK", public_health_document(await health_snapshot())
+        elif method == "GET" and path == "/internal/tool-limits":
+            response_status, response_body = "200 OK", {"limits": configured_tool_limits(), "newToolsEnabledByDefault": configured_new_tools_default()}
+        elif method == "POST" and path == "/timer/start":
+            response_status, response_body = "200 OK", await TIMER_TASKS.create(parse_json_body(body))
+        elif method == "GET" and re.fullmatch(r"/tasks/timer/[^/]+", path):
+            response_status, response_body = "200 OK", await TIMER_TASKS.status(path.removeprefix("/tasks/timer/"))
+        elif method == "POST" and re.fullmatch(r"/tasks/timer/[^/]+/cancel", path):
+            if parse_json_body(body) != {}:
+                raise AgentApiError("TIMER_INVALID", "Timer cancellation accepts an empty body.")
+            response_status, response_body = "200 OK", await TIMER_TASKS.cancel(path.removeprefix("/tasks/timer/").removesuffix("/cancel"))
         elif method == "POST" and path == "/workspace/list":
             response_status, response_body = "200 OK", workspace_list(parse_json_body(body))
         elif method == "POST" and path == "/workspace/stat":
@@ -5703,6 +5827,8 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             response_status, response_body = "200 OK", await clipboard_set(parse_json_body(body))
         elif method == "POST" and path == "/internal/library-store-files":
             response_status, response_body = "200 OK", library_store_files(parse_json_body(body))
+        elif method == "POST" and path == "/internal/media-to-chat-files":
+            response_status, response_body = "200 OK", media_to_chat_files(parse_json_body(body))
         elif method == "POST" and path.startswith("/mcp/log/"):
             response_status, response_body = "200 OK", mcp_tool_log(path.removeprefix("/mcp/log/"), parse_json_body(body))
         elif method == "POST" and path == "/youtube/download-formats":
@@ -5788,13 +5914,15 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
         log_path = compact_google_translate_speech_log_path(path, response_body)
         log(f"{method or 'INVALID'} {log_path or '/'} -> {response_status.split()[0]}{response_log_suffix(path, response_body)}")
     except AgentApiError as error:
-        status = "404 Not Found" if error.code in {"TASK_NOT_FOUND", "VISUAL_MAP_TASK_NOT_FOUND", "CAMERA_RECORD_TASK_NOT_FOUND", "CAPTURE_FRAME_TASK_NOT_FOUND", "MEDIA_CLIP_TASK_NOT_FOUND"} else "400 Bad Request"
+        status = "404 Not Found" if error.code in {"TASK_NOT_FOUND", "VISUAL_MAP_TASK_NOT_FOUND", "CAMERA_RECORD_TASK_NOT_FOUND", "CAPTURE_FRAME_TASK_NOT_FOUND", "MEDIA_CLIP_TASK_NOT_FOUND", "TIMER_NOT_FOUND"} else "400 Bad Request"
         writer.write(http_response(status, error_document(error)))
         await writer.drain()
         log(f"{method or 'INVALID'} {path or '/'} -> {status.split()[0]}")
     except (ConnectionError, asyncio.TimeoutError, UnicodeDecodeError, asyncio.IncompleteReadError) as error:
         log(f"request failed: {error.__class__.__name__}", error=True)
     finally:
+        for manager in (TASKS, SPEECH_TASKS, VISUAL_MAP_TASKS, CAMERA_RECORD_TASKS, CAPTURE_FRAME_TASKS, MEDIA_CLIP_TASKS, STORYBOARD_TASKS, TIMER_TASKS):
+            manager.tasks.prune()
         writer.close()
         try:
             await writer.wait_closed()
@@ -5812,6 +5940,7 @@ async def serve(port: int) -> None:
     finally:
         async with PUBLIC_SHARE_LOCK:
             await stop_public_share_unlocked()
+        await TIMER_TASKS.shutdown()
         await CAPTURE_FRAME_TASKS.shutdown()
         await MEDIA_CLIP_TASKS.shutdown()
         await SPEECH_TASKS.shutdown()

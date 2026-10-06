@@ -25,8 +25,10 @@ npm ci --prefix extension
 | YouTube MAIN-world behavior | `extension/youtube-page-bridge.src.js` |
 | YouTube isolated bridge | `extension/youtube-content.js` |
 | ChatGPT media overlay | `extension/chatgpt-capture-frame-bridge.js`, `extension/media-viewer.html` |
+| ChatGPT Composer inspection and upload editing guard | `extension/chat-composer.js` |
 | Settings and popup | `extension/settings.*`, `extension/popup.*` |
 | Local Agent | `agent/researchtube_agent.py` |
+| Timer behavior and task retention | `agent/timers.py`, `agent/task_history.py`, `extension/timers.js`, `extension/task-history.js` |
 | Storyboard Agent behavior | `agent/storyboards.py` |
 
 Do not implement changes directly in `extension/dist/background.js` or `extension/youtube-page-bridge.js`; the build regenerates them.
@@ -174,3 +176,26 @@ When behavior changes:
 Package the repository with generated bundles and the bundled Workspace demo, excluding `.git`, `node_modules`, Python caches, user-created Workspace files and prior archives. Verify the ZIP with `unzip -t` or an equivalent archive tester.
 
 Do not commit, push or publish unless the user explicitly requests it.
+
+## Task history and developer configuration
+
+Use `TaskHistory(configured_task_history_limit)` for Agent task registries; bind a runner immediately after registration so done callbacks can prune terminal records after actual final publication. Keep failed/cancelled records as well as completed ones. Never evict queued/working records or remove Workspace files as part of history maintenance. Browser task Maps are pruned before persistence and status/cancellation access. Test small configured limits and active-runner publication races.
+
+`newToolsEnabledByDefault` belongs to the single Agent JSON configuration, not a developer control in user Settings. It initializes unknown tool preferences only; never overwrite saved per-tool choices. `value` and `comment` sit beside each other inside every setting object, preserving strict JSON parsing without duplicate parameter names. `read_agent_config()` unwraps values at one boundary; internal code and HTTP responses continue using ordinary typed values. New settings must include an adjacent meaningful explanation. See [TIMERS.md](features/TIMERS.md) for clock semantics and limitations.
+
+Configuration example (all settings use this layout):
+
+```json
+{
+  "port": {
+    "value": 17843,
+    "comment": "Loopback HTTP port. Restart the Agent after changing it."
+  },
+  "limits": {
+    "completedTaskHistoryLimit": {
+      "value": 2000,
+      "comment": "Maximum retained terminal records per task manager; output files remain."
+    }
+  }
+}
+```

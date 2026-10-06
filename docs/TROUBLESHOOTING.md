@@ -133,7 +133,7 @@ User checks:
 1. Confirm the current Extension is enabled and has permission on `chatgpt.com` and the ChatGPT sandbox origin declared in the manifest.
 2. Confirm `system_agent_status` reports a reachable Agent.
 3. Confirm the logical file still exists with `workspace_stat`.
-4. Call `media_image_show` again for that exact logical path in a new message.
+4. Call `media_show` again for that exact logical path in a new message.
 5. Open Chrome DevTools only if needed and copy ResearchTube-prefixed bridge messages, not unrelated page data.
 
 Expected bridge startup logs show the Extension version, origin, whether the frame is top-level, and whether a capture root was found. Repeated `origin=null` iframe lines alone do not prove failure. The useful failure is the first ResearchTube message after the widget announces itself or Refresh is pressed.
@@ -155,6 +155,17 @@ Do not close the Translate tab as a standard troubleshooting step; reuse is inte
 - Camera availability depends on FFmpeg's native device backend and user-granted OS permissions. Use `camera_list` before capture/recording.
 - A busy camera or active recording must be stopped/finalized before starting an incompatible operation.
 
+## Files sent to the current chat
+
+- Invoke `media_to_chat` with the intended ChatGPT conversation active in the last focused Chrome window. It requires an existing conversation URL and creates no new tab.
+- The default `composerPolicy: "requireEmpty"` refuses both text and existing attachments. Choose `"clear"` explicitly to discard them once before uploading; a failed or unavailable removal control stops preparation.
+- New text or user attachment changes after preparation stop Send under either policy. Uploaded files remain attached; inspect the Composer before retrying. Editing and then deleting text also stops the task.
+- Finish the assistant response after starting the task. `submitting` may wait for Send while ChatGPT is responding; request status in a later turn.
+- Do not navigate the destination tab to another conversation during a task. Switching away to another tab does not change the captured destination.
+- A count-limit rejection names the configured maximum. Check `mediaToChatMaxFiles` in `agent/agent-config.json`; Library uses a separate setting.
+- `skippedFiles` reports oversized files and the applicable size threshold. If every file is skipped, no chooser opens. Check `mediaToChatMaxFileSizeMiB` and ChatGPT's own upload restrictions.
+- A completed task confirms the Send click. For failures or an Extension restart, inspect the chat before retrying to avoid duplicate uploads; do not delete Workspace source files.
+
 ## What to collect for a bug report
 
 Collect only:
@@ -171,3 +182,19 @@ Collect only:
 Do not collect API keys, Tunnel IDs, cookies, signed URLs, physical user paths or complete unredacted browser logs.
 
 Use [Error reference](ERRORS.md) for code-specific guidance.
+
+## Timer or old task no longer found
+
+Timers are only in Agent memory. Restarting the Agent/computer loses their records. All task managers also evict the oldest completed/failed/cancelled records when they exceed `limits.completedTaskHistoryLimit` (default 2000 per manager). Increase this value in `agent-config.json` if longer status history is needed. Eviction does not remove any Workspace files. Create a new timer when required; do not report that the missing timer completed.
+
+For an internet-clock failure, check the Agent machine's HTTPS access to `timeapi.io`; use `clockSource: system` explicitly if external synchronization is unnecessary. Confirmed system suspend fails the timer. `EXECUTION_GAP_DETECTED` alone does not establish that the computer slept. A completed timer does not initiate a new assistant response; continue polling within the initiating turn.
+
+The new-tool default is a developer parameter in `agent-config.json`, `newToolsEnabledByDefault`. It is no longer a Settings checkbox. Saved individual tool choices remain unchanged; new tools use this default when first registered. Config explanations live in each setting's `comment`; edit its adjacent `value`. `limits` remains a group containing these setting objects. The shipped config replaces the older flat format.
+
+## Timer tools missing from the MCP catalogue
+
+The public tool names are `timer_start`, `timer_status`, and `timer_cancel`. Check their individual switches in Extension Settings, in the Timers group. A developer default of false can leave newly registered tools disabled; later changing the default does not overwrite saved individual choices.
+
+When the client refreshes the MCP schema, the Extension console prints `[ResearchTube MCP] tools/list` with its serving release version, public tool count, enabled timer names and disabled timer names. If this line reports the three timer names, the serving Extension included them in its actual MCP response; verify that ChatGPT refreshed the intended ResearchTube connection. If the release is unexpected, check which Extension directory is loaded. Updating only the Agent does not change the MCP catalogue, because the Extension serves it.
+
+Schema discovery remains available when the Agent or its developer configuration cannot be read. The cached new-tool default (initially true) is used and the console reports the configuration issue. Actual Agent-backed operations still validate health, compatibility and configuration.

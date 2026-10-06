@@ -14,7 +14,7 @@ The source is an existing logical Workspace path. It is never modified.
 
 ## Intervals
 
-`segments` accepts 1–20 objects with `startSeconds` and `endSeconds`. Input order is preserved and every interval creates a separate file. Intervals are not concatenated.
+`segments` accepts objects with `startSeconds` and `endSeconds`, up to `limits.mediaClipMaxSegments` in `agent/agent-config.json` (default 20). Input order is preserved and every interval creates a separate file. Intervals are not concatenated.
 
 When `segments` is omitted, the complete source duration is processed. This is useful for extracting the full audio stream from video.
 

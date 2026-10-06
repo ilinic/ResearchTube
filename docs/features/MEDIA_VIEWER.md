@@ -1,6 +1,6 @@
 # Workspace media viewer
 
-`media_image_show` deliberately displays one supported Workspace image, video or audio file inside the ChatGPT conversation.
+`media_show` deliberately displays one supported Workspace image, video or audio file inside the ChatGPT conversation.
 
 ## Why an Extension-owned viewer exists
 
@@ -17,7 +17,7 @@ The original widget remains the layout anchor. The Extension overlays `media-vie
 
 ## Public flow
 
-1. The caller passes a logical Workspace path to `media_image_show`.
+1. The caller passes a logical Workspace path to `media_show`.
 2. The Extension asks the Agent for bounded media metadata.
 3. A widget anchor is returned through MCP.
 4. The widget announces a view ID and verified metadata.

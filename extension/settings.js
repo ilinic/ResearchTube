@@ -49,13 +49,6 @@ function toolGroupTitle(groups, group) { return groups?.[group]?.title || "Custo
 function renderMcpTools(result) {
   const container = $("mcp-tools"); const note = $("mcp-tools-result");
   if (!result?.ok) { container.textContent = "MCP tool settings are unavailable."; note.textContent = result?.error || ""; return; }
-  const defaultCheckbox = $("new-tools-enabled");
-  defaultCheckbox.checked = result.preferences?.newToolsEnabledByDefault !== false;
-  defaultCheckbox.onchange = async () => {
-    const saved = await call({ type: "set-mcp-new-tools-default", payload: { enabled: defaultCheckbox.checked } });
-    if (!saved?.ok) { defaultCheckbox.checked = !defaultCheckbox.checked; note.textContent = saved?.message || "Could not save the default."; return; }
-    note.textContent = "Saved. Refresh the MCP tool schema in ChatGPT to apply future tool changes.";
-  };
   container.replaceChildren();
   const groups = new Map();
   for (const tool of result.tools || []) { if (!groups.has(tool.group)) groups.set(tool.group, []); groups.get(tool.group).push(tool); }

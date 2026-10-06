@@ -170,7 +170,7 @@ class WorkspacePathResolverTests(unittest.TestCase):
             messages,
         )
 
-    def test_library_store_files_resolves_workspace_images_only(self) -> None:
+    def test_library_store_files_resolves_workspace_files(self) -> None:
         captures = agent.WORKSPACE_PATH / "captures"
         captures.mkdir(parents=True)
         image = captures / "frame.png"
@@ -181,6 +181,139 @@ class WorkspacePathResolverTests(unittest.TestCase):
         with self.assertRaises(agent.AgentApiError) as raised:
             agent.library_store_files({"files": [{"workspacePath": "captures/missing.png"}]})
         self.assertEqual(raised.exception.code, "FILE_NOT_FOUND")
+
+    def test_configured_limits_reject_entire_batches_and_skip_only_oversized_library_files(self) -> None:
+        config = self.root / "agent-config.json"
+        config.write_text(json.dumps({"limits": {key: {"value": value} for key, value in {
+            "mediaCaptureFrameMaxFrames": 2, "mediaClipMaxSegments": 2,
+            "cameraRecordAudioMaxMinutes": 2, "cameraRecordVideoMaxMinutes": 3,
+            "libraryStoreMaxFiles": 2, "libraryStoreMaxFileSizeMiB": 1,
+        }.items()}}), encoding="utf-8")
+        folder = agent.WORKSPACE_PATH / "uploads"
+        folder.mkdir(parents=True)
+        (folder / "notes.txt").write_text("ok", encoding="utf-8")
+        (folder / "video.mp4").write_bytes(b"x" * (1024 * 1024 + 1))
+        with patch.object(agent, "CONFIG_PATH", config):
+            resolved = agent.library_store_files({"files": [
+                {"workspacePath": "uploads/notes.txt"}, {"workspacePath": "uploads/video.mp4"},
+            ]})
+            self.assertEqual([item["workspacePath"] for item in resolved["files"]], ["uploads/notes.txt"])
+            self.assertEqual(resolved["skippedFiles"], [{"workspacePath": "uploads/video.mp4", "sizeBytes": 1024 * 1024 + 1, "maxFileSizeBytes": 1024 * 1024, "reason": "FILE_TOO_LARGE"}])
+            with self.assertRaises(agent.AgentApiError) as raised:
+                agent.library_store_files({"files": [{"workspacePath": "uploads/notes.txt"}] * 3})
+            self.assertIn("2 items", raised.exception.message)
+            with self.assertRaises(agent.AgentApiError) as raised:
+                agent.capture_frames_options({"path": "uploads/video.mp4", "timestampsSeconds": [0, 1, 2]})
+            self.assertIn("2 timestamps", raised.exception.message)
+            with self.assertRaises(agent.AgentApiError) as raised:
+                agent.media_clip_options({"path": "uploads/video.mp4", "outputKind": "video", "segments": [{"startSeconds": i, "endSeconds": i + 0.5} for i in range(3)]})
+            self.assertIn("2 intervals", raised.exception.message)
+            with self.assertRaises(agent.AgentApiError) as raised:
+                asyncio.run(agent.CameraRecordTaskManager().create({"cameraId": "camera", "durationSeconds": 181}))
+            self.assertIn("180", raised.exception.message)
+            with self.assertRaises(agent.AgentApiError) as raised:
+                asyncio.run(agent.CameraRecordTaskManager().create({"cameraId": "camera", "durationSeconds": 121}, recording_kind="audio"))
+            self.assertIn("120", raised.exception.message)
+
+    def test_media_to_chat_limits_are_independent_and_accept_arbitrary_files(self) -> None:
+        config = self.root / "agent-config.json"
+        config.write_text(json.dumps({"limits": {key: {"value": value} for key, value in {
+            "libraryStoreMaxFiles": 1, "libraryStoreMaxFileSizeMiB": 2,
+            "mediaToChatMaxFiles": 3, "mediaToChatMaxFileSizeMiB": 1,
+        }.items()}}), encoding="utf-8")
+        folder = agent.WORKSPACE_PATH / "uploads"
+        folder.mkdir(parents=True)
+        # Include a non-media type, an exact size boundary and a file one byte over it.
+        (folder / "notes.txt").write_bytes(b"notes")
+        with (folder / "boundary.bin").open("wb") as output:
+            output.truncate(1024 * 1024)
+        with (folder / "large.zip").open("wb") as output:
+            output.truncate(1024 * 1024 + 1)
+        files = [{"workspacePath": f"uploads/{name}"} for name in ["notes.txt", "boundary.bin", "large.zip"]]
+        with patch.object(agent, "CONFIG_PATH", config):
+            result = agent.media_to_chat_files({"files": files})
+            self.assertEqual([item["workspacePath"] for item in result["files"]], ["uploads/notes.txt", "uploads/boundary.bin"])
+            self.assertEqual(result["skippedFiles"], [{
+                "workspacePath": "uploads/large.zip", "sizeBytes": 1024 * 1024 + 1,
+                "maxFileSizeBytes": 1024 * 1024, "reason": "FILE_TOO_LARGE",
+            }])
+            self.assertEqual(Path(result["files"][0]["localPath"]), (folder / "notes.txt").resolve())
+            library_result = agent.library_store_files({"files": [files[-1]]})
+            self.assertEqual(len(library_result["files"]), 1)
+            self.assertEqual(library_result["skippedFiles"], [])
+            with self.assertRaises(agent.AgentApiError) as raised:
+                agent.library_store_files({"files": files})
+            self.assertEqual(raised.exception.code, "LIBRARY_STORE_INVALID")
+            self.assertIn("1 items", raised.exception.message)
+            with self.assertRaises(agent.AgentApiError) as raised:
+                agent.media_to_chat_files({"files": files + [files[0]]})
+            self.assertEqual(raised.exception.code, "MEDIA_TO_CHAT_INVALID")
+            self.assertIn("3 items", raised.exception.message)
+            # New requests read config changes without restarting the Agent.
+            config.write_text(json.dumps({"limits": {key: {"value": value} for key, value in {"mediaToChatMaxFileSizeMiB": 2}.items()}}), encoding="utf-8")
+            self.assertEqual(len(agent.media_to_chat_files({"files": files})["files"]), 3)
+        self.assertEqual((folder / "notes.txt").read_bytes(), b"notes")
+        self.assertEqual((folder / "large.zip").stat().st_size, 1024 * 1024 + 1)
+
+    def test_media_to_chat_rejects_unknown_duplicate_and_nonworkspace_files(self) -> None:
+        agent.WORKSPACE_PATH.mkdir(parents=True)
+        (agent.WORKSPACE_PATH / "notes.txt").write_text("notes", encoding="utf-8")
+        for payload in [{"files": []}, {"files": [{"workspacePath": "notes.txt", "extra": True}]},
+                        {"files": [{"workspacePath": "notes.txt"}] * 2},
+                        {"files": [{"workspacePath": "notes.txt"}], "extra": True}]:
+            with self.subTest(payload=payload), self.assertRaises(agent.AgentApiError) as raised:
+                agent.media_to_chat_files(payload)
+            self.assertEqual(raised.exception.code, "MEDIA_TO_CHAT_INVALID")
+        for path in ["../secret.txt", "/etc/passwd", "C:/private/file.txt"]:
+            with self.subTest(path=path), self.assertRaises(agent.AgentApiError) as raised:
+                agent.media_to_chat_files({"files": [{"workspacePath": path}]})
+            self.assertEqual(raised.exception.code, "WORKSPACE_PATH_INVALID")
+
+
+    def test_media_to_chat_private_http_route_resolves_files_and_reports_count_errors(self) -> None:
+        agent.WORKSPACE_PATH.mkdir(parents=True)
+        (agent.WORKSPACE_PATH / "report.pdf").write_bytes(b"report")
+        config = self.root / "agent-config.json"
+        config.write_text(json.dumps({"limits": {key: {"value": value} for key, value in {"mediaToChatMaxFiles": 1}.items()}}), encoding="utf-8")
+        class Writer:
+            def __init__(self):
+                self.data = bytearray()
+            def write(self, data):
+                self.data.extend(data)
+            async def drain(self):
+                pass
+            def close(self):
+                pass
+            async def wait_closed(self):
+                pass
+        async def request(payload):
+            body = json.dumps(payload).encode()
+            reader = asyncio.StreamReader()
+            reader.feed_data(f"POST /internal/media-to-chat-files HTTP/1.1\r\nContent-Length: {len(body)}\r\n\r\n".encode() + body)
+            reader.feed_eof()
+            writer = Writer()
+            await agent.handle_client(reader, writer)
+            header, body = bytes(writer.data).split(b"\r\n\r\n", 1)
+            return header, json.loads(body)
+        with patch.object(agent, "CONFIG_PATH", config):
+            header, body = asyncio.run(request({"files": [{"workspacePath": "report.pdf"}]}))
+            self.assertTrue(header.startswith(b"HTTP/1.1 200 OK"))
+            self.assertEqual(body["files"][0]["workspacePath"], "report.pdf")
+            header, body = asyncio.run(request({"files": [{"workspacePath": "report.pdf"}] * 2}))
+            self.assertTrue(header.startswith(b"HTTP/1.1 400 Bad Request"))
+            self.assertEqual(body["error"]["code"], "MEDIA_TO_CHAT_INVALID")
+            self.assertIn("1 items", body["error"]["message"])
+
+    def test_media_to_chat_log_exposes_only_status_and_percentage(self) -> None:
+        document = agent.mcp_tool_log("media_to_chat", {"status": "working", "progressPercent": 65})
+        self.assertEqual(document, {"status": "working", "progressPercent": 65})
+        self.assertEqual(agent.response_log_suffix("/mcp/log/media_to_chat", document), " working 65%")
+        for value in [-1, 101, True, None, "65", float("nan"), float("inf")]:
+            with self.subTest(value=value), self.assertRaises(agent.AgentApiError) as raised:
+                agent.mcp_tool_log("media_to_chat", {"status": "working", "progressPercent": value})
+            self.assertEqual(raised.exception.code, "MCP_LOG_INVALID")
+        with self.assertRaises(agent.AgentApiError):
+            agent.mcp_tool_log("media_to_chat", {"status": "working", "taskId": "private"})
 
 
 class VisualMapContractTests(unittest.TestCase):
@@ -234,7 +367,7 @@ class VisualMapContractTests(unittest.TestCase):
 
     def test_timestamp_font_must_be_a_font_filename(self) -> None:
         with patch.object(agent, "CONFIG_PATH") as config_path:
-            config_path.read_text.return_value = '{"visualMapTimestampFont":"../Arial.ttf"}'
+            config_path.read_text.return_value = '{"visualMapTimestampFont":{"value":"../Arial.ttf"}}'
             with self.assertRaises(agent.AgentApiError) as raised:
                 agent.configured_visual_map_timestamp_font()
         self.assertEqual(raised.exception.code, "VISUAL_MAP_TIMESTAMP_FONT_INVALID")

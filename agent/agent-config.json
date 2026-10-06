@@ -1,4 +1,52 @@
 {
-  "port": 17843,
-  "visualMapTimestampFont": "DejaVuSans.ttf"
+  "port": {
+    "value": 17843,
+    "comment": "Loopback HTTP port for the Local Agent (1–65535). Match the port in Extension Settings. Restart the Agent after changing it."
+  },
+  "visualMapTimestampFont": {
+    "value": "DejaVuSans.ttf",
+    "comment": "Font filename from agent/tools/fonts used for timestamp overlays. Use a filename, not a host path."
+  },
+  "limits": {
+    "mediaCaptureFrameMaxFrames": {
+      "value": 20,
+      "comment": "Maximum requested frames in one media_capture_frame batch; default 20, range 1–100."
+    },
+    "mediaClipMaxSegments": {
+      "value": 20,
+      "comment": "Maximum requested intervals in one media_clip task; default 20, range 1–100. Omitting segments processes the whole source as one interval."
+    },
+    "cameraRecordAudioMaxMinutes": {
+      "value": 10,
+      "comment": "Maximum duration of one camera_record_audio recording, in minutes; default 10, range 1–1440."
+    },
+    "cameraRecordVideoMaxMinutes": {
+      "value": 1,
+      "comment": "Maximum duration of one camera_record_video recording, in minutes; default 1, range 1–1440."
+    },
+    "libraryStoreMaxFiles": {
+      "value": 5,
+      "comment": "Maximum Workspace files in one library_store_start batch; default 5, range 1–100."
+    },
+    "libraryStoreMaxFileSizeMiB": {
+      "value": 100,
+      "comment": "Maximum individual Library-upload file size in MiB (1048576 bytes). Larger files are skipped and reported; default 100, range 1–512."
+    },
+    "mediaToChatMaxFiles": {
+      "value": 5,
+      "comment": "Maximum Workspace files in one media_to_chat batch; default 5, range 1–100. Independent of the Library limit."
+    },
+    "mediaToChatMaxFileSizeMiB": {
+      "value": 100,
+      "comment": "Maximum individual current-chat upload size in MiB. Larger files are skipped and reported; default 100, range 1–512."
+    },
+    "completedTaskHistoryLimit": {
+      "value": 2000,
+      "comment": "Maximum retained completed/failed/cancelled records per task manager; default 2000, range 1–100000. Oldest terminal records are removed from memory and Extension task storage. Active/queued work and output files are never deleted. Timer records are also lost on Agent restart."
+    }
+  },
+  "newToolsEnabledByDefault": {
+    "value": true,
+    "comment": "Developer default for newly discovered tools without a saved individual preference. true enables them; false leaves them disabled. Existing per-tool choices are preserved. The Extension reads this from the Agent; if the Agent is unavailable it uses the last known value, initially true. Refresh the MCP schema after adding tools."
+  }
 }
