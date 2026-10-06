@@ -58,11 +58,12 @@ class StartupHealthTests(unittest.IsolatedAsyncioTestCase):
             chrome.assert_not_awaited()
             config.assert_not_called()
 
-    async def test_diagnostics_publish_independently_once_and_remain_cached(self):
+    async def test_chrome_starts_after_all_component_checks_and_logs_once(self):
         initial = agent.initialize_health_snapshot()
         components_release = asyncio.Event()
         chrome_release = asyncio.Event()
         chrome_started = asyncio.Event()
+        component_logs = []
         async def component(name, definition):
             await components_release.wait()
             return name, {"status": "available", "version": "1", "source": "local",
@@ -72,20 +73,30 @@ class StartupHealthTests(unittest.IsolatedAsyncioTestCase):
             return "youtubePoTokenProvider", {"status": "missing", "version": None,
                                                "source": "local", "privatePath": "C:/private/provider", "message": None}
         async def chrome():
+            self.assertEqual(set(component_logs), set(initial["components"]))
+            self.assertTrue(all(c["status"] != "checking" for c in initial["components"].values()))
+            agent.log.assert_any_call("Startup checks completed. Waiting for Extension requests.")
             chrome_started.set()
             await chrome_release.wait()
             return {"state": "enabled", "chromeRunning": True, "browserInstances": 1, "message": "Enabled"}
         with patch.object(agent, "component_health", new=AsyncMock(side_effect=component)) as component_mock, \
              patch.object(agent, "youtube_pot_provider_health", new=AsyncMock(side_effect=provider)) as provider_mock, \
-             patch.object(agent, "chrome_automation_status", new=AsyncMock(side_effect=chrome)) as chrome_mock:
+             patch.object(agent, "chrome_automation_status", new=AsyncMock(side_effect=chrome)) as chrome_mock, \
+             patch.object(agent, "log_component_health", side_effect=lambda name, result: component_logs.append(name)):
             task = asyncio.create_task(agent.collect_startup_health(initial))
             try:
-                await asyncio.wait_for(chrome_started.wait(), 1)
-                components_release.set()
                 for _ in range(10):
                     await asyncio.sleep(0)
-                    if all(c["status"] != "checking" for c in initial["components"].values()):
-                        break
+                self.assertEqual(component_mock.await_count, len(agent.COMPONENTS))
+                provider_mock.assert_awaited_once()
+                chrome_mock.assert_not_awaited()
+                self.assertFalse(chrome_started.is_set())
+                server = await asyncio.start_server(agent.handle_client, "127.0.0.1", 0)
+                async with server:
+                    pending_components = await asyncio.wait_for(self.get_health(server), 1)
+                self.assertEqual(pending_components["chromeAutomation"]["state"], "checking")
+                components_release.set()
+                await asyncio.wait_for(chrome_started.wait(), 1)
                 self.assertTrue(all(c["status"] != "checking" for c in initial["components"].values()))
                 pending = agent.cached_public_health()
                 self.assertEqual(pending["chromeAutomation"]["state"], "checking")

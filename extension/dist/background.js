@@ -142,6 +142,85 @@ function pruneCompletedTasks(tasks, maximum = 2e3) {
   for (const task of terminal.slice(0, Math.max(0, terminal.length - maximum))) tasks.delete(task.taskId);
 }
 
+// media-stream.js
+var MEDIA_STREAM_ROUTE = "/_researchtube/workspace-media";
+function createMediaStreamHandler({ extensionUrl, getClient, resolveMedia, fetchMedia, log = () => {
+} }) {
+  const base = new URL(extensionUrl);
+  const own = (url) => url.protocol === base.protocol && url.host === base.host;
+  const isViewer = (value) => {
+    try {
+      const url = new URL(value);
+      return own(url) && url.pathname === "/media-viewer.html";
+    } catch {
+      return false;
+    }
+  };
+  const failure = (status, message) => new Response(message, {
+    status,
+    headers: { "Content-Type": "text/plain", "Cache-Control": "no-store" }
+  });
+  async function respond(event, url) {
+    try {
+      const request = event.request;
+      if (!["GET", "HEAD"].includes(request.method)) return failure(405, "Only media reads are supported.");
+      const client = event.clientId ? await getClient(event.clientId) : null;
+      if (!isViewer(client?.url || (!event.clientId ? request.referrer : ""))) return failure(403, "The media request is not from a ResearchTube viewer.");
+      if ([...url.searchParams.keys()].some((key) => !["path", "reload"].includes(key)) || url.searchParams.getAll("path").length !== 1 || (url.searchParams.get("reload") || "").length > 80) {
+        return failure(400, "Invalid media request.");
+      }
+      const path = url.searchParams.get("path");
+      if (!path || path.length > 4096 || request.signal.aborted) return failure(400, "Invalid or stopped media request.");
+      const media = await resolveMedia(path);
+      if (!["video", "audio"].includes(media?.metadata?.mediaKind)) return failure(415, "This stream route supports video and audio.");
+      if (request.signal.aborted) return failure(400, "Media request stopped.");
+      const headers = new Headers();
+      const range = request.headers.get("Range");
+      if (range !== null) {
+        if (!/^bytes=(?:\d+-\d*|-\d+)$/.test(range)) return failure(400, "Only one byte range is supported.");
+        headers.set("Range", range);
+      }
+      const upstream = await fetchMedia(media.localAgentImageUrl, {
+        method: "GET",
+        headers,
+        credentials: "omit",
+        redirect: "error",
+        cache: "no-store",
+        signal: request.signal
+      });
+      if (![200, 206, 416].includes(upstream.status)) {
+        await upstream.body?.cancel();
+        log("Agent response unavailable", { status: upstream.status });
+        return failure(upstream.status === 404 ? 404 : 502, "The Local Agent could not stream this media.");
+      }
+      const outputHeaders = new Headers({ "Content-Type": media.metadata.mimeType, "Cache-Control": "no-store" });
+      for (const name of ["Content-Length", "Content-Range", "Accept-Ranges"]) {
+        const value = upstream.headers.get(name);
+        if (value !== null) outputHeaders.set(name, value);
+      }
+      log("media response", { method: request.method, partial: range !== null, status: upstream.status });
+      if (request.method === "HEAD") await upstream.body?.cancel();
+      return new Response(
+        request.method === "HEAD" ? null : upstream.body,
+        { status: upstream.status, headers: outputHeaders }
+      );
+    } catch {
+      log("media stream failed");
+      return failure(502, "The Local Agent media stream is unavailable.");
+    }
+  }
+  return (event) => {
+    let url;
+    try {
+      url = new URL(event.request.url);
+    } catch {
+      return;
+    }
+    if (!own(url) || url.pathname !== MEDIA_STREAM_ROUTE) return;
+    event.respondWith(respond(event, url));
+  };
+}
+
 // chat-composer.js
 function resolveChatComposer() {
   const candidates = [...document.querySelectorAll('[contenteditable="true"][role="textbox"], #prompt-textarea, textarea')].filter((element) => {
@@ -639,11 +718,19 @@ var MCP_TOOL_SETTINGS = Object.freeze({
   online_share_status: { group: "online" },
   online_share_stop: { group: "online" }
 });
-var EXTENSION_VERSION = "2.2.59";
+var EXTENSION_VERSION = "2.2.65";
+globalThis.addEventListener?.("fetch", createMediaStreamHandler({
+  extensionUrl: chrome.runtime.getURL("/"),
+  getClient: (id) => globalThis.clients.get(id),
+  resolveMedia: (path) => showWorkspaceImage(path),
+  fetchMedia: (url, options) => fetch(url, options),
+  log: (stage, details = {}) => console.info(`[ResearchTube media stream ${EXTENSION_VERSION}]`, stage, details)
+}));
 var REQUIRED_AGENT_INTERFACE_VERSION = 73;
 var MEDIA_TO_CHAT_WIDGET_URI = "ui://researchtube/chat-target-v4.html";
 var MEDIA_TO_CHAT_BIND_TIMEOUT_MS = 3e4;
-var CAPTURE_FRAME_WIDGET_URI = "ui://researchtube/capture-frame-v52.html";
+var CAPTURE_FRAME_WIDGET_URI = "ui://researchtube/capture-frame-v56.html";
+var CAPTURE_FRAME_WIDGET_ALIASES = /* @__PURE__ */ new Set(["ui://researchtube/capture-frame-v51.html", "ui://researchtube/capture-frame-v52.html", "ui://researchtube/capture-frame-v53.html", "ui://researchtube/capture-frame-v54.html", "ui://researchtube/capture-frame-v55.html"]);
 var RESEARCHTUBE_DEMO_GUIDE_URL = "https://github.com/ilinic/ResearchTube/blob/main/docs/DEMO.md";
 var RESEARCHTUBE_SERVER_DESCRIPTION = "ResearchTube provides YouTube research, local media and image operations, workspace management, screenshots, clipboard, Library integration, real asynchronous timers, and a guided demonstration using bundled local media. Search this server when the user refers to ResearchTube, YouTube analysis, a previously created workspace file, captured frame, screenshot, crop, clipboard, or asks to continue a previous ResearchTube operation. In clients with deferred tools, ResearchTube is discoverable through functions.exec lazy MCP-tool discovery; search there before treating the capability as unavailable.";
 var RESEARCHTUBE_MCP_INSTRUCTIONS = "ResearchTube exposes MCP tools that may be loaded or discovered lazily by the client. When the user mentions ResearchTube, invokes @ResearchTube, asks to repeat a ResearchTube operation, or requests a capability previously provided by ResearchTube, do not infer that ResearchTube is unavailable merely because its tools are not currently visible as a top-level tool namespace. In this client, ResearchTube is available through functions.exec with lazy MCP-tool discovery: search there for the appropriate ResearchTube tool before reporting that the capability is unavailable. Only report ResearchTube as unavailable if tool discovery actually fails, the required tool cannot be found after discovery, or an actual ResearchTube tool invocation returns an availability, connection, compatibility, or transport error. Successful use earlier in the conversation is evidence that the tools may be discoverable again; rediscover them rather than assuming access has disappeared. On the first ResearchTube interaction in a conversation, when the user asks what ResearchTube can do or gives no concrete operation, briefly offer the guided demo. Run it only with consent, use the bundled logical Workspace path demo/researchtube-demo.mp4, follow " + RESEARCHTUBE_DEMO_GUIDE_URL + ", never modify or delete the bundled source, and explain each benefit in the user's language. media_clip and media_capture_frame are asynchronous: poll their corresponding get_task tools no faster than pollIntervalMs. media_clip creates one separate file per requested interval and never renders or concatenates results automatically. media_capture_frame, media_capture_screen, and media_image_crop never render a widget themselves. Call media_show only for specific completed image paths the user asks to see. For media_capture_screen and media_image_crop, when showInChat is true, after the successful creation result call media_show once with the returned workspace image path; otherwise do not call the display tool. timer_start, timer_status, and timer_cancel provide real timed pauses because LLMs have no precise internal running clock. Show the user any requested preparation instruction, start a timer, and continue status calls at pollIntervalMs within the same turn until completed before dependent actions. An ended assistant turn is not automatically resumed by a timer. media_to_chat queues attachments for the current ChatGPT conversation. Finish the assistant response after starting it; do not poll in the same turn because Send may remain unavailable until the response ends.";
@@ -3807,14 +3894,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
   if (message?.type === "researchtube_media_viewer_resolve") {
-    console.info(`[ResearchTube image worker ${EXTENSION_VERSION}] media resolve received`);
+    console.info(`[ResearchTube media worker ${EXTENSION_VERSION}] media resolve received`);
     showWorkspaceImage(message.path).then((data) => {
-      console.info(`[ResearchTube image worker ${EXTENSION_VERSION}] media resolve completed`);
+      console.info(`[ResearchTube media worker ${EXTENSION_VERSION}] media resolve completed`);
       sendResponse({ ok: true, data });
     }).catch((error2) => {
-      console.info(`[ResearchTube image worker ${EXTENSION_VERSION}] media resolve failed`, safeErrorMessage(error2));
+      console.info(`[ResearchTube media worker ${EXTENSION_VERSION}] media resolve failed`, safeErrorMessage(error2));
       sendResponse({ ok: false, error: safeErrorMessage(error2) });
     });
+    return true;
+  }
+  if (message?.type === "researchtube_media_widget_metadata") {
+    Promise.all([getWorkspaceImageMetadata(message.path), configuredImageWidgetTimeout()]).then(([media, handshakeTimeoutSeconds]) => {
+      sendResponse({ ok: true, data: { metadata: { workspacePath: media.path, mediaKind: media.mediaKind, mimeType: media.mimeType }, handshakeTimeoutSeconds } });
+    }).catch((error2) => sendResponse({ ok: false, error: safeErrorMessage(error2) }));
     return true;
   }
   return false;
@@ -5859,11 +5952,15 @@ async function configuredImageWidgetTimeout() {
   }
   return timeout;
 }
-async function readCaptureFrameWidgetHtml() {
-  const response = await fetch(chrome.runtime.getURL("ui/capture-frame-widget-v27.html"));
+async function readCaptureFrameWidgetHtml(uri = CAPTURE_FRAME_WIDGET_URI) {
+  const response = await fetch(chrome.runtime.getURL(`ui/capture-frame-widget-v30.html?version=${EXTENSION_VERSION}`), { cache: "no-store" });
   if (!response.ok) throw new Error("The bundled workspace-image widget could not be read.");
+  const html = await response.text();
+  const widgetVersion = html.match(/const WIDGET_VERSION = "([^"]+)";/)?.[1] || "unknown";
+  console.info(`[ResearchTube media resource] extension=${EXTENSION_VERSION} widget=${widgetVersion} requested=${uri} current=${CAPTURE_FRAME_WIDGET_URI}`);
+  if (widgetVersion !== EXTENSION_VERSION) throw new Error("The bundled media widget version differs from the Extension. Replace the complete Extension folder.");
   const timeout = await configuredImageWidgetTimeout();
-  return (await response.text()).replace("const IMAGE_HANDSHAKE_TIMEOUT_SECONDS = 10;", `const IMAGE_HANDSHAKE_TIMEOUT_SECONDS = ${timeout};`);
+  return html.replace("const IMAGE_HANDSHAKE_TIMEOUT_SECONDS = 10;", `const IMAGE_HANDSHAKE_TIMEOUT_SECONDS = ${timeout};`);
 }
 function captureFrameWidgetResource() {
   return {
@@ -5877,7 +5974,7 @@ function mediaToChatWidgetResource() {
   return { uri: MEDIA_TO_CHAT_WIDGET_URI, name: "ResearchTube current-chat task", description: "Binds a file-submission task to the Chrome tab that invoked it.", mimeType: "text/html;profile=mcp-app" };
 }
 async function readMcpResource(id, uri) {
-  if (uri !== CAPTURE_FRAME_WIDGET_URI && uri !== MEDIA_TO_CHAT_WIDGET_URI) {
+  if (uri !== CAPTURE_FRAME_WIDGET_URI && !CAPTURE_FRAME_WIDGET_ALIASES.has(uri) && uri !== MEDIA_TO_CHAT_WIDGET_URI) {
     return { jsonrpc: "2.0", id, error: { code: -32602, message: "Unknown MCP resource URI" } };
   }
   try {
@@ -5887,13 +5984,13 @@ async function readMcpResource(id, uri) {
       const response = await fetch(chrome.runtime.getURL("ui/chat-target-v1.html"));
       if (!response.ok) throw new Error("The bundled chat-target widget could not be read.");
       text2 = await response.text();
-    } else text2 = await readCaptureFrameWidgetHtml();
+    } else text2 = await readCaptureFrameWidgetHtml(uri);
     return {
       jsonrpc: "2.0",
       id,
       result: {
         contents: [{
-          ...chatTargetWidget ? mediaToChatWidgetResource() : captureFrameWidgetResource(),
+          ...chatTargetWidget ? mediaToChatWidgetResource() : { ...captureFrameWidgetResource(), uri },
           text: text2,
           _meta: {
             ui: { prefersBorder: !chatTargetWidget },

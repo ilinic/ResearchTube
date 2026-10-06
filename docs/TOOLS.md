@@ -63,7 +63,7 @@ Timers live only in Agent memory. They do not wake a finished chat. Old terminal
 | `media_capture_frame_cancel_task` | Cancels frame extraction and preserves completed frames. |
 | `media_capture_screen` | Captures the complete virtual desktop or an explicit global `x`, `y`, `width`, `height` region. |
 | `media_image_crop` | Writes a rectangular crop from an existing PNG, JPEG or WebP source. |
-| `media_show` | Displays image, video or audio through the Extension-owned viewer. It does not upload attachments. |
+| `media_show` | Displays image, video or audio through the Extension-owned viewer; native audio/video playback and seeking stream through byte ranges. It does not upload attachments or autoplay. |
 | `media_to_chat` | Queues selected Workspace files of any type for upload and Send in the ChatGPT conversation that invoked the tool. Uses independent configured count and per-file size limits. |
 | `media_to_chat_status` | Reports phase, approximate percentage, submitted files and oversized skipped files. Poll in a later conversation turn. |
 | `media_to_chat_cancel` | Cancels only a task that is still queued, like Library storage. |

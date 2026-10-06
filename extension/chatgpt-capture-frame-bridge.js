@@ -10,6 +10,9 @@ if (!globalThis.__researchTubeCaptureFrameWidgetBridgeInstalled) {
   const OVERLAY_CLASS = "researchtube-local-media-overlay";
 
   function localMediaPayload(value) {
+    // The current bridge adapts cached audio/video templates in their own
+    // frame. Avoid a second legacy overlay and mutations of host React nodes.
+    if (globalThis.__researchTubeImageViewerBridgeInstalled) return null;
     const media = value?.media;
     if (!media || typeof media !== "object" || typeof media.workspacePath !== "string" || !media.workspacePath) return null;
     // Images use the acknowledged, retryable bridge in chatgpt-image-viewer-bridge.js.

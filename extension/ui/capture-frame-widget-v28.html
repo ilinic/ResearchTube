@@ -17,7 +17,7 @@
   </style>
 </head>
 <body>
-  <main id="capture" class="capture">
+  <main id="capture" class="capture" data-researchtube-media-widget="2.2.62">
     <header class="top-row"><span id="brand-context" class="image-type">Workspace Image</span><div id="status" class="status" role="status"></div><div id="metadata" class="metadata"></div><div class="actions"><button id="refresh-frame" class="icon-button" type="button" title="Refresh media" aria-label="Refresh media"><svg class="refresh-icon" viewBox="0 0 24 24" aria-hidden="true"><g transform="translate(10 9)"><path d="M8 -1A8 8 0 1 0 10.2 4.5"></path><path d="M9 -6v7H2"></path></g></svg></button></div></header>
     <section id="details" class="details"><div class="path-row"><div id="path" class="path"></div><button id="copy-frame-name" class="icon-button" type="button" title="Copy workspace path" aria-label="Copy workspace path"><svg viewBox="0 0 24 24" aria-hidden="true"><g transform="translate(12 12)"><rect x="-5" y="-7" width="10" height="12" rx="1.5"/><path d="M-2 -5h8a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H-2a2 2 0 0 1-2-2"/></g></svg></button></div></section>
   </main>
@@ -27,7 +27,7 @@
       const reportHeight = () => requestAnimationFrame(() => { try { openai()?.notifyIntrinsicHeight?.(Math.ceil(document.documentElement.scrollHeight)); window.parent.postMessage({ jsonrpc: "2.0", method: "ui/notifications/size-changed", params: { height: Math.ceil(document.documentElement.scrollHeight) } }, "*"); } catch (_error) {} });
       const setStatus = (text, error = false) => { status.textContent = text; status.classList.toggle("error", error); reportHeight(); };
       const IMAGE_HANDSHAKE_TIMEOUT_SECONDS = 10;
-      const WIDGET_VERSION = "2.2.61";
+      const WIDGET_VERSION = "2.2.62";
       const mediaLog = (...args) => console.info(`[ResearchTube media widget ${WIDGET_VERSION}]`, ...args);
       mediaLog("ready", { origin: location.origin, nested: window !== window.top });
       let mediaAttempt = null, lastToolOutput = null, configuredMediaTimeout = IMAGE_HANDSHAKE_TIMEOUT_SECONDS;

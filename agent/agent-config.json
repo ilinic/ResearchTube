@@ -47,7 +47,7 @@
   },
   "mediaWidgetHandshakeTimeoutSeconds": {
     "value": 10,
-    "comment": "Seconds allowed for an image widget to connect to the Extension and load its local viewer. The widget retries connection every second. Default 10, range 1–300. Read for each media_show call; existing loading attempts keep their timeout. Retry starts a fresh attempt."
+    "comment": "Seconds allowed for an image, video or audio widget to connect to the Extension and load its local viewer. The widget retries connection every second. Default 10, range 1–300. Read for each media_show call; existing loading attempts keep their timeout. Retry starts a fresh attempt."
   },
   "newToolsEnabledByDefault": {
     "value": true,

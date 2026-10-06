@@ -1,4 +1,4 @@
-// Own markers and direct-child Window identities bind an image to its slot.
+// Own markers and direct-child Window identities bind media to its slot.
 // Nested sandbox frames relay metadata only; the viewer lives in the top page.
 (() => {
   if (globalThis.__researchTubeImageViewerBridgeInstalled) return;
@@ -8,20 +8,26 @@
   const routes = new Map();
   const viewers = new Map();
   const actions = new Map();
+  const cachedFrames = new WeakMap();
   const viewerStages = new Set(['viewer script ready', 'invalid media anchor',
     'requesting workspace media from worker', 'worker answered', 'fetching local image',
     'local HTTP response', 'image bytes received', 'waiting for media decode',
-    'media decoded; reporting loaded', 'media load failed', 'Copy failed']);
-  const log = (...args) => console.info('[ResearchTube image]', ...args);
-  let stopped = false, observer, lastScannedView, lastScannedAction;
+    'streaming media from Extension route', 'media decoded; reporting loaded', 'media load failed', 'Copy failed',
+    'native media event', 'native media state', 'native media deadline', 'native stream probe', 'native stream probe failed']);
+  const log = (...args) => console.info('[ResearchTube media]', ...args);
+  let stopped = false, observer, lastScannedView, lastScannedAction, legacyViewId;
+  let legacyDOMKey, legacyRecovery;
   function dispose(error) {
     if (stopped) return;
     stopped = true;
     observer?.disconnect();
+    if (legacyRecovery) { clearTimeout(legacyRecovery.timer); legacyRecovery = null; }
     window.removeEventListener('researchtube-image-view-ready', onReady);
+    window.removeEventListener('researchtube-local-media-ready', onLegacyReady);
     window.removeEventListener('message', onMessage);
     window.removeEventListener('pagehide', onPageHide);
     window.removeEventListener('researchtube-image-view-action', onAction);
+    window.removeEventListener('click', onCachedRefresh, true);
     for (const entry of viewers.values()) {
       if (error) finish(entry, 'error', { error });
       remove(entry);
@@ -48,9 +54,9 @@
 
   function valid(value) {
     return value?.source === SOURCE && /^[a-f0-9-]{36}$/.test(value.viewId)
-      && /^[a-f0-9-]{36}$/.test(value.requestId) && value.media?.mediaKind === 'image'
+      && /^[a-f0-9-]{36}$/.test(value.requestId) && ['image', 'video', 'audio'].includes(value.media?.mediaKind)
       && typeof value.media.workspacePath === 'string' && value.media.workspacePath.length > 0
-      && typeof value.media.mimeType === 'string' && value.media.mimeType.startsWith('image/')
+      && typeof value.media.mimeType === 'string' && value.media.mimeType.startsWith(`${value.media.mediaKind}/`)
       && Number.isInteger(value.timeoutSeconds) && value.timeoutSeconds >= 1 && value.timeoutSeconds <= 300 && Number.isSafeInteger(value.expiresAt);
   }
   const key = value => `${value.viewId}/${value.requestId}`;
@@ -93,7 +99,7 @@
     const bound = routes.get(key(value));
     const entry = { value, route };
     if (!bound || bound.source !== route.source || actions.size >= 128) {
-      actionResult(entry, false, 'The image widget is not connected to the Extension. Click Refresh and retry Copy.'); return;
+      actionResult(entry, false, 'The media widget is not connected to the Extension. Click Refresh and retry Copy.'); return;
     }
     actions.set(value.actionId, entry);
     entry.timer = setTimeout(() => {
@@ -107,7 +113,7 @@
     }
     const viewer = viewers.get(value.viewId);
     if (!viewer || viewer.value.requestId !== value.requestId || viewer.value.media.workspacePath !== value.media.workspacePath) {
-      actionResult(entry, false, 'The image widget has changed. Click Refresh and retry Copy.'); return;
+      actionResult(entry, false, 'The media widget has changed. Click Refresh and retry Copy.'); return;
     }
     Promise.resolve().then(() => chrome.runtime.sendMessage({ type: 'researchtube_capture_frame_local_action',
       action: 'copyPath', path: viewer.value.media.workspacePath })).then(
@@ -133,6 +139,36 @@
     window.removeEventListener('resize', entry.position);
     window.removeEventListener('scroll', entry.position, true);
   }
+  function scrollFromViewer(entry, value) {
+    if (entry.state !== 'loaded' || entry.viewer.style.visibility !== 'visible' || !entry.route.frame?.isConnected || !entry.viewer.isConnected
+      || !Number.isFinite(value.deltaX) || !Number.isFinite(value.deltaY) || ![0, 1, 2].includes(value.deltaMode)) return;
+    const targets = [];
+    // Follow this exact widget's ancestors, never a ChatGPT class name or a
+    // different conversation. Residual movement chains at scroll boundaries.
+    for (let parent = entry.route.frame.parentElement; parent; parent = parent.parentElement) {
+      const style = getComputedStyle(parent);
+      const x = /^(auto|scroll|overlay)$/.test(style.overflowX) && parent.scrollWidth > parent.clientWidth;
+      const y = /^(auto|scroll|overlay)$/.test(style.overflowY) && parent.scrollHeight > parent.clientHeight;
+      if (x || y) targets.push({ element: parent, style, x, y });
+    }
+    const root = document.scrollingElement;
+    if (root && !targets.some(item => item.element === root)) targets.push({ element: root, style: getComputedStyle(root),
+      x: root.scrollWidth > root.clientWidth, y: root.scrollHeight > root.clientHeight });
+    const first = targets[0];
+    const lineHeight = Number.parseFloat(first?.style.lineHeight) || 16;
+    const scaleX = value.deltaMode === 1 ? lineHeight : value.deltaMode === 2 ? (first?.element.clientWidth || window.innerWidth) : 1;
+    const scaleY = value.deltaMode === 1 ? lineHeight : value.deltaMode === 2 ? (first?.element.clientHeight || window.innerHeight) : 1;
+    let x = value.deltaX * scaleX, y = value.deltaY * scaleY;
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+    for (const target of targets) {
+      const beforeX = target.element.scrollLeft, beforeY = target.element.scrollTop;
+      target.element.scrollBy({ left: target.x ? x : 0, top: target.y ? y : 0, behavior: 'instant' });
+      if (target.x) x -= target.element.scrollLeft - beforeX;
+      if (target.y) y -= target.element.scrollTop - beforeY;
+      if (Math.abs(x) < 0.01 && Math.abs(y) < 0.01) break;
+    }
+    entry.position();
+  }
   function install(route, value) {
     const viewerUrl = runtimeValue(runtime => runtime.getURL('media-viewer.html'));
     if (viewerUrl === null) { reply(route, result(value, 'error', { error: DISCONNECTED })); return; }
@@ -148,7 +184,8 @@
     // Do not move or replace React-owned nodes, or change host ancestor styles.
     const viewer = document.createElement('iframe');
     viewer.dataset.researchtubeImageViewer = value.viewId;
-    viewer.title = 'ResearchTube local image';
+    viewer.title = `ResearchTube local ${value.media.mediaKind}`;
+    viewer.allow = 'autoplay';
     viewer.style.cssText = 'position:fixed;border:0;visibility:hidden;background:transparent;z-index:2;';
     viewer.src = `${viewerUrl}#${encodeURIComponent(JSON.stringify({ ...value.media, viewId: value.viewId, requestId: value.requestId, timeoutSeconds: value.timeoutSeconds }))}`;
     document.body.append(viewer);
@@ -171,12 +208,18 @@
       }
       Object.assign(viewer.style, { left: `${rect.left}px`, top: `${rect.top}px`, width: `${rect.width}px`, height: `${rect.height}px`,
         clipPath: `inset(${Math.max(0, top - rect.top)}px ${Math.max(0, rect.right - right)}px ${Math.max(0, rect.bottom - bottom)}px ${Math.max(0, left - rect.left)}px)` });
-      viewer.style.visibility = entry.state === 'loaded' && right > left && bottom > top ? 'visible' : 'hidden';
+      // Native loading must not wait for a CSS-hidden frame to become visible
+      // only after its own metadata event. Pending AV is laid out but remains
+      // transparent and cannot intercept clicks or scrolling.
+      const nativeLoading = entry.state === 'accepted' && value.media.mediaKind !== 'image';
+      viewer.style.visibility = (entry.state === 'loaded' || nativeLoading) && right > left && bottom > top ? 'visible' : 'hidden';
+      viewer.style.opacity = entry.state === 'loaded' ? '1' : '0';
+      viewer.style.pointerEvents = entry.state === 'loaded' ? 'auto' : 'none';
     };
     entry.timer = setTimeout(() => {
       if (entry.state !== 'accepted') return;
       log(`view=${value.viewId} loading timeout; last stage=${entry.lastStage}`);
-      finish(entry, 'error', { error: 'The local image viewer did not finish loading. Retry.' }); remove(entry);
+      finish(entry, 'error', { error: 'The local media viewer did not finish loading. Retry.' }); remove(entry);
     }, Math.max(0, Math.min(value.timeoutSeconds * 1000, value.expiresAt - Date.now())));
     if (typeof ResizeObserver === 'function') { entry.resize = new ResizeObserver(entry.position); entry.resize.observe(frame); }
     window.addEventListener('resize', entry.position);
@@ -186,9 +229,21 @@
   }
   function request(route, value) {
     if (stopped) return;
-    if (!valid(value)) { log('request rejected: invalid image metadata'); return; }
+    if (!valid(value)) { log('request rejected: invalid media metadata'); return; }
     if (Date.now() >= value.expiresAt) { log(`view=${value.viewId} request expired`); return; }
     if (runtimeValue(runtime => runtime.getManifest().version) === null) { reply(route, result(value, 'error', { error: DISCONNECTED })); return; }
+    if (value.cachedTemplate === true) {
+      const prior = cachedFrames.get(route.source);
+      // A cached template announces both a DOM event and a parent message.
+      // Their arrival order must not create two players for the same slot.
+      if (prior && key(prior) !== key(value) && sameMedia(prior.media, value.media)
+        && Date.now() - prior.receivedAt < 250) return;
+      // The first event may have been adapted in a parent frame before the
+      // inner content script arrived. Keep that slot's canonical view identity
+      // when the inner script later starts forwarding its own UUID.
+      if (prior && prior.viewId !== value.viewId) value = { ...value, viewId: prior.viewId };
+      cachedFrames.set(route.source, { ...value, receivedAt: Date.now() });
+    }
     const existing = routes.get(key(value));
     if (existing && existing.source !== route.source) { log(`view=${value.viewId} request rejected: slot identity changed`); return; }
     log(`view=${value.viewId} request=${value.requestId} received via=${route.local ? 'DOM' : 'child-frame'} top=${window === window.top}`);
@@ -205,13 +260,97 @@
   }
   function local(value) { request({ local: true, source: window }, value); }
   function onReady(event) { if (!stopped) local(event.detail); }
+  function sameMedia(left, right) {
+    return left?.workspacePath === right?.workspacePath && left?.mediaKind === right?.mediaKind && left?.mimeType === right?.mimeType;
+  }
+  function adaptCachedMedia(route, media, timeoutSeconds = 10, via = 'DOM event') {
+    const prior = cachedFrames.get(route.source);
+    if (prior && sameMedia(prior.media, media) && Date.now() - prior.receivedAt < 250) return;
+    const value = { source: SOURCE, type: 'request', cachedTemplate: true,
+      viewId: prior?.viewId || (route.local && legacyViewId) || crypto.randomUUID(),
+      requestId: crypto.randomUUID(), timeoutSeconds, expiresAt: Date.now() + timeoutSeconds * 1000,
+      media: { workspacePath: media?.workspacePath, mediaKind: media?.mediaKind, mimeType: media?.mimeType } };
+    if (!['video', 'audio'].includes(media?.mediaKind) || !valid(value)) {
+      log('cached widget rejected: invalid media metadata'); return;
+    }
+    if (route.local) {
+      legacyViewId = value.viewId;
+      legacyDOMKey = `${media.mediaKind}/${media.workspacePath}`;
+    }
+    log(`view=${value.viewId} cached audio/video widget adapted via=${via}`);
+    request(route, value);
+  }
+  // Restored conversations can still run the 2.2.58 template: its image
+  // handshake is current, but audio/video only emit this same-frame event.
+  // Convert at the originating frame, then use the ordinary Window-bound
+  // relay. Do not mount inside an opaque sandbox or move ChatGPT DOM nodes.
+  function onLegacyReady(event) {
+    if (stopped || window === window.top) return;
+    adaptCachedMedia({ local: true, source: window }, event.detail?.media);
+  }
+  function ownCachedMediaCard() {
+    const root = document.getElementById('capture');
+    if (!root?.matches?.('main#capture.capture') || root.hasAttribute('data-researchtube-media-widget')
+      || root.hasAttribute('data-researchtube-image-view')) return null;
+    const names = ['brand-context', 'path', 'details', 'refresh-frame', 'copy-frame-name'];
+    const nodes = names.map(name => document.getElementById(name));
+    if (nodes.some(item => !item || !root.contains(item))) return null;
+    if (nodes[4].getAttribute('aria-label') !== 'Copy workspace path') return null;
+    const label = nodes[0].textContent.trim();
+    const mediaKind = ['Workspace Video', 'Webcam Video'].includes(label) ? 'video'
+      : ['Workspace Audio', 'Webcam Audio', 'Speech TTS Audio'].includes(label) ? 'audio' : null;
+    const workspacePath = nodes[1].textContent.trim();
+    if (!mediaKind || !workspacePath || workspacePath.length > 1024) return null;
+    return { mediaKind, workspacePath };
+  }
+  function recoverLegacyDOM(force = false) {
+    if (stopped || window === window.top) return;
+    const card = ownCachedMediaCard();
+    if (!card) return;
+    const cardKey = `${card.mediaKind}/${card.workspacePath}`;
+    if (!force && cardKey === legacyDOMKey) return;
+    legacyDOMKey = cardKey;
+    if (legacyRecovery) clearTimeout(legacyRecovery.timer);
+    const pending = legacyRecovery = { cardKey };
+    pending.timer = setTimeout(() => {
+      if (legacyRecovery === pending) { legacyRecovery = null; log('cached widget metadata lookup timed out; click Refresh'); }
+    }, 10_000);
+    log('cached media card found; verifying Workspace metadata');
+    const call = runtimeValue(runtime => runtime.sendMessage({ type: 'researchtube_media_widget_metadata', path: card.workspacePath }));
+    Promise.resolve(call).then(response => {
+      if (stopped || legacyRecovery !== pending) return;
+      legacyRecovery = null; clearTimeout(pending.timer);
+      const current = ownCachedMediaCard();
+      if (!current || `${current.mediaKind}/${current.workspacePath}` !== cardKey) return;
+      const metadata = response?.data?.metadata;
+      const timeout = response?.data?.handshakeTimeoutSeconds;
+      if (response?.ok !== true || metadata?.workspacePath !== card.workspacePath || metadata?.mediaKind !== card.mediaKind
+        || !Number.isInteger(timeout) || timeout < 1 || timeout > 300) {
+        log('cached media metadata could not be verified', String(response?.error || 'Unexpected media response.')); return;
+      }
+      const prior = cachedFrames.get(window);
+      if (!force && prior && sameMedia(prior.media, metadata)) return;
+      adaptCachedMedia({ local: true, source: window }, metadata, timeout, 'cached card DOM');
+    }, error => {
+      if (legacyRecovery !== pending) return;
+      legacyRecovery = null; clearTimeout(pending.timer);
+      log('cached media metadata lookup failed', String(error?.message || error));
+    });
+  }
+  function onCachedRefresh(event) {
+    const button = document.getElementById('refresh-frame');
+    if (button && button.contains(event.target)) recoverLegacyDOM(true);
+  }
   function onAction(event) { actionRequest({ local: true, source: window }, event.detail); }
   function onPageHide(event) { if (!event.persisted) dispose(); }
   window.addEventListener('researchtube-image-view-ready', onReady);
+  window.addEventListener('researchtube-local-media-ready', onLegacyReady);
   window.addEventListener('researchtube-image-view-action', onAction);
   window.addEventListener('pagehide', onPageHide);
+  window.addEventListener('click', onCachedRefresh, true);
   function scan() {
     if (stopped) return;
+    recoverLegacyDOM();
     const marker = document.querySelector('[data-researchtube-image-view]');
     if (!marker) return;
     const view = marker.getAttribute('data-researchtube-image-view');
@@ -226,30 +365,41 @@
   }
   if (window !== window.top) {
     observer = new MutationObserver(scan);
-    observer.observe(document, { subtree: true, childList: true, attributes: true, attributeFilter: ['data-researchtube-image-view', 'data-researchtube-image-action'] });
+    observer.observe(document, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['data-researchtube-image-view', 'data-researchtube-image-action'] });
     scan();
   }
   function handleMessage(event) {
     if (stopped) return;
     const value = event.data;
+    if (value?.jsonrpc === '2.0' && value.method === 'researchtube/extension-bridge'
+      && value.params?.source === 'researchtube-capture-frame-widget' && value.params.type === 'local-media-ready') {
+      if (event.source === window || !allowedOrigin(event.origin)) return;
+      const frame = [...document.querySelectorAll('iframe')].find(item => item.contentWindow === event.source);
+      if (!frame) { log('cached widget rejected: sending iframe not found'); return; }
+      adaptCachedMedia({ local: false, source: event.source, origin: event.origin, frame }, value.params.media, 10, 'parent message');
+      return;
+    }
     if (value?.source !== SOURCE || event.source === window) return;
-    if (['viewer-state', 'viewer-diagnostic'].includes(value.type) && window === window.top) {
+    if (['viewer-state', 'viewer-diagnostic', 'viewer-wheel'].includes(value.type) && window === window.top) {
       const entry = viewers.get(value.viewId);
       if (!entry || entry.viewer.contentWindow !== event.source || entry.value.requestId !== value.requestId || entry.state === 'error') return;
+      if (value.type === 'viewer-wheel') { scrollFromViewer(entry, value); return; }
       if (value.type === 'viewer-diagnostic') {
         if (!viewerStages.has(value.stage) || entry.diagnosticCount >= 30) return;
         entry.diagnosticCount++;
         entry.lastStage = value.stage;
         const details = {};
         for (const name of ['valid', 'ok', 'timedOut']) if (typeof value.details?.[name] === 'boolean') details[name] = value.details[name];
-        for (const name of ['status', 'sizeBytes', 'height']) if (Number.isFinite(value.details?.[name])) details[name] = value.details[name];
+        for (const name of ['status', 'sizeBytes', 'height', 'readyState', 'networkState', 'mediaErrorCode']) if (Number.isFinite(value.details?.[name])) details[name] = value.details[name];
+        if (typeof value.details?.version === 'string' && /^\d+\.\d+\.\d+$/.test(value.details.version)) details.version = value.details.version;
+        if (['loadstart', 'progress', 'stalled', 'suspend', 'abort', 'emptied'].includes(value.details?.event)) details.event = value.details.event;
         log(`view=${value.viewId} viewer stage=${value.stage}`, details);
         return;
       }
       if (value.state === 'loaded') {
         const height = Number.isFinite(value.height) ? Math.max(100, Math.min(800, Math.ceil(value.height))) : 320;
         finish(entry, 'loaded', { height }); entry.position();
-      } else if (value.state === 'error') { finish(entry, 'error', { error: String(value.error || 'The local image could not be loaded.') }); remove(entry); }
+      } else if (value.state === 'error') { finish(entry, 'error', { error: String(value.error || 'The local media could not be loaded.') }); remove(entry); }
       return;
     }
     if (value.type === 'result' && event.source === window.parent && window !== window.top) {

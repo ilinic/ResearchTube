@@ -4,6 +4,7 @@ import vm from 'node:vm';
 import {webcrypto} from 'node:crypto';
 const bundle=await readFile(new URL('../dist/background.js',import.meta.url),'utf8');
 const widget=await readFile(new URL('../ui/chat-target-v1.html',import.meta.url),'utf8');
+const mediaWidget=await readFile(new URL('../ui/capture-frame-widget-v30.html',import.meta.url),'utf8');
 const bridge=await readFile(new URL('../chatgpt-chat-target-bridge.js',import.meta.url),'utf8');
 const manifest=JSON.parse(await readFile(new URL('../manifest.json',import.meta.url),'utf8'));
 const script=manifest.content_scripts.find(item=>item.js.includes('chatgpt-chat-target-bridge.js'));
@@ -35,7 +36,7 @@ function worker() {
  context.resolveLibraryStoreFiles=async files=>({localPaths:['/private/report.pdf'],submittedFiles:files,skippedFiles:[]});
  context.cdpAttachFilesNow=async (_paths,options)=>{await context.requireCurrentChatTarget(options.currentChatTarget);mutations.push({...options.currentChatTarget});};
  context.cdpErrorLog=()=>{};
- context.fetch=async path=>({ok:true,text:async()=>path.includes('chat-target')?widget:'media-viewer-widget'});
+ context.fetch=async path=>({ok:true,text:async()=>path.includes('chat-target')?widget:mediaWidget});
  return {context,tabs,storage,alarms,mutations,queries,advance(ms){now+=ms;},
   receive:(message,sender)=>new Promise(resolve=>{assert.equal(listener(message,sender,resolve),true);}),
   start:async()=>{

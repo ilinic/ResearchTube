@@ -39,7 +39,7 @@ try:
 except ImportError:
     from task_history import TaskHistory
 
-AGENT_VERSION = "2.2.54"
+AGENT_VERSION = "2.2.55"
 INTERFACE_VERSION = 73
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
@@ -534,7 +534,7 @@ def cached_public_health() -> dict[str, Any]:
 
 
 async def collect_startup_health(snapshot: dict[str, Any]) -> None:
-    """Run one background batch; publish each finished check independently."""
+    """Finish tool diagnostics/logs before the one low-priority Chrome probe."""
     def publish() -> None:
         global PUBLIC_HEALTH_SNAPSHOT
         if HEALTH_SNAPSHOT is snapshot:
@@ -560,7 +560,12 @@ async def collect_startup_health(snapshot: dict[str, Any]) -> None:
         snapshot["chromeAutomation"] = result
         publish()
 
-    await asyncio.gather(*(collect_component(name) for name in snapshot["components"]), collect_chrome())
+    await asyncio.gather(*(collect_component(name) for name in snapshot["components"]))
+    log("Startup checks completed. Waiting for Extension requests.")
+    # The loopback server is already serving. Yield after the last startup log
+    # before spawning the unrelated Windows/PowerShell Chrome process check.
+    await asyncio.sleep(0)
+    await collect_chrome()
 
 
 def public_platform_metadata() -> dict[str, str]:

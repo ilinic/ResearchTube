@@ -2,6 +2,8 @@
 import asyncio
 import struct
 import tempfile
+import shutil
+import subprocess
 import unittest
 import zlib
 from pathlib import Path
@@ -33,10 +35,10 @@ class WidgetHttpTests(unittest.IsolatedAsyncioTestCase):
         self.workspace_patch.stop()
         self.temp.cleanup()
 
-    async def request(self, range_value=None, header_name='Range'):
+    async def request(self, range_value=None, header_name='Range', path='/crops/test-crop.png'):
         reader, writer = await asyncio.open_connection('127.0.0.1', self.port)
         range_line = f'{header_name}: {range_value}\r\n' if range_value is not None else ''
-        writer.write(f'GET /crops/test-crop.png?viewer=123 HTTP/1.1\r\nHost: localhost\r\n{range_line}\r\n'.encode('ascii'))
+        writer.write(f'GET {path}?viewer=123 HTTP/1.1\r\nHost: localhost\r\n{range_line}\r\n'.encode('ascii'))
         await writer.drain()
         raw = await asyncio.wait_for(reader.read(), 2)
         writer.close()
@@ -77,3 +79,30 @@ class WidgetHttpTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(headers['content-range'], f'bytes */{len(self.data)}')
                 self.assertEqual(headers['content-length'], '0')
                 self.assertEqual(body, b'')
+
+    @unittest.skipUnless(shutil.which('ffmpeg'), 'Real media integration requires FFmpeg')
+    async def test_real_audio_and_video_support_head_middle_tail_and_invalid_ranges(self):
+        audio, video = self.root / 'test.wav', self.root / 'test.mp4'
+        def generate():
+            subprocess.run(['ffmpeg', '-nostdin', '-v', 'error', '-f', 'lavfi', '-i',
+                            'sine=frequency=440:duration=1', str(audio)], check=True, timeout=15, capture_output=True)
+            subprocess.run(['ffmpeg', '-nostdin', '-v', 'error', '-f', 'lavfi', '-i',
+                            'testsrc2=size=64x64:rate=10:duration=1', '-f', 'lavfi', '-i',
+                            'sine=frequency=440:duration=1', '-c:v', 'libx264', '-c:a', 'aac',
+                            '-movflags', '+faststart', '-shortest', str(video)], check=True, timeout=15, capture_output=True)
+        await asyncio.to_thread(generate)
+        for file, mime in [(audio, 'audio/wav'), (video, 'video/mp4')]:
+            data, before = file.read_bytes(), file.stat()
+            for start, end in [(0, 31), (len(data) // 2, len(data) // 2 + 31), (len(data) - 32, len(data) - 1)]:
+                status, headers, body = await self.request(f'bytes={start}-{end}', path=f'/{file.name}')
+                self.assertEqual(status, 'HTTP/1.1 206 Partial Content')
+                self.assertEqual(headers['content-type'], mime)
+                self.assertEqual(headers['content-range'], f'bytes {start}-{end}/{len(data)}')
+                self.assertEqual(headers['accept-ranges'], 'bytes')
+                self.assertEqual(body, data[start:end + 1])
+            status, headers, body = await self.request(f'bytes={len(data)}-', path=f'/{file.name}')
+            self.assertEqual(status, 'HTTP/1.1 416 Range Not Satisfiable')
+            self.assertEqual(headers['content-range'], f'bytes */{len(data)}')
+            self.assertEqual(body, b'')
+            self.assertEqual(file.stat().st_mtime_ns, before.st_mtime_ns)
+            self.assertEqual(file.read_bytes(), data)

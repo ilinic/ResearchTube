@@ -11,23 +11,32 @@
     .top-row, .path-row { display: flex; align-items: center; min-width: 0; }
     .top-row { flex-wrap: wrap; gap: 7px 9px; }
     .image-type { color: color-mix(in srgb, CanvasText 76%, Canvas); font-size: 14px; font-weight: 400; line-height: 1.3; }
-    button { font: inherit; color: CanvasText; cursor: pointer; }.icon-button { display: inline-grid; width: 31px; height: 31px; flex: 0 0 auto; padding: 0; place-items: center; border: 1px solid color-mix(in srgb, CanvasText 20%, Canvas); border-radius: 8px; background: color-mix(in srgb, CanvasText 5%, Canvas); }.icon-button svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }.icon-button .refresh-icon { transform-origin: 50% 50%; transition: transform 160ms ease; }.icon-button.refreshing .refresh-icon { animation: refresh-turn 720ms linear infinite; }.icon-button:disabled { cursor: progress; opacity: .7; } @keyframes refresh-turn { to { transform: rotate(360deg); } }
+    button { font: inherit; color: CanvasText; cursor: pointer; }.icon-button { display: inline-grid; width: 31px; height: 31px; flex: 0 0 auto; padding: 0; place-items: center; border: 1px solid color-mix(in srgb, CanvasText 20%, Canvas); border-radius: 8px; background: color-mix(in srgb, CanvasText 5%, Canvas); }.icon-button svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }.icon-button .copy-icon { width: 20px; height: 20px; fill: currentColor; stroke: none; }.icon-button .refresh-icon { transform-origin: 50% 50%; transition: transform 160ms ease; }.icon-button.refreshing .refresh-icon { animation: refresh-turn 720ms linear infinite; }.icon-button:disabled { cursor: progress; opacity: .7; } @keyframes refresh-turn { to { transform: rotate(360deg); } }
     .details { display: none; min-width: 0; }.details.visible { display: block; }.path-row { gap: 8px; }.path { min-width: 0; flex: 1; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; word-break: break-word; }.youtube-video-link, .youtube-timestamp-link { color: #3b82f6; text-decoration: underline; text-underline-offset: 2px; }
     .status { display: none; min-width: 0; font-size: 13px; line-height: 1.3; color: color-mix(in srgb, CanvasText 66%, Canvas); }.status:not(:empty) { display: block; }.status.error { color: #d92d20; }.metadata { display: flex; flex: 1 1 auto; flex-wrap: wrap; gap: 6px; }.chip { padding: 3px 7px; border: 1px solid color-mix(in srgb, CanvasText 17%, Canvas); border-radius: 999px; color: color-mix(in srgb, CanvasText 76%, Canvas); font-size: 11px; line-height: 1.25; }.actions { display: flex; gap: 7px; margin-left: auto; }
   </style>
 </head>
 <body>
-  <main id="capture" class="capture">
+  <main id="capture" class="capture" data-researchtube-media-widget="2.2.65">
     <header class="top-row"><span id="brand-context" class="image-type">Workspace Image</span><div id="status" class="status" role="status"></div><div id="metadata" class="metadata"></div><div class="actions"><button id="refresh-frame" class="icon-button" type="button" title="Refresh media" aria-label="Refresh media"><svg class="refresh-icon" viewBox="0 0 24 24" aria-hidden="true"><g transform="translate(10 9)"><path d="M8 -1A8 8 0 1 0 10.2 4.5"></path><path d="M9 -6v7H2"></path></g></svg></button></div></header>
-    <section id="details" class="details"><div class="path-row"><div id="path" class="path"></div><button id="copy-frame-name" class="icon-button" type="button" title="Copy workspace path" aria-label="Copy workspace path"><svg viewBox="0 0 24 24" aria-hidden="true"><g transform="translate(12 12)"><rect x="-5" y="-7" width="10" height="12" rx="1.5"/><path d="M-2 -5h8a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H-2a2 2 0 0 1-2-2"/></g></svg></button></div></section>
+    <section id="details" class="details"><div class="path-row"><div id="path" class="path"></div><button id="copy-frame-name" class="icon-button" type="button" title="Copy workspace path" aria-label="Copy workspace path"><svg aria-hidden="true" class="copy-icon" focusable="false" height="20" viewBox="0 0 20 20" width="20" xmlns="http://www.w3.org/2000/svg"><path fill-rule="evenodd" clip-rule="evenodd" d="M15.1006 1.78516C16.793 1.78556 18.165 3.15808 18.165 4.85059V10.8838C18.1649 12.5762 16.7929 13.9478 15.1006 13.9482H13.998V15.0508C13.9976 16.7431 12.626 18.1151 10.9336 18.1152H4.90039C3.20789 18.1152 1.83537 16.7432 1.83496 15.0508V9.01758C1.83496 7.32482 3.20764 5.95215 4.90039 5.95215H6.00195V4.85059C6.00195 3.15783 7.37463 1.78516 9.06738 1.78516H15.1006ZM4.90039 7.28223C3.94218 7.28223 3.16504 8.05936 3.16504 9.01758V15.0508C3.16544 16.0087 3.94243 16.7852 4.90039 16.7852H10.9336C11.8914 16.785 12.6676 16.0086 12.668 15.0508V9.01758C12.668 8.05945 11.8917 7.28237 10.9336 7.28223H4.90039ZM9.06738 3.11523C8.10917 3.11523 7.33203 3.89237 7.33203 4.85059V5.95215H10.9336C12.6262 5.95229 13.998 7.32491 13.998 9.01758V12.6182H15.1006C16.0584 12.6178 16.8348 11.8416 16.835 10.8838V4.85059C16.835 3.89262 16.0585 3.11564 15.1006 3.11523H9.06738Z" fill="currentColor"></path></svg></button></div></section>
   </main>
   <script>
     (() => {
       const openai = () => window.openai; const root = document.getElementById("capture"); const status = document.getElementById("status"); const details = document.getElementById("details"); const pathElement = document.getElementById("path"); const metadata = document.getElementById("metadata"); const brandContext = document.getElementById("brand-context"); const refreshButton = document.getElementById("refresh-frame"); const copyButton = document.getElementById("copy-frame-name"); const localActionRequests = new Map(); let lastWorkspacePath = null; let displayedWorkspacePath = null; let displayedMediaStats = null;
-      const reportHeight = () => requestAnimationFrame(() => { try { openai()?.notifyIntrinsicHeight?.(Math.ceil(document.documentElement.scrollHeight)); window.parent.postMessage({ jsonrpc: "2.0", method: "ui/notifications/size-changed", params: { height: Math.ceil(document.documentElement.scrollHeight) } }, "*"); } catch (_error) {} });
+      let lastReportedHeight = null;
+      const reportHeight = () => {
+        // document.scrollHeight includes the host's current iframe viewport;
+        // measuring our own card lets a previously tall slot shrink again.
+        const height = root.style.display === "none" ? 0 : Math.ceil(root.getBoundingClientRect().height);
+        if (height === lastReportedHeight) return;
+        lastReportedHeight = height;
+        try { openai()?.notifyIntrinsicHeight?.(height); } catch (_error) {}
+        try { window.parent.postMessage({ jsonrpc: "2.0", method: "ui/notifications/size-changed", params: { height } }, "*"); } catch (_error) {}
+      };
       const setStatus = (text, error = false) => { status.textContent = text; status.classList.toggle("error", error); reportHeight(); };
       const IMAGE_HANDSHAKE_TIMEOUT_SECONDS = 10;
-      const WIDGET_VERSION = "2.2.61";
+      const WIDGET_VERSION = "2.2.65";
       const mediaLog = (...args) => console.info(`[ResearchTube media widget ${WIDGET_VERSION}]`, ...args);
       mediaLog("ready", { origin: location.origin, nested: window !== window.top });
       let mediaAttempt = null, lastToolOutput = null, configuredMediaTimeout = IMAGE_HANDSHAKE_TIMEOUT_SECONDS;
@@ -59,7 +68,7 @@
         if (mediaAttempt) { clearInterval(mediaAttempt.interval); clearTimeout(mediaAttempt.timer); }
         const viewId = mediaAttempt?.value.viewId || crypto.randomUUID();
         const value = { source: "researchtube-image-view", type: "request", viewId, requestId: crypto.randomUUID(), timeoutSeconds: configuredMediaTimeout, expiresAt: Date.now() + configuredMediaTimeout * 1000,
-          media: { workspacePath: viewer.info.workspacePath, mediaKind: viewer.info.mediaKind, mimeType: viewer.info.mimeType } };
+          media: { workspacePath: viewer.info.workspacePath, mediaKind: viewer.info.mediaKind, mimeType: viewer.info.mimeType, presentation: presentationFor(viewer) } };
         const attempt = mediaAttempt = { value, done: false, notifications: 0 };
         mediaLog("media attempt started", { viewId, requestId: value.requestId, workspacePath: value.media.workspacePath, timeoutSeconds: value.timeoutSeconds });
         const notify = () => {
@@ -123,12 +132,26 @@
       function workspaceFormatLabel(path, fallback) { const match = String(path || "").match(/\.([A-Za-z0-9]+)$/); return (match?.[1] || fallback || "").toUpperCase(); }
       function parseToolOutput(value) { if (typeof value !== "string") return value; try { return JSON.parse(value); } catch (_error) { return value; } }
       function viewerPayload(value) { value = parseToolOutput(value); if (!value || value.showInChat !== true) return null; const info = value.image && typeof value.image === "object" ? value.image : value; if (!info || typeof info.workspacePath !== "string" || typeof info.mimeType !== "string") return null; const mediaKind = info.mediaKind || "image"; if (!["image", "video", "audio"].includes(mediaKind)) return null; const kind = value.crop ? "crop" : Number.isInteger(value.monitorCount) ? "screenshot" : Number.isFinite(value.requestedTimestampSeconds) ? "frame" : "workspace"; return { value, info: { ...info, mediaKind }, kind }; }
-      function hideWidget() { root.style.display = "none"; try { openai()?.notifyIntrinsicHeight?.(0); } catch (_error) {} }
+      function hideWidget() { root.style.display = "none"; reportHeight(); }
       function cameraTaskTag(path) { return /(?:^| )\[cam_[A-Za-z0-9_-]{10}\](?= |\.|$)/.test(path); }
       function ttsTaskTag(path) { return /(?:^| )\[tts_[A-Za-z0-9_-]{10}\](?= |\.|$)/.test(path); }
       function waitForToolOutput() { root.style.display = "grid"; details.classList.remove("visible"); metadata.replaceChildren(); displayedMediaStats = null; brandContext.textContent = "Workspace Media"; setStatus("Waiting for media data…"); }
       function durationLabel(seconds) { if (!Number.isFinite(seconds) || seconds < 0) return null; const total = Math.floor(seconds); const minutes = Math.floor(total / 60); const remainder = total % 60; if (minutes < 60) return `${minutes}:${String(remainder).padStart(2, "0")}`; const hours = Math.floor(minutes / 60); return `${hours}:${String(minutes % 60).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`; }
       function showDetails(viewer) { const { value, info, kind } = viewer; displayedWorkspacePath = info.workspacePath; root.style.display = "grid"; root.style.minHeight = "620px"; if (info.mediaKind === "image") root.style.minHeight = "320px"; const webcam = cameraTaskTag(info.workspacePath); const tts = ttsTaskTag(info.workspacePath); brandContext.textContent = tts ? "Speech TTS Audio" : webcam ? `Webcam ${info.mediaKind === "video" ? "Video" : info.mediaKind === "audio" ? "Audio" : "Frame"}` : kind === "frame" ? "Captured Frame" : kind === "screenshot" ? "Screenshot" : kind === "crop" ? "Cropped Image" : info.mediaKind === "video" ? "Workspace Video" : info.mediaKind === "audio" ? "Workspace Audio" : "Workspace Image"; if (kind === "frame" || kind === "crop" || youtubeTagId(info.workspacePath)) renderPath(info.workspacePath); else pathElement.textContent = info.workspacePath; metadata.replaceChildren(); if (kind === "frame" && Number.isFinite(value.requestedTimestampSeconds)) addChip(`t = ${value.requestedTimestampSeconds.toFixed(3)} s`); const width = displayedMediaStats?.width ?? info.width; const height = displayedMediaStats?.height ?? info.height; if (Number.isInteger(width) && Number.isInteger(height)) addChip(`${width} × ${height}`); addChip(workspaceFormatLabel(info.workspacePath, info.format || info.mimeType.split("/")[1])); const size = Number.isInteger(info.sizeBytes) ? info.sizeBytes : info.imageSizeBytes; if (Number.isInteger(size)) addChip(`${Math.round(size / 1024)} KB`); const duration = durationLabel(displayedMediaStats?.duration ?? info.durationSeconds); if (duration && info.mediaKind !== "image") addChip(duration); if (kind === "frame" && typeof value.seekMode === "string") addChip(`${value.seekMode} seek`); if (kind === "crop") addChip(`crop ${value.crop.x},${value.crop.y} ${value.crop.width}×${value.crop.height}`); if (kind === "screenshot") { addChip(`${value.monitorCount} monitor${value.monitorCount === 1 ? "" : "s"}`); if (value.virtualDesktop) addChip(`desktop ${value.virtualDesktop.left},${value.virtualDesktop.top}`); } details.classList.add("visible"); reportHeight(); }
+      function presentationFor(viewer) {
+        const { value, kind } = viewer;
+        const tags = [];
+        if (kind === "frame") {
+          if (Number.isFinite(value.requestedTimestampSeconds)) tags.push(`t = ${value.requestedTimestampSeconds.toFixed(3)} s`);
+          if (typeof value.seekMode === "string") tags.push(`${value.seekMode} seek`);
+        }
+        if (kind === "crop") tags.push(`crop ${value.crop.x},${value.crop.y} ${value.crop.width}×${value.crop.height}`);
+        if (kind === "screenshot") {
+          tags.push(`${value.monitorCount} monitor${value.monitorCount === 1 ? "" : "s"}`);
+          if (value.virtualDesktop) tags.push(`desktop ${value.virtualDesktop.left},${value.virtualDesktop.top}`);
+        }
+        return { label: brandContext.textContent, tags };
+      }
       async function render(value, force = false) { value = parseToolOutput(value); if (value === undefined || value === null) { waitForToolOutput(); return; } const viewer = viewerPayload(value); if (!viewer) { hideWidget(); return; } lastToolOutput = value; const { info } = viewer; if (!force && info.workspacePath === lastWorkspacePath) return; mediaLog("media data received", { workspacePath: info.workspacePath, mediaKind: info.mediaKind }); lastWorkspacePath = info.workspacePath; displayedMediaStats = null; showDetails(viewer); setStatus("Loading local ResearchTube media…"); notifyLocalMedia(viewer); }
       async function safeRender(value, force = false) {
         try { await render(value, force); }
@@ -143,7 +166,7 @@
       window.addEventListener("message", event => {
         if (event.source !== window.parent || event.data?.jsonrpc !== "2.0") return;
         if (event.data.id === initializeId && event.data.result) {
-          window.parent.postMessage({ jsonrpc: "2.0", method: "ui/notifications/initialized", params: {} }, "*"); reportHeight();
+          window.parent.postMessage({ jsonrpc: "2.0", method: "ui/notifications/initialized", params: {} }, "*"); lastReportedHeight = null; reportHeight();
         }
         if (event.data.method === "ui/resource-teardown") {
           if (mediaAttempt) { mediaAttempt.done = true; clearInterval(mediaAttempt.interval); clearTimeout(mediaAttempt.timer); }
@@ -154,7 +177,7 @@
       window.parent.postMessage({ jsonrpc: "2.0", id: initializeId, method: "ui/initialize", params: {
         appInfo: { name: "researchtube-media-viewer", version: WIDGET_VERSION }, appCapabilities: {}, protocolVersion: "2026-01-26"
       } }, "*");
-      if (typeof ResizeObserver === "function") new ResizeObserver(reportHeight).observe(document.body); consumeMediaSettings(openai()?.toolResponseMetadata); void safeRender(currentFrame());
+      if (typeof ResizeObserver === "function") new ResizeObserver(reportHeight).observe(root); consumeMediaSettings(openai()?.toolResponseMetadata); void safeRender(currentFrame());
       // ChatGPT can create the iframe before it publishes toolOutput. Polling is
       // limited to this short bootstrap window and prevents an initial blank card.
       for (let attempt = 1; attempt <= 24; attempt += 1) window.setTimeout(() => { const value = currentFrame(); if (value !== undefined && value !== null) void safeRender(value); }, attempt * 250);
