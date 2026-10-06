@@ -24,6 +24,45 @@ export function chatComposerPageExpression(fn, ...args) {
   return `(() => { const resolveChatComposer = ${resolveChatComposer.toString()}; return (${fn.toString()})(${serialized}); })()`;
 }
 
+// The host can insert (YYYYMMDD-HHMMSS) before the extension after upload.
+// Match that one observed transformation relative to the original name, never
+// strip arbitrary parentheses/numbers or normalize the original filename.
+export function chatComposerAttachmentNamesMatch(actualNames, expectedNames, allowTimestamp = true) {
+  if (!Array.isArray(actualNames) || !Array.isArray(expectedNames) || actualNames.length !== expectedNames.length
+    || [...actualNames, ...expectedNames].some(name => typeof name !== 'string' || !name.length)) return false;
+  const remaining = [...expectedNames];
+  const renamed = [];
+  // Reserve all exact matches first, including original names that already
+  // contain a timestamp. Batch order may change as individual uploads finish.
+  for (const name of actualNames) {
+    const index = remaining.indexOf(name);
+    if (index >= 0) remaining.splice(index, 1);
+    else renamed.push(name);
+  }
+  if (renamed.length && !allowTimestamp) return false;
+  const timestampMatches = (actual, original) => {
+    const dot = original.lastIndexOf('.');
+    const stem = dot > 0 ? original.slice(0, dot) : original;
+    const extension = dot > 0 ? original.slice(dot) : '';
+    if (!actual.startsWith(stem) || !actual.endsWith(extension)) return false;
+    const suffix = actual.slice(stem.length, extension ? -extension.length : undefined);
+    const match = /^\((\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})\)$/.exec(suffix);
+    if (!match) return false;
+    const parts = match.slice(1).map(Number);
+    const date = new Date(0);
+    date.setUTCFullYear(parts[0], parts[1] - 1, parts[2]);
+    date.setUTCHours(parts[3], parts[4], parts[5], 0);
+    return [date.getUTCFullYear(), date.getUTCMonth() + 1, date.getUTCDate(),
+      date.getUTCHours(), date.getUTCMinutes(), date.getUTCSeconds()].every((value, index) => value === parts[index]);
+  };
+  for (const name of renamed) {
+    const index = remaining.findIndex(original => timestampMatches(name, original));
+    if (index < 0) return false;
+    remaining.splice(index, 1);
+  }
+  return remaining.length === 0;
+}
+
 // Runs in the ChatGPT page through CDP. Keep inspection scoped to the Composer.
 export function inspectChatComposer() {
   const { composer, root, form } = resolveChatComposer();

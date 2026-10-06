@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import { pageFixture } from './fixtures/chat-composer-page.mjs';
-import { resolveChatComposer, chatComposerPageExpression, inspectChatComposer, clickChatComposerAttachmentRemoval, resetChatComposerFileInputs, installChatComposerGuard, readChatComposerGuard, disposeChatComposerGuard } from '../chat-composer.js';
+import { resolveChatComposer, chatComposerPageExpression, chatComposerAttachmentNamesMatch, inspectChatComposer, clickChatComposerAttachmentRemoval, resetChatComposerFileInputs, installChatComposerGuard, readChatComposerGuard, disposeChatComposerGuard } from '../chat-composer.js';
 
 const page = pageFixture();
 let snapshot = page.run(inspectChatComposer);
@@ -202,3 +202,23 @@ for(let index=0;index<initialNames.length;index++) {
 assert.equal(everyType.run(inspectChatComposer).attachments.length,0);
 assert.equal(everyType.run(clickChatComposerAttachmentRemoval,initialNames).clicked,false);
 console.log('Chat Composer: mixed image/document/audio/archive removal uses dynamic filenames');
+
+// Reported delay regression: one accepted image is later renamed by the host.
+const matchNames = chatComposerAttachmentNamesMatch;
+assert.equal(matchNames(['test-crop(20261006-120344).jpg'], ['test-crop.jpg']), true);
+assert.equal(matchNames(['photo(20261006-120344).jpg'], ['photo.jpg'], false), false, 'native FileList names remain exact');
+assert.equal(matchNames(['notes(20261006-120344).docx', 'photo.jpg'], ['photo.jpg', 'notes.docx']), true);
+assert.equal(matchNames(['notes.v2(20261006-120344).docx'], ['notes.v2.docx']), true);
+assert.equal(matchNames(['README(20261006-120344)'], ['README']), true);
+assert.equal(matchNames(['a(20261006-120344).jpg', 'a.jpg'], ['a.jpg', 'a(20261006-120344).jpg']), true);
+assert.equal(matchNames(['a(20261006-120344)(20261006-120445).jpg'], ['a(20261006-120344).jpg']), true);
+for (const actual of ['test-crop(1).jpg', 'test-crop-other.jpg', 'test-crop(20261006-120344).png',
+  'test-crop(20261306-120344).jpg', 'test-crop(20260230-120344).jpg', 'test-crop(20261006-240344).jpg',
+  'test-crop(20261006-120344)(1).jpg', 'test-crop(20261006-120344)extra.jpg', 'test-crop(20261006-120344).JPG']) {
+  assert.equal(matchNames([actual], ['test-crop.jpg']), false, actual);
+}
+assert.equal(matchNames(['test-crop.jpg'], ['test-crop(20261006-120344).jpg']), false, 'never strip the original timestamp');
+assert.equal(matchNames(['report.jpg', 'report.jpg'], ['report.jpg', 'other.jpg']), false, 'one-to-one multiset matching');
+assert.equal(matchNames(['report.jpg', 'other.jpg'], ['report.jpg']), false);
+assert.equal(matchNames([null], ['report.jpg']), false);
+console.log('Chat Composer: exact and host timestamp names, batch multiplicity and strict mismatch refusal passed');

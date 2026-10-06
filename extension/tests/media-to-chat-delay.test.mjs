@@ -83,6 +83,11 @@ function worker() {
 
 const defaults = worker();
 const tool = defaults.context.publicMcpTools().find(tool => tool.name === 'media_to_chat');
+assert.match(tool.description, /Status polling and cancellation are allowed in the initiating assistant turn/);
+assert.doesNotMatch(tool.description, /Do not poll during this same assistant turn/);
+const statusTool = defaults.context.publicMcpTools().find(tool => tool.name === 'media_to_chat_status');
+assert.match(statusTool.description, /Polling is allowed in the initiating assistant turn/);
+assert.doesNotMatch(statusTool.description, /Poll only in a later/);
 assert.equal(tool.inputSchema.properties.sendDelaySeconds.default, 0);
 assert.ok(!tool.inputSchema.required.includes('sendDelaySeconds'));
 assert.ok(tool.outputSchema.properties.task.properties.phase.enum.includes('waitingToSend'));
@@ -118,6 +123,44 @@ assert.equal(done.status, 'completed'); assert.equal(done.progressPercent, 100);
 assert.equal(delayed.sends.length, 1, 'duplicate wakes cannot send twice');
 assert.deepEqual(clone(done.submittedFiles), [{ workspacePath: 'report.pdf' }]);
 assert.ok(!JSON.stringify(waiting).includes('guardToken') && !JSON.stringify(waiting).includes('/private/'));
+
+
+// A real one-minute waiting stage lets the host rename an uploaded card and
+// reset the native FileList. This is not a user edit or an extra attachment.
+const renamed = worker();
+const renamedTask = await renamed.start(60);
+const renamedPage = renamed.pages.get(42);
+renamedPage.root.cards = []; renamedPage.root.controls = [];
+renamedPage.button('Remove report(20261006-120344).pdf', 'report(20261006-120344).pdf', { markedCard: true });
+assert.equal(renamedPage.input.files.length, 0);
+renamed.advance(60_000);
+await renamed.context.resumeDelayedMediaToChatTask(renamedTask.taskId);
+assert.equal((await renamed.context.mediaToChatStatus(renamedTask.taskId)).status, 'completed');
+assert.equal(renamed.sends.length, 1);
+
+// Timestamp aliases cannot bypass trusted replacement/removal, or accept a
+// different filename/type/count. All refused files remain in the Composer.
+for (const mutation of ['differentName', 'differentExtension', 'duplicate', 'trustedReplacement']) {
+  const w = worker(); const task = await w.start(60); const page = w.pages.get(42);
+  page.root.cards = []; page.root.controls = [];
+  const name = mutation === 'differentName' ? 'other(20261006-120344).pdf'
+    : mutation === 'differentExtension' ? 'report(20261006-120344).png' : 'report(20261006-120344).pdf';
+  page.button(`Remove ${name}`, name, { markedCard: true });
+  if (mutation === 'duplicate') page.button('Remove report.pdf', 'report.pdf', { markedCard: true });
+  if (mutation === 'trustedReplacement') {
+    page.input.files = [{ name }]; page.event('change', page.input); page.input.files = [];
+  }
+  w.advance(60_000); await w.context.resumeDelayedMediaToChatTask(task.taskId);
+  assert.equal((await w.context.mediaToChatStatus(task.taskId)).status, 'failed', mutation);
+  assert.equal(w.sends.length, 0, mutation);
+  assert.equal(page.run(inspectChatComposer).attachments.length, mutation === 'duplicate' ? 2 : 1);
+}
+
+// Acceptance can see the timestamp name immediately, before the waiting stage.
+const acceptancePage = worker();
+acceptancePage.pages.get(42).button('Remove report(20261006-120344).pdf', 'report(20261006-120344).pdf', { markedCard: true });
+const acceptance = await acceptancePage.context.cdpEvaluate(42, acceptancePage.context.cdpAttachmentStateExpression(['report.pdf']));
+assert.equal(acceptance.value.accepted, true);
 
 // Waiting releases the global file-automation queue and reserves only its own Composer.
 const parallel = worker(); const reserved = await parallel.start(600);

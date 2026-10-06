@@ -40,7 +40,7 @@ Do not implement a fix only in a generated file. Change the source and run `npm 
 ## Version policy
 
 - Extension implementation version: `extension/package.json`, `extension/package-lock.json`, `extension/manifest.json` and `EXTENSION_VERSION` in `extension/background.js` must agree.
-- Agent release version: `AGENT_VERSION` in `agent/researchtube_agent.py` must equal the Extension release version.
+- Agent implementation version: `AGENT_VERSION` in `agent/researchtube_agent.py` is independent of the Extension implementation version. Increment only the component whose behavior changes; MCP tool descriptions that change model behavior belong to the Extension. Do not bump an unchanged Agent or Extension to match the other. Synchronize implementation versions only when the user explicitly requests it.
 - Compatibility version: `INTERFACE_VERSION` in the Agent must equal `REQUIRED_AGENT_INTERFACE_VERSION` in the Extension.
 - Increment the interface version only when the Extension ↔ Agent contract becomes incompatible or gains a required contract surface.
 - An Extension-only implementation or documentation bootstrap change does not require an interface-version increment.

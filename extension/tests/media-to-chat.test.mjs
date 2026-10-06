@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import vm from "node:vm";
 import { pageFixture } from './fixtures/chat-composer-page.mjs';
 import { webcrypto } from "node:crypto";
-import { resolveChatComposer, chatComposerPageExpression, inspectChatComposer, clickChatComposerAttachmentRemoval, resetChatComposerFileInputs, installChatComposerGuard, readChatComposerGuard, disposeChatComposerGuard } from "../chat-composer.js";
+import { resolveChatComposer, chatComposerPageExpression, chatComposerAttachmentNamesMatch, inspectChatComposer, clickChatComposerAttachmentRemoval, resetChatComposerFileInputs, installChatComposerGuard, readChatComposerGuard, disposeChatComposerGuard } from "../chat-composer.js";
 
 const source = await readFile(new URL("../background.js", import.meta.url), "utf8");
 for (const name of ["media_show", "media_to_chat", "media_to_chat_status", "media_to_chat_cancel"]) assert.match(source, new RegExp(`name: "${name}"`));
@@ -33,7 +33,7 @@ const telemetry = [];
 const commands = [];
 const context = vm.createContext({
   pruneCompletedTasks, completedTaskHistoryLimit: 2000, developerNewToolsDefault: true, refreshTaskHistorySettings: async () => {},
-  resolveChatComposer, chatComposerPageExpression, inspectChatComposer, clickChatComposerAttachmentRemoval, resetChatComposerFileInputs, installChatComposerGuard, readChatComposerGuard, disposeChatComposerGuard,
+  resolveChatComposer, chatComposerPageExpression, chatComposerAttachmentNamesMatch, inspectChatComposer, clickChatComposerAttachmentRemoval, resetChatComposerFileInputs, installChatComposerGuard, readChatComposerGuard, disposeChatComposerGuard,
   URL, console, Promise, crypto: webcrypto, setTimeout, clearTimeout,
   MEDIA_TO_CHAT_BIND_TIMEOUT_MS: 30_000,
   chrome: {

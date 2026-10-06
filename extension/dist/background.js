@@ -161,6 +161,44 @@ function chatComposerPageExpression(fn, ...args) {
   const serialized = args.map((arg) => typeof arg === "function" ? arg.toString() : JSON.stringify(arg)).join(", ");
   return `(() => { const resolveChatComposer = ${resolveChatComposer.toString()}; return (${fn.toString()})(${serialized}); })()`;
 }
+function chatComposerAttachmentNamesMatch(actualNames, expectedNames, allowTimestamp = true) {
+  if (!Array.isArray(actualNames) || !Array.isArray(expectedNames) || actualNames.length !== expectedNames.length || [...actualNames, ...expectedNames].some((name) => typeof name !== "string" || !name.length)) return false;
+  const remaining = [...expectedNames];
+  const renamed = [];
+  for (const name of actualNames) {
+    const index = remaining.indexOf(name);
+    if (index >= 0) remaining.splice(index, 1);
+    else renamed.push(name);
+  }
+  if (renamed.length && !allowTimestamp) return false;
+  const timestampMatches = (actual, original) => {
+    const dot = original.lastIndexOf(".");
+    const stem = dot > 0 ? original.slice(0, dot) : original;
+    const extension = dot > 0 ? original.slice(dot) : "";
+    if (!actual.startsWith(stem) || !actual.endsWith(extension)) return false;
+    const suffix = actual.slice(stem.length, extension ? -extension.length : void 0);
+    const match = /^\((\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})\)$/.exec(suffix);
+    if (!match) return false;
+    const parts = match.slice(1).map(Number);
+    const date = /* @__PURE__ */ new Date(0);
+    date.setUTCFullYear(parts[0], parts[1] - 1, parts[2]);
+    date.setUTCHours(parts[3], parts[4], parts[5], 0);
+    return [
+      date.getUTCFullYear(),
+      date.getUTCMonth() + 1,
+      date.getUTCDate(),
+      date.getUTCHours(),
+      date.getUTCMinutes(),
+      date.getUTCSeconds()
+    ].every((value, index) => value === parts[index]);
+  };
+  for (const name of renamed) {
+    const index = remaining.findIndex((original) => timestampMatches(name, original));
+    if (index < 0) return false;
+    remaining.splice(index, 1);
+  }
+  return remaining.length === 0;
+}
 function inspectChatComposer() {
   const { composer, root, form } = resolveChatComposer();
   if (!root) return { found: false, textEmpty: false, attachments: [], selectedFiles: [], removeTargets: [], hoverTargets: [] };
@@ -601,7 +639,7 @@ var MCP_TOOL_SETTINGS = Object.freeze({
   online_share_status: { group: "online" },
   online_share_stop: { group: "online" }
 });
-var EXTENSION_VERSION = "2.2.52";
+var EXTENSION_VERSION = "2.2.54";
 var REQUIRED_AGENT_INTERFACE_VERSION = 73;
 var MEDIA_TO_CHAT_WIDGET_URI = "ui://researchtube/chat-target-v4.html";
 var MEDIA_TO_CHAT_BIND_TIMEOUT_MS = 3e4;
@@ -2012,7 +2050,7 @@ function toolDefinitions() {
     {
       name: "media_to_chat",
       title: "Send workspace files to the current chat",
-      description: "Queue any selected Workspace files for attachment and sending in the ChatGPT conversation that invoked this tool. Its compact service widget identifies the originating Chrome tab before any Composer changes; the exact tab ID and conversation are then fixed for the entire task. Active tabs and focused windows are never used to select a destination. If the originating tab cannot be identified within 30 seconds, is duplicated in another tab, closes or changes conversation, the task fails rather than selecting another tab. The ResearchTube Extension must be able to receive the task widget handshake. No new tab is opened. The tool uploads file bytes to ChatGPT using Chrome automation and presses Send without adding prompt text. Count and per-file size limits are configured by mediaToChatMaxFiles and mediaToChatMaxFileSizeMiB in agent/agent-config.json. Oversized files are listed in skippedFiles; eligible files are sent together. composerPolicy defaults to requireEmpty: refuse a Composer containing text or attachments. clear explicitly removes its text and existing attachments once, before uploading the selected files, and verifies that it is empty. After uploading starts, user edits, added or removed attachments, or a changed conversation stop the task without Send; already attached task files stay in the Composer. The task never clears again after upload begins. Optional sendDelaySeconds defaults to 0 and delays Send after all eligible files are accepted in Composer. During waitingToSend, status reports sendNotBefore (UTC) and remainingSeconds. The pause releases browser automation for other tabs; another task targeting the same Composer is refused. Cancellation before Send leaves existing text and attachments untouched. After receiving the task, finish this assistant response promptly: ChatGPT may keep Send unavailable while responding. Do not poll during this same assistant turn; use media_to_chat_status in a later turn, no faster than pollIntervalMs. completed confirms a Send click, not ChatGPT processing or Library storage.",
+      description: "Queue any selected Workspace files for attachment and sending in the ChatGPT conversation that invoked this tool. Its compact service widget identifies the originating Chrome tab before any Composer changes; the exact tab ID and conversation are then fixed for the entire task. Active tabs and focused windows are never used to select a destination. If the originating tab cannot be identified within 30 seconds, is duplicated in another tab, closes or changes conversation, the task fails rather than selecting another tab. The ResearchTube Extension must be able to receive the task widget handshake. No new tab is opened. The tool uploads file bytes to ChatGPT using Chrome automation and presses Send without adding prompt text. Count and per-file size limits are configured by mediaToChatMaxFiles and mediaToChatMaxFileSizeMiB in agent/agent-config.json. Oversized files are listed in skippedFiles; eligible files are sent together. composerPolicy defaults to requireEmpty: refuse a Composer containing text or attachments. clear explicitly removes its text and existing attachments once, before uploading the selected files, and verifies that it is empty. After uploading starts, user edits, added or removed attachments, or a changed conversation stop the task without Send; already attached task files stay in the Composer. The task never clears again after upload begins. Optional sendDelaySeconds defaults to 0 and delays Send after all eligible files are accepted in Composer. During waitingToSend, status reports sendNotBefore (UTC) and remainingSeconds. The pause releases browser automation for other tabs; another task targeting the same Composer is refused. Cancellation before Send leaves existing text and attachments untouched. Status polling and cancellation are allowed in the initiating assistant turn, no faster than pollIntervalMs. With a positive sendDelaySeconds, inspect waitingToSend and cancel before sendNotBefore when needed. ChatGPT may keep Send unavailable while the assistant is responding: when the goal is actual submission, finish the response after any required pre-Send checks instead of waiting indefinitely for completed. A timer does not independently resume an ended assistant turn. completed confirms a Send click, not ChatGPT processing or Library storage.",
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
       inputSchema: { type: "object", additionalProperties: false, properties: { files: { type: "array", minItems: 1, items: libraryStoreFileSchema, description: "One batch of logical Workspace paths; any file type may be selected, subject to ChatGPT upload support." }, composerPolicy: { type: "string", enum: ["requireEmpty", "clear"], default: "requireEmpty", description: "requireEmpty refuses text or attachments already in the Composer. clear explicitly discards both once before upload. New user edits after preparation always stop Send and leave uploaded files attached." }, sendDelaySeconds: { type: "number", minimum: 0, default: 0, description: "Optional seconds to wait after all files are accepted in Composer, before Send. 0 sends as soon as ready; 600 waits ten minutes. Cancellation leaves files and text in place. Readiness is checked independently of this delay." } }, required: ["files"] },
       outputSchema: mediaToChatStartSchema,
@@ -2026,7 +2064,7 @@ function toolDefinitions() {
     {
       name: "media_to_chat_status",
       title: "Check sending files to chat",
-      description: "Return a media_to_chat task's phase, percentage, submitted files and size-rejected files, plus sendDelaySeconds, sendNotBefore in UTC and remainingSeconds while waitingToSend. Poll only in a later conversation turn, because ChatGPT may disable Send until the initiating assistant response finishes. completed confirms that the extension pressed Send; downstream ChatGPT processing is not verified.",
+      description: "Return a media_to_chat task's phase, percentage, submitted files and size-rejected files, plus sendDelaySeconds, sendNotBefore in UTC and remainingSeconds while waitingToSend. Polling is allowed in the initiating assistant turn, including observing waitingToSend and verifying cancellation; respect pollIntervalMs. If waiting for actual submission and ChatGPT keeps Send unavailable while the assistant is responding, finish that response and check completion in the next turn triggered by the attachment message; do not busy-wait for completed. completed confirms that the extension pressed Send; downstream ChatGPT processing is not verified.",
       annotations: localAgentReadAnnotations,
       inputSchema: { type: "object", additionalProperties: false, properties: { taskId: { type: "string", minLength: 1 } }, required: ["taskId"] },
       outputSchema: mediaToChatTaskSchema
@@ -2679,11 +2717,12 @@ function cdpAttachmentStateExpression(fileNames) {
     const resolveChatComposer = ${resolveChatComposer.toString()};
     const state = (${inspectChatComposer.toString()})();
     const expectedNames = ${JSON.stringify(fileNames)};
-    const selectedNames = new Set(state.selectedFiles.map(file => file.name));
+    const namesMatch = ${chatComposerAttachmentNamesMatch.toString()};
+    const selectedNames = state.selectedFiles.map(file => file.name);
     const cardNames = state.attachments.map(card => card.name);
-    const acceptedNames = expectedNames.filter(name => selectedNames.has(name) || cardNames.includes(name));
-    return { accepted: state.found && state.attachments.length >= expectedNames.length && acceptedNames.length === expectedNames.length,
-      acceptedNames, selectedNames: [...selectedNames] };
+    const accepted = state.found && state.attachments.length === expectedNames.length
+      && (namesMatch(cardNames, expectedNames) || namesMatch(selectedNames, expectedNames, false));
+    return { accepted, acceptedNames: accepted ? expectedNames : [], selectedNames };
   })()`;
 }
 async function cdpWaitForAttachmentAccepted(tabId, fileNames, timeoutMs = 15e3) {
@@ -2988,9 +3027,9 @@ async function assertCurrentChatComposer(target, { fileNames = null, guardToken 
   const selected = state.selectedFiles.map((file) => file.name).sort();
   const expected = [...fileNames].sort();
   const cards = state.attachments.map((card) => card.name).sort();
-  const namesMatch = (names) => names.length === expected.length && names.every((name, index) => name === expected[index]);
   const namedCards = cards.every((name) => typeof name === "string" && name.length > 0);
-  if (composerVisibleAttachmentCount(state) !== expected.length || (namedCards ? !namesMatch(cards) : !namesMatch(selected))) {
+  const namesMatch = namedCards ? chatComposerAttachmentNamesMatch(cards, expected) : chatComposerAttachmentNamesMatch(selected, expected, false);
+  if (composerVisibleAttachmentCount(state) !== expected.length || !namesMatch) {
     cdpLog("Composer attachment verification failed", { tabId: target.tabId, expectedNames: expected, cardNames: cards, selectedNames: selected, previewCount: state.previewCount });
     throw localAgentError("MEDIA_TO_CHAT_INVALID", "The Composer attachments changed or could not be verified. No Send click was made; remaining files stay attached.");
   }

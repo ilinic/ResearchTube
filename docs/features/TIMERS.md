@@ -51,4 +51,4 @@ Show a visible preparation instruction, start the requested timer, and continue 
 
 Once `completed` is observed, execute the dependent test action. Ten elapsed seconds do not prove that the user finished preparation. If an assistant response has ended, timer completion alone cannot resume it.
 
-For `media_to_chat`, retain its separate rule: after starting a submission, finish the initiating assistant response and poll its status in a later turn so ChatGPT Send can become enabled. A timer does not remove that requirement.
+For `media_to_chat`, status and cancellation may be used in the initiating assistant turn. With a positive `sendDelaySeconds`, timers can space checks of `waitingToSend` and its countdown before cancellation. For actual submission, finish the response after required pre-Send checks if ChatGPT keeps Send disabled during generation; the automatic attachment message can trigger the next turn. A timer does not independently resume an ended response.
