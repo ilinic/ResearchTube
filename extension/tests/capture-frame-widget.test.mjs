@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
-const [widget, viewer, background] = await Promise.all([
+const [widget, viewerHtml, viewer, background] = await Promise.all([
   readFile(new URL("../ui/capture-frame-widget-v27.html", import.meta.url), "utf8"),
   readFile(new URL("../media-viewer.html", import.meta.url), "utf8"),
+  readFile(new URL("../media-viewer.js", import.meta.url), "utf8"),
   readFile(new URL("../background.js", import.meta.url), "utf8")
 ]);
 
@@ -21,9 +22,11 @@ assert.match(widget, /workspacePath/, "the media anchor must preserve the logica
 
 assert.match(viewer, /researchtube_media_viewer_resolve/, "the extension-owned viewer must resolve media through the service worker");
 assert.match(viewer, /researchtube_capture_frame_local_action/, "the extension-owned viewer must copy paths through the service worker");
-assert.match(viewer, /<video id="video" controls playsinline controlslist="nodownload noplaybackrate nofullscreen" disablepictureinpicture>/);
-assert.match(viewer, /<audio id="audio" controls>/);
+assert.match(viewerHtml, /<video id="video" controls playsinline controlslist="nodownload noplaybackrate nofullscreen" disablepictureinpicture>/);
+assert.match(viewerHtml, /<audio id="audio" controls>/);
 assert.match(viewer, /chrome\.runtime\.sendMessage/, "the viewer must use extension messaging, not ChatGPT network APIs");
 assert.doesNotMatch(viewer, /window\.openai/, "the viewer is independent of the MCP Apps sandbox");
 assert.match(background, /researchtube_media_viewer_resolve/, "the service worker must resolve a loopback URL only for the extension viewer");
+assert.match(viewerHtml, /<script src="media-viewer.js"><\/script>/);
+assert.doesNotMatch(viewerHtml, /<script>/, "extension pages cannot execute inline JavaScript");
 console.log("capture frame widget: ok");

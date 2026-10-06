@@ -24,7 +24,7 @@ npm ci --prefix extension
 | Storyboard public contract | `extension/storyboards.js` |
 | YouTube MAIN-world behavior | `extension/youtube-page-bridge.src.js` |
 | YouTube isolated bridge | `extension/youtube-content.js` |
-| ChatGPT media overlay | `extension/chatgpt-capture-frame-bridge.js`, `extension/media-viewer.html` |
+| ChatGPT media overlay | `extension/chatgpt-image-viewer-bridge.js`, `extension/chatgpt-capture-frame-bridge.js`, `extension/media-viewer.html`, `extension/media-viewer.js` |
 | ChatGPT Composer inspection and upload editing guard | `extension/chat-composer.js` |
 | Settings and popup | `extension/settings.*`, `extension/popup.*` |
 | Local Agent | `agent/researchtube_agent.py` |
@@ -183,7 +183,7 @@ Do not commit, push or publish unless the user explicitly requests it.
 
 Use `TaskHistory(configured_task_history_limit)` for Agent task registries; bind a runner immediately after registration so done callbacks can prune terminal records after actual final publication. Keep failed/cancelled records as well as completed ones. Never evict queued/working records or remove Workspace files as part of history maintenance. Browser task Maps are pruned before persistence and status/cancellation access. Test small configured limits and active-runner publication races.
 
-`newToolsEnabledByDefault` belongs to the single Agent JSON configuration, not a developer control in user Settings. It initializes preferences for automatically discovered custom tools only; newly introduced built-in tools default to enabled independently of this parameter; never overwrite saved per-tool choices. `value` and `comment` sit beside each other inside every setting object, preserving strict JSON parsing without duplicate parameter names. `read_agent_config()` unwraps values at one boundary; internal code and HTTP responses continue using ordinary typed values. New settings must include an adjacent meaningful explanation. See [TIMERS.md](features/TIMERS.md) for clock semantics and limitations.
+`newToolsEnabledByDefault` belongs to the single Agent JSON configuration, not a developer control in user Settings. It initializes preferences for automatically discovered custom tools only; newly introduced built-in tools default to enabled independently of this parameter; never overwrite saved per-tool choices. `value` and `comment` sit beside each other inside every setting object, preserving strict JSON parsing without duplicate parameter names. `read_agent_config()` unwraps values at one boundary; internal code and HTTP responses continue using ordinary typed values. New settings must include an adjacent meaningful explanation. `mediaWidgetHandshakeTimeoutSeconds` defaults to 10 (integer 1–300) and is read for each media_show call and sent through private tool-result metadata, so a cached widget template does not pin an old setting. It controls image connection/loading attempts; the retry interval remains one second. Older Agents without the optional response field use 10; invalid configuration values are reported instead of silently coerced. See [TIMERS.md](features/TIMERS.md) for clock semantics and limitations.
 
 Configuration example (all settings use this layout):
 

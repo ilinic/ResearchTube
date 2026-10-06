@@ -12,6 +12,8 @@ if (!globalThis.__researchTubeCaptureFrameWidgetBridgeInstalled) {
   function localMediaPayload(value) {
     const media = value?.media;
     if (!media || typeof media !== "object" || typeof media.workspacePath !== "string" || !media.workspacePath) return null;
+    // Images use the acknowledged, retryable bridge in chatgpt-image-viewer-bridge.js.
+    if (media.mediaKind === "image") return null;
     if (!new Set(["image", "video", "audio"]).has(media.mediaKind) || typeof media.mimeType !== "string") return null;
     return { workspacePath: media.workspacePath, mediaKind: media.mediaKind, mimeType: media.mimeType, sizeBytes: Number.isInteger(media.sizeBytes) ? media.sizeBytes : null };
   }

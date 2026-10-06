@@ -80,7 +80,7 @@ $("describe-video").addEventListener("click", async () => {
     url: liveTab.url,
     title: liveTab.title,
     index: liveTab.index
-  } }).catch((error) => console.warn("[ResearchTube] Describe this video request failed", error));
+  } }).catch((error) => console.info("[ResearchTube] Describe this video request failed", error));
   window.close();
 });
 $("settings").addEventListener("click", () => chrome.runtime.openOptionsPage());

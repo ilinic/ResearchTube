@@ -639,11 +639,11 @@ var MCP_TOOL_SETTINGS = Object.freeze({
   online_share_status: { group: "online" },
   online_share_stop: { group: "online" }
 });
-var EXTENSION_VERSION = "2.2.54";
+var EXTENSION_VERSION = "2.2.59";
 var REQUIRED_AGENT_INTERFACE_VERSION = 73;
 var MEDIA_TO_CHAT_WIDGET_URI = "ui://researchtube/chat-target-v4.html";
 var MEDIA_TO_CHAT_BIND_TIMEOUT_MS = 3e4;
-var CAPTURE_FRAME_WIDGET_URI = "ui://researchtube/capture-frame-v49.html";
+var CAPTURE_FRAME_WIDGET_URI = "ui://researchtube/capture-frame-v52.html";
 var RESEARCHTUBE_DEMO_GUIDE_URL = "https://github.com/ilinic/ResearchTube/blob/main/docs/DEMO.md";
 var RESEARCHTUBE_SERVER_DESCRIPTION = "ResearchTube provides YouTube research, local media and image operations, workspace management, screenshots, clipboard, Library integration, real asynchronous timers, and a guided demonstration using bundled local media. Search this server when the user refers to ResearchTube, YouTube analysis, a previously created workspace file, captured frame, screenshot, crop, clipboard, or asks to continue a previous ResearchTube operation. In clients with deferred tools, ResearchTube is discoverable through functions.exec lazy MCP-tool discovery; search there before treating the capability as unavailable.";
 var RESEARCHTUBE_MCP_INSTRUCTIONS = "ResearchTube exposes MCP tools that may be loaded or discovered lazily by the client. When the user mentions ResearchTube, invokes @ResearchTube, asks to repeat a ResearchTube operation, or requests a capability previously provided by ResearchTube, do not infer that ResearchTube is unavailable merely because its tools are not currently visible as a top-level tool namespace. In this client, ResearchTube is available through functions.exec with lazy MCP-tool discovery: search there for the appropriate ResearchTube tool before reporting that the capability is unavailable. Only report ResearchTube as unavailable if tool discovery actually fails, the required tool cannot be found after discovery, or an actual ResearchTube tool invocation returns an availability, connection, compatibility, or transport error. Successful use earlier in the conversation is evidence that the tools may be discoverable again; rediscover them rather than assuming access has disappeared. On the first ResearchTube interaction in a conversation, when the user asks what ResearchTube can do or gives no concrete operation, briefly offer the guided demo. Run it only with consent, use the bundled logical Workspace path demo/researchtube-demo.mp4, follow " + RESEARCHTUBE_DEMO_GUIDE_URL + ", never modify or delete the bundled source, and explain each benefit in the user's language. media_clip and media_capture_frame are asynchronous: poll their corresponding get_task tools no faster than pollIntervalMs. media_clip creates one separate file per requested interval and never renders or concatenates results automatically. media_capture_frame, media_capture_screen, and media_image_crop never render a widget themselves. Call media_show only for specific completed image paths the user asks to see. For media_capture_screen and media_image_crop, when showInChat is true, after the successful creation result call media_show once with the returned workspace image path; otherwise do not call the display tool. timer_start, timer_status, and timer_cancel provide real timed pauses because LLMs have no precise internal running clock. Show the user any requested preparation instruction, start a timer, and continue status calls at pollIntervalMs within the same turn until completed before dependent actions. An ended assistant turn is not automatically resumed by a timer. media_to_chat queues attachments for the current ChatGPT conversation. Finish the assistant response after starting it; do not poll in the same turn because Send may remain unavailable until the response ends.";
@@ -2302,7 +2302,7 @@ async function mcpToolPreferences() {
     try {
       await refreshTaskHistorySettings();
     } catch (error2) {
-      console.warn(`[ResearchTube MCP] new-tool default unavailable (${error2?.code || "AGENT_UNAVAILABLE"}); using cached default=${developerNewToolsDefault}.`);
+      console.info(`[ResearchTube MCP] new-tool default unavailable (${error2?.code || "AGENT_UNAVAILABLE"}); using cached default=${developerNewToolsDefault}.`);
     }
     preferences.newToolsEnabledByDefault = developerNewToolsDefault;
   }
@@ -2371,7 +2371,7 @@ function cdpLog(step, details = void 0) {
   else console.info(`${prefix} ${step}`, details);
 }
 function cdpErrorLog(step, error2) {
-  console.warn(`[ResearchTube CDP] ${step}`, error2 instanceof Error ? error2.message : error2);
+  console.info(`[ResearchTube CDP] ${step}`, error2 instanceof Error ? error2.message : error2);
 }
 async function cdpAttach(tabId) {
   cdpLog("Debugger attach requested", { tabId, protocolVersion: CDP_PROTOCOL_VERSION });
@@ -2636,10 +2636,10 @@ async function cdpSetComposerText(tabId, text2) {
         firstDifferenceIndex,
         error: safeErrorMessage(error2)
       };
-      console.warn("[ResearchTube CDP] Composer text mismatch; retrying replacement", lastDiagnostic);
+      console.info("[ResearchTube CDP] Composer text mismatch; retrying replacement", lastDiagnostic);
     }
   }
-  console.warn("[ResearchTube CDP] Composer prompt verification failed after all attempts", lastDiagnostic);
+  console.info("[ResearchTube CDP] Composer prompt verification failed after all attempts", lastDiagnostic);
   throw cdpError(`ChatGPT Composer could not be replaced and verified after ${CDP_COMPOSER_PROMPT_ATTEMPTS} attempts: ${safeErrorMessage(lastError)}`);
 }
 async function cdpClearComposerDraft(tabId) {
@@ -3807,7 +3807,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
   if (message?.type === "researchtube_media_viewer_resolve") {
-    showWorkspaceImage(message.path).then((data) => sendResponse({ ok: true, data })).catch((error2) => sendResponse({ ok: false, error: safeErrorMessage(error2) }));
+    console.info(`[ResearchTube image worker ${EXTENSION_VERSION}] media resolve received`);
+    showWorkspaceImage(message.path).then((data) => {
+      console.info(`[ResearchTube image worker ${EXTENSION_VERSION}] media resolve completed`);
+      sendResponse({ ok: true, data });
+    }).catch((error2) => {
+      console.info(`[ResearchTube image worker ${EXTENSION_VERSION}] media resolve failed`, safeErrorMessage(error2));
+      sendResponse({ ok: false, error: safeErrorMessage(error2) });
+    });
     return true;
   }
   return false;
@@ -5583,7 +5590,7 @@ async function ensureCaptureFrameOffscreenDocument() {
     captureFrameOffscreenPromise = null;
     if (error2?.code) throw error2;
     const detail = String(error2?.message || error2 || "Unknown offscreen-document error.");
-    console.error("[ResearchTube] Chrome could not open the offscreen clipboard document.", error2);
+    console.info("[ResearchTube] Chrome could not open the offscreen clipboard document.", error2);
     throw localAgentError("CLIPBOARD_UNAVAILABLE", "Chrome could not open its local clipboard helper.", detail);
   }
 }
@@ -5593,13 +5600,13 @@ async function copyCaptureFrameToClipboard(message) {
     const result = await chrome.runtime.sendMessage({ type: "researchtube_copy_capture_frame", ...message });
     if (!result?.ok) {
       const detail = String(result?.message || "The offscreen clipboard document returned no success response.");
-      console.error("[ResearchTube] The offscreen clipboard document rejected the request.", { kind: message.kind, detail });
+      console.info("[ResearchTube] The offscreen clipboard document rejected the request.", { kind: message.kind, detail });
       throw localAgentError("CLIPBOARD_UNAVAILABLE", "Chrome could not update the local clipboard.", detail);
     }
   } catch (error2) {
     if (error2?.code) throw error2;
     const detail = String(error2?.message || error2 || "Unknown clipboard messaging error.");
-    console.error("[ResearchTube] Chrome clipboard messaging failed.", error2);
+    console.info("[ResearchTube] Chrome clipboard messaging failed.", error2);
     throw localAgentError("CLIPBOARD_UNAVAILABLE", "Chrome could not update the local clipboard.", detail);
   }
 }
@@ -5690,7 +5697,7 @@ async function pollOnceInternal() {
     await refreshActionBadge();
     return { ok: true, handled: commands.length };
   } catch (error2) {
-    console.warn("ResearchTube:", error2);
+    console.info("ResearchTube:", error2);
     await chrome.storage.local.set({ lastStatus: `error: ${String(error2)}` });
     await setActionBadge("connection-error");
     return { ok: false, error: String(error2) };
@@ -5837,10 +5844,26 @@ function connectionFailure(errorCode, message, detail = null) {
 function safeErrorMessage(error2) {
   return String(error2?.message || error2 || "Unknown error").replace(/sk-[A-Za-z0-9_-]+/g, "[redacted]");
 }
+async function configuredImageWidgetTimeout() {
+  let timeout = 10;
+  try {
+    const settings = await agentJsonRequest("/internal/tool-limits");
+    if (settings.mediaWidgetHandshakeTimeoutSeconds !== void 0) {
+      timeout = settings.mediaWidgetHandshakeTimeoutSeconds;
+      if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > 300) {
+        throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid image-widget handshake timeout.");
+      }
+    }
+  } catch (error2) {
+    if (error2?.code === "CONFIG_INVALID" || error2?.code === "AGENT_INVALID_RESPONSE") throw error2;
+  }
+  return timeout;
+}
 async function readCaptureFrameWidgetHtml() {
   const response = await fetch(chrome.runtime.getURL("ui/capture-frame-widget-v27.html"));
   if (!response.ok) throw new Error("The bundled workspace-image widget could not be read.");
-  return response.text();
+  const timeout = await configuredImageWidgetTimeout();
+  return (await response.text()).replace("const IMAGE_HANDSHAKE_TIMEOUT_SECONDS = 10;", `const IMAGE_HANDSHAKE_TIMEOUT_SECONDS = ${timeout};`);
 }
 function captureFrameWidgetResource() {
   return {
@@ -6224,8 +6247,14 @@ async function executeShowWorkspaceImageToolCall(id, path) {
   const startedAt = Date.now();
   try {
     const result = await showWorkspaceImage(path);
+    const handshakeTimeoutSeconds = await configuredImageWidgetTimeout();
     void recordCommandDiagnostic("succeeded", { tool: "media_show", elapsed_ms: Date.now() - startedAt, output: result.metadata });
-    return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: "Workspace media shown." }], structuredContent: result.metadata, isError: false } };
+    return { jsonrpc: "2.0", id, result: {
+      content: [{ type: "text", text: "Workspace media shown." }],
+      structuredContent: result.metadata,
+      _meta: { "researchtube/mediaWidget": { handshakeTimeoutSeconds } },
+      isError: false
+    } };
   } catch (error2) {
     void recordCommandDiagnostic("failed", { tool: "media_show", elapsed_ms: Date.now() - startedAt, error_code: error2?.code || null, error: searchDiagnosticMessage(error2) });
     return toolError(id, error2);
@@ -6238,7 +6267,7 @@ async function executeCaptureFrameWidgetActionToolCall(id, tool, path, action) {
     void recordCommandDiagnostic("succeeded", { tool, elapsed_ms: Date.now() - startedAt, output: result });
     return jsonToolResult(id, result);
   } catch (error2) {
-    console.error(`[ResearchTube] ${tool} failed.`, error2);
+    console.info(`[ResearchTube] ${tool} failed.`, error2);
     void recordCommandDiagnostic("failed", { tool, elapsed_ms: Date.now() - startedAt, error_code: error2?.code || null, error: searchDiagnosticMessage(error2) });
     if (typeof error2?.detail === "string" && error2.detail) {
       const detailedError = localAgentError(error2.code || "TOOL_ERROR", `${String(error2.message)} Detail: ${error2.detail}`, error2.detail);

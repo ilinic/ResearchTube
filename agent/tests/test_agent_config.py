@@ -80,6 +80,21 @@ class AgentConfigTests(unittest.TestCase):
         for key in ['libraryStoreMaxFileSizeMiB', 'mediaToChatMaxFileSizeMiB']:
             self.assertEqual(agent.configured_tool_limits()[key], 20)
 
+    def test_image_widget_timeout_defaults_validation_and_live_edits(self):
+        self.assertEqual(self.original['mediaWidgetHandshakeTimeoutSeconds']['value'], 10)
+        self.assertEqual(agent.configured_media_widget_handshake_timeout(), 10)
+        self.write({})
+        self.assertEqual(agent.configured_media_widget_handshake_timeout(), 10)
+        for value in [1, 7, 300]:
+            self.write({'mediaWidgetHandshakeTimeoutSeconds': {'value': value}})
+            self.assertEqual(agent.configured_media_widget_handshake_timeout(), value)
+        for value in [True, 0, -1, 301, 1.5, '10', None]:
+            self.write({'mediaWidgetHandshakeTimeoutSeconds': {'value': value}})
+            with self.assertRaises(agent.AgentApiError) as raised:
+                agent.configured_media_widget_handshake_timeout()
+            self.assertEqual(raised.exception.code, 'CONFIG_INVALID')
+            self.assertIn('mediaWidgetHandshakeTimeoutSeconds', raised.exception.message)
+
     def test_defaults_and_cleanup_fallback(self):
         self.write({})
         self.assertEqual(agent.configured_port(), 17843)

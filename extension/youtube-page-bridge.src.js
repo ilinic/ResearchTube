@@ -17,7 +17,7 @@ import { Innertube, Parser } from "youtubei.js";
     if (error?.error_type === "class_not_found" && error.classname === "CommentFilterContextView") {
       return;
     }
-    console.warn("[ResearchTube][YouTube.js parser]", error);
+    console.info("[ResearchTube][YouTube.js parser]", error);
   });
 
   const SOURCE = "researchtube-page-bridge";

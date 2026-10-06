@@ -39,7 +39,7 @@ try:
 except ImportError:
     from task_history import TaskHistory
 
-AGENT_VERSION = "2.2.52"
+AGENT_VERSION = "2.2.54"
 INTERFACE_VERSION = 73
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
@@ -288,6 +288,13 @@ def configured_new_tools_default() -> bool:
     value = read_agent_config().get("newToolsEnabledByDefault", True)
     if not isinstance(value, bool):
         raise AgentApiError("CONFIG_INVALID", "newToolsEnabledByDefault must be a boolean.")
+    return value
+
+
+def configured_media_widget_handshake_timeout() -> int:
+    value = read_agent_config().get("mediaWidgetHandshakeTimeoutSeconds", 10)
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 300:
+        raise AgentApiError("CONFIG_INVALID", "mediaWidgetHandshakeTimeoutSeconds must be an integer from 1 to 300.")
     return value
 
 
@@ -5337,7 +5344,7 @@ def widget_media_byte_range(value: str | None, size: int) -> tuple[int, int] | N
     return start, min(end, size - 1)
 
 
-async def read_request(reader: asyncio.StreamReader) -> tuple[str, str, dict[str, list[str]], bytes]:
+async def read_request(reader: asyncio.StreamReader) -> tuple[str, str, dict[str, list[str]], bytes, dict[str, str]]:
     request_line = await asyncio.wait_for(reader.readline(), timeout=5)
     parts = request_line.decode("latin-1").strip().split()
     if len(parts) < 2:
@@ -5361,7 +5368,7 @@ async def read_request(reader: asyncio.StreamReader) -> tuple[str, str, dict[str
     if content_length < 0 or content_length > maximum:
         raise AgentApiError("REQUEST_TOO_LARGE", "Request body is too large.")
     body = await asyncio.wait_for(reader.readexactly(content_length), timeout=30 if maximum > MAX_REQUEST_BODY_BYTES else 5) if content_length else b""
-    return parts[0].upper(), parsed.path, parse_qs(parsed.query, keep_blank_values=True), body
+    return parts[0].upper(), parsed.path, parse_qs(parsed.query, keep_blank_values=True), body, headers
 
 
 @dataclass(frozen=True)
@@ -5518,7 +5525,7 @@ def public_share_file(path: str) -> tuple[Path, str]:
 
 async def handle_public_share_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
     try:
-        method, path, _query, body = await read_request(reader)
+        method, path, _query, body, _headers = await read_request(reader)
         if method not in {"GET", "HEAD"} or body:
             writer.write(image_response("404 Not Found"))
         else:
@@ -5815,13 +5822,13 @@ STORYBOARD_TASKS = StoryboardService(sys.modules[__name__])
 async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
     method, path = "", ""
     try:
-        method, path, query, body = await read_request(reader)
+        method, path, query, body, headers = await read_request(reader)
         if method == "OPTIONS":
             response_status, response_body = "204 No Content", None
         elif method == "GET" and path == "/health":
             response_status, response_body = "200 OK", cached_public_health()
         elif method == "GET" and path == "/internal/tool-limits":
-            response_status, response_body = "200 OK", {"limits": configured_tool_limits(), "newToolsEnabledByDefault": configured_new_tools_default()}
+            response_status, response_body = "200 OK", {"limits": configured_tool_limits(), "newToolsEnabledByDefault": configured_new_tools_default(), "mediaWidgetHandshakeTimeoutSeconds": configured_media_widget_handshake_timeout()}
         elif method == "POST" and path == "/timer/start":
             response_status, response_body = "200 OK", await TIMER_TASKS.create(parse_json_body(body))
         elif method == "GET" and re.fullmatch(r"/tasks/timer/[^/]+", path):

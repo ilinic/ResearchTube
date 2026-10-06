@@ -58,8 +58,8 @@ assert.match(background, /expectedText: text, composerText: actualText/, "a fail
 assert.match(background, /firstDifferenceIndex/, "Composer mismatch diagnostics must report the first differing character position");
 assert.match(background, /function normalizeComposerTextForComparison\(value\)[\s\S]*?normalize\("NFC"\)\.replace\(\/\\s\+\/gu, " "\)\.trim\(\)/, "Composer comparison must normalize Unicode form and whitespace before deciding whether the prompt matches");
 assert.match(background, /normalizedComposerText === normalizedExpectedText/, "prompt submission must be based on the normalized full-text comparison");
-assert.match(background, /console\.warn\("\[ResearchTube CDP\] Composer text mismatch; retrying replacement"/, "each retry mismatch must be visible in the browser console");
-assert.match(background, /console\.warn\("\[ResearchTube CDP\] Composer prompt verification failed after all attempts", lastDiagnostic\)/, "a terminal Composer verification failure must print its text diagnostics to the console without creating an Errors entry");
+assert.match(background, /console\.info\("\[ResearchTube CDP\] Composer text mismatch; retrying replacement"/, "each retry mismatch must be visible in the browser console");
+assert.match(background, /console\.info\("\[ResearchTube CDP\] Composer prompt verification failed after all attempts", lastDiagnostic\)/, "a terminal Composer verification failure must print its text diagnostics to the console without creating an Errors entry");
 assert.match(background, /key: "Backspace", code: "Backspace", windowsVirtualKeyCode: 8, nativeVirtualKeyCode: 8/, "Backspace must include both virtual-key codes");
 assert.match(background, /key: "Delete", code: "Delete", windowsVirtualKeyCode: 46, nativeVirtualKeyCode: 46/, "Delete must be a verified fallback with both virtual-key codes");
 assert.match(background, /composer\.selectionStart === 0 && composer\.selectionEnd === String\(composer\.value \?\? ''\)\.length/, "textarea cleanup must verify that all characters are selected");

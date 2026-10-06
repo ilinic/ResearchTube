@@ -28,7 +28,7 @@ The tunnel is outbound-only from the Extension. The Agent binds only to loopback
 | Storyboard Extension module | `extension/storyboards.js` | Storyboard schemas, validation and public result projection |
 | ChatGPT media bridge | `extension/chatgpt-capture-frame-bridge.js` | Finds the exact MCP widget iframe and installs the local viewer overlay |
 | Current-chat binding | `extension/chatgpt-chat-target-bridge.js`, `extension/ui/chat-target-v1.html` | Compact task handshake using Chrome sender identity, independent of ChatGPT layout |
-| Local media viewer | `extension/media-viewer.html` | Loads image, video or audio bytes from loopback with Extension permissions |
+| Local media viewer | `extension/media-viewer.html` | Loads image, video or audio bytes from loopback with Extension permissions; packaged script in `media-viewer.js` |
 | Settings and popup | `extension/settings.*`, `extension/popup.*` | Connection, Agent status, tool availability and bounded diagnostics |
 | Local Agent | `agent/researchtube_agent.py` | Workspace, executable discovery, downloads, FFmpeg operations, speech callbacks and loopback media serving |
 | Timer Agent module | `agent/timers.py`, `agent/task_history.py` | Real durations/deadlines, clock diagnostics and bounded terminal-task history |
@@ -121,9 +121,15 @@ Media creation tools return Workspace metadata and normally do not render a widg
 
 ## ChatGPT local-media viewer
 
-An MCP widget remains the conversation anchor but cannot reliably fetch loopback media under ChatGPT's iframe CSP. The widget announces its identity. The ResearchTube content script locates the exact iframe by `event.source` and overlays an Extension-owned `media-viewer.html` frame in the same position.
+An MCP widget remains the conversation anchor but cannot reliably fetch loopback media under ChatGPT's iframe CSP. Images use `chatgpt-image-viewer-bridge.js`: an own DOM marker plus a UUID identify the view and a separate UUID identifies each loading/Retry attempt. The widget announces immediately and once per second until the Extension acknowledges receipt. `mediaWidgetHandshakeTimeoutSeconds` in the single Agent configuration defaults to 10 and bounds the complete connection/loading attempt. A deadline travels with each request so late injection cannot revive an expired attempt. A fresh Retry explicitly starts a new request.
 
-The viewer receives verified logical metadata, constructs the loopback request in the Extension security context and loads bytes directly from the Agent. Images are loaded normally; video and audio use HTTP byte ranges for seeking. Media bytes, loopback URLs and physical paths are not placed in the MCP result.
+Content scripts run in all matching sandbox frames, including opaque/about:blank descendants. Direct-child Window identities relay metadata and acknowledgments through nested frames to the top page; no ChatGPT class names, text searches or active-tab guesses select the target. The top-page script attaches one Extension viewer per view, outside the React tree, and positions/clips it to that exact iframe slot. Repeated notifications do not reset loading or create duplicate viewers. The original iframe stays untouched and visible until the viewer reports a successful image load; connection receipt and image readiness are separate states. Image decode acknowledgment is sent immediately after the load event, without waiting for requestAnimationFrame or a ResizeObserver: the viewer is initially hidden until that acknowledgment. Errors remove the failed overlay, preserve the anchor's Retry control and go to the console. The MCP Apps initialization, tool-result and size-changed messages supplement ChatGPT's compatibility helpers.
+
+The Extension viewer uses packaged `media-viewer.js`, not inline JavaScript (blocked by Extension-page CSP). Video/audio retain the previous media bridge; this iteration's new retry/relay behavior and practical test scope are image-only.
+
+The viewer receives verified logical metadata, constructs the loopback request in the Extension security context and loads bytes directly from the Agent. Images are fetched inside the Extension viewer using its loopback host permission and displayed with a viewer-owned Blob URL; image bytes never traverse MCP or ChatGPT postMessage. Blob URLs are revoked on Refresh, failure and page unload. Video and audio retain HTTP byte ranges for seeking. Media bytes, loopback URLs and physical paths are not placed in the MCP result.
+
+Image-anchor Copy reuses the image relay across opaque or inherited-origin child frames, rather than depending on the older capture-frame bridge. Pending actions are bounded, expire with the configured handshake deadline, and execute once per action ID. Widget and bridge diagnostics use console.info; marker scans ignore unchanged values to prevent acknowledgments from retriggering themselves.
 
 ## ChatGPT file submission
 

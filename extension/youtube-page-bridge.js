@@ -38492,7 +38492,7 @@ ${getNsigProcessorFn(eval_args.n, eval_args.sp, eval_args.sig)}`;
       if (error2?.error_type === "class_not_found" && error2.classname === "CommentFilterContextView") {
         return;
       }
-      console.warn("[ResearchTube][YouTube.js parser]", error2);
+      console.info("[ResearchTube][YouTube.js parser]", error2);
     });
     const SOURCE = "researchtube-page-bridge";
     const COMMAND_SOURCE = "researchtube-extension-content";

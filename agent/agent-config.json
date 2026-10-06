@@ -45,6 +45,10 @@
       "comment": "Maximum retained completed/failed/cancelled records per task manager; default 2000, range 1–100000. Oldest terminal records are removed from memory and Extension task storage. Active/queued work and output files are never deleted. Timer records are also lost on Agent restart."
     }
   },
+  "mediaWidgetHandshakeTimeoutSeconds": {
+    "value": 10,
+    "comment": "Seconds allowed for an image widget to connect to the Extension and load its local viewer. The widget retries connection every second. Default 10, range 1–300. Read for each media_show call; existing loading attempts keep their timeout. Retry starts a fresh attempt."
+  },
   "newToolsEnabledByDefault": {
     "value": true,
     "comment": "Default activation of automatically discovered custom tools without a saved individual preference. true enables those custom tools; false leaves them disabled. Newly introduced built-in ResearchTube tools are enabled independently of this setting. Existing individual tool choices are preserved. The Extension reads this from the Agent, using its last known value (initially true) if unavailable. Refresh the MCP schema after discovering custom tools."
