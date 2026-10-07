@@ -360,7 +360,7 @@ console.log('Browser batches: navigation during final save preserves files and s
  const scoped=fixture();
  scoped.host.studyOptions=async()=>({groupTabs:false,detailedLogging:false,observation:{maxNodes:50,maxChars:16000}});
  const sid=(await scoped.agent.start(10)).session.sessionId;
- assert.match(scoped.events.find(row=>row[0]==='prompt')[2],/one browser_observe call/);
+ assert.match(scoped.events.find(row=>row[0]==='prompt')[2],/Start with browser_observe \(defaults\)/);
  await scoped.agent.onEvent({tabId:21},'Target.attachedToTarget',{sessionId:'child',targetInfo:{type:'iframe'}});
  const before=await scoped.run('browser_observe',{sessionId:sid});
  const mainImage=before.nodes.find(node=>node.role==='image');
