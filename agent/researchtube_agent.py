@@ -41,8 +41,8 @@ except ImportError:
     from task_history import TaskHistory
     from browser_resources import save_browser_resource
 
-AGENT_VERSION = "2.2.65"
-INTERFACE_VERSION = 77
+AGENT_VERSION = "2.2.66"
+INTERFACE_VERSION = 78
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
 MAX_GOOGLE_TRANSLATE_AUDIO_BYTES = 16 * 1024 * 1024
@@ -5858,7 +5858,7 @@ def compact_custom_tool_log_path(path: str, body: dict[str, Any] | None) -> str:
     if not isinstance(tool, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,79}", tool):
         return path
     task_id = document.get("taskId")
-    suffix = f"/{task_id}" if isinstance(task_id, str) and re.fullmatch(r"ct_[A-Za-z0-9_-]{11}", task_id) else ""
+    suffix = f"/{task_id}" if isinstance(task_id, str) and re.fullmatch(r"tsk_[A-Za-z0-9_-]{10}", task_id) else ""
     if path.endswith("/cancel"):
         suffix += "/cancel"
     return f"/custom-tools/{tool}{suffix}"
@@ -5924,9 +5924,9 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             if not isinstance(payload, dict) or set(payload) != {"name", "arguments"} or not isinstance(payload.get("name"), str):
                 raise AgentApiError("CUSTOM_TOOL_REQUEST_INVALID", "Custom tool calls require name and arguments.")
             response_status, response_body = "200 OK", await CUSTOM_TOOLS.call(payload["name"], payload["arguments"])
-        elif method == "GET" and re.fullmatch(r"/custom-tools/tasks/ct_[A-Za-z0-9_-]{11}", path):
+        elif method == "GET" and re.fullmatch(r"/custom-tools/tasks/tsk_[A-Za-z0-9_-]{10}", path):
             response_status, response_body = "200 OK", CUSTOM_TOOLS.status(path.removeprefix("/custom-tools/tasks/"))
-        elif method == "POST" and re.fullmatch(r"/custom-tools/tasks/ct_[A-Za-z0-9_-]{11}/cancel", path):
+        elif method == "POST" and re.fullmatch(r"/custom-tools/tasks/tsk_[A-Za-z0-9_-]{10}/cancel", path):
             if parse_json_body(body) != {}:
                 raise AgentApiError("CUSTOM_TOOL_REQUEST_INVALID", "Custom tool cancellation accepts an empty body.")
             response_status, response_body = "200 OK", await CUSTOM_TOOLS.cancel(path.removeprefix("/custom-tools/tasks/").removesuffix("/cancel"))

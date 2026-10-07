@@ -47,7 +47,7 @@ const MCP_TOOL_GROUPS = Object.freeze({
   clipboard: { title: "Clipboard", order: 80 },
   library: { title: "Library and sharing", order: 90 },
   online: { title: "Online Share", order: 100 },
-  custom: { title: "Custom", order: 110 }
+  custom: { title: "Custom Asynchronous Tasks", order: 110 }
 });
 // This is deliberately explicit metadata, rather than a rule inferred from a
 // tool name. New third-party tools without an entry land safely in Custom.
@@ -68,7 +68,7 @@ const MCP_TOOL_SETTINGS = Object.freeze({
   library_store_start: { group: "library" }, library_store_status: { group: "library" }, library_store_cancel: { group: "library" }, online_share_start: { group: "online" }, online_share_status: { group: "online" }, online_share_stop: { group: "online" },
   custom_tool_status: { group: "custom" }, custom_tool_cancel: { group: "custom" }
 });
-const EXTENSION_VERSION = "2.2.89";
+const EXTENSION_VERSION = "2.2.90";
 // Chrome dispatches this for requests made by our Extension-owned viewer.
 // Packaged assets and unrelated requests fall through without interception.
 globalThis.addEventListener?.("fetch", createMediaStreamHandler({
@@ -78,7 +78,7 @@ globalThis.addEventListener?.("fetch", createMediaStreamHandler({
   fetchMedia: (url, options) => fetch(url, options),
   log: (stage, details = {}) => consoleAction(`[ResearchTube media stream ${EXTENSION_VERSION}]`, stage, details)
 }));
-const REQUIRED_AGENT_INTERFACE_VERSION = 77;
+const REQUIRED_AGENT_INTERFACE_VERSION = 78;
 // A UI resource URI is a cache key in MCP Apps. Increment it whenever the
 // rendered template changes so ChatGPT does not reuse a stale iframe bundle.
 const MEDIA_TO_CHAT_WIDGET_URI = "ui://researchtube/chat-target-v7.html";
@@ -409,7 +409,7 @@ const speechCancelSchema = { type: "object", additionalProperties: false, proper
 const customTaskSchema = {
   type: "object", additionalProperties: false,
   properties: {
-    taskId: { type: "string", pattern: "^ct_[A-Za-z0-9_-]{11}$" }, tool: { type: "string", minLength: 1 },
+    taskId: { type: "string", pattern: "^tsk_[A-Za-z0-9_-]{10}$" }, tool: { type: "string", minLength: 1 },
     status: { type: "string", enum: ["working", "completed", "cancelled", "failed"] }, phase: { type: "string", enum: ["running", "completed", "cancelled", "failed"] },
     progressPercent: { type: "number", minimum: 0, maximum: 100 }, statusMessage: { type: "string", minLength: 1 },
     createdAt: { type: "string", format: "date-time" }, lastUpdatedAt: { type: "string", format: "date-time" }, pollIntervalMs: { type: "integer", minimum: 1000 },
@@ -1568,7 +1568,7 @@ function toolDefinitions() {
       title: "Get Custom Tool task status",
       description: "Read asynchronous Custom Tool progress and result. Poll at pollIntervalMs.",
       annotations: localAgentReadAnnotations,
-      inputSchema: { type: "object", additionalProperties: false, properties: { taskId: { type: "string", pattern: "^ct_[A-Za-z0-9_-]{11}$" } }, required: ["taskId"] },
+      inputSchema: { type: "object", additionalProperties: false, properties: { taskId: { type: "string", pattern: "^tsk_[A-Za-z0-9_-]{10}$" } }, required: ["taskId"] },
       outputSchema: customTaskSchema
     },
     {
@@ -1576,7 +1576,7 @@ function toolDefinitions() {
       title: "Cancel a Custom Tool task",
       description: "Request cancellation of a running Custom Tool task.",
       annotations: localWorkspaceWriteAnnotations,
-      inputSchema: { type: "object", additionalProperties: false, properties: { taskId: { type: "string", pattern: "^ct_[A-Za-z0-9_-]{11}$" } }, required: ["taskId"] },
+      inputSchema: { type: "object", additionalProperties: false, properties: { taskId: { type: "string", pattern: "^tsk_[A-Za-z0-9_-]{10}$" } }, required: ["taskId"] },
       outputSchema: customToolCancelSchema
     }
   ];
@@ -1653,7 +1653,8 @@ async function mcpToolSettingsCatalog() {
       alwaysEnabled: metadata.alwaysEnabled,
       enabled: metadata.alwaysEnabled || preferences.enabledByName[tool.name] === true
     };
-  }).sort((left, right) => ((MCP_TOOL_GROUPS[left.group]?.order ?? MCP_TOOL_GROUPS.custom.order) - (MCP_TOOL_GROUPS[right.group]?.order ?? MCP_TOOL_GROUPS.custom.order)) || left.name.localeCompare(right.name));
+  }).sort((left, right) => ((MCP_TOOL_GROUPS[left.group]?.order ?? MCP_TOOL_GROUPS.custom.order + 10) - (MCP_TOOL_GROUPS[right.group]?.order ?? MCP_TOOL_GROUPS.custom.order + 10))
+    || left.groupTitle.localeCompare(right.groupTitle) || left.group.localeCompare(right.group) || left.name.localeCompare(right.name));
 }
 
 async function enabledMcpToolDefinitions() {
@@ -3918,7 +3919,7 @@ function customToolByName(name) {
 }
 
 function customToolTaskId(value) {
-  if (typeof value !== "string" || !/^ct_[A-Za-z0-9_-]{11}$/.test(value)) throw localAgentError("INVALID_ARGUMENT", "taskId must be a Custom Tool task ID.");
+  if (typeof value !== "string" || !/^tsk_[A-Za-z0-9_-]{10}$/.test(value)) throw localAgentError("INVALID_ARGUMENT", "taskId must be a ResearchTube task ID (tsk_ plus ten URL-safe characters).");
   return value;
 }
 
@@ -3926,7 +3927,7 @@ async function customToolCall(name, argumentsValue) {
   const document = await agentJsonRequest("/custom-tools/call", { method: "POST", body: { name, arguments: argumentsValue }, timeoutMs: AGENT_TASK_TIMEOUT_MS });
   if (!document || typeof document !== "object" || !["result", "task"].includes(document.kind)) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid Custom Tool result.");
   if (document.kind === "result") return document.result;
-  if (!document.task || typeof document.task !== "object") throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid Custom Tool task.");
+  if (!document.task || typeof document.task !== "object" || typeof document.task.taskId !== "string" || !/^tsk_[A-Za-z0-9_-]{10}$/.test(document.task.taskId)) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid Custom Tool task.");
   return document.task;
 }
 

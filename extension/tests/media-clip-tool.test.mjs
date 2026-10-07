@@ -10,11 +10,11 @@ for (const tool of ["media_clip", "media_clip_get_task", "media_clip_cancel_task
   assert.match(background, new RegExp(`name: "${tool}"`), `${tool} must be published`);
 }
 assert.match(background, /segments: \{ type: "array", minItems: 1/);
-assert.match(background, /omit segments to process the entire source/i);
-assert.match(background, /each interval creates a separate output file in input order/);
-assert.match(background, /cutMode=copy preserves encoded streams without transcoding/);
-assert.match(background, /accurate re-encodes for precise boundaries/);
-assert.match(background, /Poll media_clip_get_task no faster than pollIntervalMs/);
+assert.match(background, /Omit segments for the full source/i);
+assert.match(background, /Cut ordered video\/audio intervals into separate files/);
+assert.match(background, /copy keeps encoded streams/);
+assert.match(background, /accurate re-encodes for precise cuts/);
+assert.match(background, /Read clip task progress and completed files\. Poll at pollIntervalMs/);
 assert.match(background, /function normalizeMediaClipInput\(/);
 assert.match(background, /function normalizeMediaClipTask\(/);
 assert.match(background, /"\/tasks\/media-clip"/);

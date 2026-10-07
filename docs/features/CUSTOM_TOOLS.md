@@ -6,6 +6,11 @@ name, but it must contain a `manifest.json`.
 
 The manifest declares a package and one or more tools. `groupTitle` names the
 group shown in Extension Settings; `title` belongs to an individual tool.
+The universal `custom_tool_status` and `custom_tool_cancel` commands appear
+under **Custom Asynchronous Tasks**, after the built-in tool groups. Package
+groups follow at the bottom, ordered by their manifest `groupTitle`, with
+commands sorted by name inside each group. Distinct package IDs keep groups
+separate even when their titles match.
 Tool names are explicit and are not derived from directory or file names.
 
 ```text
@@ -43,7 +48,9 @@ The function receives `(arguments, context)` and returns a JSON object. The
 context exposes the package directory, `progress(percent, message)` and
 `check_cancelled()`. A synchronous function returns its result directly. A
 task function returns a task record immediately; its progress, result and
-cancellation use `custom_tool_status` and `custom_tool_cancel`.
+cancellation use `custom_tool_status` and `custom_tool_cancel`. Task IDs use
+the standard `tsk_` prefix followed by exactly ten URL-safe characters; the
+same ID is used at creation, status, cancellation and in Agent logs.
 
 Agent console logs use the manifest's exact tool name for invocation, status,
 cancellation and terminal outcomes. `context.progress(percent, message)` logs

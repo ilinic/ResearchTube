@@ -101,7 +101,7 @@ class CustomToolsTests(unittest.IsolatedAsyncioTestCase):
                 await request("POST", "/custom-tools/call", {"name": "named_example", "arguments": {}})
                 logged.assert_called_with("POST /custom-tools/named_example -> 200 completed")
             await registry.shutdown()
-        task_id = "ct_abcdefghijk"
+        task_id = "tsk_abcdefghij"
         doc = {"tool": "wait_seconds", "taskId": task_id, "status": "working", "progressPercent": 37.5}
         for path, body, expected in [
             ("/custom-tools/call", {"kind": "task", "task": doc}, f"/custom-tools/wait_seconds/{task_id}"),
@@ -124,8 +124,64 @@ class CustomToolsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["result"]["wordCount"], 3)
         task = await agent.CUSTOM_TOOLS.call("wait_seconds", {"seconds": 1})
         self.assertEqual(task["kind"], "task")
+        self.assertRegex(task["task"]["taskId"], r"^tsk_[A-Za-z0-9_-]{10}$")
         await asyncio.sleep(1.1)
         self.assertEqual(agent.CUSTOM_TOOLS.status(task["task"]["taskId"])["status"], "completed")
+
+    async def test_task_id_collision_keeps_both_tasks_and_cancellation_uses_standard_id(self):
+        with tempfile.TemporaryDirectory() as directory:
+            registry = self.logging_registry(directory,
+                "import asyncio\nasync def run(arguments, context):\n    await asyncio.sleep(60)\n    return {'done': True}\n",
+                execution="task")
+            try:
+                with patch("agent.custom_tools.secrets.token_urlsafe", side_effect=["abcdefghij", "abcdefghij", "0123456789"]) as random_id:
+                    first = (await registry.call("named_example", {}))["task"]["taskId"]
+                    second = (await registry.call("named_example", {}))["task"]["taskId"]
+                self.assertEqual(first, "tsk_abcdefghij")
+                self.assertEqual(second, "tsk_0123456789")
+                self.assertEqual(random_id.call_count, 3)
+                self.assertEqual(set(registry.tasks), {first, second})
+                for task_id in [first, second]:
+                    self.assertEqual(registry.status(task_id)["taskId"], task_id)
+                    cancelled = await registry.cancel(task_id)
+                    self.assertEqual(cancelled["taskId"], task_id)
+                    self.assertEqual(cancelled["status"], "cancelled")
+            finally:
+                await registry.shutdown()
+
+    async def test_http_custom_task_start_status_and_cancel_accept_standard_ids(self):
+        class Writer:
+            def __init__(self): self.chunks = []
+            def write(self, data): self.chunks.append(data)
+            async def drain(self): pass
+            def close(self): pass
+            async def wait_closed(self): pass
+        async def request(method, path, payload=None):
+            body = json.dumps(payload).encode() if payload is not None else b""
+            reader = asyncio.StreamReader()
+            reader.feed_data(f"{method} {path} HTTP/1.1\r\nContent-Length: {len(body)}\r\n\r\n".encode() + body)
+            reader.feed_eof()
+            writer = Writer()
+            await agent.handle_client(reader, writer)
+            headers, response = b"".join(writer.chunks).split(b"\r\n\r\n", 1)
+            self.assertIn(b" 200 ", headers.split(b"\r\n")[0])
+            return json.loads(response)
+        with tempfile.TemporaryDirectory() as directory:
+            registry = self.logging_registry(directory,
+                "import asyncio\nasync def run(arguments, context):\n    await asyncio.sleep(60)\n    return {'done': True}\n",
+                execution="task")
+            try:
+                with patch.object(agent, "CUSTOM_TOOLS", registry):
+                    started = await request("POST", "/custom-tools/call", {"name": "named_example", "arguments": {}})
+                    task_id = started["task"]["taskId"]
+                    self.assertRegex(task_id, r"^tsk_[A-Za-z0-9_-]{10}$")
+                    status = await request("GET", f"/custom-tools/tasks/{task_id}")
+                    self.assertEqual(status["taskId"], task_id)
+                    cancelled = await request("POST", f"/custom-tools/tasks/{task_id}/cancel", {})
+                    self.assertEqual(cancelled["taskId"], task_id)
+                    self.assertEqual(cancelled["status"], "cancelled")
+            finally:
+                await registry.shutdown()
 
     async def test_package_can_expose_multiple_tools_and_reject_bad_entrypoint(self):
         with tempfile.TemporaryDirectory() as directory:

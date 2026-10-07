@@ -351,7 +351,9 @@ class CustomToolRegistry:
             self._log(spec, "completed")
             return {"kind": "result", "tool": name, "result": result}
         now = utc_now()
-        task_id = f"ct_{secrets.token_urlsafe(8)}"
+        task_id = f"tsk_{secrets.token_urlsafe(7)}"
+        while task_id in self.tasks:
+            task_id = f"tsk_{secrets.token_urlsafe(7)}"
         task = CustomTask(task_id, spec, now, now)
         self.tasks[task_id] = task
         self._log(spec, task.status, task.progress_percent, task_id)

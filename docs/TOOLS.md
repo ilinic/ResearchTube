@@ -42,8 +42,10 @@ package has a `manifest.json` with a `groupTitle` and a list of tools. Each
 tool has an explicit MCP `name`, a `title`, an object `inputSchema`, and an
 `entryPoint` such as `tools.py:count_words`. A package may expose multiple
 tools. `execution: "sync"` returns a result directly; `execution: "task"`
-returns a task immediately and uses `custom_tool_status` and
-`custom_tool_cancel`. See [Custom Tools](features/CUSTOM_TOOLS.md).
+returns a task immediately with a standard `tsk_` plus ten-character
+URL-safe ID and uses `custom_tool_status` and `custom_tool_cancel`. Settings
+places these universal commands under **Custom Asynchronous Tasks**, followed
+by each custom package group with its manifest `groupTitle`. See [Custom Tools](features/CUSTOM_TOOLS.md).
 
 | Tool | Behavior |
 | --- | --- |

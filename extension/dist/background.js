@@ -1817,54 +1817,53 @@ function publicWorkspaceArguments(tool, args, definitions) {
   const reverse = Object.fromEntries(Object.entries(names).map(([a, b]) => [b, a]));
   return Object.fromEntries(Object.entries(args).map(([key, value]) => [reverse[key] ?? key, value]));
 }
-function artifactToolDefinitions(definitions,chatSchema,widgetUri,readAnnotations,writeAnnotations) {
-  // A private tab reservation exists before there are artifacts. It has an
-  // empty real-file list; ordinary media_to_chat still requires a nonempty batch.
-  const workflowChatSchema={...chatSchema,properties:{...chatSchema.properties,
-    files:{...chatSchema.properties.files,minItems:0}}};
-  const dataSchemas=Object.fromEntries(definitions.filter(t=>ARTIFACT_TOOLS.includes(t.name)).map(t=>[t.name,
-    t.name==='youtube_download'?{type:'object',anyOf:[t.outputSchema,definitions.find(d=>d.name==='youtube_download_get_task').outputSchema]}:t.outputSchema]));
-  const taskSchema=artifactTaskSchema(workflowChatSchema,{type:'object',anyOf:Object.values(dataSchemas)});
-  // A producer only advertises its own native result, so the model does not
-  // have to inspect twelve unrelated metadata variants for a simple crop.
-  const schemaFor=names=>artifactTaskSchema(workflowChatSchema,Array.isArray(names)
-    ?{type:'object',anyOf:names.map(name=>dataSchemas[name])}:dataSchemas[names]);
-  const taskInput={type:'object',additionalProperties:false,properties:{taskId:{type:'string',pattern:'^tsk_[A-Za-z0-9_-]{10}$'}},required:['taskId']};
-  const cancelSchema={type:'object',additionalProperties:false,properties:{task:taskSchema,cancelled:{type:'boolean'}},required:['task','cancelled']};
-  const result=definitions.map(definition=>{
-    const names=WORKSPACE_ARGUMENT_NAMES[definition.name]??{};
-    let tool={...definition,inputSchema:renameSchema(definition.inputSchema,names),description:renameDescription(definition.description,names)};
-    // Rename references inside property descriptions as well.
-    for(const property of Object.values(tool.inputSchema.properties??{})) {
-      if(property.description)property.description=renameDescription(property.description,names);
+function artifactToolDefinitions(definitions, chatSchema, widgetUri, readAnnotations, writeAnnotations) {
+  const workflowChatSchema = { ...chatSchema, properties: {
+    ...chatSchema.properties,
+    files: { ...chatSchema.properties.files, minItems: 0 }
+  } };
+  const dataSchemas = Object.fromEntries(definitions.filter((t) => ARTIFACT_TOOLS.includes(t.name)).map((t) => [
+    t.name,
+    t.name === "youtube_download" ? { type: "object", anyOf: [t.outputSchema, definitions.find((d) => d.name === "youtube_download_get_task").outputSchema] } : t.outputSchema
+  ]));
+  const taskSchema2 = artifactTaskSchema(workflowChatSchema, { type: "object", anyOf: Object.values(dataSchemas) });
+  const schemaFor = (names) => artifactTaskSchema(workflowChatSchema, Array.isArray(names) ? { type: "object", anyOf: names.map((name) => dataSchemas[name]) } : dataSchemas[names]);
+  const taskInput = { type: "object", additionalProperties: false, properties: { taskId: { type: "string", pattern: "^tsk_[A-Za-z0-9_-]{10}$" } }, required: ["taskId"] };
+  const cancelSchema2 = { type: "object", additionalProperties: false, properties: { task: taskSchema2, cancelled: { type: "boolean" } }, required: ["task", "cancelled"] };
+  const result = definitions.map((definition) => {
+    const names = WORKSPACE_ARGUMENT_NAMES[definition.name] ?? {};
+    let tool = { ...definition, inputSchema: renameSchema(definition.inputSchema, names), description: renameDescription(definition.description, names) };
+    for (const property of Object.values(tool.inputSchema.properties ?? {})) {
+      if (property.description) property.description = renameDescription(property.description, names);
     }
-    if(ARTIFACT_TOOLS.includes(tool.name)) {
-      tool.inputSchema.properties={...tool.inputSchema.properties,...artifactOptionsSchema};
-      // Legacy display flags blur presentation and actual file submission.
+    if (ARTIFACT_TOOLS.includes(tool.name)) {
+      tool.inputSchema.properties = { ...tool.inputSchema.properties, ...artifactOptionsSchema };
       delete tool.inputSchema.properties.showInChat;
-      tool.description=tool.description.replace(/showInChat defaults to false:[\s\S]*?The tool never/,'The tool never')
-        .replace(/For media_capture_screen[^.]*\./g,'')
-        .replace(/For text, returns Unicode text directly\./,'For text, returns Unicode text in creation.data after the asynchronous read.');
-      tool.description+=' Returns an asynchronous task; results in creation.data. Poll media_task_status at pollIntervalMs; cancel via media_task_cancel. addToChat uploads outputs and presses Send; do not re-upload. Finish the response if Send waits. Saved files survive cancellation; outputs never overwrite existing files.';
-      tool.outputSchema=schemaFor(tool.name);
-      tool.annotations={...tool.annotations,destructiveHint:true,openWorldHint:true};
-      tool._meta={...tool._meta,ui:{resourceUri:widgetUri},'openai/outputTemplate':widgetUri,
-        'openai/toolInvocation/invoked':artifactOperationMessage(tool.name,'started')};
-    } else if(Object.hasOwn(ARTIFACT_STATUS_TOOLS,tool.name)) {
-      tool.outputSchema=schemaFor(ARTIFACT_STATUS_TOOLS[tool.name]);
-      tool.description='Alias of media_task_status: read creation.data, files and optional chat progress. completed requires all requested stages. Poll at pollIntervalMs; finish the response if Send waits.';
-    } else if(Object.hasOwn(ARTIFACT_CANCEL_TOOLS,tool.name)) {
-      tool.outputSchema={...cancelSchema,properties:{...cancelSchema.properties,task:schemaFor(ARTIFACT_CANCEL_TOOLS[tool.name])}};
-      tool.description='Alias of media_task_cancel: stop creation/delivery before Send commits; preserve published files and Composer contents. Poll status until cancellation settles. Committed Send cannot be undone.';
+      tool.description = tool.description.replace(/showInChat defaults to false:[\s\S]*?The tool never/, "The tool never").replace(/For media_capture_screen[^.]*\./g, "").replace(/For text, returns Unicode text directly\./, "For text, returns Unicode text in creation.data after the asynchronous read.");
+      tool.description += " Returns an asynchronous task; results in creation.data. Poll media_task_status at pollIntervalMs; cancel via media_task_cancel. addToChat uploads outputs and presses Send; do not re-upload. Finish the response if Send waits. Saved files survive cancellation; outputs never overwrite existing files.";
+      tool.outputSchema = schemaFor(tool.name);
+      tool.annotations = { ...tool.annotations, destructiveHint: true, openWorldHint: true };
+      tool._meta = {
+        ...tool._meta,
+        ui: { resourceUri: widgetUri },
+        "openai/outputTemplate": widgetUri,
+        "openai/toolInvocation/invoked": artifactOperationMessage(tool.name, "started")
+      };
+    } else if (Object.hasOwn(ARTIFACT_STATUS_TOOLS, tool.name)) {
+      tool.outputSchema = schemaFor(ARTIFACT_STATUS_TOOLS[tool.name]);
+      tool.description = "Alias of media_task_status: read creation.data, files and optional chat progress. completed requires all requested stages. Poll at pollIntervalMs; finish the response if Send waits.";
+    } else if (Object.hasOwn(ARTIFACT_CANCEL_TOOLS, tool.name)) {
+      tool.outputSchema = { ...cancelSchema2, properties: { ...cancelSchema2.properties, task: schemaFor(ARTIFACT_CANCEL_TOOLS[tool.name]) } };
+      tool.description = "Alias of media_task_cancel: stop creation/delivery before Send commits; preserve published files and Composer contents. Poll status until cancellation settles. Committed Send cannot be undone.";
     }
     return tool;
   });
-  return [...result,
-    {name:'media_task_status',title:'Check artifact task',description:'Read artifact task creation.data, files and optional chat (upload/skips/delay). One taskId covers both stages; completed requires all requested stages. Chat failure preserves created files. Poll at pollIntervalMs; finish the response if Send waits.',annotations:readAnnotations,inputSchema:taskInput,outputSchema:taskSchema},
-    {name:'media_task_cancel',title:'Cancel artifact task',description:'Cancel creation/delivery before Send commits, preserving published files and Composer contents. An in-flight capture/crop/read may finish. Poll media_task_status until settled. Committed Send cannot be undone.',annotations:writeAnnotations,inputSchema:taskInput,outputSchema:cancelSchema}
+  return [
+    ...result,
+    { name: "media_task_status", title: "Check artifact task", description: "Read artifact task creation.data, files and optional chat (upload/skips/delay). One taskId covers both stages; completed requires all requested stages. Chat failure preserves created files. Poll at pollIntervalMs; finish the response if Send waits.", annotations: readAnnotations, inputSchema: taskInput, outputSchema: taskSchema2 },
+    { name: "media_task_cancel", title: "Cancel artifact task", description: "Cancel creation/delivery before Send commits, preserving published files and Composer contents. An in-flight capture/crop/read may finish. Poll media_task_status until settled. Committed Send cannot be undone.", annotations: writeAnnotations, inputSchema: taskInput, outputSchema: cancelSchema2 }
   ];
 }
-
 
 // media-stream.js
 var MEDIA_STREAM_ROUTE = "/_researchtube/workspace-media";
@@ -2274,7 +2273,7 @@ function normalizeStoryboardResult(name, data) {
   if (!plain2(data)) bad();
   if (data.status === "rejected") {
     if (!messages[data.error?.code]) bad();
-    return { status: "rejected", error: { code: data.error.code, message: messages[data.error.code] }, ...(reasons.includes(data.error.code) ? { comment: storyboardAlternativeComment } : {}) };
+    return { status: "rejected", error: { code: data.error.code, message: messages[data.error.code] }, ...reasons.includes(data.error.code) ? { comment: storyboardAlternativeComment } : {} };
   }
   if (name.endsWith("get_info")) {
     if (!matches(videoId, data.videoId)) bad();
@@ -2344,7 +2343,7 @@ var MCP_TOOL_GROUPS = Object.freeze({
   clipboard: { title: "Clipboard", order: 80 },
   library: { title: "Library and sharing", order: 90 },
   online: { title: "Online Share", order: 100 },
-  custom: { title: "Custom", order: 110 }
+  custom: { title: "Custom Asynchronous Tasks", order: 110 }
 });
 var MCP_TOOL_SETTINGS = Object.freeze({
   ...Object.fromEntries(BROWSER_TOOL_NAMES.map((name) => [name, { group: "browser" }])),
@@ -2416,7 +2415,7 @@ var MCP_TOOL_SETTINGS = Object.freeze({
   custom_tool_status: { group: "custom" },
   custom_tool_cancel: { group: "custom" }
 });
-var EXTENSION_VERSION = "2.2.89";
+var EXTENSION_VERSION = "2.2.90";
 globalThis.addEventListener?.("fetch", createMediaStreamHandler({
   extensionUrl: chrome.runtime.getURL("/"),
   getClient: (id) => globalThis.clients.get(id),
@@ -2424,7 +2423,7 @@ globalThis.addEventListener?.("fetch", createMediaStreamHandler({
   fetchMedia: (url, options) => fetch(url, options),
   log: (stage, details = {}) => consoleAction(`[ResearchTube media stream ${EXTENSION_VERSION}]`, stage, details)
 }));
-var REQUIRED_AGENT_INTERFACE_VERSION = 77;
+var REQUIRED_AGENT_INTERFACE_VERSION = 78;
 var MEDIA_TO_CHAT_WIDGET_URI = "ui://researchtube/chat-target-v7.html";
 var MEDIA_TO_CHAT_WIDGET_ALIASES = /* @__PURE__ */ new Set(["ui://researchtube/chat-target-v4.html", "ui://researchtube/chat-target-v5.html", "ui://researchtube/chat-target-v6.html"]);
 var MEDIA_TO_CHAT_BIND_TIMEOUT_MS = 3e4;
@@ -2797,7 +2796,7 @@ var customTaskSchema = {
   type: "object",
   additionalProperties: false,
   properties: {
-    taskId: { type: "string", pattern: "^ct_[A-Za-z0-9_-]{11}$" },
+    taskId: { type: "string", pattern: "^tsk_[A-Za-z0-9_-]{10}$" },
     tool: { type: "string", minLength: 1 },
     status: { type: "string", enum: ["working", "completed", "cancelled", "failed"] },
     phase: { type: "string", enum: ["running", "completed", "cancelled", "failed"] },
@@ -3491,9 +3490,9 @@ function toolDefinitions() {
       title: "Synthesize speech",
       description: "Synthesize text via Google Translate (default, auto-detect language, MP3) or Windows (selected voice, WAV). outputMode selects speakers, file or both. Saved audio defaults to text-to-speech/; addToChat requires file or both.",
       annotations: localWorkspaceWriteAnnotations,
-      inputSchema: { type: "object", additionalProperties: false, properties: { text: { type: "string", minLength: 1, maxLength: 60000 }, engine: { type: "string", enum: ["googleTranslate", "windows"], default: "googleTranslate" }, voiceId: { type: ["string", "null"], default: null, description: "Windows voice only; omit for Google Translate." }, outputMode: { type: "string", enum: ["file", "speakers", "both"], default: "speakers" }, outputPath: { ...nullableString, description: "Optional safe workspace-relative .mp3 path for Google Translate or .wav path for Windows; available only when outputMode is file or both." } }, required: ["text"] },
+      inputSchema: { type: "object", additionalProperties: false, properties: { text: { type: "string", minLength: 1, maxLength: 6e4 }, engine: { type: "string", enum: ["googleTranslate", "windows"], default: "googleTranslate" }, voiceId: { type: ["string", "null"], default: null, description: "Windows voice only; omit for Google Translate." }, outputMode: { type: "string", enum: ["file", "speakers", "both"], default: "speakers" }, outputPath: { ...nullableString2, description: "Optional safe workspace-relative .mp3 path for Google Translate or .wav path for Windows; available only when outputMode is file or both." } }, required: ["text"] },
       outputSchema: speechTaskSchema,
-      _meta: { "openai/toolInvocation/invoking": "Starting speech…", "openai/toolInvocation/invoked": "Speech task started." }
+      _meta: { "openai/toolInvocation/invoking": "Starting speech\u2026", "openai/toolInvocation/invoked": "Speech task started." }
     },
     {
       name: "system_speech_status",
@@ -3502,7 +3501,7 @@ function toolDefinitions() {
       annotations: localAgentReadAnnotations,
       inputSchema: { type: "object", additionalProperties: false, properties: { taskId: { type: "string", minLength: 1 } }, required: ["taskId"] },
       outputSchema: speechTaskSchema,
-      _meta: { "openai/toolInvocation/invoking": "Checking speech…", "openai/toolInvocation/invoked": "Speech status checked." }
+      _meta: { "openai/toolInvocation/invoking": "Checking speech\u2026", "openai/toolInvocation/invoked": "Speech status checked." }
     },
     {
       name: "system_speech_cancel",
@@ -3511,7 +3510,7 @@ function toolDefinitions() {
       annotations: localWorkspaceWriteAnnotations,
       inputSchema: { type: "object", additionalProperties: false, properties: { taskId: { type: "string", minLength: 1 } }, required: ["taskId"] },
       outputSchema: speechCancelSchema,
-      _meta: { "openai/toolInvocation/invoking": "Cancelling speech…", "openai/toolInvocation/invoked": "Speech cancelled." }
+      _meta: { "openai/toolInvocation/invoking": "Cancelling speech\u2026", "openai/toolInvocation/invoked": "Speech cancelled." }
     },
     {
       name: "library_store_start",
@@ -3542,7 +3541,7 @@ function toolDefinitions() {
       title: "List a ResearchTube workspace directory",
       description: "List a Workspace directory; empty workspacePath selects the root. Optional extensions filters file suffixes. Results are bounded by limit.",
       annotations: localAgentReadAnnotations,
-      inputSchema: { type: "object", additionalProperties: false, properties: { path: { type: "string", default: "", description: "Logical workspace directory path. Use an empty string only for the workspace root; otherwise use / separators and no . or .. components." }, extensions: { type: "array", minItems: 1, items: { type: "string", pattern: "^[A-Za-z0-9]{1,16}$" }, description: "Optional file extensions without dots, for example [\"mp4\", \"webm\"]." }, limit: { type: "integer", minimum: 1, maximum: 500, default: 100 } }, required: [] },
+      inputSchema: { type: "object", additionalProperties: false, properties: { path: { type: "string", default: "", description: "Logical workspace directory path. Use an empty string only for the workspace root; otherwise use / separators and no . or .. components." }, extensions: { type: "array", minItems: 1, items: { type: "string", pattern: "^[A-Za-z0-9]{1,16}$" }, description: 'Optional file extensions without dots, for example ["mp4", "webm"].' }, limit: { type: "integer", minimum: 1, maximum: 500, default: 100 } }, required: [] },
       outputSchema: workspaceListSchema
     },
     {
@@ -3607,7 +3606,8 @@ function toolDefinitions() {
       description: "Inspect Workspace media with ffprobe. Optional sections selects format, streams, chapters or programs; omitted means all. Preserves metadata tags, removes host filename. fileSizeBytes is measured separately from ffprobeFileSizeBytes.",
       annotations: localAgentReadAnnotations,
       inputSchema: {
-        type: "object", additionalProperties: false,
+        type: "object",
+        additionalProperties: false,
         properties: {
           path: { type: "string", minLength: 1, description: "Logical workspace-relative POSIX path of a media file." },
           sections: { type: "array", minItems: 1, maxItems: 4, uniqueItems: true, items: mediaProbeSectionSchema, description: "Optional ffprobe metadata sections. Omit to return format, streams, chapters, and programs." }
@@ -3622,7 +3622,8 @@ function toolDefinitions() {
       description: "Cut ordered video/audio intervals into separate files under clips/. Omit segments for the full source; video can yield audio. copy keeps encoded streams; accurate re-encodes for precise cuts. Configured segment limit applies; source and completed clips remain.",
       annotations: localWorkspaceWriteAnnotations,
       inputSchema: {
-        type: "object", additionalProperties: false,
+        type: "object",
+        additionalProperties: false,
         properties: {
           path: { type: "string", minLength: 1, description: "Existing logical workspace-relative video or audio path." },
           outputKind: { type: "string", enum: ["video", "audio"], description: "video cuts video; audio extracts or cuts an audio stream." },
@@ -3636,7 +3637,7 @@ function toolDefinitions() {
         required: ["path", "outputKind"]
       },
       outputSchema: mediaClipTaskSchema,
-      _meta: { "openai/toolInvocation/invoking": "Starting media clipping…", "openai/toolInvocation/invoked": "Media-clip task started." }
+      _meta: { "openai/toolInvocation/invoking": "Starting media clipping\u2026", "openai/toolInvocation/invoked": "Media-clip task started." }
     },
     {
       name: "media_clip_get_task",
@@ -3645,7 +3646,7 @@ function toolDefinitions() {
       annotations: localAgentReadAnnotations,
       inputSchema: { type: "object", additionalProperties: false, properties: { taskId: { type: "string", minLength: 1 } }, required: ["taskId"] },
       outputSchema: mediaClipTaskSchema,
-      _meta: { "openai/toolInvocation/invoking": "Checking media clipping…", "openai/toolInvocation/invoked": "Media-clip progress checked." }
+      _meta: { "openai/toolInvocation/invoking": "Checking media clipping\u2026", "openai/toolInvocation/invoked": "Media-clip progress checked." }
     },
     {
       name: "media_clip_cancel_task",
@@ -3654,7 +3655,7 @@ function toolDefinitions() {
       annotations: localWorkspaceWriteAnnotations,
       inputSchema: { type: "object", additionalProperties: false, properties: { taskId: { type: "string", minLength: 1 } }, required: ["taskId"] },
       outputSchema: mediaClipCancelTaskSchema,
-      _meta: { "openai/toolInvocation/invoking": "Cancelling media clipping…", "openai/toolInvocation/invoked": "Media-clip cancellation requested." }
+      _meta: { "openai/toolInvocation/invoking": "Cancelling media clipping\u2026", "openai/toolInvocation/invoked": "Media-clip cancellation requested." }
     },
     {
       name: "media_capture_frame",
@@ -3662,7 +3663,8 @@ function toolDefinitions() {
       description: "Extract frames to captures/ from Workspace video or YouTube. First get YouTube's numeric video formatId from youtube_download_get_formats. Section groups merge gaps up to 10s, span at most 60s. Configured frame limit applies; completed frames survive failure.",
       annotations: localWorkspaceWriteAnnotations,
       inputSchema: {
-        type: "object", additionalProperties: false,
+        type: "object",
+        additionalProperties: false,
         properties: {
           path: { description: "Logical workspace-relative path of the source media file." },
           youtube: { description: "YouTube source object with videoId and numeric formatId from youtube_download_get_formats." },
@@ -3678,7 +3680,7 @@ function toolDefinitions() {
       },
       outputSchema: captureFrameTaskSchema,
       _meta: {
-        "openai/toolInvocation/invoking": "Starting frame extraction…",
+        "openai/toolInvocation/invoking": "Starting frame extraction\u2026",
         "openai/toolInvocation/invoked": "Frame-extraction task started."
       }
     },
@@ -3689,7 +3691,7 @@ function toolDefinitions() {
       annotations: localAgentReadAnnotations,
       inputSchema: { type: "object", additionalProperties: false, properties: { taskId: { type: "string", minLength: 1 } }, required: ["taskId"] },
       outputSchema: captureFrameTaskSchema,
-      _meta: { "openai/toolInvocation/invoking": "Checking frame extraction…", "openai/toolInvocation/invoked": "Frame-extraction progress checked." }
+      _meta: { "openai/toolInvocation/invoking": "Checking frame extraction\u2026", "openai/toolInvocation/invoked": "Frame-extraction progress checked." }
     },
     {
       name: "media_capture_frame_task_diagnostics",
@@ -3698,7 +3700,7 @@ function toolDefinitions() {
       annotations: localAgentReadAnnotations,
       inputSchema: { type: "object", additionalProperties: false, properties: { taskId: { type: "string", minLength: 1 } }, required: ["taskId"] },
       outputSchema: captureFrameTaskDiagnosticsSchema,
-      _meta: { "openai/toolInvocation/invoking": "Reading frame diagnostics…", "openai/toolInvocation/invoked": "Frame diagnostics read." }
+      _meta: { "openai/toolInvocation/invoking": "Reading frame diagnostics\u2026", "openai/toolInvocation/invoked": "Frame diagnostics read." }
     },
     {
       name: "media_capture_frame_cancel_task",
@@ -3707,7 +3709,7 @@ function toolDefinitions() {
       annotations: localWorkspaceWriteAnnotations,
       inputSchema: { type: "object", additionalProperties: false, properties: { taskId: { type: "string", minLength: 1 } }, required: ["taskId"] },
       outputSchema: captureFrameCancelTaskSchema,
-      _meta: { "openai/toolInvocation/invoking": "Cancelling frame extraction…", "openai/toolInvocation/invoked": "Frame-extraction cancellation requested." }
+      _meta: { "openai/toolInvocation/invoking": "Cancelling frame extraction\u2026", "openai/toolInvocation/invoked": "Frame-extraction cancellation requested." }
     },
     {
       name: "visual_map_create",
@@ -3715,17 +3717,24 @@ function toolDefinitions() {
       description: "Create chronological PNG contact sheets from Workspace video. uniform samples evenly; sceneDetect uses FFmpeg scdet, filtering changes within 2s; hybrid selects each interval's strongest change or midpoint. Threshold defaults to 10%; maxTotalFrames bounds sampling.",
       annotations: localWorkspaceWriteAnnotations,
       inputSchema: {
-        type: "object", additionalProperties: false,
+        type: "object",
+        additionalProperties: false,
         properties: {
           workspacePath: { type: "string", minLength: 1, description: "Existing logical workspace-relative video path." },
-          columns: { type: "integer", minimum: 1 }, rows: { type: "integer", minimum: 1 }, maxTotalFrames: { type: "integer", minimum: 1, maximum: 120 },
-          selection: { type: "string", enum: ["uniform", "sceneDetect", "hybrid"], default: "uniform" }, sceneDetectThreshold: { type: "number", minimum: 0, maximum: 100, default: 10, description: "FFmpeg scdet threshold percentage. Use only with selection=sceneDetect or hybrid." }, startSeconds: { type: "number", minimum: 0, default: 0 }, endSeconds: { type: "number", minimum: 0 },
-          maxMapDimension: { type: "integer", minimum: 1, default: 4096 }, frameTimestampPosition: { ...visualMapTimestampPositionSchema, default: "bottomRight" }
+          columns: { type: "integer", minimum: 1 },
+          rows: { type: "integer", minimum: 1 },
+          maxTotalFrames: { type: "integer", minimum: 1, maximum: 120 },
+          selection: { type: "string", enum: ["uniform", "sceneDetect", "hybrid"], default: "uniform" },
+          sceneDetectThreshold: { type: "number", minimum: 0, maximum: 100, default: 10, description: "FFmpeg scdet threshold percentage. Use only with selection=sceneDetect or hybrid." },
+          startSeconds: { type: "number", minimum: 0, default: 0 },
+          endSeconds: { type: "number", minimum: 0 },
+          maxMapDimension: { type: "integer", minimum: 1, default: 4096 },
+          frameTimestampPosition: { ...visualMapTimestampPositionSchema, default: "bottomRight" }
         },
         required: ["workspacePath", "columns", "rows", "maxTotalFrames"]
       },
       outputSchema: visualMapTaskSchema,
-      _meta: { "openai/toolInvocation/invoking": "Starting visual map…", "openai/toolInvocation/invoked": "Visual-map task started." }
+      _meta: { "openai/toolInvocation/invoking": "Starting visual map\u2026", "openai/toolInvocation/invoked": "Visual-map task started." }
     },
     {
       name: "visual_map_get_task",
@@ -3733,11 +3742,13 @@ function toolDefinitions() {
       description: "Read visual map progress and saved maps. Poll at pollIntervalMs; results are not automatically displayed.",
       annotations: localAgentReadAnnotations,
       inputSchema: {
-        type: "object", additionalProperties: false,
-        properties: { taskId: { type: "string", minLength: 1 } }, required: ["taskId"]
+        type: "object",
+        additionalProperties: false,
+        properties: { taskId: { type: "string", minLength: 1 } },
+        required: ["taskId"]
       },
       outputSchema: visualMapTaskSchema,
-      _meta: { "openai/toolInvocation/invoking": "Checking visual-map progress…", "openai/toolInvocation/invoked": "Visual-map progress checked." }
+      _meta: { "openai/toolInvocation/invoking": "Checking visual-map progress\u2026", "openai/toolInvocation/invoked": "Visual-map progress checked." }
     },
     {
       name: "visual_map_cancel_task",
@@ -3745,53 +3756,61 @@ function toolDefinitions() {
       description: "Cancel a visual map task. Poll visual_map_get_task for terminal status.",
       annotations: localWorkspaceWriteAnnotations,
       inputSchema: {
-        type: "object", additionalProperties: false,
-        properties: { taskId: { type: "string", minLength: 1 } }, required: ["taskId"]
+        type: "object",
+        additionalProperties: false,
+        properties: { taskId: { type: "string", minLength: 1 } },
+        required: ["taskId"]
       },
       outputSchema: visualMapCancelTaskSchema,
-      _meta: { "openai/toolInvocation/invoking": "Cancelling visual map…", "openai/toolInvocation/invoked": "Visual-map cancellation requested." }
+      _meta: { "openai/toolInvocation/invoking": "Cancelling visual map\u2026", "openai/toolInvocation/invoked": "Visual-map cancellation requested." }
     },
     {
       name: "camera_list",
       title: "List local cameras",
       description: "List local cameras and native modes above 25 through 120 FPS, preserving rates such as 29.97. Opaque cameraId is valid only in this Agent session.",
       annotations: localAgentReadAnnotations,
-      inputSchema: { type: "object", additionalProperties: false, properties: {} }, outputSchema: cameraListSchema
+      inputSchema: { type: "object", additionalProperties: false, properties: {} },
+      outputSchema: cameraListSchema
     },
     {
       name: "camera_capture_frame",
       title: "Capture a camera frame",
       description: "Capture one camera_list camera frame at its maximum native mode. Saves PNG under captures/ by default.",
       annotations: localWorkspaceWriteAnnotations,
-      inputSchema: { type: "object", additionalProperties: false, properties: { cameraId: { type: "string", minLength: 1 }, targetPath: { type: "string", minLength: 1 }, targetFormat: { type: "string", enum: ["png", "jpeg", "webp"], default: "png" } }, required: ["cameraId"] }, outputSchema: cameraFrameSchema
+      inputSchema: { type: "object", additionalProperties: false, properties: { cameraId: { type: "string", minLength: 1 }, targetPath: { type: "string", minLength: 1 }, targetFormat: { type: "string", enum: ["png", "jpeg", "webp"], default: "png" } }, required: ["cameraId"] },
+      outputSchema: cameraFrameSchema
     },
     {
       name: "camera_record_video",
       title: "Record a camera video",
       description: "Record camera video with its paired microphone as H.264 MP4. targetFps chooses the largest nearby native mode; default prefers 60 then 30 FPS. Configured duration limit applies; final metadata is verified.",
       annotations: localWorkspaceWriteAnnotations,
-      inputSchema: { type: "object", additionalProperties: false, properties: { cameraId: { type: "string", minLength: 1 }, durationSeconds: { type: "integer", minimum: 1, description: "Maximum duration in minutes is set by cameraRecordVideoMaxMinutes in agent-config.json." }, targetFps: { type: "number", exclusiveMinimum: 25, maximum: 120 } }, required: ["cameraId", "durationSeconds"] }, outputSchema: cameraRecordTaskSchema
+      inputSchema: { type: "object", additionalProperties: false, properties: { cameraId: { type: "string", minLength: 1 }, durationSeconds: { type: "integer", minimum: 1, description: "Maximum duration in minutes is set by cameraRecordVideoMaxMinutes in agent-config.json." }, targetFps: { type: "number", exclusiveMinimum: 25, maximum: 120 } }, required: ["cameraId", "durationSeconds"] },
+      outputSchema: cameraRecordTaskSchema
     },
     {
       name: "camera_record_audio",
       title: "Record camera audio",
       description: "Record a listed camera's paired microphone as M4A under sound/. Configured duration limit applies; camera_record_stop ends recording gracefully.",
       annotations: localWorkspaceWriteAnnotations,
-      inputSchema: { type: "object", additionalProperties: false, properties: { cameraId: { type: "string", minLength: 1 }, durationSeconds: { type: "integer", minimum: 1, description: "Maximum duration in minutes is set by cameraRecordAudioMaxMinutes in agent-config.json." } }, required: ["cameraId", "durationSeconds"] }, outputSchema: cameraRecordTaskSchema
+      inputSchema: { type: "object", additionalProperties: false, properties: { cameraId: { type: "string", minLength: 1 }, durationSeconds: { type: "integer", minimum: 1, description: "Maximum duration in minutes is set by cameraRecordAudioMaxMinutes in agent-config.json." } }, required: ["cameraId", "durationSeconds"] },
+      outputSchema: cameraRecordTaskSchema
     },
     {
       name: "camera_record_status",
       title: "Get camera recording status",
       description: "Read camera recording progress and final result. Poll at pollIntervalMs.",
       annotations: localAgentReadAnnotations,
-      inputSchema: { type: "object", additionalProperties: false, properties: { taskId: { type: "string", minLength: 1 } }, required: ["taskId"] }, outputSchema: cameraRecordTaskSchema
+      inputSchema: { type: "object", additionalProperties: false, properties: { taskId: { type: "string", minLength: 1 } }, required: ["taskId"] },
+      outputSchema: cameraRecordTaskSchema
     },
     {
       name: "camera_record_stop",
       title: "Stop a camera recording",
       description: "Stop camera recording gracefully and finalize the file. Poll camera_record_status until completed or failed.",
       annotations: localWorkspaceWriteAnnotations,
-      inputSchema: { type: "object", additionalProperties: false, properties: { taskId: { type: "string", minLength: 1 } }, required: ["taskId"] }, outputSchema: cameraStopSchema
+      inputSchema: { type: "object", additionalProperties: false, properties: { taskId: { type: "string", minLength: 1 } }, required: ["taskId"] },
+      outputSchema: cameraStopSchema
     },
     {
       name: "media_capture_screen",
@@ -3799,7 +3818,8 @@ function toolDefinitions() {
       description: "Capture the virtual desktop or an in-bounds region (x/y/width/height in global pixels). Saves PNG to screenshots/ by default; JPEG/WebP optional. Uses FFmpeg; Wayland unsupported, macOS requires screen permission.",
       annotations: localWorkspaceWriteAnnotations,
       inputSchema: {
-        type: "object", additionalProperties: false,
+        type: "object",
+        additionalProperties: false,
         properties: {
           outputPath: { type: "string", minLength: 1, description: "Optional logical workspace-relative image path. If omitted, media_capture_screen creates a uniquely named file under screenshots/. It never overwrites an existing file." },
           region: screenCaptureRegionSchema,
@@ -3809,7 +3829,7 @@ function toolDefinitions() {
       },
       outputSchema: screenCaptureSchema,
       _meta: {
-        "openai/toolInvocation/invoking": "Capturing desktop…",
+        "openai/toolInvocation/invoking": "Capturing desktop\u2026",
         "openai/toolInvocation/invoked": "Desktop captured."
       }
     },
@@ -3819,7 +3839,8 @@ function toolDefinitions() {
       description: "Crop a Workspace PNG/JPEG/WebP using zero-based source pixels. Rectangle must fit the source. Saves a new PNG under crops/ by default; JPEG/WebP optional. Source is unchanged; existing outputs are not overwritten.",
       annotations: localWorkspaceWriteAnnotations,
       inputSchema: {
-        type: "object", additionalProperties: false,
+        type: "object",
+        additionalProperties: false,
         properties: {
           path: { type: "string", minLength: 1, description: "Logical workspace-relative path of an existing PNG, JPEG, or WebP source image." },
           crop: captureFrameCropSchema,
@@ -3831,7 +3852,7 @@ function toolDefinitions() {
       },
       outputSchema: imageCropSchema,
       _meta: {
-        "openai/toolInvocation/invoking": "Cropping image…",
+        "openai/toolInvocation/invoking": "Cropping image\u2026",
         "openai/toolInvocation/invoked": "Image cropped."
       }
     },
@@ -3845,7 +3866,7 @@ function toolDefinitions() {
       _meta: {
         ui: { resourceUri: MEDIA_TO_CHAT_WIDGET_URI },
         "openai/outputTemplate": MEDIA_TO_CHAT_WIDGET_URI,
-        "openai/toolInvocation/invoking": "Preparing files for this chat…",
+        "openai/toolInvocation/invoking": "Preparing files for this chat\u2026",
         "openai/toolInvocation/invoked": "Files-to-chat task created."
       }
     },
@@ -3875,7 +3896,7 @@ function toolDefinitions() {
       _meta: {
         ui: { resourceUri: CAPTURE_FRAME_WIDGET_URI },
         "openai/outputTemplate": CAPTURE_FRAME_WIDGET_URI,
-        "openai/toolInvocation/invoking": "Loading workspace media…",
+        "openai/toolInvocation/invoking": "Loading workspace media\u2026",
         "openai/toolInvocation/invoked": "Workspace media shown."
       }
     },
@@ -3908,7 +3929,7 @@ function toolDefinitions() {
       title: "Put text or a workspace image on clipboard",
       description: "Replace the clipboard with text or pixels from a Workspace PNG/JPEG/WebP; supply exactly one. Limits: text 2 MiB, image file 20 MiB, decoded image 50 MP. Images are copied as pixels, not file references.",
       annotations: localWorkspaceWriteAnnotations,
-      inputSchema: { type: "object", additionalProperties: false, properties: { text: { type: "string", maxLength: 2_000_000, description: "Unicode text to place on the system clipboard." }, workspacePath: { type: "string", minLength: 1, description: "Logical workspace-relative PNG, JPEG, or WebP path. Its decoded image pixels, not the file, are placed on the clipboard." } }, oneOf: [{ required: ["text"] }, { required: ["workspacePath"] }] },
+      inputSchema: { type: "object", additionalProperties: false, properties: { text: { type: "string", maxLength: 2e6, description: "Unicode text to place on the system clipboard." }, workspacePath: { type: "string", minLength: 1, description: "Logical workspace-relative PNG, JPEG, or WebP path. Its decoded image pixels, not the file, are placed on the clipboard." } }, oneOf: [{ required: ["text"] }, { required: ["workspacePath"] }] },
       outputSchema: clipboardSetSchema
     },
     {
@@ -3918,7 +3939,8 @@ function toolDefinitions() {
       annotations: localAgentReadAnnotations,
       inputSchema: { type: "object", additionalProperties: false, properties: { path: { type: "string", minLength: 1, description: "Logical workspace-relative path returned by media_capture_frame.image.workspacePath." } }, required: ["path"] },
       outputSchema: {
-        type: "object", additionalProperties: false,
+        type: "object",
+        additionalProperties: false,
         properties: { path: { type: "string" }, mediaKind: { type: "string", enum: ["image", "video", "audio"] }, mimeType: { type: "string" }, sizeBytes: { type: "integer", minimum: 0 } },
         required: ["path", "mediaKind", "mimeType", "sizeBytes"]
       },
@@ -3951,7 +3973,8 @@ function toolDefinitions() {
       description: "Download public YouTube media. First call youtube_download_get_formats for exact IDs. Choose combined, video, audio, or video+audio; never mix combined with others. best is allowed. Supply both startSeconds/endSeconds for a partial clip. FFmpeg is needed for partials or merging.",
       annotations: localDownloadAnnotations,
       inputSchema: {
-        type: "object", additionalProperties: false,
+        type: "object",
+        additionalProperties: false,
         properties: {
           videoId: { type: "string", pattern: "^[A-Za-z0-9_-]{6,}$", description: "Public YouTube video ID returned by youtube_search, a channel or playlist catalogue, or youtube_get_video." },
           formatSelection: downloadSelectionSchema,
@@ -4003,7 +4026,7 @@ function toolDefinitions() {
       description: "Read public video metadata, caption tracks and advisory youtubeFormats. Use trackIndex with youtube_get_transcript. For downloads, obtain authoritative IDs from youtube_download_get_formats. Does not return transcript or comment text.",
       annotations: pureReadAnnotations,
       inputSchema: { type: "object", additionalProperties: false, properties: { videoId: { type: "string", minLength: 6, description: "YouTube video ID obtained from youtube_search, a channel or playlist catalogue, or a prior youtube_get_video response." } }, required: ["videoId"] },
-      outputSchema: { type: "object", additionalProperties: false, properties: { videoId: { type: "string" }, title: { type: "string" }, description: { type: "string" }, channel: commentAuthorSchema, publishedAt: nullableString, durationSeconds: { type: ["number", "null"] }, views: nullableInteger, viewsText: nullableString, likes: nullableInteger, likesText: nullableString, commentCount: nullableInteger, commentCountText: nullableString, category: nullableString, tags: { type: "array", items: { type: "string" } }, thumbnailUrl: nullableString, captions: { type: "object", additionalProperties: false, properties: { available: { type: "boolean" }, tracks: { type: "array", items: captionTrackSchema } }, required: ["available", "tracks"] }, youtubeFormats: youtubeFormatsSchema }, required: ["videoId", "title", "description", "channel", "publishedAt", "durationSeconds", "views", "viewsText", "likes", "likesText", "commentCount", "commentCountText", "category", "tags", "thumbnailUrl", "captions", "youtubeFormats"] }
+      outputSchema: { type: "object", additionalProperties: false, properties: { videoId: { type: "string" }, title: { type: "string" }, description: { type: "string" }, channel: commentAuthorSchema, publishedAt: nullableString2, durationSeconds: { type: ["number", "null"] }, views: nullableInteger, viewsText: nullableString2, likes: nullableInteger, likesText: nullableString2, commentCount: nullableInteger, commentCountText: nullableString2, category: nullableString2, tags: { type: "array", items: { type: "string" } }, thumbnailUrl: nullableString2, captions: { type: "object", additionalProperties: false, properties: { available: { type: "boolean" }, tracks: { type: "array", items: captionTrackSchema } }, required: ["available", "tracks"] }, youtubeFormats: youtubeFormatsSchema }, required: ["videoId", "title", "description", "channel", "publishedAt", "durationSeconds", "views", "viewsText", "likes", "likesText", "commentCount", "commentCountText", "category", "tags", "thumbnailUrl", "captions", "youtubeFormats"] }
     },
     {
       name: "youtube_get_channel_videos",
@@ -4011,7 +4034,7 @@ function toolDefinitions() {
       description: "List public channel videos with duration, views, Shorts/live flags and continuation. Accepts handle, channel URL or UC ID. Select returned video IDs for further research.",
       annotations: pageReadAnnotations,
       inputSchema: { type: "object", additionalProperties: false, properties: { channel: { type: "string", minLength: 2, description: "YouTube @handle, full channel URL, or UC channel ID." }, limit: { type: "integer", minimum: 1, maximum: 100, default: 30, description: "Maximum public video records to return. Results may be fewer at YouTube's page boundary; use continuation when supplied." }, continuation: { type: ["string", "null"], description: "Opaque token from this same tool and channel. Pass it back unchanged; never construct, edit, reuse for another channel, or log it." }, includeShorts: { type: "boolean", default: true, description: "Whether to include items YouTube marks as Shorts." }, includeStreams: { type: "boolean", default: true, description: "Whether to include live, upcoming, or streamed items." } }, required: ["channel"] },
-      outputSchema: { type: "object", additionalProperties: false, properties: { channel: channelIdentitySchema, videos: { type: "array", items: channelVideoItemSchema }, returned: { type: "integer" }, requested: { type: "integer" }, continuation: nullableString }, required: ["channel", "videos", "returned", "requested", "continuation"] }
+      outputSchema: { type: "object", additionalProperties: false, properties: { channel: channelIdentitySchema, videos: { type: "array", items: channelVideoItemSchema }, returned: { type: "integer" }, requested: { type: "integer" }, continuation: nullableString2 }, required: ["channel", "videos", "returned", "requested", "continuation"] }
     },
     {
       name: "youtube_get_channel_playlists",
@@ -4019,7 +4042,7 @@ function toolDefinitions() {
       description: "List public channel playlists and continuation. Accepts handle, channel URL or UC ID. Use playlistId with youtube_get_playlist_videos.",
       annotations: pageReadAnnotations,
       inputSchema: { type: "object", additionalProperties: false, properties: { channel: { type: "string", minLength: 2, description: "YouTube @handle, full channel URL, or UC channel ID." }, limit: { type: "integer", minimum: 1, maximum: 100, default: 30, description: "Maximum public playlist records to return. Results may be fewer at YouTube's page boundary; use continuation when supplied." }, continuation: { type: ["string", "null"], description: "Opaque token from this same tool and channel. Pass it back unchanged; never construct, edit, reuse for another channel, or log it." } }, required: ["channel"] },
-      outputSchema: { type: "object", additionalProperties: false, properties: { channel: channelIdentitySchema, playlists: { type: "array", items: playlistItemSchema }, returned: { type: "integer" }, requested: { type: "integer" }, continuation: nullableString }, required: ["channel", "playlists", "returned", "requested", "continuation"] }
+      outputSchema: { type: "object", additionalProperties: false, properties: { channel: channelIdentitySchema, playlists: { type: "array", items: playlistItemSchema }, returned: { type: "integer" }, requested: { type: "integer" }, continuation: nullableString2 }, required: ["channel", "playlists", "returned", "requested", "continuation"] }
     },
     {
       name: "youtube_get_playlist_videos",
@@ -4027,14 +4050,14 @@ function toolDefinitions() {
       description: "List ordered public playlist videos and continuation. Accepts PL ID or playlist URL. position is zero-based; use returned video IDs for transcript/comment research.",
       annotations: pageReadAnnotations,
       inputSchema: { type: "object", additionalProperties: false, properties: { playlist: { type: "string", minLength: 3, description: "YouTube playlist ID beginning with PL or a full playlist URL containing list=." }, limit: { type: "integer", minimum: 1, maximum: 100, default: 30, description: "Maximum public playlist video records to return. Results may be fewer at YouTube's page boundary; use continuation when supplied." }, continuation: { type: ["string", "null"], description: "Opaque token from this same tool and playlist. Pass it back unchanged; never construct, edit, reuse for another playlist, or log it." } }, required: ["playlist"] },
-      outputSchema: { type: "object", additionalProperties: false, properties: { playlist: playlistIdentitySchema, videos: { type: "array", items: channelVideoItemSchema }, returned: { type: "integer" }, requested: { type: "integer" }, continuation: nullableString }, required: ["playlist", "videos", "returned", "requested", "continuation"] }
+      outputSchema: { type: "object", additionalProperties: false, properties: { playlist: playlistIdentitySchema, videos: { type: "array", items: channelVideoItemSchema }, returned: { type: "integer" }, requested: { type: "integer" }, continuation: nullableString2 }, required: ["playlist", "videos", "returned", "requested", "continuation"] }
     },
     {
       name: "youtube_get_transcript",
       title: "Get public YouTube transcript",
       description: "Read timestamped text from a public caption track; trackIndex defaults to 0. Call youtube_get_video to choose another track/language.",
       annotations: pageReadAnnotations,
-      inputSchema: { type: "object", additionalProperties: false, properties: { videoId: { type: "string", minLength: 6, description: "YouTube video ID whose public transcript is required." }, trackIndex: { type: "integer", minimum: 0, default: 0, description: "Caption track index returned by youtube_get_video. Defaults to 0, YouTube's primary track." }, limit: { type: "integer", minimum: 1, maximum: 5000, default: 800, description: "Maximum number of timestamped caption segments to return, in chronological order." } }, required: ["videoId"] },
+      inputSchema: { type: "object", additionalProperties: false, properties: { videoId: { type: "string", minLength: 6, description: "YouTube video ID whose public transcript is required." }, trackIndex: { type: "integer", minimum: 0, default: 0, description: "Caption track index returned by youtube_get_video. Defaults to 0, YouTube's primary track." }, limit: { type: "integer", minimum: 1, maximum: 5e3, default: 800, description: "Maximum number of timestamped caption segments to return, in chronological order." } }, required: ["videoId"] },
       outputSchema: { type: "object", additionalProperties: false, properties: { videoId: { type: "string" }, selectedTrack: captionTrackSchema, segments: { type: "array", items: { type: "object", additionalProperties: false, properties: { start: { type: "number" }, duration: { type: "number" }, text: { type: "string" } }, required: ["start", "duration", "text"] } }, returned: { type: "integer" }, requested: { type: "integer" } }, required: ["videoId", "selectedTrack", "segments", "returned", "requested"] }
     },
     {
@@ -4060,7 +4083,7 @@ function toolDefinitions() {
       title: "Get Custom Tool task status",
       description: "Read asynchronous Custom Tool progress and result. Poll at pollIntervalMs.",
       annotations: localAgentReadAnnotations,
-      inputSchema: { type: "object", additionalProperties: false, properties: { taskId: { type: "string", pattern: "^ct_[A-Za-z0-9_-]{11}$" } }, required: ["taskId"] },
+      inputSchema: { type: "object", additionalProperties: false, properties: { taskId: { type: "string", pattern: "^tsk_[A-Za-z0-9_-]{10}$" } }, required: ["taskId"] },
       outputSchema: customTaskSchema
     },
     {
@@ -4068,13 +4091,12 @@ function toolDefinitions() {
       title: "Cancel a Custom Tool task",
       description: "Request cancellation of a running Custom Tool task.",
       annotations: localWorkspaceWriteAnnotations,
-      inputSchema: { type: "object", additionalProperties: false, properties: { taskId: { type: "string", pattern: "^ct_[A-Za-z0-9_-]{11}$" } }, required: ["taskId"] },
+      inputSchema: { type: "object", additionalProperties: false, properties: { taskId: { type: "string", pattern: "^tsk_[A-Za-z0-9_-]{10}$" } }, required: ["taskId"] },
       outputSchema: customToolCancelSchema
     }
   ];
   return [...artifactToolDefinitions(definitions, mediaToChatTaskSchema, MEDIA_TO_CHAT_WIDGET_URI, localAgentReadAnnotations, localWorkspaceWriteAnnotations), ...browserToolDefinitions(), ...customLifecycleDefinitions, ...CUSTOM_MCP_TOOLS];
 }
-
 function isPrivateMcpTool(tool) {
   return tool?._meta?.["openai/visibility"] === "private" || tool?._meta?.ui?.visibility?.includes("app");
 }
@@ -4136,7 +4158,7 @@ async function mcpToolSettingsCatalog() {
       alwaysEnabled: metadata.alwaysEnabled,
       enabled: metadata.alwaysEnabled || preferences.enabledByName[tool.name] === true
     };
-  }).sort((left, right) => (MCP_TOOL_GROUPS[left.group]?.order ?? MCP_TOOL_GROUPS.custom.order) - (MCP_TOOL_GROUPS[right.group]?.order ?? MCP_TOOL_GROUPS.custom.order) || left.name.localeCompare(right.name));
+  }).sort((left, right) => (MCP_TOOL_GROUPS[left.group]?.order ?? MCP_TOOL_GROUPS.custom.order + 10) - (MCP_TOOL_GROUPS[right.group]?.order ?? MCP_TOOL_GROUPS.custom.order + 10) || left.groupTitle.localeCompare(right.groupTitle) || left.group.localeCompare(right.group) || left.name.localeCompare(right.name));
 }
 async function enabledMcpToolDefinitions() {
   const catalog = await mcpToolSettingsCatalog();
@@ -6360,14 +6382,14 @@ function customToolByName(name) {
   return CUSTOM_MCP_TOOLS.find((tool) => tool.name === name) || null;
 }
 function customToolTaskId(value) {
-  if (typeof value !== "string" || !/^ct_[A-Za-z0-9_-]{11}$/.test(value)) throw localAgentError("INVALID_ARGUMENT", "taskId must be a Custom Tool task ID.");
+  if (typeof value !== "string" || !/^tsk_[A-Za-z0-9_-]{10}$/.test(value)) throw localAgentError("INVALID_ARGUMENT", "taskId must be a ResearchTube task ID (tsk_ plus ten URL-safe characters).");
   return value;
 }
 async function customToolCall(name, argumentsValue) {
   const document2 = await agentJsonRequest("/custom-tools/call", { method: "POST", body: { name, arguments: argumentsValue }, timeoutMs: AGENT_TASK_TIMEOUT_MS });
   if (!document2 || typeof document2 !== "object" || !["result", "task"].includes(document2.kind)) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid Custom Tool result.");
   if (document2.kind === "result") return document2.result;
-  if (!document2.task || typeof document2.task !== "object") throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid Custom Tool task.");
+  if (!document2.task || typeof document2.task !== "object" || typeof document2.task.taskId !== "string" || !/^tsk_[A-Za-z0-9_-]{10}$/.test(document2.task.taskId)) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid Custom Tool task.");
   return document2.task;
 }
 async function customToolStatus(taskId4) {

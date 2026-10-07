@@ -8,7 +8,7 @@ const [background, html, script] = await Promise.all([
 ]);
 
 assert.match(background, /const MCP_TOOL_GROUPS/);
-assert.match(background, /custom: \{ title: "Custom"/);
+assert.match(background, /custom: \{ title: "Custom Asynchronous Tasks"/);
 assert.match(background, /system_agent_status: \{ group: "system", alwaysEnabled: true \}/);
 assert.match(background, /enabledMcpToolDefinitions/);
 assert.match(background, /isMcpToolEnabled/);

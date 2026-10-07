@@ -45,7 +45,7 @@ async function testAgentConnection() {
   }
 }
 async function refreshDiagnostics() { const result = await call({ type: "get-diagnostics" }); const summary = $("diagnostics-summary"); if (!result?.ok) { summary.textContent = "Diagnostics are unavailable."; return result; } const count = Number(result.commandEntryCount || 0) + Number(result.searchEntryCount || 0); summary.textContent = count ? `${count} local event${count === 1 ? "" : "s"} captured (${result.commandEntryCount || 0} tool, ${result.searchEntryCount || 0} search). Copy the log after reproducing the problem.` : "No diagnostic events captured yet."; return result; }
-function toolGroupTitle(groups, group) { return groups?.[group]?.title || "Custom"; }
+function toolGroupTitle(groups, group) { return groups?.[group]?.title || "Custom Asynchronous Tasks"; }
 function renderMcpTools(result) {
   const container = $("mcp-tools"); const note = $("mcp-tools-result");
   if (!result?.ok) { container.textContent = "MCP tool settings are unavailable."; note.textContent = result?.error || ""; return; }
