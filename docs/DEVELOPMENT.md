@@ -41,7 +41,7 @@ Add a public definition to the owning Extension module. Give it:
 
 - a stable snake_case name;
 - a user-readable title;
-- an LLM-facing description that explains defaults, limits, side effects and follow-up calls;
+- a concise LLM-facing description (at most 600 characters for built-ins) with purpose, essential constraints and follow-up calls; put parameter details in their schema descriptions and implementation details in docs;
 - strict input and output JSON Schemas with `additionalProperties: false`;
 - MCP annotations;
 - invocation labels when the operation is visible or asynchronous.

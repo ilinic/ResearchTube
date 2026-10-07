@@ -16,6 +16,8 @@ ResearchTube can discover and download YouTube's ready-made timeline preview she
 
 Discovery first uses matching current YouTube page context, then Agent watch-page metadata and finally metadata-only yt-dlp fallback. No tab is navigated. Live, upcoming and post-live DVR streams are rejected; finite archived videos are supported when storyboards exist.
 
+When discovery returns `available:false`, its `comment` recommends `visual_map_create` using a Workspace video (download it first if needed). Unavailable download rejections include the same fixed comment; `STORYBOARD_NOT_AVAILABLE` also includes the advice in its error message so artifact-task failures retain it. This is guidance only: no video download or Visual Map starts automatically. Agent reasons and privacy projection are preserved.
+
 ## Variants
 
 `variantId` is opaque and must be passed unchanged from discovery. Public metadata includes:

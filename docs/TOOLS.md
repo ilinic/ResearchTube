@@ -116,11 +116,13 @@ returns a task immediately and uses `custom_tool_status` and
 | `camera_record_status` | Returns the complete artifact workflow; native recording/stopping state and metadata are in creation.data. |
 | `camera_record_stop` | Requests graceful stop and finalization of a working recording. |
 
+Built-in MCP descriptions are limited to 600 characters; detailed behavior is documented here and in feature guides. Schemas remain authoritative.
+
 ## YouTube Storyboards
 
 | Tool | Behavior |
 | --- | --- |
-| `youtube_storyboard_get_info` | Discovers ready-made storyboard variants, geometry, interval and sheet count without downloading sheets. |
+| `youtube_storyboard_get_info` | Discovers preview-sheet variants. When unavailable, `comment` recommends `visual_map_create` from a Workspace video. |
 | `youtube_storyboard_download` | Starts download of all sheets, an inclusive time range or explicit indexes; optional timestamps are drawn into a selected corner. |
 | `youtube_storyboard_get_task` | Returns the complete workflow with native progress/tile timestamps and publishedSheets in creation.data; created paths are in files. |
 | `youtube_storyboard_cancel_task` | Stops queued/current transfers while retaining complete sheets. |

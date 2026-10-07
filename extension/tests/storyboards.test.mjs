@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
+import { assertSchema } from './fixtures/schema-check.mjs';
 import { STORYBOARD_TOOL_NAMES, storyboardDefinitions, validateStoryboardInput, normalizeStoryboardResult } from '../storyboards.js';
 
 const vid = 'aqz-KE-bpKQ';
@@ -11,7 +12,7 @@ const definitions = storyboardDefinitions({ readOnlyHint: true }, { readOnlyHint
 assert.deepEqual(definitions.map(d => d.name), STORYBOARD_TOOL_NAMES);
 assert.equal(definitions[0].annotations.readOnlyHint, true);
 assert.equal(definitions[1].annotations.readOnlyHint, false);
-assert.match(definitions[1].description, /sheetTimestamps always returns the calculated absolute time/);
+assert.match(definitions[1].description, /sheetTimestamps always returns calculated tile times/);
 const downloadArgs = validateStoryboardInput(download, { videoId: vid, variantId: variant.variantId, selection: { mode: 'sheets', sheetIndexes: [2, 2, 0] } });
 assert.deepEqual(downloadArgs.selection.sheetIndexes, [2, 0]);
 assert.equal(downloadArgs.frameTimestampPosition, 'bottomRight');
@@ -24,6 +25,21 @@ const normalized = normalizeStoryboardResult(info, { videoId: vid, available: tr
 assert.equal(JSON.stringify(normalized).includes('secret'), false);
 assert.deepEqual(normalized.variants, [variant]);
 assert.throws(() => normalizeStoryboardResult(info, { videoId: vid, available: true, durationSeconds: 20, variants: [{ ...variant, framesPerSheet: 24 }] }), { code: 'AGENT_INVALID_RESPONSE' });
+
+for (const reason of ['STORYBOARD_NOT_AVAILABLE', 'STORYBOARD_VIDEO_LIVE', 'STORYBOARD_CONTEXT_UNAVAILABLE']) {
+  const unavailable = normalizeStoryboardResult(info, { videoId: vid, available: false, reason, comment: 'private signed URL' });
+  assert.equal(unavailable.available, false);
+  assert.match(unavailable.comment, /visual_map_create.*Workspace video/);
+  assert.ok(!JSON.stringify(unavailable).includes('private'));
+  assertSchema(definitions[0].outputSchema, unavailable);
+  const rejected = normalizeStoryboardResult(download, { status: 'rejected', error: { code: reason, message: 'private' } });
+  assert.match(rejected.comment, /visual_map_create/);
+  assertSchema(definitions[1].outputSchema, rejected);
+  if (reason === 'STORYBOARD_NOT_AVAILABLE') assert.match(rejected.error.message, /visual_map_create/);
+}
+assert.equal(normalized.comment, undefined, 'available storyboards need no fallback comment');
+assert.equal(normalizeStoryboardResult(info, {status:'rejected',error:{code:'STORYBOARD_INVALID'}}).comment, undefined);
+
 const task = { taskId: id, status: 'working', phase: 'downloading', progressPercent: 35, completedSheets: 1, totalSheets: 3, downloadedSheets: 1, reusedSheets: 0, workspaceDirectory: 'storyboards', pollIntervalMs: 1000, publishedSheets: [{sheetIndex: 0, workspacePath: 'storyboards/example.jpeg'}], frameTimestampPosition: 'bottomRight', sheetTimestamps: [{ sheetIndex: 0, frameTimestampsSeconds: [0, 5] }, { sheetIndex: 1, frameTimestampsSeconds: [125, 130] }, { sheetIndex: 2, frameTimestampsSeconds: [250, 255, 260] }] };
 assert.deepEqual(normalizeStoryboardResult(status, { ...task, rawSpec: 'secret', paths: ['C:\\private'] }), task);
 assert.throws(() => normalizeStoryboardResult(status, { ...task, completedSheets: 2 }), { code: 'AGENT_INVALID_RESPONSE' });

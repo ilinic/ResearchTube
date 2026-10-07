@@ -87,10 +87,10 @@ function worker() {
 
 const defaults = worker();
 const tool = defaults.context.publicMcpTools().find(tool => tool.name === 'media_to_chat');
-assert.match(tool.description, /Status polling and cancellation are allowed in the initiating assistant turn/);
+assert.match(tool.description, /Poll\/cancel at pollIntervalMs, including this turn/);
 assert.doesNotMatch(tool.description, /Do not poll during this same assistant turn/);
 const statusTool = defaults.context.publicMcpTools().find(tool => tool.name === 'media_to_chat_status');
-assert.match(statusTool.description, /Polling is allowed in the initiating assistant turn/);
+assert.match(statusTool.description, /Poll at pollIntervalMs, including this turn/);
 assert.doesNotMatch(statusTool.description, /Poll only in a later/);
 assert.equal(tool.inputSchema.properties.sendDelaySeconds.default, 0);
 assert.ok(!tool.inputSchema.required.includes('sendDelaySeconds'));

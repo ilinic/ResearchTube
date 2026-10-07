@@ -8,9 +8,10 @@ const variantId = { type: "string", pattern: "^storyboard_[1-9][0-9]*$" };
 const timestampPositions = ["none", "topLeft", "topRight", "bottomLeft", "bottomRight"];
 const frameTimestampPosition = { type: "string", enum: timestampPositions, default: "bottomRight" };
 const reasons = ["STORYBOARD_NOT_AVAILABLE", "STORYBOARD_VIDEO_LIVE", "STORYBOARD_CONTEXT_UNAVAILABLE"];
+const storyboardAlternativeComment = "Use visual_map_create to generate preview sheets from a Workspace video; download the video first if needed.";
 const messages = {
   STORYBOARD_INVALID: "Check videoId, variantId, selection and taskId against the documented input.",
-  STORYBOARD_NOT_AVAILABLE: "YouTube has no usable storyboards for this video.",
+  STORYBOARD_NOT_AVAILABLE: "YouTube has no usable storyboards for this video. Use visual_map_create with a Workspace video instead.",
   STORYBOARD_VIDEO_LIVE: "Storyboards currently support finite videos, not live or upcoming streams.",
   STORYBOARD_CONTEXT_UNAVAILABLE: "Open the video in YouTube or check the Local Agent's yt-dlp installation, then retry.",
   STORYBOARD_VARIANT_NOT_FOUND: "Discover the available variants with youtube_storyboard_get_info.",
@@ -24,10 +25,10 @@ const variantSchema = object({ variantId, cellWidth: positive, cellHeight: posit
 const selectionSchema = { oneOf: [object({ mode: { const: "all" } }),
   object({ mode: { const: "range" }, startSeconds: { type: "number", minimum: 0 }, endSeconds: { type: "number", minimum: 0 } }),
   object({ mode: { const: "sheets" }, sheetIndexes: { type: "array", minItems: 1, items: integer } })] };
-const rejected = object({ status: { const: "rejected" }, error: errorSchema });
+const rejected = object({ status: { const: "rejected" }, error: errorSchema, comment: { type: "string" } }, ["status", "error"]);
 const infoSchema = { type: "object", oneOf: [
   object({ videoId, durationSeconds: { type: "number", exclusiveMinimum: 0 }, available: { const: true }, variants: { type: "array", minItems: 1, items: variantSchema } }),
-  object({ videoId, available: { const: false }, reason: { enum: reasons } }), rejected] };
+  object({ videoId, available: { const: false }, reason: { enum: reasons }, comment: { type: "string" } }), rejected] };
 const statuses = ["working", "completed", "cancelled", "failed"];
 const sheetTimestampSchema = object({ sheetIndex: integer,
   frameTimestampsSeconds: { type: "array", minItems: 1, items: { type: "number", minimum: 0 } } });
@@ -45,10 +46,10 @@ export function storyboardDefinitions(readAnnotations, writeAnnotations) {
   const make = (name, title, description, inputSchema, outputSchema, write = false) => ({ name, title, description, inputSchema, outputSchema,
     annotations: { ...(write ? writeAnnotations : readAnnotations), openWorldHint: name.endsWith("get_info") || name.endsWith("download") } });
   return [
-    make(STORYBOARD_TOOL_NAMES[0], "Get YouTube storyboard variants", "Discover pre-generated timeline-preview sheet variants. Returns cell geometry, interval and sheet count. frameIntervalEstimated marks timing inferred when YouTube has no nonzero interval or the last yt-dlp fallback only provides average fps; range boundaries then use that estimate. Reads the matching open YouTube tab first, then yt-dlp metadata. Creates no files and downloads no media or sheets. variantId is opaque; retain it unchanged.", object({ videoId }), infoSchema),
-    make(STORYBOARD_TOOL_NAMES[1], "Download YouTube storyboard sheets", "Start one asynchronous task for all sheets, an inclusive time range within video duration, or zero-based sheet indexes of one discovered variant. Downloads YouTube's ready preview JPEG sheets only, never video/audio. sheetTimestamps always returns the calculated absolute time for every real tile. frameTimestampPosition controls whether those labels are drawn on the ready-made grid: bottomRight by default, or none, topLeft, topRight, or bottomLeft when explicitly requested; unused cells of a final partial sheet stay untouched. Files are directly in storyboards/ with video ID, sz_widthxheight, tstp_seconds, mesh_columnsxrows and sheet index tags in each filename. Never displays an image automatically. Poll youtube_storyboard_get_task at pollIntervalMs; use the returned publishedSheets for exact safely published files.", object({ videoId, variantId, selection: selectionSchema, frameTimestampPosition }, ["videoId", "variantId", "selection"]), { type: "object", oneOf: [taskSchema, rejected] }, true),
-    make(STORYBOARD_TOOL_NAMES[2], "Get storyboard task progress", "Get compact sheet counts, monotonic progress and publishedSheets with exact verified sheet indexes and logical paths. Poll no faster than pollIntervalMs. Complete sheets remain in storyboards/ after failure or cancellation. Does not return image bytes.", object({ taskId }), { type: "object", oneOf: [taskSchema, rejected] }),
-    make(STORYBOARD_TOOL_NAMES[3], "Cancel storyboard download", "Stop current and queued transfers for one storyboard task. Preserves all completely published sheets. Repeating cancellation returns the existing terminal status.", object({ taskId }), { type: "object", oneOf: [cancelSchema, rejected] }, true)
+    make(STORYBOARD_TOOL_NAMES[0], "Get YouTube storyboard variants", "Discover YouTube preview-sheet variants, geometry, timing and sheet counts; retain variantId unchanged. frameIntervalEstimated marks inferred timing. Creates no files. If unavailable, the response recommends visual_map_create from a Workspace video.", object({ videoId }), infoSchema),
+    make(STORYBOARD_TOOL_NAMES[1], "Download YouTube storyboard sheets", "Download ready JPEG sheets of a discovered variant: all, a time range or sheet indexes. sheetTimestamps always returns calculated tile times; frameTimestampPosition draws labels (default bottomRight, none disables). Saves directly under storyboards/; never downloads video/audio.", object({ videoId, variantId, selection: selectionSchema, frameTimestampPosition }, ["videoId", "variantId", "selection"]), { type: "object", oneOf: [taskSchema, rejected] }, true),
+    make(STORYBOARD_TOOL_NAMES[2], "Get storyboard task progress", "Read storyboard sheet progress and published paths. Poll at pollIntervalMs. Complete sheets survive failure/cancellation.", object({ taskId }), { type: "object", oneOf: [taskSchema, rejected] }),
+    make(STORYBOARD_TOOL_NAMES[3], "Cancel storyboard download", "Cancel storyboard transfers; keep completely published sheets. Repeated cancellation returns terminal status.", object({ taskId }), { type: "object", oneOf: [cancelSchema, rejected] }, true)
   ];
 }
 
@@ -79,11 +80,11 @@ export function normalizeStoryboardResult(name, data) {
   if (!plain(data)) bad();
   if (data.status === "rejected") {
     if (!messages[data.error?.code]) bad();
-    return { status: "rejected", error: { code: data.error.code, message: messages[data.error.code] } };
+    return { status: "rejected", error: { code: data.error.code, message: messages[data.error.code] }, ...(reasons.includes(data.error.code) ? { comment: storyboardAlternativeComment } : {}) };
   }
   if (name.endsWith("get_info")) {
     if (!matches(videoId, data.videoId)) bad();
-    if (data.available === false && reasons.includes(data.reason)) return { videoId: data.videoId, available: false, reason: data.reason };
+    if (data.available === false && reasons.includes(data.reason)) return { videoId: data.videoId, available: false, reason: data.reason, comment: storyboardAlternativeComment };
     if (data.available !== true || !finite(data.durationSeconds) || data.durationSeconds <= 0 || !Array.isArray(data.variants) || !data.variants.length) bad();
     const variants = data.variants.map(v => {
       if (!plain(v) || !matches(variantId, v.variantId) || v.format !== "jpeg" || typeof v.frameIntervalEstimated !== "boolean" || !finite(v.frameIntervalSeconds) || v.frameIntervalSeconds <= 0 ||

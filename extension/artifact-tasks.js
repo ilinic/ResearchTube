@@ -34,9 +34,9 @@ const object = (properties, required = Object.keys(properties)) => ({type:'objec
 const errorSchema = object({code:{type:'string'}, message:{type:'string'}});
 const nullable = schema => ({anyOf:[schema,{type:'null'}]});
 export const artifactOptionsSchema = {
-  addToChat:{type:'boolean',default:false,description:'Upload all created files to the originating ChatGPT conversation and press Send as the second stage of this task. This supplies attachments to ChatGPT, unlike media_show which only displays a viewer. Default false runs only the requested operation.'},
-  composerPolicy:{type:'string',enum:['requireEmpty','clear'],default:'requireEmpty',description:'With addToChat: requireEmpty refuses an existing draft or attachments; clear explicitly discards both once before upload. New user edits stop Send and leave uploaded files attached.'},
-  sendDelaySeconds:{type:'number',minimum:0,default:0,description:'With addToChat: optional seconds between acceptance of all eligible attachments and Send. Readiness is checked separately. Status exposes waitingToSend, sendNotBefore and remainingSeconds. Cancellation leaves the Composer untouched.'}
+  addToChat:{type:'boolean',default:false,description:'Upload created files to this conversation and press Send. Default false creates only; media_show displays a viewer instead.'},
+  composerPolicy:{type:'string',enum:['requireEmpty','clear'],default:'requireEmpty',description:'With addToChat: requireEmpty refuses drafts/attachments; clear discards both once. Later text edits stop Send and retain files.'},
+  sendDelaySeconds:{type:'number',minimum:0,default:0,description:'With addToChat: seconds before Send after files are accepted. Default 0. waitingToSend reports deadline/remaining time; cancel preserves Composer.'}
 };
 export function artifactTaskSchema(chatSchema, dataSchema = {type:'object'}) {
   return object({
