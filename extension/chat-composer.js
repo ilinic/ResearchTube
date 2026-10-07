@@ -215,45 +215,26 @@ export function resetChatComposerFileInputs() {
 }
 
 // Track user editing independently of the final text: typing then deleting still stops Send.
-export function installChatComposerGuard(expectedNames, token, inspectAttachments = null) {
+export function installChatComposerGuard(_expectedNames, token, _inspectAttachments = null) {
   const key = '__researchtubeChatComposerGuard';
   window[key]?.dispose?.();
-  const { composer, root, form } = resolveChatComposer();
+  const { root } = resolveChatComposer();
   if (!root) return false;
-  const expected = [...expectedNames].sort();
-  const state = { token, changed: false, ownSelectionSeen: false, ownText: null, ownBeforeInput: false, ownInput: false };
+  // File identity is deliberately not monitored. The delivery check compares
+  // only the number of visible attachment cards, allowing same-count replacement.
+  const state = { token, changed: false, ownText: null, ownBeforeInput: false, ownInput: false };
   const listener = (event) => {
     if (!event.isTrusted) return;
-    const target = event.target;
-    // React can replace the Composer during upload; follow the current draft area.
-    const { composer: liveComposer, root: liveRoot, form: liveForm } = resolveChatComposer();
+    const { composer: liveComposer, root: liveRoot } = resolveChatComposer();
     if (!liveRoot) { state.changed = true; return; }
-    if (event.type === 'change' && target?.matches?.('input[type="file"]')) {
-      if (target.closest('form') && target.closest('form') !== liveForm) return;
-      const names = [...(target.files || [])].map((file) => file.name).sort();
-      const ownSelection = !state.ownSelectionSeen && names.length === expected.length && names.every((name, index) => name === expected[index]);
-      if (ownSelection) state.ownSelectionSeen = true;
-      else state.changed = true;
-    } else if (liveRoot.contains(target)) {
-      if (['beforeinput', 'input'].includes(event.type) && (target === liveComposer || liveComposer.contains(target))) {
-        const own = state.ownText !== null && event.inputType === 'insertText' && event.data === state.ownText;
-        if (own && event.type === 'beforeinput' && !state.ownBeforeInput && !state.ownInput) state.ownBeforeInput = true;
-        else if (own && event.type === 'input' && state.ownBeforeInput && !state.ownInput) { state.ownInput = true; state.ownText = null; }
-        else state.changed = true;
-      }
-      if (event.type === 'drop' && event.dataTransfer?.files?.length) state.changed = true;
-      if (event.type === 'paste' && event.clipboardData?.files?.length) state.changed = true;
-      if (event.type === 'click') {
-        const button = target?.closest?.('button, [role="button"]');
-        const label = ['aria-label', 'title', 'data-testid'].map((name) => button?.getAttribute(name) || '').join(' ');
-        const bounds = button?.getBoundingClientRect();
-        const removal = bounds && inspectAttachments?.().removeTargets.some((item) =>
-          Math.abs(item.x - bounds.left - bounds.width / 2) < 1 && Math.abs(item.y - bounds.top - bounds.height / 2) < 1);
-        if (removal || /(?:\b(?:remove|delete)\b|удалить)/i.test(label)) state.changed = true;
-      }
-    }
+    const target = event.target;
+    if (target !== liveComposer && !liveComposer.contains(target)) return;
+    const own = state.ownText !== null && event.inputType === 'insertText' && event.data === state.ownText;
+    if (own && event.type === 'beforeinput' && !state.ownBeforeInput && !state.ownInput) state.ownBeforeInput = true;
+    else if (own && event.type === 'input' && state.ownBeforeInput && !state.ownInput) { state.ownInput = true; state.ownText = null; }
+    else state.changed = true;
   };
-  const types = ['beforeinput', 'input', 'change', 'drop', 'paste', 'click'];
+  const types = ['beforeinput', 'input'];
   for (const type of types) document.addEventListener(type, listener, true);
   state.dispose = () => {
     for (const type of types) document.removeEventListener(type, listener, true);

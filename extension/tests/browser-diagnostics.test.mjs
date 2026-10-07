@@ -34,3 +34,12 @@ await assert.rejects(off.span("off", () => { throw failure; }), error => error =
 const brokenConsole = createBrowserDiagnostics({ enabled: true, now: () => clock, log: () => { throw Error("console failure"); } });
 assert.equal(await brokenConsole.span("console", () => 456), 456);
 console.log("Browser diagnostics: durations, repeated CDP aggregation, private-data exclusion, disable switch and error transparency: ok");
+
+trace.event("tab.state", { point: "resource.beforeSend", tabId: 42, windowId: 7, active: false, windowFocused: true, visibilityState: "hidden", hidden: true, hasFocus: true, readyState: "complete", url: "PRIVATE URL" });
+const tabState = logs.find(row => row.stage === "tab.state");
+assert.equal(tabState.point, "resource.beforeSend");
+assert.equal(tabState.tabId, 42);
+assert.equal(tabState.active, false);
+assert.equal(tabState.visibilityState, "hidden");
+assert.equal(tabState.readyState, "complete");
+assert.doesNotMatch(JSON.stringify(tabState), /PRIVATE|url/);

@@ -33,6 +33,7 @@ let resetInputs = 0;
 const telemetry = [];
 const commands = [];
 const context = vm.createContext({
+  waitForComposerMedia,
   pruneCompletedTasks, completedTaskHistoryLimit: 2000, developerNewToolsDefault: true, refreshTaskHistorySettings: async () => {},
   resolveChatComposer, chatComposerPageExpression, chatComposerAttachmentNamesMatch, inspectChatComposer, clickChatComposerAttachmentRemoval, resetChatComposerFileInputs, installChatComposerGuard, readChatComposerGuard, disposeChatComposerGuard,
   URL, console, Promise, crypto: webcrypto, setTimeout, clearTimeout,
@@ -219,7 +220,7 @@ assert.equal(draftEmpty, false);
 // An added attachment or editing and then deleting text also stops Send.
 draftEmpty = true; attachmentNames = [];
 afterAcceptance = () => { attachmentNames.push("user.txt"); };
-await assert.rejects(context.cdpAttachFilesNow(["/workspace/report.pdf"], { currentChatTarget: target }), /attachments changed/);
+await assert.rejects(context.cdpAttachFilesNow(["/workspace/report.pdf"], { currentChatTarget: target }), /did not confirm Composer attachment count/);
 assert.deepEqual(attachmentNames, ["report.pdf", "user.txt"]);
 assert.equal(sends, sendsBeforeEdit);
 attachmentNames = [];
@@ -377,12 +378,12 @@ resetPage();
 await context.cdpAttachFilesNow(['/workspace/task.jpg'],{currentChatTarget:target});
 assert.equal(actualSends,2);
 resetPage();onActualAcceptance=()=>{live.composer.innerText='user typed';live.event('input',live.composer);};
-await assert.rejects(context.cdpAttachFilesNow(['/workspace/task.jpg'],{currentChatTarget:target}),/contains a draft/);
+await assert.rejects(context.cdpAttachFilesNow(['/workspace/task.jpg'],{currentChatTarget:target}),/edited during upload/);
 assert.equal(actualSends,2);
 assert.equal(live.composer.innerText,'user typed');
 assert.equal(live.run(inspectChatComposer).attachments[0].name,'task.jpg');
 resetPage();onActualAcceptance=()=>live.button('Remove extra.pdf','extra.pdf',{markedCard:true});
-await assert.rejects(context.cdpAttachFilesNow(['/workspace/task.jpg'],{currentChatTarget:target}),/attachments changed/);
+await assert.rejects(context.cdpAttachFilesNow(['/workspace/task.jpg'],{currentChatTarget:target}),/did not confirm Composer attachment count/);
 assert.equal(actualSends,2);
 console.log('media to chat: real page expressions reject occupied live editor, clear initial state, accept reset FileList and preserve user changes');
 

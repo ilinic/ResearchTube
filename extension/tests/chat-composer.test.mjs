@@ -49,7 +49,7 @@ for (const type of ['change', 'drop', 'paste', 'click']) {
   } else if (type === 'drop') page.event('drop', page.composer, { dataTransfer: { files: [{}] } });
   else if (type === 'paste') page.event('paste', page.composer, { clipboardData: { files: [{}] } });
   else page.event('click', page.button('Remove file', 'output.pdf'));
-  assert.equal(page.run(readChatComposerGuard, type).changed, true, `user ${type} must stop Send`);
+  assert.equal(page.run(readChatComposerGuard, type).changed, false, `attachment ${type} must not monitor file identity`);
 }
 // Installing another monitor replaces old handlers rather than accumulating them.
 page.run(installChatComposerGuard, ['output.pdf'], 'replacement');
@@ -76,7 +76,7 @@ assert.equal(imageState.previewCount, 2, 'each image card must count once');
 assert.equal(imageState.removeTargets.length, 1, 'edit buttons and toolbar X must not be clicked');
 imagePage.run(installChatComposerGuard, ['photo.png'], 'unlabelled-close', inspectChatComposer);
 imagePage.event('click', close);
-assert.equal(imagePage.run(readChatComposerGuard, 'unlabelled-close').changed, true);
+assert.equal(imagePage.run(readChatComposerGuard, 'unlabelled-close').changed, false);
 imagePage.run(disposeChatComposerGuard, 'unlabelled-close');
 const filenamePage = pageFixture();
 filenamePage.button('Remove photo.png', 'photo.png', { imageSrc: 'blob:photo' });

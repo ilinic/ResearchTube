@@ -142,8 +142,8 @@ await renamed.context.resumeDelayedMediaToChatTask(renamedTask.taskId);
 assert.equal((await renamed.context.mediaToChatStatus(renamedTask.taskId)).status, 'completed');
 assert.equal(renamed.sends.length, 1);
 
-// Timestamp aliases cannot bypass trusted replacement/removal, or accept a
-// different filename/type/count. All refused files remain in the Composer.
+// Only count matters: same-count replacements and arbitrary names/types pass.
+// Extra cards exhaust the retry budget and remain in the Composer.
 for (const mutation of ['differentName', 'differentExtension', 'duplicate', 'trustedReplacement']) {
   const w = worker(); const task = await w.start(60); const page = w.pages.get(42);
   page.root.cards = []; page.root.controls = [];
@@ -155,9 +155,9 @@ for (const mutation of ['differentName', 'differentExtension', 'duplicate', 'tru
     page.input.files = [{ name }]; page.event('change', page.input); page.input.files = [];
   }
   w.advance(60_000); await w.context.resumeDelayedMediaToChatTask(task.taskId);
-  assert.equal((await w.context.mediaToChatStatus(task.taskId)).status, 'failed', mutation);
-  assert.equal(w.sends.length, 0, mutation);
-  assert.equal(page.run(inspectChatComposer).attachments.length, mutation === 'duplicate' ? 2 : 1);
+  assert.equal((await w.context.mediaToChatStatus(task.taskId)).status, mutation === 'duplicate' ? 'failed' : 'completed', mutation);
+  assert.equal(w.sends.length, mutation === 'duplicate' ? 0 : 1, mutation);
+  assert.equal(page.run(inspectChatComposer).attachments.length, mutation === 'duplicate' ? 2 : 0);
 }
 
 // Acceptance can see the timestamp name immediately, before the waiting stage.

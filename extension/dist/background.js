@@ -2145,48 +2145,26 @@ function resetChatComposerFileInputs() {
   }
   return true;
 }
-function installChatComposerGuard(expectedNames, token, inspectAttachments = null) {
-  const key = "__researchtubeChatComposerGuard";
+function installChatComposerGuard(_expectedNames, token, _inspectAttachments = null) {
+  const key = '__researchtubeChatComposerGuard';
   window[key]?.dispose?.();
-  const { composer, root, form } = resolveChatComposer();
+  const { root } = resolveChatComposer();
   if (!root) return false;
-  const expected = [...expectedNames].sort();
-  const state = { token, changed: false, ownSelectionSeen: false, ownText: null, ownBeforeInput: false, ownInput: false };
+  // File identity is deliberately not monitored. The delivery check compares
+  // only the number of visible attachment cards, allowing same-count replacement.
+  const state = { token, changed: false, ownText: null, ownBeforeInput: false, ownInput: false };
   const listener = (event) => {
     if (!event.isTrusted) return;
+    const { composer: liveComposer, root: liveRoot } = resolveChatComposer();
+    if (!liveRoot) { state.changed = true; return; }
     const target = event.target;
-    const { composer: liveComposer, root: liveRoot, form: liveForm } = resolveChatComposer();
-    if (!liveRoot) {
-      state.changed = true;
-      return;
-    }
-    if (event.type === "change" && target?.matches?.('input[type="file"]')) {
-      if (target.closest("form") && target.closest("form") !== liveForm) return;
-      const names = [...target.files || []].map((file) => file.name).sort();
-      const ownSelection = !state.ownSelectionSeen && names.length === expected.length && names.every((name, index) => name === expected[index]);
-      if (ownSelection) state.ownSelectionSeen = true;
-      else state.changed = true;
-    } else if (liveRoot.contains(target)) {
-      if (["beforeinput", "input"].includes(event.type) && (target === liveComposer || liveComposer.contains(target))) {
-        const own = state.ownText !== null && event.inputType === "insertText" && event.data === state.ownText;
-        if (own && event.type === "beforeinput" && !state.ownBeforeInput && !state.ownInput) state.ownBeforeInput = true;
-        else if (own && event.type === "input" && state.ownBeforeInput && !state.ownInput) {
-          state.ownInput = true;
-          state.ownText = null;
-        } else state.changed = true;
-      }
-      if (event.type === "drop" && event.dataTransfer?.files?.length) state.changed = true;
-      if (event.type === "paste" && event.clipboardData?.files?.length) state.changed = true;
-      if (event.type === "click") {
-        const button = target?.closest?.('button, [role="button"]');
-        const label = ["aria-label", "title", "data-testid"].map((name) => button?.getAttribute(name) || "").join(" ");
-        const bounds = button?.getBoundingClientRect();
-        const removal = bounds && inspectAttachments?.().removeTargets.some((item) => Math.abs(item.x - bounds.left - bounds.width / 2) < 1 && Math.abs(item.y - bounds.top - bounds.height / 2) < 1);
-        if (removal || /(?:\b(?:remove|delete)\b|удалить)/i.test(label)) state.changed = true;
-      }
-    }
+    if (target !== liveComposer && !liveComposer.contains(target)) return;
+    const own = state.ownText !== null && event.inputType === 'insertText' && event.data === state.ownText;
+    if (own && event.type === 'beforeinput' && !state.ownBeforeInput && !state.ownInput) state.ownBeforeInput = true;
+    else if (own && event.type === 'input' && state.ownBeforeInput && !state.ownInput) { state.ownInput = true; state.ownText = null; }
+    else state.changed = true;
   };
-  const types = ["beforeinput", "input", "change", "drop", "paste", "click"];
+  const types = ['beforeinput', 'input'];
   for (const type of types) document.addEventListener(type, listener, true);
   state.dispose = () => {
     for (const type of types) document.removeEventListener(type, listener, true);
@@ -2195,6 +2173,7 @@ function installChatComposerGuard(expectedNames, token, inspectAttachments = nul
   window[key] = state;
   return true;
 }
+
 function readChatComposerGuard(token) {
   const state = window.__researchtubeChatComposerGuard;
   return state?.token === token ? { present: true, changed: state.changed } : { present: false, changed: true };
@@ -2473,7 +2452,7 @@ var MCP_TOOL_SETTINGS = Object.freeze({
   custom_tool_status: { group: "custom" },
   custom_tool_cancel: { group: "custom" }
 });
-var EXTENSION_VERSION = "2.2.86";
+var EXTENSION_VERSION = "2.2.87";
 globalThis.addEventListener?.("fetch", createMediaStreamHandler({
   extensionUrl: chrome.runtime.getURL("/"),
   getClient: (id) => globalThis.clients.get(id),
@@ -3917,7 +3896,7 @@ function toolDefinitions() {
     {
       name: "media_to_chat",
       title: "Send workspace files to the current chat",
-      description: "Queue any selected Workspace files for attachment and sending in the ChatGPT conversation that invoked this tool. Its compact service widget identifies the originating Chrome tab before any Composer changes; the exact tab ID and conversation are then fixed for the entire task. Active tabs and focused windows are never used to select a destination. If the originating tab cannot be identified within 30 seconds, is duplicated in another tab, closes or changes conversation, the task fails rather than selecting another tab. The ResearchTube Extension must be able to receive the task widget handshake. No new tab is opened. The tool uploads file bytes to ChatGPT using Chrome automation and presses Send without adding prompt text. Count and per-file size limits are configured by mediaToChatMaxFiles and mediaToChatMaxFileSizeMiB in agent/agent-config.json. Oversized files are listed in skippedFiles; eligible files are sent together. composerPolicy defaults to requireEmpty: refuse a Composer containing text or attachments. clear explicitly removes its text and existing attachments once, before uploading the selected files, and verifies that it is empty. After uploading starts, user edits, added or removed attachments, or a changed conversation stop the task without Send; already attached task files stay in the Composer. The task never clears again after upload begins. Optional sendDelaySeconds defaults to 0 and delays Send after all eligible files are accepted in Composer. During waitingToSend, status reports sendNotBefore (UTC) and remainingSeconds. The pause releases browser automation for other tabs; another task targeting the same Composer is refused. Cancellation before Send leaves existing text and attachments untouched. Status polling and cancellation are allowed in the initiating assistant turn, no faster than pollIntervalMs. With a positive sendDelaySeconds, inspect waitingToSend and cancel before sendNotBefore when needed. ChatGPT may keep Send unavailable while the assistant is responding: when the goal is actual submission, finish the response after any required pre-Send checks instead of waiting indefinitely for completed. The Extension continues the queued attachment/send task independently after the assistant response ends; configured enabled-Send retries stop as soon as submission is acknowledged. A timer does not independently resume an ended assistant turn. completed confirms Send and UI acknowledgement, not ChatGPT processing or Library storage.",
+      description: "Queue any selected Workspace files for attachment and sending in the ChatGPT conversation that invoked this tool. Its compact service widget identifies the originating Chrome tab before any Composer changes; the exact tab ID and conversation are then fixed for the entire task. Active tabs and focused windows are never used to select a destination. If the originating tab cannot be identified within 30 seconds, is duplicated in another tab, closes or changes conversation, the task fails rather than selecting another tab. The ResearchTube Extension must be able to receive the task widget handshake. No new tab is opened. The tool uploads file bytes to ChatGPT using Chrome automation and presses Send without adding prompt text. Count and per-file size limits are configured by mediaToChatMaxFiles and mediaToChatMaxFileSizeMiB in agent/agent-config.json. Oversized files are listed in skippedFiles; eligible files are sent together. composerPolicy defaults to requireEmpty: refuse a Composer containing text or attachments. clear explicitly removes its text and existing attachments once, before uploading the selected files, and verifies that it is empty. After uploading starts, attachment readiness is verified only by the number of visible Composer cards. Filenames and identities are not compared; replacing one file with another at the same count is allowed. Temporary count mismatches are retried using the configured Composer retry budget (15 repeats at 2-second intervals by default). User text edits or a changed conversation stop the task without Send; attached files stay in the Composer. The task never clears again after upload begins. Optional sendDelaySeconds defaults to 0 and delays Send after all eligible files are accepted in Composer. During waitingToSend, status reports sendNotBefore (UTC) and remainingSeconds. The pause releases browser automation for other tabs; another task targeting the same Composer is refused. Cancellation before Send leaves existing text and attachments untouched. Status polling and cancellation are allowed in the initiating assistant turn, no faster than pollIntervalMs. With a positive sendDelaySeconds, inspect waitingToSend and cancel before sendNotBefore when needed. ChatGPT may keep Send unavailable while the assistant is responding: when the goal is actual submission, finish the response after any required pre-Send checks instead of waiting indefinitely for completed. The Extension continues the queued attachment/send task independently after the assistant response ends; configured enabled-Send retries stop as soon as submission is acknowledged. A timer does not independently resume an ended assistant turn. completed confirms Send and UI acknowledgement, not ChatGPT processing or Library storage.",
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
       inputSchema: { type: "object", additionalProperties: false, properties: { files: { type: "array", minItems: 1, items: libraryStoreFileSchema, description: "One batch of logical Workspace paths; any file type may be selected, subject to ChatGPT upload support." }, composerPolicy: { type: "string", enum: ["requireEmpty", "clear"], default: "requireEmpty", description: "requireEmpty refuses text or attachments already in the Composer. clear explicitly discards both once before upload. New user edits after preparation always stop Send and leave uploaded files attached." }, sendDelaySeconds: { type: "number", minimum: 0, default: 0, description: "Optional seconds to wait after all files are accepted in Composer, before Send. 0 sends as soon as ready; 600 waits ten minutes. Cancellation leaves files and text in place. Readiness is checked independently of this delay." } }, required: ["files"] },
       outputSchema: mediaToChatStartSchema,
@@ -4628,39 +4607,14 @@ function cdpAttachmentStateExpression(fileNames) {
   return `(() => {
     const resolveChatComposer = ${resolveChatComposer.toString()};
     const state = (${inspectChatComposer.toString()})();
-    const expectedNames = ${JSON.stringify(fileNames)};
-    const namesMatch = ${chatComposerAttachmentNamesMatch.toString()};
-    const attachments = Array.isArray(state?.attachments) ? state.attachments : [];
-    const selectedNames = Array.isArray(state?.selectedFiles) ? state.selectedFiles.map(file => file.name) : [];
-    const cardNames = attachments.map(card => card?.name);
-    const cardTexts = attachments.map(card => card?.text || '');
-    const baseName = name => String(name || '').split('/').pop().split('\\\\').pop();
-    const normalized = value => String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
-    const expectedStems = expectedNames.map(name => baseName(name).replace(/\\.[^.]+$/, ''));
-    const textNamesMatch = () => {
-      const remaining = [...cardTexts];
-      for (const stem of expectedStems) {
-        const needle = normalized(stem);
-        const index = remaining.findIndex(text => needle && normalized(text).includes(needle));
-        if (index < 0) return false;
-        remaining.splice(index, 1);
-      }
-      return true;
-    };
-    const countMatches = attachments.length === expectedNames.length;
-    const namedCardAccepted = Boolean(state?.found && countMatches && cardNames.every(name => typeof name === 'string' && name.length > 0) && namesMatch(cardNames, expectedNames));
-    const selectedFilesAccepted = Boolean(state?.found && countMatches && selectedNames.length === expectedNames.length && namesMatch(selectedNames, expectedNames, true));
-    const cardTextAccepted = Boolean(state?.found && countMatches && textNamesMatch());
-    const accepted = namedCardAccepted || selectedFilesAccepted || cardTextAccepted;
-    return {
-      accepted,
-      attachmentCount: attachments.length,
-      selectedCount: selectedNames.length,
-      namedCount: cardNames.filter(name => typeof name === 'string' && name.length > 0).length,
-      evidence: namedCardAccepted ? 'cardNames' : selectedFilesAccepted ? 'selectedFiles' : cardTextAccepted ? 'cardText' : 'none'
-    };
+    const expectedCount = ${fileNames.length};
+    const attachmentCount = state?.found && Array.isArray(state.attachments)
+      ? Math.max(state.attachments.length, state.previewCount || 0) : 0;
+    return { accepted: Boolean(state?.found && attachmentCount === expectedCount),
+      found: Boolean(state?.found), attachmentCount, expectedCount };
   })()`;
 }
+
 async function cdpWaitForAttachmentAccepted(tabId, fileNames, retryPolicy, beforeCheck = null) {
   const policy = retryPolicy || await configuredComposerMediaRetry();
   cdpLog("Waiting for Composer file acceptance", { tabId, fileCount: fileNames.length, ...policy });
@@ -4669,14 +4623,14 @@ async function cdpWaitForAttachmentAccepted(tabId, fileNames, retryPolicy, befor
     return {
       ready: Boolean(state?.accepted),
       diagnostic: {
+        found: Boolean(state?.found),
         attachmentCount: Number.isSafeInteger(state?.attachmentCount) ? state.attachmentCount : 0,
-        selectedCount: Number.isSafeInteger(state?.selectedCount) ? state.selectedCount : 0,
-        namedCount: Number.isSafeInteger(state?.namedCount) ? state.namedCount : 0,
-        evidence: typeof state?.evidence === "string" ? state.evidence : "none"
+        expectedCount: fileNames.length
       }
     };
-  }, policy, { stage: "file acceptance", beforeCheck: beforeCheck || void 0, log: cdpLog, sleep });
+  }, policy, { stage: "file acceptance", beforeCheck: beforeCheck || undefined, log: cdpLog, sleep });
 }
+
 async function cdpOpenStableFileChooser(tabId, fileCount = 1) {
   let lastError = null;
   for (let attempt = 1; attempt <= CDP_FILE_CHOOSER_ATTEMPTS; attempt += 1) {
@@ -4887,13 +4841,13 @@ async function cdpSendAttachedFiles(tabId, fileCount, { beforeClick = null, time
   await cdpClickEnabledSendButton(tabId, timeoutMs, beforeClick, onSendCommit, policy);
   cdpLog("Attached file batch sent and acknowledged", { tabId, fileCount });
 }
-async function cdpInsertBrowserContinuation(tabId, currentChatTarget, fileNames, composerGuardToken, continuationText, checkCancelled) {
-  await assertCurrentChatComposer(currentChatTarget, { fileNames, guardToken: composerGuardToken });
+async function cdpInsertBrowserContinuation(tabId, currentChatTarget, fileNames, composerGuardToken, continuationText, checkCancelled, retryPolicy = null) {
+  await assertCurrentChatComposer(currentChatTarget, { fileNames, guardToken: composerGuardToken, retryPolicy, checkCancelled });
   checkCancelled?.();
   const authorized = (await cdpEvaluate(tabId, chatComposerPageExpression(authorizeChatComposerText, composerGuardToken, continuationText)))?.value;
   if (!authorized) throw localAgentError("BROWSER_CHAT_CHANGED", "The Composer changed before the continuation could be inserted.");
   await cdpCommand(tabId, "Input.insertText", { text: continuationText });
-  await assertCurrentChatComposer(currentChatTarget, { fileNames, guardToken: composerGuardToken, expectedText: continuationText });
+  await assertCurrentChatComposer(currentChatTarget, { fileNames, guardToken: composerGuardToken, expectedText: continuationText, retryPolicy, checkCancelled });
 }
 async function cdpAttachFilesNow(filePathValues, { onPhase = null, currentChatTarget = null, composerPolicy = "requireEmpty", deferSend = false, checkCancelled = null, onSendCommit = null, continuationText = null, beforeSend = null, trace = null } = {}) {
   checkCancelled?.();
@@ -4951,20 +4905,20 @@ async function cdpAttachFilesNow(filePathValues, { onPhase = null, currentChatTa
     checkCancelled?.();
     if (onPhase) await onPhase("composerAccepted");
     if (deferSend && currentChatTarget) {
-      await assertCurrentChatComposer(currentChatTarget, { fileNames, guardToken: composerGuardToken });
+      await assertCurrentChatComposer(currentChatTarget, { fileNames, guardToken: composerGuardToken, retryPolicy, checkCancelled });
       checkCancelled?.();
       keepGuard = true;
       return { fileNames, guardToken: composerGuardToken };
     }
-    if (continuationText && currentChatTarget) await cdpInsertBrowserContinuation(tab.id, currentChatTarget, fileNames, composerGuardToken, continuationText, checkCancelled);
-    await logBrowserTabState(trace, tab.id, "resource.beforeSend");
-    if (onPhase) await onPhase("submitting");
+    if (continuationText && currentChatTarget) await cdpInsertBrowserContinuation(tab.id, currentChatTarget, fileNames, composerGuardToken, continuationText, checkCancelled, retryPolicy);
+        await logBrowserTabState(trace, tab.id, "resource.beforeSend");
+if (onPhase) await onPhase("submitting");
     await cdpSendAttachedFiles(tab.id, filePaths.length, currentChatTarget ? {
       timeoutMs: 5 * 6e4,
       beforeClick: async () => {
         checkCancelled?.();
         await beforeSend?.();
-        await assertCurrentChatComposer(currentChatTarget, { fileNames, guardToken: composerGuardToken, expectedText: continuationText });
+        await assertCurrentChatComposer(currentChatTarget, { fileNames, guardToken: composerGuardToken, expectedText: continuationText, retryPolicy, checkCancelled });
         checkCancelled?.();
       },
       onSendCommit,
@@ -4984,6 +4938,7 @@ async function cdpAttachFilesNow(filePathValues, { onPhase = null, currentChatTa
 }
 async function cdpSendPreparedChatFiles(task) {
   const { fileNames, guardToken } = task.prepared;
+  const retryPolicy = await configuredComposerMediaRetry();
   const tab = await requireCurrentChatTarget(task.target);
   let attached = false;
   try {
@@ -4997,9 +4952,10 @@ async function cdpSendPreparedChatFiles(task) {
       timeoutMs: 5 * 6e4,
       beforeClick: async () => {
         assertMediaToChatNotCancelled(task);
-        await assertCurrentChatComposer(task.target, { fileNames, guardToken });
+        await assertCurrentChatComposer(task.target, { fileNames, guardToken, retryPolicy, checkCancelled: () => assertMediaToChatNotCancelled(task) });
         assertMediaToChatNotCancelled(task);
       },
+      retryPolicy,
       onSendCommit: () => commitMediaToChatSend(task)
     });
   } finally {
@@ -5058,40 +5014,56 @@ function composerAttachmentCount(state) {
 function composerVisibleAttachmentCount(state) {
   return Math.max(state.attachments.length, state.previewCount || 0);
 }
-async function currentChatComposerState(target) {
+async function currentChatComposerState(target, { allowUnavailable = false } = {}) {
   await requireCurrentChatTarget(target);
   const state = (await cdpEvaluate(target.tabId, chatComposerPageExpression(inspectChatComposer)))?.value;
   if (!state?.found || !Array.isArray(state.attachments) || !Array.isArray(state.selectedFiles) || !Array.isArray(state.removeTargets)) {
+    if (allowUnavailable) return { found: false, textEmpty: false, attachments: [], selectedFiles: [], removeTargets: [], previewCount: 0 };
     throw localAgentError("MEDIA_TO_CHAT_INVALID", "The current ChatGPT Composer is unavailable; no Send click was made.");
   }
   return state;
 }
-async function assertCurrentChatComposer(target, { fileNames = null, guardToken = null, expectedText = null } = {}) {
-  const state = await currentChatComposerState(target);
-  if (expectedText !== null) {
-    const actual = (await cdpEvaluate(target.tabId, `(() => { const {composer} = (${resolveChatComposer.toString()})(); return composer ? (composer.value ?? composer.innerText ?? composer.textContent ?? '') : null; })()`))?.value;
-    if (typeof actual !== "string" || normalizeComposerTextForComparison(actual) !== normalizeComposerTextForComparison(expectedText)) throw localAgentError("BROWSER_CHAT_CHANGED", "The continuation draft changed. No Send click was made; files remain attached.");
-  } else if (!state.textEmpty) {
-    throw localAgentError("MEDIA_TO_CHAT_INVALID", fileNames ? "The current ChatGPT Composer contains a draft added during upload. No Send click was made; uploaded files remain attached." : "The current ChatGPT Composer contains a draft. Use composerPolicy clear to discard it explicitly, or clear/send it yourself.");
-  }
-  if (!fileNames) {
-    if (composerAttachmentCount(state)) throw localAgentError("MEDIA_TO_CHAT_INVALID", "The current ChatGPT Composer already contains attachments. Use composerPolicy clear to discard them explicitly, or remove them yourself.");
-    return;
-  }
-  const guard = (await cdpEvaluate(target.tabId, `(${readChatComposerGuard.toString()})(${JSON.stringify(guardToken)})`))?.value;
-  if (!guard?.present || guard.changed) {
-    throw localAgentError("MEDIA_TO_CHAT_INVALID", "The Composer was edited during upload. No Send click was made; uploaded files remain attached.");
-  }
-  const selected = state.selectedFiles.map((file) => file.name).sort();
-  const expected = [...fileNames].sort();
-  const cards = state.attachments.map((card) => card.name).sort();
-  const namedCards = cards.every((name) => typeof name === "string" && name.length > 0);
-  const namesMatch = namedCards ? chatComposerAttachmentNamesMatch(cards, expected) : chatComposerAttachmentNamesMatch(selected, expected, false);
-  if (composerVisibleAttachmentCount(state) !== expected.length || !namesMatch) {
-    cdpLog("Composer attachment verification failed", { tabId: target.tabId, expectedNames: expected, cardNames: cards, selectedNames: selected, previewCount: state.previewCount });
-    throw localAgentError("MEDIA_TO_CHAT_INVALID", "The Composer attachments changed or could not be verified. No Send click was made; remaining files stay attached.");
-  }
+
+async function assertCurrentChatComposer(target, { fileNames = null, guardToken = null, expectedText = null, retryPolicy = null, checkCancelled = null } = {}) {
+  const inspect = async () => {
+    checkCancelled?.();
+    const state = await currentChatComposerState(target, { allowUnavailable: Boolean(fileNames) });
+    checkCancelled?.();
+    if (fileNames) {
+      const guard = (await cdpEvaluate(target.tabId, `(${readChatComposerGuard.toString()})(${JSON.stringify(guardToken)})`))?.value;
+      checkCancelled?.();
+      if (!guard?.present || guard.changed) {
+        throw localAgentError("MEDIA_TO_CHAT_INVALID", "The Composer was edited during upload. No Send click was made; uploaded files remain attached.");
+      }
+      if (!state.found) return { ready: false, diagnostic: { found: false, attachmentCount: 0, expectedCount: fileNames.length } };
+    }
+    if (expectedText !== null) {
+      const actual = (await cdpEvaluate(target.tabId, `(() => { const {composer} = (${resolveChatComposer.toString()})(); return composer ? (composer.value ?? composer.innerText ?? composer.textContent ?? '') : null; })()`))?.value;
+      checkCancelled?.();
+      if (actual === null && fileNames) return { ready: false, diagnostic: { found: false, attachmentCount: 0, expectedCount: fileNames.length } };
+      if (typeof actual !== "string" || normalizeComposerTextForComparison(actual) !== normalizeComposerTextForComparison(expectedText)) throw localAgentError("BROWSER_CHAT_CHANGED", "The continuation draft changed. No Send click was made; files remain attached.");
+    } else if (!state.textEmpty) {
+      throw localAgentError("MEDIA_TO_CHAT_INVALID", fileNames
+        ? "The current ChatGPT Composer contains a draft added during upload. No Send click was made; uploaded files remain attached."
+        : "The current ChatGPT Composer contains a draft. Use composerPolicy clear to discard it explicitly, or clear/send it yourself.");
+    }
+    if (!fileNames) {
+      if (composerAttachmentCount(state)) throw localAgentError("MEDIA_TO_CHAT_INVALID", "The current ChatGPT Composer already contains attachments. Use composerPolicy clear to discard them explicitly, or remove them yourself.");
+      return { ready: true };
+    }
+    const attachmentCount = composerVisibleAttachmentCount(state);
+    return { ready: attachmentCount === fileNames.length,
+      diagnostic: { found: true, attachmentCount, expectedCount: fileNames.length } };
+  };
+  if (!fileNames) { await inspect(); return; }
+  const policy = retryPolicy || await configuredComposerMediaRetry();
+  await waitForComposerMedia(inspect, policy, {
+    stage: "Composer attachment count before Send",
+    beforeCheck: () => { checkCancelled?.(); },
+    log: cdpLog, sleep
+  });
 }
+
 async function prepareCurrentChatComposer(target, policy, checkCancelled = null) {
   checkCancelled?.();
   normalizeComposerPolicy(policy);
