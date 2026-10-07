@@ -62,7 +62,7 @@ const MCP_TOOL_SETTINGS = Object.freeze({
   clipboard_status: { group: "clipboard" }, clipboard_get: { group: "clipboard" }, clipboard_set: { group: "clipboard" },
   library_store_start: { group: "library" }, library_store_status: { group: "library" }, library_store_cancel: { group: "library" }, online_share_start: { group: "online" }, online_share_status: { group: "online" }, online_share_stop: { group: "online" }
 });
-const EXTENSION_VERSION = "2.2.79";
+const EXTENSION_VERSION = "2.2.80";
 // Chrome dispatches this for requests made by our Extension-owned viewer.
 // Packaged assets and unrelated requests fall through without interception.
 globalThis.addEventListener?.("fetch", createMediaStreamHandler({
@@ -72,7 +72,7 @@ globalThis.addEventListener?.("fetch", createMediaStreamHandler({
   fetchMedia: (url, options) => fetch(url, options),
   log: (stage, details = {}) => consoleAction(`[ResearchTube media stream ${EXTENSION_VERSION}]`, stage, details)
 }));
-const REQUIRED_AGENT_INTERFACE_VERSION = 75;
+const REQUIRED_AGENT_INTERFACE_VERSION = 76;
 // A UI resource URI is a cache key in MCP Apps. Increment it whenever the
 // rendered template changes so ChatGPT does not reuse a stale iframe bundle.
 const MEDIA_TO_CHAT_WIDGET_URI = "ui://researchtube/chat-target-v6.html";
@@ -3389,11 +3389,11 @@ const browserAgent = createBrowserAgent({
   resourceCountLimit: async () => (await configuredToolLimits()).mediaToChatMaxFiles,
   resourceLimit: async () => (await configuredToolLimits()).mediaToChatMaxFileSizeMiB * 1048576,
   historyLimit: () => completedTaskHistoryLimit,
-  saveResource: async (taskId, bytes, mimeType) => {
+  saveResource: async (taskId, bytes, mimeType, resourceId) => {
     const config = await getConfig(); const port = normalizeAgentPort(config.agentPort); await requireCompatibleAgent(port);
     const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 30_000);
     try {
-      const response = await fetch(`http://127.0.0.1:${port}/internal/browser-resource?taskId=${encodeURIComponent(taskId)}`, { method: "POST", headers: { "Content-Type": mimeType }, body: bytes, signal: controller.signal });
+      const response = await fetch(`http://127.0.0.1:${port}/internal/browser-resource?taskId=${encodeURIComponent(taskId)}&resourceId=${encodeURIComponent(resourceId)}`, { method: "POST", headers: { "Content-Type": mimeType }, body: bytes, signal: controller.signal });
       const value = await response.json();
       if (!response.ok) throw localAgentError(value?.error?.code || "BROWSER_RESOURCE_UNAVAILABLE", value?.error?.message || "The browser resource could not be saved.");
       if (Object.keys(value).sort().join(",") !== "mimeType,sizeBytes,workspacePath" || typeof value.mimeType !== "string" || value.sizeBytes !== bytes.length) throw localAgentError("AGENT_INVALID_RESPONSE", "Invalid browser resource receipt.");

@@ -955,7 +955,6 @@ function createBrowserAgent(host) {
       progress(task, "extracting", 10);
       await waitRunning(task, session2);
       const maximum = await host.resourceLimit();
-      const receiptIds = /* @__PURE__ */ new Map([[task.taskId, true]]);
       for (let index = 0; index < items.length; index++) {
         const item = items[index];
         await waitRunning(task, session2);
@@ -967,9 +966,7 @@ function createBrowserAgent(host) {
         await check(session2, false);
         if (item.pageVersion !== session2.pageVersion) throw browserError("PAGE_CHANGED", "The page navigated before extraction finished. No resource was attached.");
         progress(task, "saving", Math.round(10 + 50 * (index + 1) / items.length));
-        const receiptId = items.length === 1 ? task.taskId : uniqueId("tsk", receiptIds);
-        receiptIds.set(receiptId, true);
-        const saved = await session2.trace.span("resource.save", () => host.saveResource(receiptId, result.bytes, result.mimeType), { taskId: task.taskId, resourceNumber: index + 1, bytes: result.bytes.length });
+        const saved = await session2.trace.span("resource.save", () => host.saveResource(task.taskId, result.bytes, result.mimeType, task.resourceIds[index]), { taskId: task.taskId, resourceNumber: index + 1, bytes: result.bytes.length });
         task.files.push({ resourceId: task.resourceIds[index], workspacePath: saved.workspacePath, mimeType: saved.mimeType, extraction: result.extraction, sizeBytes: saved.sizeBytes });
         if (items.length === 1) {
           task.workspacePath = saved.workspacePath;
@@ -2311,7 +2308,7 @@ var MCP_TOOL_SETTINGS = Object.freeze({
   online_share_status: { group: "online" },
   online_share_stop: { group: "online" }
 });
-var EXTENSION_VERSION = "2.2.79";
+var EXTENSION_VERSION = "2.2.80";
 globalThis.addEventListener?.("fetch", createMediaStreamHandler({
   extensionUrl: chrome.runtime.getURL("/"),
   getClient: (id) => globalThis.clients.get(id),
@@ -2319,7 +2316,7 @@ globalThis.addEventListener?.("fetch", createMediaStreamHandler({
   fetchMedia: (url, options) => fetch(url, options),
   log: (stage, details = {}) => consoleAction(`[ResearchTube media stream ${EXTENSION_VERSION}]`, stage, details)
 }));
-var REQUIRED_AGENT_INTERFACE_VERSION = 75;
+var REQUIRED_AGENT_INTERFACE_VERSION = 76;
 var MEDIA_TO_CHAT_WIDGET_URI = "ui://researchtube/chat-target-v6.html";
 var MEDIA_TO_CHAT_WIDGET_ALIASES = /* @__PURE__ */ new Set(["ui://researchtube/chat-target-v4.html", "ui://researchtube/chat-target-v5.html"]);
 var MEDIA_TO_CHAT_BIND_TIMEOUT_MS = 3e4;
@@ -5752,14 +5749,14 @@ var browserAgent = createBrowserAgent({
   resourceCountLimit: async () => (await configuredToolLimits()).mediaToChatMaxFiles,
   resourceLimit: async () => (await configuredToolLimits()).mediaToChatMaxFileSizeMiB * 1048576,
   historyLimit: () => completedTaskHistoryLimit,
-  saveResource: async (taskId4, bytes, mimeType) => {
+  saveResource: async (taskId4, bytes, mimeType, resourceId) => {
     const config = await getConfig();
     const port = normalizeAgentPort(config.agentPort);
     await requireCompatibleAgent(port);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 3e4);
     try {
-      const response = await fetch(`http://127.0.0.1:${port}/internal/browser-resource?taskId=${encodeURIComponent(taskId4)}`, { method: "POST", headers: { "Content-Type": mimeType }, body: bytes, signal: controller.signal });
+      const response = await fetch(`http://127.0.0.1:${port}/internal/browser-resource?taskId=${encodeURIComponent(taskId4)}&resourceId=${encodeURIComponent(resourceId)}`, { method: "POST", headers: { "Content-Type": mimeType }, body: bytes, signal: controller.signal });
       const value = await response.json();
       if (!response.ok) throw localAgentError(value?.error?.code || "BROWSER_RESOURCE_UNAVAILABLE", value?.error?.message || "The browser resource could not be saved.");
       if (Object.keys(value).sort().join(",") !== "mimeType,sizeBytes,workspacePath" || typeof value.mimeType !== "string" || value.sizeBytes !== bytes.length) throw localAgentError("AGENT_INVALID_RESPONSE", "Invalid browser resource receipt.");

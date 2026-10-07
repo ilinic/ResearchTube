@@ -36,16 +36,19 @@ def resource_format(data: bytes, declared: str) -> tuple[str, str]:
     raise ValueError("The browser response does not contain a supported resource format.")
 
 
-def save_browser_resource(body: bytes, task_id: str, mime_type: str, maximum: int, resolver, error_type) -> dict:
+def save_browser_resource(body: bytes, task_id: str, mime_type: str, maximum: int, resolver, error_type, *, resource_id: str) -> dict:
     if not re.fullmatch(r"tsk_[A-Za-z0-9_-]{10}", task_id or ""):
         raise error_type("BROWSER_INVALID", "Browser resource taskId must use the standard task format.")
+    if not isinstance(resource_id, str) or not re.fullmatch(r"r_[0-9]+_[0-9]+", resource_id):
+        raise error_type("BROWSER_INVALID", "Browser file resourceId must identify an observed page resource.")
     if not body or len(body) > maximum:
         raise error_type("BROWSER_RESOURCE_TOO_LARGE", f"Browser resource must contain 1–{maximum} bytes (configured upload maximum).")
     try:
         normalized_mime, extension = resource_format(body, mime_type.split(";", 1)[0].strip().lower())
     except ValueError as error:
         raise error_type("BROWSER_RESOURCE_INVALID", str(error)) from error
-    logical = f"study-this-site/resource [browser_{task_id}].{extension}"
+    resource_tag = "res_" + resource_id.removeprefix("r_")
+    logical = f"study-this-site/{resource_tag} [{task_id}].{extension}"
     output = resolver.resolve_destination(logical, field_name="workspacePath", error_code="BROWSER_INVALID")
     output.physical_path.parent.mkdir(parents=True, exist_ok=True)
     # Re-resolve after mkdir to detect a substituted/symlinked output directory.

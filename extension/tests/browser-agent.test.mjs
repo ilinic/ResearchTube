@@ -25,7 +25,7 @@ function fixture({multipleImages=false}={}){
  startChat:async(id,prompt)=>{events.push(['prompt',id,prompt]);tabs.get(id).url='https://chatgpt.com/c/study'+id;return '/c/study'+id;},
  shouldGroupTabs:async()=>true,groupTabs:async(ids,title)=>events.push(['group',ids,title]),
  updateStatus:async(ids,status)=>events.push(['toolbar',ids,structuredClone(status)]),resourceLimit:async()=>1024,resourceCountLimit:async()=>5,historyLimit:()=>2,schedule:work=>scheduled.push(work),log:(label,value)=>logs.push({label,value}),
- saveResource:async(taskId,bytes,mimeType)=>{saved.push({taskId,bytes,mimeType});await onSave?.();return {workspacePath:`study-this-site/${taskId}.png`,mimeType:'image/png',sizeBytes:bytes.length};},
+ saveResource:async(taskId,bytes,mimeType,resourceId)=>{saved.push({taskId,bytes,mimeType,resourceId});await onSave?.();return {workspacePath:`study-this-site/${resourceId.replace(/^r_/,"res_")} [${taskId}].png`,mimeType:'image/png',sizeBytes:bytes.length};},
  resolveFiles:async paths=>paths.map(path=>'/PRIVATE/'+path),
  attachFiles:async(files,options)=>{uploads.push({files,options});options.checkCancelled();await options.onPhase('composerAccepted');await onAttach?.(options);await options.beforeSend();options.checkCancelled();options.onSendCommit();},
  command:async(tabId,method,params={},childSessionId)=>{events.push([method,tabId,params,childSessionId]);if(closed)throw Error('detached');
@@ -307,7 +307,10 @@ const batchResult=await batch.run('browser_resource_status',{sessionId:batchSid,
 assert.equal(batchResult.status,'completed');assert.equal(batchResult.progressPercent,100);
 assert.deepEqual(batchResult.resourceIds,batchIds);assert.deepEqual(batchResult.files.map(f=>f.resourceId),batchIds);
 assert.equal(batchResult.resourceId,null);assert.equal(batchResult.workspacePath,null);assert.equal(batchResult.mimeType,null);
-assert.equal(new Set(batch.saved.map(f=>f.taskId)).size,3,'private receipts have distinct standard IDs');
+assert.deepEqual(batch.saved.map(f=>f.taskId),[batchTask.taskId,batchTask.taskId,batchTask.taskId],'batch filenames share the public standard task ID');
+assert.deepEqual(batch.saved.map(f=>f.resourceId),batchIds);
+assert.equal(new Set(batchResult.files.map(f=>f.workspacePath)).size,3,'resource IDs distinguish files within the same task');
+for (const file of batchResult.files) { assert.ok(file.workspacePath.includes(`[${batchTask.taskId}]`)); assert.doesNotMatch(file.workspacePath,/browser_|resource/); assert.equal(file.workspacePath,`study-this-site/${file.resourceId.replace(/^r_/,"res_")} [${batchTask.taskId}].png`); }
 for(const file of batch.saved)assert.match(file.taskId,/^tsk_[A-Za-z0-9_-]{10}$/);
 assert.equal(batch.uploads.length,1);assert.equal(batch.uploads[0].files.length,3);
 assert.deepEqual(batchResult.submittedFiles,batchResult.files.map(f=>f.workspacePath));

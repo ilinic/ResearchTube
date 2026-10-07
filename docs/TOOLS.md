@@ -189,7 +189,7 @@ Start **Study this site** from the Extension popup. The two new tabs are grouped
 | `browser_get_node` | Inspect AX details, safe DOM attributes/geometry and resource references. |
 | `browser_get_text` | Read deferred AX subtree text with offset/limit. |
 | `browser_act` | Click, hover, replace editable text, key, scroll or select in the exact agent tab. |
-| `browser_get_resource` | Asynchronously extract one `resourceId` or an ordered `resourceIds` batch, save files in `study-this-site/` and by default attach/send the entire batch in the dedicated chat. `addToChat:false` saves only. |
+| `browser_get_resource` | Asynchronously extract one `resourceId` or an ordered `resourceIds` batch, save files in `study-this-site/` named `res_… [tsk_…].ext`, and by default attach/send the entire batch in the dedicated chat. `addToChat:false` saves only. |
 | `browser_resource_status` | Read extraction, save and delivery progress plus confirmed outputs. |
 | `browser_resource_cancel` | Cancel before Send commits without deleting files or Composer attachments. |
 | `browser_session_status` | Read session state and safe current page metadata. |

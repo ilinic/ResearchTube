@@ -20,23 +20,37 @@ class BrowserResourceTests(unittest.TestCase):
         self.override.stop()
         self.folder.cleanup()
 
-    def save(self, data=None, task_id='tsk_abcdefghij', mime='image/png', maximum=1048576):
-        return save_browser_resource(self.png if data is None else data, task_id, mime, maximum, agent.WorkspacePathResolver(), agent.AgentApiError)
+    def save(self, data=None, task_id='tsk_abcdefghij', mime='image/png', maximum=1048576,
+             resource_id='r_1_8'):
+        return save_browser_resource(self.png if data is None else data, task_id, mime, maximum,
+                                     agent.WorkspacePathResolver(), agent.AgentApiError,
+                                     resource_id=resource_id)
 
     def test_original_bytes_saved_private_path_not_exposed(self):
         result = self.save()
         self.assertEqual(set(result), {'workspacePath', 'mimeType', 'sizeBytes'})
         self.assertEqual(result['mimeType'], 'image/png')
         self.assertTrue(result['workspacePath'].startswith('study-this-site/'))
+        self.assertEqual(result['workspacePath'], 'study-this-site/res_1_8 [tsk_abcdefghij].png')
         self.assertEqual((self.workspace / result['workspacePath']).read_bytes(), self.png)
         self.assertNotIn(str(self.workspace), str(result))
 
     def test_multiple_receipts_keep_distinct_files_and_original_bytes(self):
-        receipts = [self.save(data=self.png + suffix, task_id=task_id) for task_id, suffix in [("tsk_abcdefghij", b"first"), ("tsk_klmnopqrst", b"second")]]
+        receipts = [self.save(data=self.png + suffix, resource_id=resource_id)
+                    for resource_id, suffix in [("r_1_8", b"first"), ("r_1_3", b"second")]]
         self.assertEqual(len({item["workspacePath"] for item in receipts}), 2)
-        for item, suffix in zip(receipts, [b"first", b"second"]):
+        for sequence, (item, suffix) in enumerate(zip(receipts, [b"first", b"second"]), 1):
             self.assertTrue(item["workspacePath"].startswith("study-this-site/"))
+            self.assertTrue(item['workspacePath'].startswith('study-this-site/res_1_'))
+            self.assertIn('[tsk_abcdefghij]', item['workspacePath'])
             self.assertEqual((self.workspace / item["workspacePath"]).read_bytes(), self.png + suffix)
+
+    def test_invalid_filename_metadata_rejected_before_creating_files(self):
+        for kwargs in [{'resource_id': value} for value in [None, '../bad', 'res_1_8', 'r_1_8/evil']]:
+            with self.subTest(kwargs=kwargs), self.assertRaises(agent.AgentApiError) as caught:
+                self.save(**kwargs)
+            self.assertEqual(caught.exception.code, 'BROWSER_INVALID')
+        self.assertEqual(list(self.workspace.rglob('*')), [])
 
     def test_does_not_overwrite(self):
         first = self.save()
@@ -76,7 +90,7 @@ class BrowserResourceTests(unittest.TestCase):
                 results = []
                 for _ in range(2):
                     reader, writer = await asyncio.open_connection('127.0.0.1', port)
-                    writer.write(f'POST /internal/browser-resource?taskId=tsk_httpabcdef HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: image/png\r\nContent-Length: {len(self.png)}\r\n\r\n'.encode() + self.png)
+                    writer.write(f'POST /internal/browser-resource?taskId=tsk_httpabcdef&resourceId=r_1_8 HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: image/png\r\nContent-Length: {len(self.png)}\r\n\r\n'.encode() + self.png)
                     await writer.drain()
                     header = await reader.readuntil(b'\r\n\r\n')
                     length = int(next(line.split(b':',1)[1] for line in header.split(b'\r\n') if line.lower().startswith(b'content-length:')))

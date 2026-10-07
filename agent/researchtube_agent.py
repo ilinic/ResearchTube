@@ -41,8 +41,8 @@ except ImportError:
     from task_history import TaskHistory
     from browser_resources import save_browser_resource
 
-AGENT_VERSION = "2.2.62"
-INTERFACE_VERSION = 75
+AGENT_VERSION = "2.2.63"
+INTERFACE_VERSION = 76
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
 MAX_GOOGLE_TRANSLATE_AUDIO_BYTES = 16 * 1024 * 1024
@@ -5945,11 +5945,12 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
         elif method == "POST" and path == "/internal/library-store-files":
             response_status, response_body = "200 OK", library_store_files(parse_json_body(body))
         elif method == "POST" and path == "/internal/browser-resource":
-            if set(query) != {"taskId"} or len(query["taskId"]) != 1:
-                raise AgentApiError("BROWSER_INVALID", "Browser resource ingestion requires one taskId.")
+            if set(query) != {"taskId", "resourceId"} or any(len(values) != 1 for values in query.values()):
+                raise AgentApiError("BROWSER_INVALID", "Browser file ingestion requires one taskId and resourceId.")
             response_status, response_body = "201 Created", save_browser_resource(
                 body, query["taskId"][0], headers.get("content-type", "application/octet-stream"),
                 configured_tool_limits()["mediaToChatMaxFileSizeMiB"] * 1048576, WorkspacePathResolver(), AgentApiError,
+                resource_id=query["resourceId"][0],
             )
         elif method == "POST" and path == "/internal/media-to-chat-files":
             response_status, response_body = "200 OK", media_to_chat_files(parse_json_body(body))

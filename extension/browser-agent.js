@@ -348,7 +348,6 @@ export function createBrowserAgent(host) {
       checkTask(task, session); task.status = "working"; progress(task, "extracting", 10);
       await waitRunning(task, session);
       const maximum = await host.resourceLimit();
-      const receiptIds = new Map([[task.taskId, true]]);
       for (let index = 0; index < items.length; index++) {
         const item = items[index];
         await waitRunning(task, session);
@@ -359,9 +358,7 @@ export function createBrowserAgent(host) {
         checkTask(task, session); await check(session, false);
         if (item.pageVersion !== session.pageVersion) throw browserError("PAGE_CHANGED", "The page navigated before extraction finished. No resource was attached.");
         progress(task, "saving", Math.round(10 + 50 * (index + 1) / items.length));
-        const receiptId = items.length === 1 ? task.taskId : uniqueId("tsk", receiptIds);
-        receiptIds.set(receiptId, true);
-        const saved = await session.trace.span("resource.save", () => host.saveResource(receiptId, result.bytes, result.mimeType), { taskId: task.taskId, resourceNumber: index + 1, bytes: result.bytes.length });
+        const saved = await session.trace.span("resource.save", () => host.saveResource(task.taskId, result.bytes, result.mimeType, task.resourceIds[index]), { taskId: task.taskId, resourceNumber: index + 1, bytes: result.bytes.length });
         task.files.push({ resourceId: task.resourceIds[index], workspacePath: saved.workspacePath, mimeType: saved.mimeType, extraction: result.extraction, sizeBytes: saved.sizeBytes });
         if (items.length === 1) { task.workspacePath = saved.workspacePath; task.mimeType = saved.mimeType; task.extraction = result.extraction; }
         checkTask(task, session);
