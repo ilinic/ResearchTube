@@ -7,22 +7,22 @@ async function waitForComposerMedia(probe, policy, { stage, beforeCheck = async 
   for (; ; ) {
     await beforeCheck();
     const state = await probe();
+    const diagnostic = state?.diagnostic && typeof state.diagnostic === "object" ? state.diagnostic : {};
     if (state?.ready) {
-      log("Composer media condition confirmed", { stage, retries, elapsedMs: Math.round(now() - started) });
+      log("Composer media condition confirmed", { stage, retries, ...diagnostic, elapsedMs: Math.round(now() - started) });
       return state;
     }
     if (state?.busy) {
       if (now() - started >= busyTimeoutMs) break;
     } else if (retries >= policy.retryCount) break;
     else retries++;
-    log("Composer media condition pending", { stage, retries, maximumRetries: policy.retryCount, intervalSeconds: policy.retryIntervalSeconds, busy: Boolean(state?.busy), elapsedMs: Math.round(now() - started) });
+    log("Composer media condition pending", { stage, retries, maximumRetries: policy.retryCount, intervalSeconds: policy.retryIntervalSeconds, busy: Boolean(state?.busy), ...diagnostic, elapsedMs: Math.round(now() - started) });
     await sleep2(policy.retryIntervalSeconds * 1e3);
   }
   const error3 = new Error(`ChatGPT did not confirm ${stage} within the configured retry budget (${policy.retryCount} retries, ${policy.retryIntervalSeconds}s interval), or its response wait expired. Existing files and Composer contents were preserved.`);
   error3.code = "MEDIA_TO_CHAT_TIMEOUT";
   throw error3;
 }
-
 // browser-tools.js
 var string = { type: "string" };
 var integer = { type: "integer" };
@@ -2472,7 +2472,7 @@ var MCP_TOOL_SETTINGS = Object.freeze({
   custom_tool_status: { group: "custom" },
   custom_tool_cancel: { group: "custom" }
 });
-var EXTENSION_VERSION = "2.2.83";
+var EXTENSION_VERSION = "2.2.84";
 globalThis.addEventListener?.("fetch", createMediaStreamHandler({
   extensionUrl: chrome.runtime.getURL("/"),
   getClient: (id) => globalThis.clients.get(id),
@@ -4629,19 +4629,52 @@ function cdpAttachmentStateExpression(fileNames) {
     const state = (${inspectChatComposer.toString()})();
     const expectedNames = ${JSON.stringify(fileNames)};
     const namesMatch = ${chatComposerAttachmentNamesMatch.toString()};
-    const selectedNames = state.selectedFiles.map(file => file.name);
-    const cardNames = state.attachments.map(card => card.name);
-    const accepted = state.found && state.attachments.length === expectedNames.length
-      && (namesMatch(cardNames, expectedNames) || namesMatch(selectedNames, expectedNames, false));
-    return { accepted, acceptedNames: accepted ? expectedNames : [], selectedNames };
+    const attachments = Array.isArray(state?.attachments) ? state.attachments : [];
+    const selectedNames = Array.isArray(state?.selectedFiles) ? state.selectedFiles.map(file => file.name) : [];
+    const cardNames = attachments.map(card => card?.name);
+    const cardTexts = attachments.map(card => card?.text || '');
+    const baseName = name => String(name || '').split('/').pop().split('\\\\').pop();
+    const normalized = value => String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+    const expectedStems = expectedNames.map(name => baseName(name).replace(/\\.[^.]+$/, ''));
+    const textNamesMatch = () => {
+      const remaining = [...cardTexts];
+      for (const stem of expectedStems) {
+        const needle = normalized(stem);
+        const index = remaining.findIndex(text => needle && normalized(text).includes(needle));
+        if (index < 0) return false;
+        remaining.splice(index, 1);
+      }
+      return true;
+    };
+    const countMatches = attachments.length === expectedNames.length;
+    const namedCardAccepted = Boolean(state?.found && countMatches && cardNames.every(name => typeof name === 'string' && name.length > 0) && namesMatch(cardNames, expectedNames));
+    const selectedFilesAccepted = Boolean(state?.found && selectedNames.length === expectedNames.length && namesMatch(selectedNames, expectedNames, true));
+    const cardTextAccepted = Boolean(state?.found && countMatches && textNamesMatch());
+    const accepted = namedCardAccepted || selectedFilesAccepted || cardTextAccepted;
+    return {
+      accepted,
+      attachmentCount: attachments.length,
+      selectedCount: selectedNames.length,
+      namedCount: cardNames.filter(name => typeof name === 'string' && name.length > 0).length,
+      evidence: namedCardAccepted ? 'cardNames' : selectedFilesAccepted ? 'selectedFiles' : cardTextAccepted ? 'cardText' : 'none'
+    };
   })()`;
 }
+
 async function cdpWaitForAttachmentAccepted(tabId, fileNames, retryPolicy, beforeCheck = null) {
   const policy = retryPolicy || await configuredComposerMediaRetry();
   cdpLog("Waiting for Composer file acceptance", { tabId, fileCount: fileNames.length, ...policy });
   await waitForComposerMedia(async () => {
     const state = (await cdpEvaluate(tabId, cdpAttachmentStateExpression(fileNames)))?.value;
-    return { ready: Boolean(state?.accepted) };
+    return {
+      ready: Boolean(state?.accepted),
+      diagnostic: {
+        attachmentCount: Number.isSafeInteger(state?.attachmentCount) ? state.attachmentCount : 0,
+        selectedCount: Number.isSafeInteger(state?.selectedCount) ? state.selectedCount : 0,
+        namedCount: Number.isSafeInteger(state?.namedCount) ? state.namedCount : 0,
+        evidence: typeof state?.evidence === "string" ? state.evidence : "none"
+      }
+    };
   }, policy, { stage: "file acceptance", beforeCheck: beforeCheck || void 0, log: cdpLog, sleep });
 }
 async function cdpOpenStableFileChooser(tabId, fileCount = 1) {

@@ -68,7 +68,7 @@ const MCP_TOOL_SETTINGS = Object.freeze({
   library_store_start: { group: "library" }, library_store_status: { group: "library" }, library_store_cancel: { group: "library" }, online_share_start: { group: "online" }, online_share_status: { group: "online" }, online_share_stop: { group: "online" },
   custom_tool_status: { group: "custom" }, custom_tool_cancel: { group: "custom" }
 });
-const EXTENSION_VERSION = "2.2.83";
+const EXTENSION_VERSION = "2.2.84";
 // Chrome dispatches this for requests made by our Extension-owned viewer.
 // Packaged assets and unrelated requests fall through without interception.
 globalThis.addEventListener?.("fetch", createMediaStreamHandler({
@@ -2088,11 +2088,35 @@ function cdpAttachmentStateExpression(fileNames) {
     const state = (${inspectChatComposer.toString()})();
     const expectedNames = ${JSON.stringify(fileNames)};
     const namesMatch = ${chatComposerAttachmentNamesMatch.toString()};
-    const selectedNames = state.selectedFiles.map(file => file.name);
-    const cardNames = state.attachments.map(card => card.name);
-    const accepted = state.found && state.attachments.length === expectedNames.length
-      && (namesMatch(cardNames, expectedNames) || namesMatch(selectedNames, expectedNames, false));
-    return { accepted, acceptedNames: accepted ? expectedNames : [], selectedNames };
+    const attachments = Array.isArray(state?.attachments) ? state.attachments : [];
+    const selectedNames = Array.isArray(state?.selectedFiles) ? state.selectedFiles.map(file => file.name) : [];
+    const cardNames = attachments.map(card => card?.name);
+    const cardTexts = attachments.map(card => card?.text || '');
+    const baseName = name => String(name || '').split('/').pop().split('\\\\').pop();
+    const normalized = value => String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+    const expectedStems = expectedNames.map(name => baseName(name).replace(/\\.[^.]+$/, ''));
+    const textNamesMatch = () => {
+      const remaining = [...cardTexts];
+      for (const stem of expectedStems) {
+        const needle = normalized(stem);
+        const index = remaining.findIndex(text => needle && normalized(text).includes(needle));
+        if (index < 0) return false;
+        remaining.splice(index, 1);
+      }
+      return true;
+    };
+    const countMatches = attachments.length === expectedNames.length;
+    const namedCardAccepted = Boolean(state?.found && countMatches && cardNames.every(name => typeof name === 'string' && name.length > 0) && namesMatch(cardNames, expectedNames));
+    const selectedFilesAccepted = Boolean(state?.found && selectedNames.length === expectedNames.length && namesMatch(selectedNames, expectedNames, true));
+    const cardTextAccepted = Boolean(state?.found && countMatches && textNamesMatch());
+    const accepted = namedCardAccepted || selectedFilesAccepted || cardTextAccepted;
+    return {
+      accepted,
+      attachmentCount: attachments.length,
+      selectedCount: selectedNames.length,
+      namedCount: cardNames.filter(name => typeof name === 'string' && name.length > 0).length,
+      evidence: namedCardAccepted ? 'cardNames' : selectedFilesAccepted ? 'selectedFiles' : cardTextAccepted ? 'cardText' : 'none'
+    };
   })()`;
 }
 
@@ -2101,7 +2125,15 @@ async function cdpWaitForAttachmentAccepted(tabId, fileNames, retryPolicy, befor
   cdpLog("Waiting for Composer file acceptance", { tabId, fileCount: fileNames.length, ...policy });
   await waitForComposerMedia(async () => {
     const state = (await cdpEvaluate(tabId, cdpAttachmentStateExpression(fileNames)))?.value;
-    return { ready: Boolean(state?.accepted) };
+    return {
+      ready: Boolean(state?.accepted),
+      diagnostic: {
+        attachmentCount: Number.isSafeInteger(state?.attachmentCount) ? state.attachmentCount : 0,
+        selectedCount: Number.isSafeInteger(state?.selectedCount) ? state.selectedCount : 0,
+        namedCount: Number.isSafeInteger(state?.namedCount) ? state.namedCount : 0,
+        evidence: typeof state?.evidence === "string" ? state.evidence : "none"
+      }
+    };
   }, policy, { stage: "file acceptance", beforeCheck: beforeCheck || undefined, log: cdpLog, sleep });
 }
 

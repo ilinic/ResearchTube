@@ -96,3 +96,6 @@ Extraction and delivery are Extension-owned asynchronous work. Finishing the ass
 
 
 Detailed records also emit `tab.state` checkpoints for the agent and ChatGPT tabs. They include the tab/window activity state (`active`, `windowFocused`) and page lifecycle state (`visibilityState`, `hidden`, `hasFocus`, `readyState`) without URLs, prompts or page content. The `point` field identifies the checkpoint, such as `chat.documentReady`, `resource.composerAccepted` or `resource.beforeSend`.
+
+
+Composer attachment acceptance uses the configured retry budget (15 checks by default, 2 seconds apart) and records safe evidence counters (`attachmentCount`, `selectedCount`, `namedCount`, `evidence`) in the CDP log. Acceptance can be confirmed from selected file inputs, recognized attachment-card names, or matching card text; no file content or prompt text is logged.
