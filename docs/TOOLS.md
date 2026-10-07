@@ -184,7 +184,7 @@ Start **Study this site** from the Extension popup. The two new tabs are grouped
 
 | Tool | Purpose |
 | --- | --- |
-| `browser_observe` | Live, bounded AX outline/subtree/full observation with node IDs and preserved hierarchy. |
+| `browser_observe` | Bounded full-depth content by default, resource references, hierarchy and added/updated/removed IDs; optional outline/subtree and pagination. |
 | `browser_get_children` | Expand a selected node's current children with depth and pagination. |
 | `browser_get_node` | Inspect AX details, safe DOM attributes/geometry and resource references. |
 | `browser_get_text` | Read deferred AX subtree text with offset/limit. |

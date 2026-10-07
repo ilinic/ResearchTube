@@ -162,11 +162,11 @@ console.log('Browser toolbar: tab-specific AUTO, recording priority and Stop res
 // The grouping config is optional for old/offline Agents; invalid values fail.
 for(const value of [true,false]) {
  w.context.agentJsonRequest=async()=>({browserStudyGroupTabs:value});
- assert.deepEqual(JSON.parse(JSON.stringify(await w.context.configuredBrowserStudyOptions())), { groupTabs: value, detailedLogging: true });
+ assert.deepEqual(JSON.parse(JSON.stringify(await w.context.configuredBrowserStudyOptions())), { groupTabs: value, detailedLogging: true, observation: { maxNodes: 200, maxChars: 48000 } });
 }
-w.context.agentJsonRequest=async()=>({});assert.deepEqual(JSON.parse(JSON.stringify(await w.context.configuredBrowserStudyOptions())), { groupTabs: true, detailedLogging: true });
+w.context.agentJsonRequest=async()=>({});assert.deepEqual(JSON.parse(JSON.stringify(await w.context.configuredBrowserStudyOptions())), { groupTabs: true, detailedLogging: true, observation: { maxNodes: 200, maxChars: 48000 } });
 w.context.agentJsonRequest=async()=>{throw Object.assign(Error('offline'),{code:'AGENT_UNAVAILABLE'});};
-assert.deepEqual(JSON.parse(JSON.stringify(await w.context.configuredBrowserStudyOptions())), { groupTabs: true, detailedLogging: true });
+assert.deepEqual(JSON.parse(JSON.stringify(await w.context.configuredBrowserStudyOptions())), { groupTabs: true, detailedLogging: true, observation: { maxNodes: 200, maxChars: 48000 } });
 for(const value of [null,1,'false']) {
  w.context.agentJsonRequest=async()=>({browserStudyGroupTabs:value});
  await assert.rejects(w.context.configuredBrowserStudyOptions(),e=>e.code==='AGENT_INVALID_RESPONSE');
@@ -175,7 +175,7 @@ console.log('Browser grouping setting: live boolean, default and offline compati
 
 for (const detailedLogging of [true, false]) {
  w.context.agentJsonRequest=async()=>({browserStudyGroupTabs:false,browserStudyDetailedLogging:detailedLogging});
- assert.deepEqual(JSON.parse(JSON.stringify(await w.context.configuredBrowserStudyOptions())),{groupTabs:false,detailedLogging});
+ assert.deepEqual(JSON.parse(JSON.stringify(await w.context.configuredBrowserStudyOptions())),{groupTabs:false,detailedLogging,observation:{maxNodes:200,maxChars:48000}});
 }
 for (const value of [null, 1, "false"]) {
  w.context.agentJsonRequest=async()=>({browserStudyDetailedLogging:value});
@@ -226,3 +226,13 @@ assert.deepEqual(JSON.parse(JSON.stringify(await w.context.configuredComposerMed
 w.context.agentJsonRequest = async () => { throw Object.assign(Error('config'), { code: 'CONFIG_INVALID' }); };
 await assert.rejects(w.context.configuredComposerMediaRetry(), error => error.code === 'CONFIG_INVALID');
 console.log('Composer retry policy: live settings, strict validation, old/offline fallback and visible action timestamps: ok');
+
+// The generated worker consumes optional observation limits, with strict numeric
+// validation and backward-compatible defaults on old/offline Agents.
+w.context.agentJsonRequest=async()=>({browserStudyObservation:{maxNodes:7,maxChars:1700}});
+assert.deepEqual(JSON.parse(JSON.stringify((await w.context.configuredBrowserStudyOptions()).observation)),{maxNodes:7,maxChars:1700});
+for(const value of [null,[],{maxNodes:true},{maxChars:999},{maxNodes:1001}]) {
+ w.context.agentJsonRequest=async()=>({browserStudyObservation:value});
+ await assert.rejects(w.context.configuredBrowserStudyOptions(),e=>e.code==='AGENT_INVALID_RESPONSE');
+}
+console.log('Browser observation setting: shipped worker reads strict optional node/character ceilings: ok');

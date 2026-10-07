@@ -6,6 +6,7 @@ Read this file before changing the repository. Then read `docs/ARCHITECTURE.md` 
 
 - `extension/background.js` is the main Extension and MCP source.
 - `extension/browser-tools.js`, `extension/browser-agent.js` and `extension/browser-page.js` own Browser Agent schemas, session/toolbar/resource handling and AX/DOM/CDP page operations. `agent/browser_resources.py` owns private bounded byte ingestion.
+- `extension/browser-observation-options.js` validates optional Agent node/character ceilings. Browser action updates preserve unaffected IDs; navigation invalidation is document/frame scoped.
 - `extension/storyboards.js` owns the public storyboard schemas and normalization.
 - `extension/youtube-page-bridge.src.js` is the source for the MAIN-world YouTube bridge.
 - `extension/youtube-content.js` is the isolated YouTube content script.

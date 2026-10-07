@@ -125,6 +125,25 @@ class AgentConfigTests(unittest.TestCase):
             self.assertEqual(raised.exception.code, 'CONFIG_INVALID')
             self.assertIn('browserStudyDetailedLogging', raised.exception.message)
 
+    def test_browser_study_observation_defaults_ceilings_and_validation(self):
+        defaults = {'maxNodes': 200, 'maxChars': 48000}
+        self.assertEqual(agent.configured_browser_study_observation(), defaults)
+        self.write({})
+        self.assertEqual(agent.configured_browser_study_observation(), defaults)
+        for name, output, minimum, maximum in [
+            ('browserStudyMaxNodes', 'maxNodes', 1, 1000),
+            ('browserStudyMaxChars', 'maxChars', 1000, 100000),
+        ]:
+            for value in [minimum, maximum]:
+                self.write({name: {'value': value, 'comment': 'Readable limit'}})
+                self.assertEqual(agent.configured_browser_study_observation()[output], value)
+            for value in [True, minimum - 1, maximum + 1, 1.5, '200', None]:
+                self.write({name: {'value': value}})
+                with self.assertRaises(agent.AgentApiError) as raised:
+                    agent.configured_browser_study_observation()
+                self.assertEqual(raised.exception.code, 'CONFIG_INVALID')
+                self.assertIn(name, raised.exception.message)
+
     def test_defaults_and_cleanup_fallback(self):
         self.write({})
         self.assertEqual(agent.configured_port(), 17843)

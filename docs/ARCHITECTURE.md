@@ -187,6 +187,8 @@ Current values must be read from code or `system_agent_status`; documentation do
 
 Browser Agent reads optional `browserStudyGroupTabs` and `browserStudyDetailedLogging` booleans together from the existing Agent settings endpoint at launch, defaulting to true for older/offline Agents. Detailed diagnostics are session-scoped, centralized in `browser-diagnostics.js`, use a monotonic clock and retain only CDP counters, never payloads or log history. Turning the flag off affects new sessions. Only the two new tabs enter the group. The popup launches research without session controls. Closing either bound tab is normal stopped completion with a separate stopReason, cancels pending pre-Send delivery and clears AUTO; the surviving tab is preserved.
 
+The same optional settings response publishes `browserStudyObservation` from `browserStudyMaxNodes` and `browserStudyMaxChars`. `browser-observation-options.js` validates defaults/ceilings before session creation. Full-depth bounded reads replace the mandatory outline/expand/text sequence. `browser-page.js` keeps document-version IDs, per-frame generations and a bounded public-difference summary against its last observation/action. Child navigation invalidates only its subtree; main-document navigation invalidates everything. Action responses carry locally reconciled new/updated nodes and removed IDs without resending unchanged page content. Selected AX/DOM targets and resource identity remain independently validated before input, after extraction and before delivery/Send. Observation failure after dispatched input is reported separately to avoid duplicate actions.
+
 
 ### Browser resource batches and repeated Send
 

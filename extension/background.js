@@ -1,6 +1,7 @@
 import { waitForComposerMedia } from "./composer-media-retry.js";
 import { createBrowserAgent, waitForBrowserDocument, waitForBrowserConversation } from "./browser-agent.js";
 import { browserToolDefinitions, BROWSER_TOOL_NAMES } from "./browser-tools.js";
+import { browserObservationOptions } from "./browser-observation-options.js";
 import { TIMER_TOOL_NAMES, timerDefinitions, validateTimerInput, normalizeTimerResult } from "./timers.js";
 import { ARTIFACT_TOOLS, ARTIFACT_STATUS_TOOLS, ARTIFACT_CANCEL_TOOLS, createArtifactTaskManager, artifactOperationMessage } from "./artifact-tasks.js";
 import { artifactToolDefinitions, publicWorkspaceArguments } from "./artifact-tools.js";
@@ -3284,11 +3285,11 @@ async function configuredBrowserStudyOptions() {
     if (typeof enabled !== "boolean") throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid browserStudyGroupTabs.");
     const detailedLogging = document.browserStudyDetailedLogging === undefined ? true : document.browserStudyDetailedLogging;
     if (typeof detailedLogging !== "boolean") throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid browserStudyDetailedLogging.");
-    return { groupTabs: enabled, detailedLogging };
+    return { groupTabs: enabled, detailedLogging, observation: browserObservationOptions(document.browserStudyObservation) };
   } catch (error) {
     if (["CONFIG_INVALID", "AGENT_INVALID_RESPONSE"].includes(error.code)) throw error;
     // Browser-only research remains available without the optional Agent.
-    return { groupTabs: true, detailedLogging: true };
+    return { groupTabs: true, detailedLogging: true, observation: browserObservationOptions() };
   }
 }
 

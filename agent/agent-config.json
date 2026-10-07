@@ -68,5 +68,13 @@
   "browserStudyGroupTabs": {
     "value": true,
     "comment": "Group the two new Study this site tabs (site copy and dedicated ChatGPT conversation). Default true; false leaves them ungrouped. Uses a short RT · page title, or hostname when untitled. The source tab is untouched. Read on each new study session; groups already created are unchanged."
+  },
+  "browserStudyMaxNodes": {
+    "value": 200,
+    "comment": "Maximum nodes per Browser Agent observation or automatic post-action update. Default 200; integer 1–1000. The first read includes full-depth accessible content instead of a shallow outline. MCP maxNodes may reduce this ceiling, not raise it. Increase only if useful page content is being deferred. Read once per new study session."
+  },
+  "browserStudyMaxChars": {
+    "value": 48000,
+    "comment": "Maximum serialized node payload characters per Browser Agent observation or automatic post-action update, including node IDs and structure. Default 48000; integer 1000–100000. Page metadata and bounded change summaries add small overhead. MCP maxChars may reduce this ceiling. Long text and omitted nodes remain available through pagination or browser_get_text. Read once per new study session."
   }
 }

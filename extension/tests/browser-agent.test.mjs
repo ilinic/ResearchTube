@@ -353,3 +353,43 @@ const nstatus=await navigatedBatch.run('browser_resource_status',{sessionId:nsid
 assert.equal(nstatus.status,'failed');assert.equal(nstatus.error.code,'PAGE_CHANGED');assert.equal(nstatus.files.length,3);
 assert.equal(navigatedBatch.uploads.length,0,'navigation during save keeps receipts but blocks old-page delivery');
 console.log('Browser batches: navigation during final save preserves files and stops before upload: ok');
+
+// A child navigation must not reject main-page resources, even between save
+// and Send. The selected child's own navigation must still stop its delivery.
+{
+ const scoped=fixture();
+ scoped.host.studyOptions=async()=>({groupTabs:false,detailedLogging:false,observation:{maxNodes:50,maxChars:16000}});
+ const sid=(await scoped.agent.start(10)).session.sessionId;
+ assert.match(scoped.events.find(row=>row[0]==='prompt')[2],/one browser_observe call/);
+ await scoped.agent.onEvent({tabId:21},'Target.attachedToTarget',{sessionId:'child',targetInfo:{type:'iframe'}});
+ const before=await scoped.run('browser_observe',{sessionId:sid});
+ const mainImage=before.nodes.find(node=>node.role==='image');
+ const childImage=before.nodes.filter(node=>node.role==='image')[1];
+ const childRoot=before.roots[1];
+ const mainRoot=before.roots[0];
+ assert.ok(childImage && childRoot);
+ const mainTask=await scoped.run('browser_get_resource',{sessionId:sid,resourceId:mainImage.resources[0].resourceId});
+ scoped.onAttach(async()=>{await scoped.agent.onEvent({tabId:21,sessionId:'child'},'Page.frameNavigated',{frame:{id:'childFrame',url:'https://ad.test/reloaded'}});});
+ await scoped.scheduled.shift()();
+ assert.equal((await scoped.run('browser_resource_status',{sessionId:sid,taskId:mainTask.taskId})).status,'completed');
+ await scoped.run('browser_get_node',{sessionId:sid,nodeId:mainRoot});
+ await assert.rejects(scoped.run('browser_get_node',{sessionId:sid,nodeId:childImage.nodeId}),{code:'STALE_NODE'});
+ const after=await scoped.run('browser_observe',{sessionId:sid});
+ assert.equal(after.page.pageVersion,before.page.pageVersion);
+ assert.equal(after.roots[0],mainRoot);
+ assert.notEqual(after.roots[1],childRoot);
+ const newChildImage=after.nodes.filter(node=>node.role==='image')[1];
+ const childTask=await scoped.run('browser_get_resource',{sessionId:sid,resourceId:newChildImage.resources[0].resourceId});
+ await scoped.scheduled.shift()();
+ const failed=await scoped.run('browser_resource_status',{sessionId:sid,taskId:childTask.taskId});
+ assert.equal(failed.status,'failed');assert.equal(failed.error.code,'STALE_NODE');
+ assert.equal(failed.files.length,1,'saved bytes survive selected-frame navigation before Send');
+ assert.deepEqual(failed.submittedFiles,[]);
+ const sameDocumentUrl='https://site.test/article?filter=new#details';
+ scoped.tabs.get(21).url=sameDocumentUrl;
+ await scoped.agent.onEvent({tabId:21},'Page.navigatedWithinDocument',{frameId:'main',url:sameDocumentUrl});
+ const same=await scoped.run('browser_get_node',{sessionId:sid,nodeId:mainRoot});
+ assert.equal(same.page.pageVersion,before.page.pageVersion);
+ assert.equal(same.page.url,'https://site.test/article');
+}
+console.log('Browser frame routing: unrelated iframe reload preserves main IDs/delivery; selected-frame reload preserves bytes and stops Send; same-document navigation retains IDs: ok');
