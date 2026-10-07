@@ -4879,8 +4879,8 @@ async function cdpAttachFilesNow(filePathValues, { onPhase = null, currentChatTa
   let keepGuard = false;
   try {
     await cdpAttach(tab.id);
-    await logBrowserTabState(trace, tab.id, "resource.attached");
     attached = true;
+    await logBrowserTabState(trace, tab.id, "resource.attached");
     await cdpPrepareBackgroundChat(tab.id);
     await logBrowserTabState(trace, tab.id, "resource.focusEmulation");
     await cdpCommand(tab.id, "Page.enable");
@@ -4911,10 +4911,10 @@ async function cdpAttachFilesNow(filePathValues, { onPhase = null, currentChatTa
     await cdpCommand(tab.id, "DOM.setFileInputFiles", { files: filePaths, backendNodeId: chooser.backendNodeId });
     cdpLog("DOM.setFileInputFiles completed", { tabId: tab.id, backendNodeId: chooser.backendNodeId, fileCount: filePaths.length });
     await cdpWaitForAttachmentAccepted(tab.id, fileNames, retryPolicy, async () => {
-    await logBrowserTabState(trace, tab.id, "resource.composerAccepted");
       checkCancelled?.();
       if (currentChatTarget) await requireCurrentChatTarget(currentChatTarget);
     });
+    await logBrowserTabState(trace, tab.id, "resource.composerAccepted");
     checkCancelled?.();
     if (onPhase) await onPhase("composerAccepted");
     if (deferSend && currentChatTarget) {
