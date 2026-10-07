@@ -42,7 +42,7 @@ except ImportError:
     from browser_resources import save_browser_resource
 
 AGENT_VERSION = "2.2.64"
-INTERFACE_VERSION = 76
+INTERFACE_VERSION = 77
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
 MAX_GOOGLE_TRANSLATE_AUDIO_BYTES = 16 * 1024 * 1024
@@ -136,6 +136,15 @@ class AgentApiError(Exception):
     def __init__(self, code: str, message: str, detail: str | None = None) -> None:
         super().__init__(message)
         self.code, self.message, self.detail = code, message, detail
+
+
+try:
+    from .custom_tools import CustomToolRegistry
+except ImportError:  # Direct python researchtube_agent.py launch.
+    from custom_tools import CustomToolRegistry
+
+
+CUSTOM_TOOLS = CustomToolRegistry(ROOT / "custom-tools", AgentApiError, lambda: configured_task_history_limit())
 
 
 @dataclass(frozen=True)
@@ -5880,6 +5889,19 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             response_status, response_body = "200 OK", cached_public_health()
         elif method == "GET" and path == "/internal/tool-limits":
             response_status, response_body = "200 OK", {"limits": configured_tool_limits(), "newToolsEnabledByDefault": configured_new_tools_default(), "mediaWidgetHandshakeTimeoutSeconds": configured_media_widget_handshake_timeout(), "browserStudyGroupTabs": configured_browser_study_group_tabs(), "browserStudyDetailedLogging": configured_browser_study_detailed_logging(), "browserStudyObservation": configured_browser_study_observation(), "composerMediaRetry": configured_composer_media_retry()}
+        elif method == "GET" and path == "/custom-tools":
+            response_status, response_body = "200 OK", CUSTOM_TOOLS.catalog()
+        elif method == "POST" and path == "/custom-tools/call":
+            payload = parse_json_body(body)
+            if not isinstance(payload, dict) or set(payload) != {"name", "arguments"} or not isinstance(payload.get("name"), str):
+                raise AgentApiError("CUSTOM_TOOL_REQUEST_INVALID", "Custom tool calls require name and arguments.")
+            response_status, response_body = "200 OK", await CUSTOM_TOOLS.call(payload["name"], payload["arguments"])
+        elif method == "GET" and re.fullmatch(r"/custom-tools/tasks/ct_[A-Za-z0-9_-]{11}", path):
+            response_status, response_body = "200 OK", CUSTOM_TOOLS.status(path.removeprefix("/custom-tools/tasks/"))
+        elif method == "POST" and re.fullmatch(r"/custom-tools/tasks/ct_[A-Za-z0-9_-]{11}/cancel", path):
+            if parse_json_body(body) != {}:
+                raise AgentApiError("CUSTOM_TOOL_REQUEST_INVALID", "Custom tool cancellation accepts an empty body.")
+            response_status, response_body = "200 OK", await CUSTOM_TOOLS.cancel(path.removeprefix("/custom-tools/tasks/").removesuffix("/cancel"))
         elif method == "POST" and path == "/timer/start":
             response_status, response_body = "200 OK", await TIMER_TASKS.create(parse_json_body(body))
         elif method == "GET" and re.fullmatch(r"/tasks/timer/[^/]+", path):
@@ -6053,7 +6075,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
         log_path = compact_google_translate_speech_log_path(path, response_body)
         log(f"{method or 'INVALID'} {log_path or '/'} -> {response_status.split()[0]}{response_log_suffix(path, response_body)}")
     except AgentApiError as error:
-        status = "404 Not Found" if error.code in {"TASK_NOT_FOUND", "VISUAL_MAP_TASK_NOT_FOUND", "CAMERA_RECORD_TASK_NOT_FOUND", "CAPTURE_FRAME_TASK_NOT_FOUND", "MEDIA_CLIP_TASK_NOT_FOUND", "TIMER_NOT_FOUND"} else "400 Bad Request"
+        status = "404 Not Found" if error.code in {"TASK_NOT_FOUND", "VISUAL_MAP_TASK_NOT_FOUND", "CAMERA_RECORD_TASK_NOT_FOUND", "CAPTURE_FRAME_TASK_NOT_FOUND", "MEDIA_CLIP_TASK_NOT_FOUND", "TIMER_NOT_FOUND", "CUSTOM_TOOL_NOT_FOUND", "CUSTOM_TOOL_TASK_NOT_FOUND"} else "400 Bad Request"
         writer.write(http_response(status, error_document(error)))
         await writer.drain()
         log(f"{method or 'INVALID'} {path or '/'} -> {status.split()[0]}")
@@ -6093,6 +6115,7 @@ async def serve(port: int) -> None:
         await VISUAL_MAP_TASKS.shutdown()
         await CAMERA_RECORD_TASKS.shutdown()
         await TASKS.shutdown()
+        await CUSTOM_TOOLS.shutdown()
 
 
 def parse_args() -> argparse.Namespace:

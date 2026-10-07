@@ -55,7 +55,7 @@ function renderMcpTools(result) {
   for (const [group, tools] of groups) {
     tools.sort((left, right) => left.name.localeCompare(right.name));
     const groupElement = document.createElement("section"); groupElement.className = "tool-group";
-    const heading = document.createElement("h3"); heading.textContent = toolGroupTitle(result.groups, group); groupElement.append(heading);
+    const heading = document.createElement("h3"); heading.textContent = tools[0]?.groupTitle || toolGroupTitle(result.groups, group); groupElement.append(heading);
     for (const tool of tools) {
       const row = document.createElement("label"); row.className = "tool-row";
       const checkbox = document.createElement("input"); checkbox.type = "checkbox"; checkbox.checked = tool.enabled === true; checkbox.disabled = tool.alwaysEnabled === true;
@@ -72,6 +72,11 @@ function renderMcpTools(result) {
       });
     }
     container.append(groupElement);
+  }
+  if (Array.isArray(result.customToolErrors) && result.customToolErrors.length) {
+    const errors = document.createElement("p"); errors.className = "field-help";
+    errors.textContent = `Custom Tool packages with errors: ${result.customToolErrors.map((item) => item.package || "unknown").join(", ")}.`;
+    container.append(errors);
   }
 }
 async function loadMcpToolSettings() { renderMcpTools(await call({ type: "get-mcp-tool-settings" })); }

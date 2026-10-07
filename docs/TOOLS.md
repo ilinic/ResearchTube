@@ -35,6 +35,21 @@ Timers live only in Agent memory. They do not wake a finished chat. Old terminal
 - Long operations return a task ID. Poll the matching status tool no faster than `pollIntervalMs`.
 - Local media is shown only through an explicit `media_show` call unless a tool description states otherwise.
 
+## Custom Tools
+
+Custom Tools are developer-defined packages under `agent/custom-tools/`. Each
+package has a `manifest.json` with a `groupTitle` and a list of tools. Each
+tool has an explicit MCP `name`, a `title`, an object `inputSchema`, and an
+`entryPoint` such as `tools.py:count_words`. A package may expose multiple
+tools. `execution: "sync"` returns a result directly; `execution: "task"`
+returns a task immediately and uses `custom_tool_status` and
+`custom_tool_cancel`. See [Custom Tools](features/CUSTOM_TOOLS.md).
+
+| Tool | Behavior |
+| --- | --- |
+| `custom_tool_status` | Returns progress, result or error for an asynchronous Custom Tool task. |
+| `custom_tool_cancel` | Requests cancellation of an asynchronous Custom Tool task. |
+
 ## System
 
 | Tool | Behavior |

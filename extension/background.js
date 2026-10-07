@@ -28,6 +28,10 @@ const DEFAULTS = {
   youtubeSearchCooldownLevel: 0
 };
 const DEFAULT_MCP_TOOL_PREFERENCES = Object.freeze({ newToolsEnabledByDefault: true, enabledByName: {} });
+let CUSTOM_MCP_TOOLS = [];
+let CUSTOM_TOOL_ERRORS = [];
+let customToolsLoaded = false;
+let customToolsLoading = null;
 const MCP_TOOL_GROUPS = Object.freeze({
   system: { title: "System", order: 10 },
   timers: { title: "Timers", order: 12 },
@@ -61,9 +65,10 @@ const MCP_TOOL_SETTINGS = Object.freeze({
   youtube_search: { group: "youtube" }, youtube_get_video: { group: "youtube" }, youtube_get_channel_videos: { group: "youtube" }, youtube_get_channel_playlists: { group: "youtube" }, youtube_get_playlist_videos: { group: "youtube" }, youtube_get_transcript: { group: "youtube" }, youtube_get_comments: { group: "youtube" }, youtube_get_comment_replies: { group: "youtube" },
   youtube_download_get_formats: { group: "downloads" }, youtube_download: { group: "downloads" }, youtube_download_get_task: { group: "downloads" }, youtube_download_task_diagnostics: { group: "downloads" }, youtube_download_cancel_task: { group: "downloads" },
   clipboard_status: { group: "clipboard" }, clipboard_get: { group: "clipboard" }, clipboard_set: { group: "clipboard" },
-  library_store_start: { group: "library" }, library_store_status: { group: "library" }, library_store_cancel: { group: "library" }, online_share_start: { group: "online" }, online_share_status: { group: "online" }, online_share_stop: { group: "online" }
+  library_store_start: { group: "library" }, library_store_status: { group: "library" }, library_store_cancel: { group: "library" }, online_share_start: { group: "online" }, online_share_status: { group: "online" }, online_share_stop: { group: "online" },
+  custom_tool_status: { group: "custom" }, custom_tool_cancel: { group: "custom" }
 });
-const EXTENSION_VERSION = "2.2.81";
+const EXTENSION_VERSION = "2.2.82";
 // Chrome dispatches this for requests made by our Extension-owned viewer.
 // Packaged assets and unrelated requests fall through without interception.
 globalThis.addEventListener?.("fetch", createMediaStreamHandler({
@@ -73,7 +78,7 @@ globalThis.addEventListener?.("fetch", createMediaStreamHandler({
   fetchMedia: (url, options) => fetch(url, options),
   log: (stage, details = {}) => consoleAction(`[ResearchTube media stream ${EXTENSION_VERSION}]`, stage, details)
 }));
-const REQUIRED_AGENT_INTERFACE_VERSION = 76;
+const REQUIRED_AGENT_INTERFACE_VERSION = 77;
 // A UI resource URI is a cache key in MCP Apps. Increment it whenever the
 // rendered template changes so ChatGPT does not reuse a stale iframe bundle.
 const MEDIA_TO_CHAT_WIDGET_URI = "ui://researchtube/chat-target-v7.html";
@@ -401,6 +406,18 @@ const speechTaskSchema = {
   required: ["taskId", "status", "phase", "progressPercent", "statusMessage", "engine", "voiceName", "outputMode", "saveToFile", "outputPath", "createdAt", "lastUpdatedAt", "pollIntervalMs"]
 };
 const speechCancelSchema = { type: "object", additionalProperties: false, properties: { taskId: { type: "string", pattern: "^tsk_[A-Za-z0-9_-]{10}$" }, status: { type: "string", enum: ["cancelled", "completed", "failed"] } }, required: ["taskId", "status"] };
+const customTaskSchema = {
+  type: "object", additionalProperties: false,
+  properties: {
+    taskId: { type: "string", pattern: "^ct_[A-Za-z0-9_-]{11}$" }, tool: { type: "string", minLength: 1 },
+    status: { type: "string", enum: ["working", "completed", "cancelled", "failed"] }, phase: { type: "string", enum: ["running", "completed", "cancelled", "failed"] },
+    progressPercent: { type: "number", minimum: 0, maximum: 100 }, statusMessage: { type: "string", minLength: 1 },
+    createdAt: { type: "string", format: "date-time" }, lastUpdatedAt: { type: "string", format: "date-time" }, pollIntervalMs: { type: "integer", minimum: 1000 },
+    result: { anyOf: [{ type: "object" }, { type: "null" }] }, error: { anyOf: [{ type: "object" }, { type: "null" }] }
+  },
+  required: ["taskId", "tool", "status", "phase", "progressPercent", "statusMessage", "createdAt", "lastUpdatedAt", "pollIntervalMs", "result", "error"]
+};
+const customToolCancelSchema = customTaskSchema;
 const youtubeDownloadResultSchema = {
   type: "object", additionalProperties: false,
   properties: {
@@ -1545,7 +1562,25 @@ function toolDefinitions() {
       outputSchema: { type: "object", additionalProperties: false, properties: { videoId: { type: "string" }, parentCommentId: { type: "string" }, parent: commentParentSchema, replies: { type: "array", items: replySchema }, returned: { type: "integer" }, requested: { type: "integer" }, totalReplies: nullableInteger }, required: ["videoId", "parentCommentId", "parent", "replies", "returned", "requested", "totalReplies"] }
     }
   ];
-  return [...artifactToolDefinitions(definitions, mediaToChatTaskSchema, MEDIA_TO_CHAT_WIDGET_URI, localAgentReadAnnotations, localWorkspaceWriteAnnotations), ...browserToolDefinitions()];
+  const customLifecycleDefinitions = [
+    {
+      name: "custom_tool_status",
+      title: "Get Custom Tool task status",
+      description: "Get the status and progress of an asynchronous Custom Tool task. Poll no faster than pollIntervalMs.",
+      annotations: localAgentReadAnnotations,
+      inputSchema: { type: "object", additionalProperties: false, properties: { taskId: { type: "string", pattern: "^ct_[A-Za-z0-9_-]{11}$" } }, required: ["taskId"] },
+      outputSchema: customTaskSchema
+    },
+    {
+      name: "custom_tool_cancel",
+      title: "Cancel a Custom Tool task",
+      description: "Cancel a running asynchronous Custom Tool task. The task implementation receives cancellation through its context.",
+      annotations: localWorkspaceWriteAnnotations,
+      inputSchema: { type: "object", additionalProperties: false, properties: { taskId: { type: "string", pattern: "^ct_[A-Za-z0-9_-]{11}$" } }, required: ["taskId"] },
+      outputSchema: customToolCancelSchema
+    }
+  ];
+  return [...artifactToolDefinitions(definitions, mediaToChatTaskSchema, MEDIA_TO_CHAT_WIDGET_URI, localAgentReadAnnotations, localWorkspaceWriteAnnotations), ...browserToolDefinitions(), ...customLifecycleDefinitions, ...CUSTOM_MCP_TOOLS];
 }
 
 function isPrivateMcpTool(tool) {
@@ -1559,7 +1594,8 @@ function publicMcpTools() {
 function toolSettingsMetadata(name) {
   const metadata = MCP_TOOL_SETTINGS[name] || {};
   const group = MCP_TOOL_GROUPS[metadata.group] ? metadata.group : "custom";
-  return { group, alwaysEnabled: metadata.alwaysEnabled === true };
+  const custom = CUSTOM_MCP_TOOLS.find(tool => tool.name === name)?._meta?.["researchtube/customTool"];
+  return { group, groupTitle: custom?.groupTitle || MCP_TOOL_GROUPS[group]?.title || "Custom", packageId: custom?.packageId || null, alwaysEnabled: metadata.alwaysEnabled === true };
 }
 
 function normalizeMcpToolPreferences(value) {
@@ -1612,11 +1648,12 @@ async function mcpToolSettingsCatalog() {
       name: tool.name,
       title: tool.title,
       description: String(tool.description || tool.title || tool.name),
-      group: metadata.group,
+      group: metadata.packageId ? `custom:${metadata.packageId}` : metadata.group,
+      groupTitle: metadata.groupTitle,
       alwaysEnabled: metadata.alwaysEnabled,
       enabled: metadata.alwaysEnabled || preferences.enabledByName[tool.name] === true
     };
-  }).sort((left, right) => (MCP_TOOL_GROUPS[left.group].order - MCP_TOOL_GROUPS[right.group].order) || left.name.localeCompare(right.name));
+  }).sort((left, right) => ((MCP_TOOL_GROUPS[left.group]?.order ?? MCP_TOOL_GROUPS.custom.order) - (MCP_TOOL_GROUPS[right.group]?.order ?? MCP_TOOL_GROUPS.custom.order)) || left.name.localeCompare(right.name));
 }
 
 async function enabledMcpToolDefinitions() {
@@ -3464,7 +3501,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
   if (message?.type === "get-mcp-tool-settings") {
-    mcpToolSettingsCatalog().then((tools) => sendResponse({ ok: true, tools, groups: MCP_TOOL_GROUPS })).catch((error) => sendResponse({ ok: false, error: safeErrorMessage(error) }));
+    tryRefreshCustomToolDefinitions().then(() => mcpToolSettingsCatalog()).then((tools) => sendResponse({ ok: true, tools, groups: MCP_TOOL_GROUPS, customToolErrors: CUSTOM_TOOL_ERRORS })).catch((error) => sendResponse({ ok: false, error: safeErrorMessage(error) }));
     return true;
   }
   if (message?.type === "set-mcp-tool-enabled") {
@@ -3748,6 +3785,82 @@ async function agentJsonRequest(path, { method = "GET", body = null, port = null
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function customToolDefinition(value) {
+  const metadata = value?._meta?.["researchtube/customTool"];
+  if (!value || typeof value !== "object" || typeof value.name !== "string" || !/^[a-z][a-z0-9_]{0,79}$/.test(value.name)
+    || typeof value.title !== "string" || !value.title.trim() || typeof value.description !== "string" || !value.description.trim()
+    || !value.inputSchema || typeof value.inputSchema !== "object" || value.inputSchema.type !== "object"
+    || !metadata || typeof metadata.packageId !== "string" || typeof metadata.groupTitle !== "string"
+    || !["sync", "task"].includes(metadata.execution)) {
+    throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid Custom Tool definition.");
+  }
+  const execution = metadata.execution;
+  return {
+    ...value,
+    outputSchema: execution === "task" ? customTaskSchema : (value.outputSchema ?? { type: "object" }),
+    _meta: { ...value._meta, "researchtube/customTool": metadata }
+  };
+}
+
+async function refreshCustomToolDefinitions(force = false) {
+  if (customToolsLoaded && !force) return;
+  if (customToolsLoading) return customToolsLoading;
+  customToolsLoading = (async () => {
+    try {
+      const document = await agentJsonRequest("/custom-tools", { timeoutMs: AGENT_HEALTH_TIMEOUT_MS });
+      if (!Array.isArray(document.tools) || !Array.isArray(document.errors)) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid Custom Tool catalog.");
+      CUSTOM_MCP_TOOLS = document.tools.map(customToolDefinition);
+      CUSTOM_TOOL_ERRORS = document.errors;
+      customToolsLoaded = true;
+    } finally {
+      customToolsLoading = null;
+    }
+  })();
+  return customToolsLoading;
+}
+
+async function tryRefreshCustomToolDefinitions() {
+  try {
+    await refreshCustomToolDefinitions();
+  } catch (error) {
+    if (!customToolsLoaded) {
+      CUSTOM_MCP_TOOLS = [];
+      CUSTOM_TOOL_ERRORS = [{ package: "<catalog>", code: error?.code || "AGENT_UNAVAILABLE", message: safeErrorMessage(error) }];
+    }
+    consoleAction(`[ResearchTube MCP] Custom Tool catalog unavailable (${error?.code || "AGENT_UNAVAILABLE"}).`);
+  }
+}
+
+function customToolByName(name) {
+  return CUSTOM_MCP_TOOLS.find(tool => tool.name === name) || null;
+}
+
+function customToolTaskId(value) {
+  if (typeof value !== "string" || !/^ct_[A-Za-z0-9_-]{11}$/.test(value)) throw localAgentError("INVALID_ARGUMENT", "taskId must be a Custom Tool task ID.");
+  return value;
+}
+
+async function customToolCall(name, argumentsValue) {
+  const document = await agentJsonRequest("/custom-tools/call", { method: "POST", body: { name, arguments: argumentsValue }, timeoutMs: AGENT_TASK_TIMEOUT_MS });
+  if (!document || typeof document !== "object" || !["result", "task"].includes(document.kind)) throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid Custom Tool result.");
+  if (document.kind === "result") return document.result;
+  if (!document.task || typeof document.task !== "object") throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid Custom Tool task.");
+  return document.task;
+}
+
+async function customToolStatus(taskId) {
+  const document = await agentJsonRequest(`/custom-tools/tasks/${encodeURIComponent(customToolTaskId(taskId))}`);
+  if (!document || typeof document !== "object" || document.taskId !== taskId || typeof document.status !== "string") throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid Custom Tool task status.");
+  return document;
+}
+
+async function customToolCancel(taskId) {
+  const normalized = customToolTaskId(taskId);
+  const document = await agentJsonRequest(`/custom-tools/tasks/${encodeURIComponent(normalized)}/cancel`, { method: "POST", body: {} });
+  if (!document || typeof document !== "object" || document.taskId !== normalized || typeof document.status !== "string") throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid Custom Tool cancellation result.");
+  return document;
 }
 
 function normalizeSpeechTaskId(value) {
@@ -5924,6 +6037,7 @@ async function handleMcpRequest(request) {
   }
   if (request?.method === "notifications/initialized") return null;
   if (request?.method === "tools/list") {
+    await tryRefreshCustomToolDefinitions();
     const tools = await enabledMcpToolDefinitions();
     const enabledTimers = TIMER_TOOL_NAMES.filter((name) => tools.some((tool) => tool.name === name));
     const disabledTimers = TIMER_TOOL_NAMES.filter((name) => !enabledTimers.includes(name));
@@ -5941,6 +6055,9 @@ async function handleMcpRequest(request) {
   }
   if (request?.method === "tools/call" && typeof request.params?.name === "string") {
     const name = request.params.name;
+    if (customToolByName(name)) return executeToolCall(request.id, name, request.params.arguments ?? {}, () => customToolCall(name, request.params.arguments ?? {}));
+    if (name === "custom_tool_status") return executeToolCall(request.id, name, request.params.arguments ?? {}, () => customToolStatus(request.params.arguments?.taskId));
+    if (name === "custom_tool_cancel") return executeToolCall(request.id, name, request.params.arguments ?? {}, () => customToolCancel(request.params.arguments?.taskId));
     let args;
     try { args = publicWorkspaceArguments(name, request.params.arguments ?? {}, toolDefinitions()); }
     catch (error) { return toolError(request.id, error); }

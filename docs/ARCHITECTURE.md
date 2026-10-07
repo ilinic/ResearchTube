@@ -30,7 +30,7 @@ The tunnel is outbound-only from the Extension. The Agent binds only to loopback
 | Current-chat binding | `extension/chatgpt-chat-target-bridge.js`, `extension/ui/chat-target-v1.html` | Compact task handshake using Chrome sender identity, independent of ChatGPT layout |
 | Local media viewer | `extension/media-viewer.html` | Loads image, video or audio bytes from loopback with Extension permissions; packaged script in `media-viewer.js` |
 | Settings and popup | `extension/settings.*`, `extension/popup.*` | Connection, Agent status, tool availability and bounded diagnostics |
-| Local Agent | `agent/researchtube_agent.py` | Workspace, executable discovery, downloads, FFmpeg operations, speech callbacks and loopback media serving |
+| Local Agent | `agent/researchtube_agent.py`, `agent/custom_tools.py` | Workspace, executable discovery, downloads, FFmpeg operations, speech callbacks, Custom Tools and loopback media serving |
 | Timer Agent module | `agent/timers.py`, `agent/task_history.py` | Real durations/deadlines, clock diagnostics and bounded terminal-task history |
 | Storyboard Agent module | `agent/storyboards.py` | Storyboard discovery, selection, downloads, timestamps and task lifecycle |
 
@@ -107,6 +107,12 @@ All Agent task managers retain only the latest `limits.completedTaskHistoryLimit
 Timers use the same task lifecycle, ordinary short task IDs and compact percentage logs. `agent/timers.py` separates monotonic relative duration from calendar deadlines, obtains an optional HTTPS UTC sample, returns clock-change warnings and detects suspend where system counters support it. Timers remain only in memory; restart/history eviction gives a meaningful not-found result. They cannot independently wake ChatGPT. See [TIMERS.md](features/TIMERS.md).
 
 The developer default for automatically discovered custom tools lives in `agent-config.json` as `newToolsEnabledByDefault`, not in the Settings UI. New built-in tools default to enabled independently of this parameter. Individual saved tool choices remain authoritative. The Extension reads the default when registering a previously unknown custom tool and uses its last known default (initially true) if the Agent is unavailable.
+
+Developer-defined Custom Tool packages live under `agent/custom-tools/`. The
+Agent reads each package manifest at startup and the Extension publishes the
+declared MCP definitions after the Agent is restarted. A package may expose
+multiple explicit tool names and implementation entry points; task execution
+uses the shared Custom Tool status/cancel lifecycle.
 
 ## Media processing
 

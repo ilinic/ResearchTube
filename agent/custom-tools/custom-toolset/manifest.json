@@ -1,0 +1,65 @@
+{
+  "manifestVersion": 1,
+  "id": "example.custom-toolset",
+  "version": "1.0.0",
+  "groupTitle": "Custom Toolset",
+  "description": "Small examples showing synchronous and asynchronous custom tools.",
+  "tools": [
+    {
+      "name": "count_words",
+      "title": "Count words",
+      "description": "Count the words in supplied text.",
+      "entryPoint": "tools.py:count_words",
+      "execution": "sync",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "Text to count."
+          }
+        },
+        "required": ["text"],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "text": {"type": "string"},
+          "wordCount": {"type": "integer", "minimum": 0}
+        },
+        "required": ["text", "wordCount"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "wait_seconds",
+      "title": "Wait",
+      "description": "Wait for the requested number of seconds and report progress.",
+      "entryPoint": "tools.py:wait_seconds",
+      "execution": "task",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "seconds": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 60,
+            "description": "Number of seconds to wait."
+          }
+        },
+        "required": ["seconds"],
+        "additionalProperties": false
+      },
+      "outputSchema": {
+        "type": "object",
+        "properties": {
+          "waitedSeconds": {"type": "integer", "minimum": 1},
+          "completed": {"type": "boolean"}
+        },
+        "required": ["waitedSeconds", "completed"],
+        "additionalProperties": false
+      }
+    }
+  ]
+}
