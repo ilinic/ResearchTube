@@ -2311,7 +2311,7 @@ var MCP_TOOL_SETTINGS = Object.freeze({
   online_share_status: { group: "online" },
   online_share_stop: { group: "online" }
 });
-var EXTENSION_VERSION = "2.2.78";
+var EXTENSION_VERSION = "2.2.79";
 globalThis.addEventListener?.("fetch", createMediaStreamHandler({
   extensionUrl: chrome.runtime.getURL("/"),
   getClient: (id) => globalThis.clients.get(id),
@@ -6268,62 +6268,108 @@ async function acquireGoogleTranslateTab() {
   googleTranslateSpeechTabId = tab.id;
   return tab;
 }
-async function googleTranslatePressListen(tabId, signal, debuggerAlreadyAttached = false) {
+function googleTranslatePlaybackPage(action, expectedText) {
+  const key = "__researchTubeSourcePlayback";
+  const visible = (element) => {
+    const style = getComputedStyle(element);
+    const rect2 = element.getBoundingClientRect();
+    return element.isConnected && style.visibility !== "hidden" && style.display !== "none" && rect2.width > 2 && rect2.height > 2;
+  };
+  const sourceTextMatches = () => {
+    const fields2 = [...document.querySelectorAll("textarea, [contenteditable='true']")].filter(visible);
+    return fields2.length === 1 && (fields2[0] instanceof HTMLTextAreaElement ? fields2[0].value : fields2[0].textContent) === expectedText;
+  };
+  let monitor = globalThis[key];
+  if (action === "arm") {
+    if (monitor) return { error: "alreadyMonitoring" };
+    if (!sourceTextMatches()) return { error: "textMismatch" };
+    const controls = [...document.querySelectorAll('button[aria-label="Listen to source text"], [role="button"][aria-label="Listen to source text"]')].filter((element) => visible(element) && !element.disabled && element.getAttribute("aria-disabled") !== "true");
+    if (controls.length !== 1) return { error: "sourceControlUnavailable" };
+    const button2 = controls[0];
+    monitor = { button: button2, started: false, finished: false, observer: null };
+    const update = (records) => {
+      for (const record of records) {
+        if (record.attributeName === "aria-label" && record.oldValue === "Stop listening") monitor.started = true;
+      }
+      const label = button2.getAttribute("aria-label");
+      if (label === "Stop listening") monitor.started = true;
+      if (monitor.started && label === "Listen to source text") monitor.finished = true;
+    };
+    monitor.update = update;
+    monitor.observer = new MutationObserver(update);
+    monitor.observer.observe(button2, { attributes: true, attributeFilter: ["aria-label"], attributeOldValue: true });
+    globalThis[key] = monitor;
+  }
+  if (!monitor) return { error: "monitorUnavailable" };
+  monitor.update(monitor.observer.takeRecords());
+  const button = monitor.button;
+  if (action === "dispose") {
+    monitor.observer.disconnect();
+    delete globalThis[key];
+    if (expectedText === true && !monitor.finished && button.isConnected && button.getAttribute("aria-label") === "Stop listening") button.click();
+    return { disposed: true };
+  }
+  if (action === "fallback" && !monitor.started) {
+    if (!sourceTextMatches()) return { error: "textMismatch" };
+    if (!visible(button) || button.disabled || button.getAttribute("aria-disabled") === "true" || button.getAttribute("aria-label") !== "Listen to source text") return { error: "sourceControlUnavailable" };
+    button.click();
+    monitor.update(monitor.observer.takeRecords());
+  }
+  const rect = button.getBoundingClientRect();
+  return {
+    started: monitor.started,
+    finished: monitor.finished,
+    available: visible(button),
+    x: rect.left + rect.width / 2,
+    y: rect.top + rect.height / 2
+  };
+}
+async function googleTranslatePlaybackState(tabId, action = "read", expectedText = null) {
+  return (await cdpEvaluate(tabId, `(${googleTranslatePlaybackPage.toString()})(${JSON.stringify(action)}, ${JSON.stringify(expectedText)})`))?.value;
+}
+async function googleTranslatePressListen(tabId, signal, expectedText) {
   await waitForGoogleTranslateListenControl(tabId, signal);
   googleTranslateAbort(signal);
-  let attached = false;
-  try {
-    if (!debuggerAlreadyAttached) {
-      await cdpAttach(tabId);
-      attached = true;
-    }
-    const target = (await cdpEvaluate(tabId, `(() => {
-      const enabled = element => {
-        const style = getComputedStyle(element);
-        const rect = element.getBoundingClientRect();
-        return !element.disabled && element.getAttribute("aria-disabled") !== "true"
-          && style.visibility !== "hidden" && style.display !== "none" && rect.width > 2 && rect.height > 2;
-      };
-      const button = [...document.querySelectorAll('button[aria-label="Listen to source text"], [role="button"][aria-label="Listen to source text"]')].find(enabled);
-      if (!button) return null;
-      const rect = button.getBoundingClientRect();
-      return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
-    })()`))?.value;
-    if (!Number.isFinite(target?.x) || !Number.isFinite(target?.y)) throw new Error("Google Translate listen control became unavailable before playback.");
-    await cdpCommand(tabId, "Input.dispatchMouseEvent", { type: "mouseMoved", x: target.x, y: target.y, button: "none", buttons: 0 });
-    await cdpCommand(tabId, "Input.dispatchMouseEvent", { type: "mousePressed", x: target.x, y: target.y, button: "left", buttons: 1, clickCount: 1 });
-    await cdpCommand(tabId, "Input.dispatchMouseEvent", { type: "mouseReleased", x: target.x, y: target.y, button: "left", buttons: 0, clickCount: 1 });
-    cdpLog("Clicked Google Translate source listen button with browser input", { tabId });
-  } finally {
-    if (attached) await cdpDetach(tabId);
+  const target = await googleTranslatePlaybackState(tabId, "arm", expectedText);
+  if (target?.error || !target?.available || !Number.isFinite(target.x) || !Number.isFinite(target.y)) {
+    throw new Error("Google Translate source text or unique listen control is unavailable before playback.");
   }
+  await cdpCommand(tabId, "Input.dispatchMouseEvent", { type: "mouseMoved", x: target.x, y: target.y, button: "none", buttons: 0 });
+  googleTranslateAbort(signal);
+  await cdpCommand(tabId, "Input.dispatchMouseEvent", { type: "mousePressed", x: target.x, y: target.y, button: "left", buttons: 1, clickCount: 1 });
+  await cdpCommand(tabId, "Input.dispatchMouseEvent", { type: "mouseReleased", x: target.x, y: target.y, button: "left", buttons: 0, clickCount: 1 });
+  cdpLog("Clicked Google Translate source listen button; waiting for Stop listening", { tabId });
+  const start = Date.now();
+  const deadline = start + GOOGLE_TRANSLATE_TAB_TIMEOUT_MS;
+  let fallbackUsed = false;
+  while (Date.now() < deadline) {
+    googleTranslateAbort(signal);
+    const state = await googleTranslatePlaybackState(tabId);
+    if (state?.started === true) {
+      cdpLog("Confirmed Google Translate source playback", { tabId });
+      return;
+    }
+    if (state?.error || !state?.available) throw new Error("Google Translate source listen control became unavailable before playback started.");
+    if (!fallbackUsed && Date.now() - start >= 2e3) {
+      fallbackUsed = true;
+      googleTranslateAbort(signal);
+      const fallback = await googleTranslatePlaybackState(tabId, "fallback", expectedText);
+      if (fallback?.error) throw new Error("Google Translate source text or listen control changed before playback retry.");
+      cdpLog("Retried Google Translate source listen control directly", { tabId });
+      if (fallback?.started === true) return;
+    }
+    await sleep(100);
+  }
+  throw new Error("Google Translate playback did not start: source control did not switch to Stop listening.");
 }
 async function waitForGoogleTranslatePlaybackEnd(tabId, signal) {
   const deadline = Date.now() + GOOGLE_TRANSLATE_PLAYBACK_TIMEOUT_MS;
-  let sawPlayback = false;
-  let idleSince = null;
   while (Date.now() < deadline) {
     googleTranslateAbort(signal);
-    const state = (await cdpEvaluate(tabId, `(() => {
-      const controls = [...document.querySelectorAll('button[data-aria-label-on="Stop listening"][data-aria-label-off="Listen to source text"], [role="button"][data-aria-label-on="Stop listening"][data-aria-label-off="Listen to source text"], button[aria-label="Listen to source text"], button[aria-label="Stop listening"]')];
-      const button = controls.find(element => {
-        const style = getComputedStyle(element);
-        const rect = element.getBoundingClientRect();
-        return style.visibility !== "hidden" && style.display !== "none" && rect.width > 2 && rect.height > 2;
-      });
-      if (!button) return "unavailable";
-      return button.getAttribute("aria-label") === "Stop listening" ? "playing" : "idle";
-    })()`))?.value;
-    if (state === "playing") {
-      sawPlayback = true;
-      idleSince = null;
-    } else if (state === "idle") {
-      if (sawPlayback) return;
-      idleSince ??= Date.now();
-      if (Date.now() - idleSince >= 1200) return;
-    } else {
-      idleSince = null;
-    }
+    const state = await googleTranslatePlaybackState(tabId);
+    if (state?.started !== true) throw new Error("Google Translate playback start was not confirmed.");
+    if (state.finished === true) return;
+    if (!state.available) throw new Error("Google Translate source playback control became unavailable.");
     await sleep(100);
   }
   throw new Error("Google Translate playback did not finish in time.");
@@ -6507,7 +6553,6 @@ async function startGoogleTranslateSpeechTask(taskId4, uploadToken, input) {
     await googleTranslateSetText(tab.id, input.text, controller.signal);
     await googleTranslateProgress(taskId4, uploadToken, "synthesizing", 20);
     await waitForGoogleTranslateListenControl(tab.id, controller.signal);
-    await googleTranslateProgress(taskId4, uploadToken, "playing", 28);
     if (input.outputMode === "file") {
       const currentTab = await chrome.tabs.get(tab.id);
       if (currentTab.mutedInfo?.muted !== true) {
@@ -6515,15 +6560,17 @@ async function startGoogleTranslateSpeechTask(taskId4, uploadToken, input) {
         restoreGoogleTranslateTabMute = true;
       }
     }
-    await googleTranslatePressListen(tab.id, controller.signal, true);
+    await googleTranslatePressListen(tab.id, controller.signal, input.text);
+    await googleTranslateProgress(taskId4, uploadToken, "playing", 28);
     if (input.outputMode === "speakers") {
+      await waitForGoogleTranslatePlaybackEnd(tab.id, controller.signal);
       await agentJsonRequest(`/tasks/system-speech/${encodeURIComponent(taskId4)}/google-translate-complete`, { method: "POST", body: { uploadToken } });
       completed = true;
       return;
     }
     await googleTranslateProgress(taskId4, uploadToken, "capturing", 35);
     const audio = await audioCapture.waitForAudio(controller.signal);
-    if (input.outputMode === "file") await waitForGoogleTranslatePlaybackEnd(tab.id, controller.signal);
+    await waitForGoogleTranslatePlaybackEnd(tab.id, controller.signal);
     await googleTranslateProgress(taskId4, uploadToken, "saving", 75);
     await uploadGoogleTranslateAudio(taskId4, uploadToken, audio);
     completed = true;
@@ -6535,6 +6582,10 @@ async function startGoogleTranslateSpeechTask(taskId4, uploadToken, input) {
     }
   } finally {
     audioCapture?.dispose();
+    if (focusEmulationAttached && Number.isInteger(active.tabId)) {
+      await googleTranslatePlaybackState(active.tabId, "dispose", !completed).catch(() => {
+      });
+    }
     if (restoreGoogleTranslateTabMute && Number.isInteger(active.tabId)) {
       await chrome.tabs.update(active.tabId, { muted: false }).catch((error3) => cdpErrorLog("Could not restore Google Translate tab audio", { tabId: active.tabId, error: safeErrorMessage(error3) }));
     }

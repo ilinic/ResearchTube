@@ -74,6 +74,7 @@ For media changes, also perform a small real-FFmpeg integration test where avail
 
 ## Change discipline
 
+- Before every requested commit, pull the current upstream changes and resolve integration conflicts before committing. Do not commit against a stale checkout.
 - Preserve unrelated user changes in a dirty worktree.
 - Do not delete or rewrite user Workspace content.
 - Do not commit, push, publish, open a pull request or modify remote state unless the user explicitly asks.

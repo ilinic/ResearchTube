@@ -154,6 +154,8 @@ If no image viewer attaches, check Extension permissions on the sandbox subdomai
 
 For `GOOGLE_TRANSLATE_UNAVAILABLE`, verify normal network access to Google Translate and that Chrome permits the Extension's debugger permission. ResearchTube should retain an inactive Translate tab, clear previous source text, insert and verify new text, wait for the enabled source listen control, and click `aria-label="Listen to source text"` through CDP browser input.
 
+For `GOOGLE_TRANSLATE_PLAYBACK_FAILED`, successful mouse dispatch alone is insufficient: the source control must switch to `Stop listening`. The Extension observes before clicking, retries the same control directly once only when no start was observed, and keeps focus emulation through playback completion in all modes. Unconfirmed idle never reports success. The observer catches very short Stop/Listen transitions between polls. Check the console for confirmed playback or the direct-control retry.
+
 For file output, the MP3 response is collected through CDP network events; ResearchTube does not use `chrome.tabCapture`. File-only mode temporarily mutes the tab and restores its previous state only after playback/audio collection completes.
 
 Do not close the Translate tab as a standard troubleshooting step; reuse is intentional.

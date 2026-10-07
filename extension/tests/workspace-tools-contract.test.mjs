@@ -40,7 +40,7 @@ assert.doesNotMatch(background, /chrome\.tabCapture/, "Google Translate must not
 assert.match(background, /if \(input\.outputMode === "file"\) \{[\s\S]*?chrome\.tabs\.update\(tab\.id, \{ muted: true \}\)/, "file-only Google TTS must mute its tab during playback");
 assert.match(background, /async function waitForGoogleTranslatePlaybackEnd/, "file-only Google TTS must observe source playback completion");
 assert.match(background, /getAttribute\("aria-label"\) === "Stop listening"/, "playback completion must use Google Translate's Stop listening state");
-assert.match(background, /if \(input\.outputMode === "file"\) await waitForGoogleTranslatePlaybackEnd\(tab\.id, controller\.signal\);/, "file-only Google TTS must wait for playback before saving and unmuting");
+assert.match(background, /await waitForGoogleTranslatePlaybackEnd\(tab\.id, controller\.signal\);/, "Google TTS must wait for confirmed playback before completing any mode");
 assert.match(background, /chrome\.tabs\.update\(active\.tabId, \{ muted: false \}\)/, "file-only Google TTS must restore its tab audio after saving");
 assert.match(background, /let googleTranslateSpeechTabId = null/, "Google Translate must retain its background tab for the next request");
 assert.match(background, /active: false/, "Google Translate must open in the background");
@@ -50,12 +50,12 @@ assert.doesNotMatch(background, /chrome\.tabs\.remove\(active\.tabId\)/, "Google
 assert.match(background, /waitForGoogleTranslateListenControl\(tab\.id, controller\.signal\);/, "Google Translate must wait until its listen button is enabled after processing the inserted text");
 assert.match(background, /element\.getAttribute\("aria-disabled"\) !== "true"/, "Google Translate must treat aria-disabled listen controls as unavailable");
 assert.match(background, /aria-label="Listen to source text"/, "Google Translate must target its explicit source-text listen control");
-assert.match(background, /Clicked Google Translate source listen button with browser input/, "Google Translate must click its listen control through CDP browser input");
-assert.match(background, /await cdpAttach\(tabId\);/, "Google Translate must attach CDP before clicking its listen control");
+assert.match(background, /Clicked Google Translate source listen button; waiting for Stop listening/, "Google Translate must click its listen control through CDP browser input");
+assert.match(background, /await cdpAttach\(tab\.id\);/, "Google Translate must attach CDP before clicking its listen control");
 assert.match(background, /Emulation\.setFocusEmulationEnabled", \{ enabled: true \}/, "Google Translate must emulate focus without activating its tab");
 assert.match(background, /Emulation\.setFocusEmulationEnabled", \{ enabled: false \}/, "Google Translate focus emulation must be cleared after the task");
 assert.match(background, /Page\.setWebLifecycleState", \{ state: "active" \}/, "Google Translate must request an active lifecycle state to reduce background throttling");
-assert.match(background, /googleTranslatePressListen\(tab\.id, controller\.signal, true\);[\s\S]*?if \(input\.outputMode === "speakers"\) \{[\s\S]*?google-translate-complete/, "speaker-only Google TTS must click Listen without requiring source-audio collection");
+assert.match(background, /googleTranslatePressListen\(tab\.id, controller\.signal, input\.text\);[\s\S]*?if \(input\.outputMode === "speakers"\) \{[\s\S]*?google-translate-complete/, "speaker-only Google TTS must click Listen without requiring source-audio collection");
 assert.match(background, /gap of at most 10 seconds are merged, but one range never exceeds 60 seconds/, "YouTube frame batches must use bounded hybrid section grouping");
 assert.match(background, /targetFps is optional/, "camera recording must choose a default FPS when none is supplied");
 assert.match(background, /name: "camera_record_audio"/, "audio-only camera recording must be published through the MCP tool registry");

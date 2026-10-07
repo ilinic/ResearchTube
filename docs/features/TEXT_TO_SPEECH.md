@@ -20,14 +20,14 @@ Google Translate is the default engine and automatically detects the source lang
 
 ResearchTube retains one inactive Translate tab. For every request it:
 
-1. waits for page readiness;
-2. clears earlier source text;
-3. inserts and verifies the exact requested text;
-4. waits until the source listen button is enabled;
-5. attaches CDP, emulates focus and an active lifecycle without activating the tab;
-6. clicks the button identified by `aria-label="Listen to source text"` using browser input;
+1. attaches CDP and emulates focus and an active lifecycle without activating the tab;
+2. waits for page readiness, clears earlier source text, then inserts and verifies the exact requested text;
+3. resolves one enabled source listen button and starts observing its label before clicking;
+4. clicks `aria-label="Listen to source text"` using browser input;
+5. confirms the source control changed to `Stop listening`; if pointer input is ignored, tries the same control directly once after two seconds, provided playback has not started and source text still matches;
+6. reports a playback failure if no confirmed start arrives within the bounded readiness timeout; idle alone never counts as success;
 7. collects file audio from CDP network responses when required;
-8. waits for playback completion before finalizing file-only output and restoring mute state.
+8. waits for confirmed playback completion in every output mode before reporting completion, saving file output and releasing focus emulation.
 
 ResearchTube does not use `chrome.tabCapture`, does not require an `activeTab` recording gesture and never closes the retained Translate tab.
 
@@ -49,6 +49,6 @@ When no output path is supplied for a file-producing mode, ResearchTube writes a
 
 ## Tasks
 
-The start tool returns immediately. Status exposes engine, output mode, phase, progress, public voice/format metadata and the logical output path after completion. Cancellation stops active local synthesis or browser collection but retains the Google Translate tab.
+The start tool returns immediately. Status exposes engine, output mode, phase, progress, public voice/format metadata and the logical output path after completion. Cancellation stops active local synthesis or browser collection, stops confirmed Translate playback and removes the playback observer and focus emulation while retaining the Google Translate tab.
 
 The primary implementation is in `extension/background.js`, `agent/researchtube_agent.py` and `agent/tools/windows-speech/`.
