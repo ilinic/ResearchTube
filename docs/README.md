@@ -53,3 +53,5 @@ This directory is the canonical documentation set for ResearchTube. Source code 
 - Update this index when adding, moving or removing a document.
 
 - [Real timers](features/TIMERS.md): duration/deadline tasks, system or internet time, clock warnings and history retention.
+
+- [Browser Agent](features/BROWSER_AGENT.md): Study this site, live page trees, actions, resources and exact session routing.

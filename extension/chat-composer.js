@@ -221,7 +221,7 @@ export function installChatComposerGuard(expectedNames, token, inspectAttachment
   const { composer, root, form } = resolveChatComposer();
   if (!root) return false;
   const expected = [...expectedNames].sort();
-  const state = { token, changed: false, ownSelectionSeen: false };
+  const state = { token, changed: false, ownSelectionSeen: false, ownText: null, ownBeforeInput: false, ownInput: false };
   const listener = (event) => {
     if (!event.isTrusted) return;
     const target = event.target;
@@ -235,7 +235,12 @@ export function installChatComposerGuard(expectedNames, token, inspectAttachment
       if (ownSelection) state.ownSelectionSeen = true;
       else state.changed = true;
     } else if (liveRoot.contains(target)) {
-      if (['beforeinput', 'input'].includes(event.type) && (target === liveComposer || liveComposer.contains(target))) state.changed = true;
+      if (['beforeinput', 'input'].includes(event.type) && (target === liveComposer || liveComposer.contains(target))) {
+        const own = state.ownText !== null && event.inputType === 'insertText' && event.data === state.ownText;
+        if (own && event.type === 'beforeinput' && !state.ownBeforeInput && !state.ownInput) state.ownBeforeInput = true;
+        else if (own && event.type === 'input' && state.ownBeforeInput && !state.ownInput) { state.ownInput = true; state.ownText = null; }
+        else state.changed = true;
+      }
       if (event.type === 'drop' && event.dataTransfer?.files?.length) state.changed = true;
       if (event.type === 'paste' && event.clipboardData?.files?.length) state.changed = true;
       if (event.type === 'click') {
@@ -267,4 +272,14 @@ export function disposeChatComposerGuard(token) {
   const state = window.__researchtubeChatComposerGuard;
   if (state?.token === token) state.dispose();
   return true;
+}
+
+// Authorize exactly one known Extension insertion, retaining all user-edit
+// monitoring across it. Never clear or reset the guard to mask an edit.
+export function authorizeChatComposerText(token, text) {
+  const state = window.__researchtubeChatComposerGuard;
+  const { composer } = resolveChatComposer();
+  if (!state || state.token !== token || state.changed || !composer || String(composer.value ?? composer.innerText ?? composer.textContent ?? '').trim()) return false;
+  state.ownText = text; state.ownBeforeInput = false; state.ownInput = false;
+  composer.focus(); return document.activeElement === composer;
 }

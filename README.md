@@ -105,3 +105,5 @@ The generated Extension bundles are committed for installation. After changing t
 ## Status
 
 ResearchTube is an open-source personal research and local-media tool. YouTube content, transcripts and comments remain external sources that should be evaluated rather than treated as automatically verified facts.
+
+Use **Study this site** in the Extension popup to open a Browser Agent copy of the current page and a dedicated ChatGPT conversation. It reads Accessibility Tree/DOM, operates ordinary page controls and delivers selected resources as real chat attachments. See [Browser Agent](docs/features/BROWSER_AGENT.md).

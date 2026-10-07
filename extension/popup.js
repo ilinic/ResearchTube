@@ -44,6 +44,35 @@ async function loadAgentStatus(port) {
     await new Promise((resolve) => setTimeout(resolve, 1_000));
   }
 }
+let browserControlTabId = null;
+let browserPopupClosed = false;
+window.addEventListener("pagehide", () => { browserPopupClosed = true; });
+function renderBrowserSession(session) {
+  $("browser-session").hidden = !session;
+  if (!session) return;
+  $("browser-session-status").textContent = session.error ? `${session.error.code}: ${session.error.message}` : session.statusMessage;
+  $("browser-pause").disabled = session.state !== "running";
+  $("browser-resume").disabled = session.state !== "paused";
+  $("browser-stop").disabled = !["starting", "running", "paused"].includes(session.state);
+}
+async function loadBrowserSession(tabId) {
+  browserControlTabId = tabId;
+  while (!browserPopupClosed) {
+    const result = await call({ type: "browser-local-status", tabId });
+    if (!result?.ok) return;
+    renderBrowserSession(result.session);
+    if (!result.session || ["stopped", "failed"].includes(result.session.state)) return;
+    await new Promise(resolve => setTimeout(resolve, 1000));
+  }
+}
+for (const action of ["pause", "resume", "stop"]) {
+  $(`browser-${action}`).addEventListener("click", async () => {
+    if (!Number.isInteger(browserControlTabId)) return;
+    const result = await call({ type: "browser-local-control", tabId: browserControlTabId, action }).catch(error => ({ error: String(error) }));
+    if (result?.ok) renderBrowserSession(result.session);
+    else $("browser-session-status").textContent = result?.error || "Browser control unavailable.";
+  });
+}
 let activeYouTubeVideoTab = null;
 async function load() {
   $("agent-status").textContent = "Checking…";
@@ -51,7 +80,9 @@ async function load() {
   // Local popup state and actions render independently of Agent availability.
   const activeTabPromise = chrome.tabs.query({ active: true, lastFocusedWindow: true });
   const statePromise = call({ type: "status", includeAgent: false });
-  activeYouTubeVideoTab = currentYouTubeVideoTab(await activeTabPromise);
+  const activeTabs = await activeTabPromise;
+  activeYouTubeVideoTab = currentYouTubeVideoTab(activeTabs);
+  if (Number.isInteger(activeTabs?.[0]?.id)) void loadBrowserSession(activeTabs[0].id).catch(error => console.info("[ResearchTube Browser] status unavailable", error));
   $("describe-video").hidden = !activeYouTubeVideoTab;
   const state = await statePromise;
   const configured = state.configured;
@@ -67,7 +98,12 @@ async function load() {
   $("interface-version").className = "good";
   void loadAgentStatus(state.agentPort || 17843).catch((error) => console.info("[ResearchTube] Agent status unavailable", error));
 }
-$("chatgpt").addEventListener("click", () => call({ type: "open-external", target: "chatgptNewChat" }));
+$("chatgpt").addEventListener("click", async () => {
+  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  if (!tab?.id || !/^https?:\/\//.test(tab.url || "")) { $("describe-video-status").hidden = false; $("describe-video-status").textContent = "Open a website before starting Study this site."; return; }
+  void call({ type: "study-site", tabId: tab.id }).catch(error => console.info("[ResearchTube Browser]", error));
+  window.close();
+});
 $("describe-video").addEventListener("click", async () => {
   // Do not reuse the tab snapshot collected when the popup opened. A playlist
   // can advance while it is open. Chrome supplies the URL from the address bar

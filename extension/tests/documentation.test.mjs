@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { BROWSER_TOOL_NAMES } from "../browser-tools.js";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -13,7 +14,7 @@ const canonical = [
   "docs/README.md", "docs/ARCHITECTURE.md", "docs/DEVELOPMENT.md", "docs/TOOLS.md",
   "docs/INSTALLATION.md", "docs/TROUBLESHOOTING.md", "docs/ERRORS.md", "docs/DEMO.md",
   "docs/features/STORYBOARDS.md", "docs/features/MEDIA_VIEWER.md",
-  "docs/features/TEXT_TO_SPEECH.md", "docs/features/MEDIA_CLIP.md", "docs/features/TIMERS.md", "docs/features/ARTIFACT_TASKS.md"
+  "docs/features/TEXT_TO_SPEECH.md", "docs/features/MEDIA_CLIP.md", "docs/features/TIMERS.md", "docs/features/ARTIFACT_TASKS.md", "docs/features/BROWSER_AGENT.md"
 ];
 
 for (const path of canonical) assert.equal(existsSync(join(root, path)), true, `${path} must exist`);
@@ -40,7 +41,7 @@ const settingsStart = background.indexOf("const MCP_TOOL_SETTINGS = Object.freez
 const settingsEnd = background.indexOf("\n});", settingsStart);
 assert.ok(settingsStart >= 0 && settingsEnd > settingsStart, "MCP settings registry must be parseable");
 const registry = background.slice(settingsStart, settingsEnd);
-const publicTools = [...registry.matchAll(/\b([a-z][a-z0-9_]+): \{ group:/g)].map((match) => match[1]);
+const publicTools = [...registry.matchAll(/\b([a-z][a-z0-9_]+): \{ group:/g)].map((match) => match[1]).concat(BROWSER_TOOL_NAMES);
 const toolsDoc = read("docs/TOOLS.md");
 for (const tool of publicTools) assert.match(toolsDoc, new RegExp("`" + tool + "`"), `${tool} must be documented`);
 assert.doesNotMatch(toolsDoc, /`media_load_workspace_image` \|/, "private widget action must not be presented as a public row");

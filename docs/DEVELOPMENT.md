@@ -203,3 +203,7 @@ Configuration example (all settings use this layout):
   }
 }
 ```
+
+### Browser Agent changes
+
+Keep page JS fixed and Extension-owned; never add a public eval/source-string parameter. Preserve AX hierarchy and deferred text access. Keep all physical tabs and authenticated resource URLs private, validate current page versions, and refuse alternate-tab fallbacks. Popup sessions and resource continuations do not use media widgets to identify their destination. Run `extension/tests/browser-agent.test.mjs` and `agent/tests/test_browser_resources.py` with the normal suite; then verify actual Chrome/ChatGPT behavior separately. See [Browser Agent](features/BROWSER_AGENT.md).

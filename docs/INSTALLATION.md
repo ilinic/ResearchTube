@@ -126,3 +126,5 @@ Never replace `agent/workspace/` with an empty release directory when it already
 - [Guided demo](DEMO.md)
 - [Troubleshooting](TROUBLESHOOTING.md)
 - [Tool reference](TOOLS.md)
+
+Browser Agent requires Chrome 125 or later for nested iframe debugger sessions. Start it with **Study this site** in the popup; no additional host permissions or separate browser profile are needed.

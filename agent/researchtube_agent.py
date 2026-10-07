@@ -36,11 +36,13 @@ from urllib.request import Request, urlopen
 
 try:
     from .task_history import TaskHistory
+    from .browser_resources import save_browser_resource
 except ImportError:
     from task_history import TaskHistory
+    from browser_resources import save_browser_resource
 
-AGENT_VERSION = "2.2.57"
-INTERFACE_VERSION = 74
+AGENT_VERSION = "2.2.58"
+INTERFACE_VERSION = 75
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
 MAX_GOOGLE_TRANSLATE_AUDIO_BYTES = 16 * 1024 * 1024
@@ -5373,6 +5375,8 @@ async def read_request(reader: asyncio.StreamReader) -> tuple[str, str, dict[str
         raise AgentApiError("BAD_REQUEST", "Invalid Content-Length.") from error
     parsed = urlparse(parts[1])
     maximum = MAX_GOOGLE_TRANSLATE_AUDIO_BYTES if re.fullmatch(r"/tasks/system-speech/tsk_[A-Za-z0-9_-]{10}/google-translate-audio", parsed.path) else MAX_REQUEST_BODY_BYTES
+    if parsed.path == "/internal/browser-resource":
+        maximum = configured_tool_limits()["mediaToChatMaxFileSizeMiB"] * 1048576
     if content_length < 0 or content_length > maximum:
         raise AgentApiError("REQUEST_TOO_LARGE", "Request body is too large.")
     body = await asyncio.wait_for(reader.readexactly(content_length), timeout=30 if maximum > MAX_REQUEST_BODY_BYTES else 5) if content_length else b""
@@ -5915,6 +5919,13 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             response_status, response_body = "200 OK", await clipboard_set(parse_json_body(body))
         elif method == "POST" and path == "/internal/library-store-files":
             response_status, response_body = "200 OK", library_store_files(parse_json_body(body))
+        elif method == "POST" and path == "/internal/browser-resource":
+            if set(query) != {"taskId"} or len(query["taskId"]) != 1:
+                raise AgentApiError("BROWSER_INVALID", "Browser resource ingestion requires one taskId.")
+            response_status, response_body = "201 Created", save_browser_resource(
+                body, query["taskId"][0], headers.get("content-type", "application/octet-stream"),
+                configured_tool_limits()["mediaToChatMaxFileSizeMiB"] * 1048576, WorkspacePathResolver(), AgentApiError,
+            )
         elif method == "POST" and path == "/internal/media-to-chat-files":
             response_status, response_body = "200 OK", media_to_chat_files(parse_json_body(body))
         elif method == "POST" and path.startswith("/mcp/log/"):

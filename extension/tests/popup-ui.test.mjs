@@ -11,7 +11,8 @@ const [html, script, css, background] = await Promise.all([
 
 assert.match(html, /Turn YouTube into Answers/);
 assert.match(html, /id="describe-video" hidden>Describe this video/);
-assert.match(html, /Open empty ChatGPT/);
+assert.match(html, /Study this site/);
+assert.match(script, /type: "study-site", tabId: tab.id/);
 assert.match(html, /<nav><button id="settings"[^>]*>Settings<\/button><button id="support"[^>]*><span class="support-heart" aria-hidden="true">♥<\/span> Support<\/button><\/nav>/, "Support must appear to the right of Settings on the same row");
 assert.match(html, /<dt>Extension<\/dt><dd id="extension-status">/);
 assert.match(html, /<dt>OpenAI Tunnel<\/dt>/);
@@ -59,7 +60,7 @@ let resolveAgent;
 let agentCalls = 0;
 const popupContext = {
   document: { getElementById: element }, URL, console,
-  window: { close() {} },
+  window: { close() {}, addEventListener() {} },
   setTimeout: (callback) => { scheduled.push(callback); return scheduled.length; },
   chrome: {
     tabs: { query: async () => [] },
@@ -98,3 +99,37 @@ assert.equal(scheduled.length, 0, "completed diagnostics are not periodically po
 vm.runInNewContext("renderAgentStatus({available: false}, 17844)", popupContext);
 assert.equal(element("agent-status").textContent, "Unavailable · 17844");
 console.log("popup nonblocking Agent status: ok");
+
+// Popup controls bind once to the opened tab, even if another window gains focus.
+const browserElements = new Map(), listeners = new Map(), browserMessages = [], browserTimers = [];
+let activePopupTab = 42, popupHidden;
+const browserElement = id => {
+  if (!browserElements.has(id)) browserElements.set(id, {textContent:'',className:'',hidden:false,disabled:false,addEventListener:(type,callback)=>listeners.set(id,callback)});
+  return browserElements.get(id);
+};
+let browserState = {state:'starting',phase:'waitingForPage',statusMessage:'Waiting for the site document…',error:null};
+const browserContext = {
+ document:{getElementById:browserElement},URL,console,
+ window:{close(){},addEventListener:(event,callback)=>{popupHidden=callback;}},
+ setTimeout:callback=>{browserTimers.push(callback);return browserTimers.length;},
+ chrome:{tabs:{query:async()=>[{id:activePopupTab,url:'https://site.test'}]},runtime:{
+  openOptionsPage(){},sendMessage:async message=>{
+   browserMessages.push(message);
+   if(message.type==='status')return {configured:true,tunnelId:'test',extensionVersion:'2.2.69',requiredAgentInterfaceVersion:75,youtubeSearch:{}};
+   if(message.type==='agent-status')return {available:false};
+   assert.equal(message.tabId,42);
+   if(message.type==='browser-local-control')browserState={...browserState,state:message.action==='stop'?'stopped':message.action==='pause'?'paused':'running',statusMessage:message.action};
+   return {ok:true,session:browserState};
+  }
+ }}
+};
+vm.runInNewContext(script,browserContext);await new Promise(resolve=>setImmediate(resolve));
+assert.equal(browserElement('browser-session').hidden,false);assert.equal(browserElement('browser-pause').disabled,true);assert.equal(browserElement('browser-stop').disabled,false);
+activePopupTab=81;browserState={...browserState,state:'running',statusMessage:'Studying this page'};browserTimers.shift()();await new Promise(resolve=>setImmediate(resolve));
+assert.equal(browserElement('browser-pause').disabled,false);await listeners.get('browser-pause')();assert.equal(browserElement('browser-resume').disabled,false);
+await listeners.get('browser-resume')();assert.equal(browserElement('browser-pause').disabled,false);
+await listeners.get('browser-stop')();assert.equal(browserElement('browser-stop').disabled,true);
+assert.deepEqual(browserMessages.filter(m=>m.type==='browser-local-control').map(m=>[m.action,m.tabId]),[['pause',42],['resume',42],['stop',42]]);
+popupHidden();browserTimers.shift()();await new Promise(resolve=>setImmediate(resolve));
+assert.equal(browserTimers.length,0,'closing popup ends status polling');
+console.log('Browser popup: startup progress, exact-tab controls and closed-popup cleanup: ok');

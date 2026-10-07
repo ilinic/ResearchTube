@@ -131,3 +131,7 @@ Clock-change and execution-gap warnings are task metadata rather than MCP tool e
 ## Artifact workflows
 
 `MEDIA_ARTIFACT_TASK_NOT_FOUND` means the Extension history no longer has that workflow, or its ID belongs to a different producer. Files may still exist. `MEDIA_ARTIFACT_INTERRUPTED` means an unacknowledged start or single capture/crop/read was interrupted by a worker restart; check Workspace before retrying because work is never replayed automatically. `MEDIA_ARTIFACT_NO_FILES` means successful creation produced no attachment (for example clipboard text). `MEDIA_ARTIFACT_CHAT_FAILED` retains the current-chat error text and successful creation metadata. Other native creation errors retain their existing codes under creation.error. Old path parameter names are rejected with their canonical replacement.
+
+## Browser Agent
+
+`BROWSER_INVALID` rejects invalid parameters. `BROWSER_SESSION_NOT_FOUND` / `BROWSER_TASK_NOT_FOUND` indicate unknown, expired or restart-lost records. `PAGE_CHANGED` invalidates earlier node/resource IDs; `STALE_NODE` requires fresh observation. `BROWSER_SESSION_PAUSED` / `BROWSER_SESSION_STOPPED` block mutation. `TAB_CLOSED`, `BROWSER_CHAT_CHANGED` and `DEBUGGER_DETACHED` stop the bound session. `BROWSER_RESOURCE_TOO_LARGE` reports the upload threshold; `BROWSER_RESOURCE_UNAVAILABLE` / `BROWSER_RESOURCE_INVALID` indicate extraction or format failure. `BROWSER_DESTINATION_EXISTS` refuses overwrite. These expected conditions return ordinary rejected tool results, not MCP transport errors.

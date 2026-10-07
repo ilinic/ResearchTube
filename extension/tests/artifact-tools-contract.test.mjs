@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {webcrypto} from 'node:crypto';
 import vm from 'node:vm';
+import {BROWSER_TOOL_NAMES} from '../browser-tools.js';
 import {ARTIFACT_TOOLS,ARTIFACT_STATUS_TOOLS,ARTIFACT_CANCEL_TOOLS} from '../artifact-tasks.js';
 import {WORKSPACE_ARGUMENT_NAMES,publicWorkspaceArguments} from '../artifact-tools.js';
 import {assertSchema} from './fixtures/schema-check.mjs';
@@ -39,6 +40,18 @@ function worker(storage={}) {
  return {context,tabs,storage,requests,uploads,timers,alarms,reports,call,tick(ms=1000){now+=ms;}};
 }
 const w=worker(),definitions=w.context.publicMcpTools();
+for(const name of BROWSER_TOOL_NAMES) {
+ const tool=definitions.find(t=>t.name===name);assert.ok(tool,'generated bundle must expose '+name);
+ assert.equal(tool.inputSchema.additionalProperties,false);assert.ok(tool.inputSchema.required.includes('sessionId'));
+ assert.equal(w.context.toolSettingsMetadata(name).group,'browser');
+}
+const browserCalls=[];
+w.context.browserAgent.execute=async(name,args)=>{browserCalls.push({name,args});return {mockBrowserResult:true};};
+const browserRouted=await w.call('browser_session_status',{sessionId:'bas_abcdefghij'});
+assert.equal(browserRouted.result.structuredContent.mockBrowserResult,true);assert.equal(browserCalls[0].name,'browser_session_status');
+assert.equal((await w.call('browser_session_status',{sessionId:'bas_abcdefghij',tabId:81})).result.isError,false,'extra browser arguments are rejected before routing');
+assert.equal(browserCalls.length,1);
+
 for(const name of ARTIFACT_TOOLS){const tool=definitions.find(t=>t.name===name);
  assert.equal(tool.inputSchema.properties.addToChat.default,false);
  assert.equal(tool.inputSchema.properties.composerPolicy.default,'requireEmpty');assert.equal(tool.inputSchema.properties.sendDelaySeconds.default,0);
@@ -132,3 +145,16 @@ if(process.env.RESEARCHTUBE_LIVE_RESULTS) {
  }
 }
 console.log('Shipped MCP artifact contracts: 12 producers, canonical paths, async crop, current-tab binding, delay/cancel, missing tab and batch limits verified.');
+
+// Exercise the generated toolbar implementation: no global badge writes, and
+// recording remains the stronger indicator on a Browser Agent tab.
+const badgeCalls=[];
+w.context.chrome.action={setBadgeBackgroundColor:async v=>badgeCalls.push(['color',v]),setBadgeText:async v=>badgeCalls.push(['text',v]),setBadgeTextColor:async v=>badgeCalls.push(['textColor',v]),setTitle:async v=>badgeCalls.push(['title',v])};
+w.context.browserAutomationBadges.set(42,{state:'running',statusMessage:'Studying this page'});
+await w.context.paintBrowserAutomationBadge(42);
+assert.ok(badgeCalls.every(([,v])=>v.tabId===42));assert.equal(badgeCalls.find(([k])=>k==='text')[1].text,'AUTO');assert.equal(badgeCalls.find(([k])=>k==='color')[1].color,'#0057ff');
+badgeCalls.length=0;w.context.cameraRecordingBadgeKind='audio';w.context.cameraRecordingBadgeVisible=true;
+await w.context.paintBrowserAutomationBadge(42);assert.equal(badgeCalls.find(([k])=>k==='text')[1].text,'MIC');
+badgeCalls.length=0;w.context.cameraRecordingBadgeKind=null;w.context.browserAutomationBadges.delete(42);
+await w.context.paintBrowserAutomationBadge(42);assert.equal(badgeCalls.find(([k])=>k==='text')[1].text,null,'Stop restores the global toolbar badge');
+console.log('Browser toolbar: tab-specific AUTO, recording priority and Stop reset: ok');

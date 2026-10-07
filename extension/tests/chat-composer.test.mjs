@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import { pageFixture } from './fixtures/chat-composer-page.mjs';
-import { resolveChatComposer, chatComposerPageExpression, chatComposerAttachmentNamesMatch, inspectChatComposer, clickChatComposerAttachmentRemoval, resetChatComposerFileInputs, installChatComposerGuard, readChatComposerGuard, disposeChatComposerGuard } from '../chat-composer.js';
+import { resolveChatComposer, chatComposerPageExpression, chatComposerAttachmentNamesMatch, inspectChatComposer, clickChatComposerAttachmentRemoval, resetChatComposerFileInputs, installChatComposerGuard, readChatComposerGuard, disposeChatComposerGuard, authorizeChatComposerText } from '../chat-composer.js';
 
 const page = pageFixture();
 let snapshot = page.run(inspectChatComposer);
@@ -222,3 +222,23 @@ assert.equal(matchNames(['report.jpg', 'report.jpg'], ['report.jpg', 'other.jpg'
 assert.equal(matchNames(['report.jpg', 'other.jpg'], ['report.jpg']), false);
 assert.equal(matchNames([null], ['report.jpg']), false);
 console.log('Chat Composer: exact and host timestamp names, batch multiplicity and strict mismatch refusal passed');
+
+// A Browser Agent continuation is the one explicitly authorized insertion.
+// User edits before, during and after it still block Send; the guard is not reset.
+const continuationPage = pageFixture();
+continuationPage.run(installChatComposerGuard, ['image.png'], 'browser-continuation', inspectChatComposer);
+assert.equal(continuationPage.run(authorizeChatComposerText, 'wrong', 'Continue study.'), false);
+assert.equal(continuationPage.run(authorizeChatComposerText, 'browser-continuation', 'Continue study.'), true);
+continuationPage.event('beforeinput', continuationPage.composer, {inputType:'insertText',data:'Continue study.'});
+continuationPage.composer.innerText='Continue study.';
+continuationPage.event('input', continuationPage.composer, {inputType:'insertText',data:'Continue study.'});
+assert.equal(continuationPage.run(readChatComposerGuard,'browser-continuation').changed,false);
+continuationPage.event('beforeinput', continuationPage.composer, {inputType:'insertText',data:'user edit'});
+assert.equal(continuationPage.run(readChatComposerGuard,'browser-continuation').changed,true);
+assert.equal(continuationPage.run(authorizeChatComposerText,'browser-continuation','Another continuation'),false);
+const interfering = pageFixture();
+interfering.run(installChatComposerGuard, ['image.png'], 'interfering', inspectChatComposer);
+interfering.run(authorizeChatComposerText,'interfering','Continue study.');
+interfering.event('beforeinput',interfering.composer,{inputType:'insertText',data:'x'});
+assert.equal(interfering.run(readChatComposerGuard,'interfering').changed,true,'user input during authorized window is not masked');
+console.log('Chat Composer: a single guarded Browser Agent continuation preserves user-edit protection');

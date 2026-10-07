@@ -38,7 +38,7 @@
     },
     "mediaToChatMaxFileSizeMiB": {
       "value": 20,
-      "comment": "Maximum individual current-chat upload size in MiB. Larger files are skipped and reported; default 20, range 1–512."
+      "comment": "Maximum individual current-chat upload size in MiB. Larger files are skipped and reported; default 20, range 1–512. Also bounds Browser Agent resource extraction, private byte ingestion and delivery to its dedicated chat."
     },
     "completedTaskHistoryLimit": {
       "value": 2000,

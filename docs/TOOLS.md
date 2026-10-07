@@ -177,3 +177,24 @@ The original Workspace files are unchanged. A restarted Extension worker marks q
 - Camera support depends on FFmpeg device availability and OS permissions.
 - Windows speech voices are Windows-only; Google Translate speech uses a browser tab and network availability.
 - YouTube can remove captions/comments/storyboards, restrict a video, require verification or change public page formats.
+
+## Browser Agent
+
+Start **Study this site** from the Extension popup. The new dedicated chat receives its `sessionId` (`bas_` plus ten random URL-safe characters); every browser call requires it. Startup binds the saved conversation address, after ChatGPT replaces its temporary local address. AX/DOM data describes the page; only real attachments provide model visual input. See [Browser Agent](features/BROWSER_AGENT.md) for sessions, frame handling, limits and resource fallbacks.
+
+| Tool | Purpose |
+| --- | --- |
+| `browser_observe` | Live, bounded AX outline/subtree/full observation with node IDs and preserved hierarchy. |
+| `browser_get_children` | Expand a selected node's current children with depth and pagination. |
+| `browser_get_node` | Inspect AX details, safe DOM attributes/geometry and resource references. |
+| `browser_get_text` | Read deferred AX subtree text with offset/limit. |
+| `browser_act` | Click, hover, replace editable text, key, scroll or select in the exact agent tab. |
+| `browser_get_resource` | Asynchronously extract one selected resource, save to Workspace and by default attach/send it in the dedicated chat. `addToChat:false` saves only. |
+| `browser_resource_status` | Read extraction, save and delivery progress plus confirmed outputs. |
+| `browser_resource_cancel` | Cancel before Send commits without deleting files or Composer attachments. |
+| `browser_session_status` | Read session state and safe current page metadata. |
+| `browser_session_pause` | Block new mutations/delivery, retaining live observation. |
+| `browser_session_resume` | Refresh and resume a paused session. |
+| `browser_session_stop` | Stop work, release debugger and clear the automation indicator; tabs remain open. |
+
+Browser resource tasks use their own status/cancel pair rather than `media_task_status`. They are created from a browser resource reference, not a Workspace source path. Source URLs and browser handles are private. Browser tasks/session state are Extension-memory records; they are not resumed after a restart.

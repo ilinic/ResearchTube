@@ -178,3 +178,9 @@ Current values must be read from code or `system_agent_status`; documentation do
 - Manifest permissions: `extension/manifest.json`.
 - Build and test commands: `extension/package.json`.
 - Stable architectural intent and invariants: this document and repository-root `AGENTS.md`.
+
+## Browser Agent
+
+`extension/browser-tools.js` defines strict public schemas; `browser-agent.js` owns sessions, exact source-copy/chat tab routing, toolbar/popup controls and resource tasks; `browser-page.js` reads AX trees, enriches selected DOM nodes and dispatches CDP actions. Debugger events track navigation/revision and recursively attach iframe targets. Session/task state is in memory; restarts do not recreate sessions. The existing Composer transport delivers resource files plus a guarded continuation to the bound chat.
+
+`agent/browser_resources.py` accepts bounded private browser bytes through `/internal/browser-resource`, detects file format and publishes an exclusive Workspace output. It never fetches a model-provided URL. CDP resource URLs/cookies/physical paths stay outside public MCP results. See [Browser Agent](features/BROWSER_AGENT.md).
