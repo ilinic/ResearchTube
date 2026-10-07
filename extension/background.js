@@ -68,7 +68,7 @@ const MCP_TOOL_SETTINGS = Object.freeze({
   library_store_start: { group: "library" }, library_store_status: { group: "library" }, library_store_cancel: { group: "library" }, online_share_start: { group: "online" }, online_share_status: { group: "online" }, online_share_stop: { group: "online" },
   custom_tool_status: { group: "custom" }, custom_tool_cancel: { group: "custom" }
 });
-const EXTENSION_VERSION = "2.2.85";
+const EXTENSION_VERSION = "2.2.86";
 // Chrome dispatches this for requests made by our Extension-owned viewer.
 // Packaged assets and unrelated requests fall through without interception.
 globalThis.addEventListener?.("fetch", createMediaStreamHandler({
@@ -2107,7 +2107,7 @@ function cdpAttachmentStateExpression(fileNames) {
     };
     const countMatches = attachments.length === expectedNames.length;
     const namedCardAccepted = Boolean(state?.found && countMatches && cardNames.every(name => typeof name === 'string' && name.length > 0) && namesMatch(cardNames, expectedNames));
-    const selectedFilesAccepted = Boolean(state?.found && selectedNames.length === expectedNames.length && namesMatch(selectedNames, expectedNames, true));
+    const selectedFilesAccepted = Boolean(state?.found && countMatches && selectedNames.length === expectedNames.length && namesMatch(selectedNames, expectedNames, true));
     const cardTextAccepted = Boolean(state?.found && countMatches && textNamesMatch());
     const accepted = namedCardAccepted || selectedFilesAccepted || cardTextAccepted;
     return {
@@ -2888,7 +2888,10 @@ async function ensureMediaToChatLoaded() {
     mediaToChatQueue = Array.isArray(stored[MEDIA_TO_CHAT_QUEUE_STORAGE_KEY])
       ? stored[MEDIA_TO_CHAT_QUEUE_STORAGE_KEY].filter((taskId) => typeof taskId === "string" && mediaToChatTasks.get(taskId)?.status === "queued") : [];
     for (const task of mediaToChatTasks.values()) {
-      if (task.status === "queued" && task.awaitingArtifacts) continue;
+      // No Composer operation has started while an unbound task is waiting.
+      // Preserve its capability and absolute deadline across MV3 suspension.
+      if (task.status === "queued" && (task.awaitingArtifacts || (!task.target && !task.sendStarted
+          && typeof task.bindingToken === "string" && Number.isFinite(task.bindingDeadline)))) continue;
       // A detached waiting task has no host paths and no partially executed
       // click to replay. Its page-side edit guard must still match on resume.
       if (task.status === "working" && task.phase === "waitingToSend" && task.prepared?.guardToken
@@ -2900,10 +2903,14 @@ async function ensureMediaToChatLoaded() {
         task.message = task.error;
       }
     }
-    mediaToChatQueue = [...mediaToChatTasks.values()].filter(task => task.status === "queued" && task.awaitingArtifacts).map(task => task.taskId);
+    mediaToChatQueue = [...mediaToChatTasks.values()].filter(task => task.status === "queued").map(task => task.taskId);
     mediaToChatLoaded = true;
     await persistMediaToChatTasks();
     for (const task of mediaToChatTasks.values()) {
+      if (task.status === "queued" && !task.target) {
+        await expireMediaToChatBinding(task.taskId);
+        if (task.status === "queued") await chrome.alarms.create(`media-chat-bind:${task.taskId}`, { when: task.bindingDeadline });
+      }
       if (task.status === "working" && task.phase === "waitingToSend") await scheduleMediaToChatSend(task);
     }
   })().finally(() => { mediaToChatLoading = null; });
@@ -3133,8 +3140,13 @@ async function expireMediaToChatBinding(taskId) {
 async function bindMediaToChatTarget(message, sender) {
   await ensureMediaToChatLoaded();
   const task = mediaToChatTasks.get(message?.taskId);
-  if (!task || !task.bindingToken || message.bindingToken !== task.bindingToken) {
-    throw localAgentError("MEDIA_TO_CHAT_TARGET_NOT_FOUND", "This files-to-chat binding is missing, expired or invalid.");
+  // A delayed duplicate handshake may outlive attachment/Send completion.
+  // Keep a private receipt for acknowledgement only; the target branch below
+  // still requires the exact authenticated tab and never queues work again.
+  const token = task?.bindingToken || (task?.target ? task.boundToken : null);
+  if (!task || !token || message.bindingToken !== token) {
+    const reason = !task ? "missing-task" : !token ? "inactive" : "token-mismatch";
+    throw Object.assign(localAgentError("MEDIA_TO_CHAT_TARGET_NOT_FOUND", "This files-to-chat binding is missing, expired or invalid."), { bindingReason: reason });
   }
   if (sender?.id !== chrome.runtime.id || !Number.isInteger(sender.tab?.id)) {
     throw localAgentError("MEDIA_TO_CHAT_TARGET_NOT_FOUND", "A Chrome-authenticated originating tab is required.");
@@ -3173,6 +3185,7 @@ async function bindMediaToChatTarget(message, sender) {
       throw localAgentError("MEDIA_TO_CHAT_TARGET_CHANGED", "The task no longer accepts this tab binding.");
     }
     task.target = target;
+    task.boundToken = task.bindingToken;
     task.message = "Queued for the originating ChatGPT tab. Finish the current assistant response so Send can become available.";
     await persistMediaToChatTasks();
     await chrome.alarms.clear(`media-chat-bind:${task.taskId}`);
@@ -3544,7 +3557,9 @@ chrome.tabs?.onUpdated?.addListener((tabId, change) => { void browserAgent.onUpd
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "researchtube_chat_target_bind") {
     bindMediaToChatTarget(message, sender).then(sendResponse).catch((error) => {
-      consoleAction(`[ResearchTube CDP] Chat target binding refused: ${error.code || "MEDIA_TO_CHAT_TARGET_NOT_FOUND"} ${safeErrorMessage(error)}`);
+      const taskId = /^tsk_[A-Za-z0-9_-]{10}$/.test(message.taskId) ? message.taskId : "unknown";
+      const task = mediaToChatTasks.get(taskId);
+      consoleAction(`[ResearchTube CDP] Chat target binding refused: ${error.code || "MEDIA_TO_CHAT_TARGET_NOT_FOUND"} taskId=${taskId} status=${task?.status || "missing"} phase=${task?.phase || "missing"} reason=${error.bindingReason || "target-check"} ${safeErrorMessage(error)}`);
       sendResponse({ ok: false, errorCode: error.code || "MEDIA_TO_CHAT_TARGET_NOT_FOUND", error: safeErrorMessage(error) });
     });
     return true;

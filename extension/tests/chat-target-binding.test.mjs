@@ -13,14 +13,14 @@ assert.equal(script.run_at,'document_start');
 assert.equal(script.css,undefined,'the binding script must not inject host-hiding CSS');
 const tabA={id:42,windowId:1,url:'https://chatgpt.com/c/origin',active:false};
 const tabB={id:81,windowId:2,url:'https://chatgpt.com/c/other',active:true};
-function worker() {
+function worker({initialStorage={},initialNow=Date.now()}={}) {
  let listener;
- let now=Date.now();
+ let now=initialNow;
  const tabs=new Map([[42,{...tabA}],[81,{...tabB}]]);
- const storage={},alarms=new Map(),mutations=[],queries=[];
+ const storage=JSON.parse(JSON.stringify(initialStorage)),alarms=new Map(),mutations=[],queries=[],logs=[];
  class Clock extends Date {static now(){return now;}}
  const context=vm.createContext({URL,Intl,TextEncoder,TextDecoder,AbortController,crypto:webcrypto,Date:Clock,setTimeout,clearTimeout,
-  console:{info(){},warn(){},error(){}},
+  console:{info(line){logs.push(line);},warn(){},error(){}},
   chrome:{runtime:{id:'extension-id',getURL:path=>path,onInstalled:{addListener(){}},onStartup:{addListener(){}},onMessage:{addListener(fn){listener=fn;}}},
    alarms:{onAlarm:{addListener(){}},create:async(name,value)=>alarms.set(name,value),clear:async name=>alarms.delete(name)},
    tabs:{query:async query=>{queries.push(query);assert.deepEqual(JSON.parse(JSON.stringify(query)),{},'never query active or last-focused tabs');return [...tabs.values()];},get:async id=>{if(!tabs.has(id))throw new Error('closed');return tabs.get(id);}},
@@ -37,7 +37,7 @@ function worker() {
  context.cdpAttachFilesNow=async (_paths,options)=>{await context.requireCurrentChatTarget(options.currentChatTarget);mutations.push({...options.currentChatTarget});};
  context.cdpErrorLog=()=>{};
  context.fetch=async path=>({ok:true,text:async()=>path.includes('chat-target')?widget:mediaWidget});
- return {context,tabs,storage,alarms,mutations,queries,advance(ms){now+=ms;},
+ return {context,tabs,storage,alarms,mutations,queries,logs,now:()=>now,advance(ms){now+=ms;},
   receive:(message,sender)=>new Promise(resolve=>{assert.equal(listener(message,sender,resolve),true);}),
   start:async()=>{
    const result=await context.handleMcpRequest({jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'media_to_chat',arguments:{files:[{workspacePath:'report.pdf'}],composerPolicy:'clear'}}});
@@ -70,6 +70,35 @@ await current.context.drainMediaToChatQueue();
 assert.deepEqual(current.mutations,[{tabId:42,chatPath:'/c/origin'}]);
 assert.equal((await current.context.mediaToChatStatus(started.task.taskId)).status,'completed');
 assert.equal(current.alarms.size,0);
+// A lost acknowledgement can arrive through another frame after completion.
+// Acknowledge the same private binding without replaying attachment/Send.
+assert.equal((await current.receive({type:'researchtube_chat_target_bind',...started.metadata},sender())).ok,true);
+assert.equal(current.mutations.length,1);
+await assert.rejects(current.context.bindMediaToChatTarget({...started.metadata,bindingToken:'wrong'},sender()),e=>e.code==='MEDIA_TO_CHAT_TARGET_NOT_FOUND');
+await assert.rejects(current.context.bindMediaToChatTarget(started.metadata,{id:'another-extension',tab:tabA}),e=>e.code==='MEDIA_TO_CHAT_TARGET_NOT_FOUND');
+await assert.rejects(current.context.bindMediaToChatTarget(started.metadata,sender(tabB)),e=>e.code==='MEDIA_TO_CHAT_TARGET_CHANGED');
+const acknowledged=worker({initialStorage:current.storage,initialNow:current.now()});
+assert.equal((await acknowledged.receive({type:'researchtube_chat_target_bind',...started.metadata},sender())).ok,true,'binding receipt survives worker suspension');
+assert.equal(acknowledged.mutations.length,0,'acknowledgement never replays a completed task');
+acknowledged.tabs.get(42).url=tabB.url;
+await assert.rejects(acknowledged.context.bindMediaToChatTarget(started.metadata,sender()),e=>e.code==='MEDIA_TO_CHAT_TARGET_CHANGED');
+// An untouched, unbound task may safely wait across worker suspension. Preserve
+// the original deadline rather than starting another 30-second window.
+const sleeping=worker();const pending=await sleeping.start();sleeping.advance(10_000);
+const resumed=worker({initialStorage:sleeping.storage,initialNow:sleeping.now()});
+assert.equal((await resumed.context.mediaToChatStatus(pending.task.taskId)).status,'queued');
+assert.equal(resumed.alarms.get(`media-chat-bind:${pending.task.taskId}`).when,sleeping.alarms.get(`media-chat-bind:${pending.task.taskId}`).when);
+assert.equal((await resumed.receive({type:'researchtube_chat_target_bind',...pending.metadata},sender())).ok,true);
+await settle();await resumed.context.drainMediaToChatQueue();
+assert.equal((await resumed.context.mediaToChatStatus(pending.task.taskId)).status,'completed');
+assert.equal(resumed.mutations.length,1);
+const expiredOnResume=worker({initialStorage:sleeping.storage,initialNow:sleeping.now()+20_001});
+assert.equal((await expiredOnResume.context.mediaToChatStatus(pending.task.taskId)).status,'failed');
+assert.equal(expiredOnResume.alarms.size,0);
+assert.equal((await expiredOnResume.receive({type:'researchtube_chat_target_bind',...pending.metadata},sender())).ok,false);
+assert.equal(expiredOnResume.mutations.length,0);
+assert.ok(expiredOnResume.logs.some(line=>line.includes(`taskId=${pending.task.taskId}`) && line.includes('status=failed') && line.includes('reason=inactive')),'safe diagnostics identify the task and rejection reason');
+assert.ok(!expiredOnResume.logs.join('\n').includes(pending.metadata.bindingToken),'private capability is never logged');
 // Missing handshake returns a meaningful terminal status without changing any tab.
 const missing=worker();const notBound=await missing.start();missing.advance(30_001);
 const failed=await missing.context.mediaToChatStatus(notBound.task.taskId);

@@ -104,6 +104,16 @@ assert.ok(slow.commands.some(c => c.method === 'Emulation.setFocusEmulationEnabl
 assert.ok(slow.logs.every(args => args.length === 1 && /^\[1970-01-01T/.test(args[0])));
 assert.ok(slow.logs.some(args => /Send and submission acknowledgement.*elapsedMs":24000/.test(args[0])));
 
+// Native FileList insertion is not React acceptance: absent preview cards
+// must consume the bounded acceptance window, without Send or another upload.
+const unaccepted = worker({ acceptedAt: Infinity });
+await assert.rejects(unaccepted.run(), error => error.code === 'MEDIA_TO_CHAT_TIMEOUT');
+assert.equal(unaccepted.now(), 30000);
+assert.equal(unaccepted.sentAt(), null);
+assert.equal(unaccepted.submissions.length, 0);
+assert.equal(unaccepted.commands.filter(c => c.method === 'DOM.setFileInputFiles').length, 1);
+assert.equal(unaccepted.page.input.files.length, 1, 'failure preserves the selected file');
+
 const instant = worker(); await instant.run(); assert.equal(instant.now(), 0); assert.equal(instant.sleeps.length, 0);
 const duringGeneration = worker({ enabledAt: 120000, busyUntil: 120000 });
 await duringGeneration.run(); assert.equal(duringGeneration.sentAt(), 120000);

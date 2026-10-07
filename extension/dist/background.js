@@ -2473,7 +2473,7 @@ var MCP_TOOL_SETTINGS = Object.freeze({
   custom_tool_status: { group: "custom" },
   custom_tool_cancel: { group: "custom" }
 });
-var EXTENSION_VERSION = "2.2.85";
+var EXTENSION_VERSION = "2.2.86";
 globalThis.addEventListener?.("fetch", createMediaStreamHandler({
   extensionUrl: chrome.runtime.getURL("/"),
   getClient: (id) => globalThis.clients.get(id),
@@ -4649,7 +4649,7 @@ function cdpAttachmentStateExpression(fileNames) {
     };
     const countMatches = attachments.length === expectedNames.length;
     const namedCardAccepted = Boolean(state?.found && countMatches && cardNames.every(name => typeof name === 'string' && name.length > 0) && namesMatch(cardNames, expectedNames));
-    const selectedFilesAccepted = Boolean(state?.found && selectedNames.length === expectedNames.length && namesMatch(selectedNames, expectedNames, true));
+    const selectedFilesAccepted = Boolean(state?.found && countMatches && selectedNames.length === expectedNames.length && namesMatch(selectedNames, expectedNames, true));
     const cardTextAccepted = Boolean(state?.found && countMatches && textNamesMatch());
     const accepted = namedCardAccepted || selectedFilesAccepted || cardTextAccepted;
     return {
@@ -5422,7 +5422,7 @@ async function ensureMediaToChatLoaded() {
     mediaToChatTasks = new Map(tasks.filter((task) => task && typeof task.taskId === "string").map((task) => [task.taskId, task]));
     mediaToChatQueue = Array.isArray(stored[MEDIA_TO_CHAT_QUEUE_STORAGE_KEY]) ? stored[MEDIA_TO_CHAT_QUEUE_STORAGE_KEY].filter((taskId4) => typeof taskId4 === "string" && mediaToChatTasks.get(taskId4)?.status === "queued") : [];
     for (const task of mediaToChatTasks.values()) {
-      if (task.status === "queued" && task.awaitingArtifacts) continue;
+      if (task.status === "queued" && (task.awaitingArtifacts || !task.target && !task.sendStarted && typeof task.bindingToken === "string" && Number.isFinite(task.bindingDeadline))) continue;
       if (task.status === "working" && task.phase === "waitingToSend" && task.prepared?.guardToken && task.prepared?.fileNames?.length && task.target && Number.isFinite(Date.parse(task.sendNotBefore))) continue;
       if (task.status === "working" || task.status === "queued") {
         task.status = "failed";
@@ -5433,10 +5433,14 @@ async function ensureMediaToChatLoaded() {
         task.message = task.error;
       }
     }
-    mediaToChatQueue = [...mediaToChatTasks.values()].filter((task) => task.status === "queued" && task.awaitingArtifacts).map((task) => task.taskId);
+    mediaToChatQueue = [...mediaToChatTasks.values()].filter((task) => task.status === "queued").map((task) => task.taskId);
     mediaToChatLoaded = true;
     await persistMediaToChatTasks();
     for (const task of mediaToChatTasks.values()) {
+      if (task.status === "queued" && !task.target) {
+        await expireMediaToChatBinding(task.taskId);
+        if (task.status === "queued") await chrome.alarms.create(`media-chat-bind:${task.taskId}`, { when: task.bindingDeadline });
+      }
       if (task.status === "working" && task.phase === "waitingToSend") await scheduleMediaToChatSend(task);
     }
   })().finally(() => {
@@ -5675,8 +5679,10 @@ async function expireMediaToChatBinding(taskId4) {
 async function bindMediaToChatTarget(message, sender) {
   await ensureMediaToChatLoaded();
   const task = mediaToChatTasks.get(message?.taskId);
-  if (!task || !task.bindingToken || message.bindingToken !== task.bindingToken) {
-    throw localAgentError("MEDIA_TO_CHAT_TARGET_NOT_FOUND", "This files-to-chat binding is missing, expired or invalid.");
+  const token = task?.bindingToken || (task?.target ? task.boundToken : null);
+  if (!task || !token || message.bindingToken !== token) {
+    const reason = !task ? "missing-task" : !token ? "inactive" : "token-mismatch";
+    throw Object.assign(localAgentError("MEDIA_TO_CHAT_TARGET_NOT_FOUND", "This files-to-chat binding is missing, expired or invalid."), { bindingReason: reason });
   }
   if (sender?.id !== chrome.runtime.id || !Number.isInteger(sender.tab?.id)) {
     throw localAgentError("MEDIA_TO_CHAT_TARGET_NOT_FOUND", "A Chrome-authenticated originating tab is required.");
@@ -5712,6 +5718,7 @@ async function bindMediaToChatTarget(message, sender) {
       throw localAgentError("MEDIA_TO_CHAT_TARGET_CHANGED", "The task no longer accepts this tab binding.");
     }
     task.target = target;
+    task.boundToken = task.bindingToken;
     task.message = "Queued for the originating ChatGPT tab. Finish the current assistant response so Send can become available.";
     await persistMediaToChatTasks();
     await chrome.alarms.clear(`media-chat-bind:${task.taskId}`);
@@ -6090,7 +6097,9 @@ chrome.tabs?.onUpdated?.addListener((tabId, change) => {
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "researchtube_chat_target_bind") {
     bindMediaToChatTarget(message, sender).then(sendResponse).catch((error3) => {
-      consoleAction(`[ResearchTube CDP] Chat target binding refused: ${error3.code || "MEDIA_TO_CHAT_TARGET_NOT_FOUND"} ${safeErrorMessage(error3)}`);
+      const taskId4 = /^tsk_[A-Za-z0-9_-]{10}$/.test(message.taskId) ? message.taskId : "unknown";
+      const task = mediaToChatTasks.get(taskId4);
+      consoleAction(`[ResearchTube CDP] Chat target binding refused: ${error3.code || "MEDIA_TO_CHAT_TARGET_NOT_FOUND"} taskId=${taskId4} status=${task?.status || "missing"} phase=${task?.phase || "missing"} reason=${error3.bindingReason || "target-check"} ${safeErrorMessage(error3)}`);
       sendResponse({ ok: false, errorCode: error3.code || "MEDIA_TO_CHAT_TARGET_NOT_FOUND", error: safeErrorMessage(error3) });
     });
     return true;
