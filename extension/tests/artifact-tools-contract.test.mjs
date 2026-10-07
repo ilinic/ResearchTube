@@ -158,3 +158,71 @@ await w.context.paintBrowserAutomationBadge(42);assert.equal(badgeCalls.find(([k
 badgeCalls.length=0;w.context.cameraRecordingBadgeKind=null;w.context.browserAutomationBadges.delete(42);
 await w.context.paintBrowserAutomationBadge(42);assert.equal(badgeCalls.find(([k])=>k==='text')[1].text,null,'Stop restores the global toolbar badge');
 console.log('Browser toolbar: tab-specific AUTO, recording priority and Stop reset: ok');
+
+// The grouping config is optional for old/offline Agents; invalid values fail.
+for(const value of [true,false]) {
+ w.context.agentJsonRequest=async()=>({browserStudyGroupTabs:value});
+ assert.deepEqual(JSON.parse(JSON.stringify(await w.context.configuredBrowserStudyOptions())), { groupTabs: value, detailedLogging: true });
+}
+w.context.agentJsonRequest=async()=>({});assert.deepEqual(JSON.parse(JSON.stringify(await w.context.configuredBrowserStudyOptions())), { groupTabs: true, detailedLogging: true });
+w.context.agentJsonRequest=async()=>{throw Object.assign(Error('offline'),{code:'AGENT_UNAVAILABLE'});};
+assert.deepEqual(JSON.parse(JSON.stringify(await w.context.configuredBrowserStudyOptions())), { groupTabs: true, detailedLogging: true });
+for(const value of [null,1,'false']) {
+ w.context.agentJsonRequest=async()=>({browserStudyGroupTabs:value});
+ await assert.rejects(w.context.configuredBrowserStudyOptions(),e=>e.code==='AGENT_INVALID_RESPONSE');
+}
+console.log('Browser grouping setting: live boolean, default and offline compatibility: ok');
+
+for (const detailedLogging of [true, false]) {
+ w.context.agentJsonRequest=async()=>({browserStudyGroupTabs:false,browserStudyDetailedLogging:detailedLogging});
+ assert.deepEqual(JSON.parse(JSON.stringify(await w.context.configuredBrowserStudyOptions())),{groupTabs:false,detailedLogging});
+}
+for (const value of [null, 1, "false"]) {
+ w.context.agentJsonRequest=async()=>({browserStudyDetailedLogging:value});
+ await assert.rejects(w.context.configuredBrowserStudyOptions(),e=>e.code==='AGENT_INVALID_RESPONSE');
+}
+console.log('Browser detailed logging setting: live boolean, strict validation and compatibility: ok');
+
+// Test the shipped worker's actual console boundary, not a mock formatter.
+// A DevTools-style text export must retain measurements without expanding objects.
+const consoleCalls=[];
+w.context.console.info=(...args)=>consoleCalls.push(args);
+w.context.browserDiagnosticLog('timing',{sessionId:'bas_abcdefghij',stage:'page.axRefresh',event:'end',elapsedMs:123.4,sinceLaunchMs:500});
+assert.equal(consoleCalls.length,1);
+assert.equal(consoleCalls[0].length,1,'a complete record is passed as a single string');
+const exported=consoleCalls[0].map(String).join(' ');
+assert.match(exported, /^\[\d{4}-\d{2}-\d{2}T[\d:.]+Z\] \[ResearchTube Browser\] timing \{/);
+assert.doesNotMatch(exported,/\[object Object\]|timing Object|\n/);
+const record=JSON.parse(exported.slice(exported.indexOf('{')));
+assert.equal(record.elapsedMs,123.4);assert.equal(record.sinceLaunchMs,500);
+assert.equal(record.stage,'page.axRefresh');assert.equal(record.sessionId,'bas_abcdefghij');
+assert.match(record.extensionVersion,/^2\.2\.\d+$/);
+assert.ok(Number.isFinite(Date.parse(record.atUtc)));
+const sample=w.context.createBrowserDiagnostics({enabled:true,sessionId:'bas_abcdefghij',log:w.context.browserDiagnosticLog,now:()=>10});
+sample.event('export.test',{bytes:8,url:'https://PRIVATE.test/?signature=SECRET',rawResponse:'SECRET'});
+assert.doesNotMatch(consoleCalls.at(-1)[0],/PRIVATE|SECRET|signature|rawResponse/);
+const diagnosticLogCount=consoleCalls.length;
+w.context.createBrowserDiagnostics({enabled:false,log:w.context.browserDiagnosticLog}).event('off');
+assert.equal(consoleCalls.length,diagnosticLogCount);
+console.log('Browser console export: single-line JSON retains exact timing, UTC/version and privacy filtering: ok');
+
+// All ordinary worker action logs use the same visible timestamp/text boundary.
+w.context.cdpLog('retry test', { attempt: 3, intervalSeconds: 2 });
+assert.equal(consoleCalls.at(-1).length, 1);
+assert.match(consoleCalls.at(-1)[0], /^\[\d{4}-\d{2}-\d{2}T[\d:.]+Z\] \[ResearchTube CDP\] retry test \{"attempt":3,"intervalSeconds":2\}$/);
+
+for (const retryCount of [1, 15, 300]) {
+ w.context.agentJsonRequest = async () => ({ composerMediaRetry: { retryCount, retryIntervalSeconds: 2 } });
+ assert.deepEqual(JSON.parse(JSON.stringify(await w.context.configuredComposerMediaRetry())), { retryCount, retryIntervalSeconds: 2 });
+}
+for (const value of [null, {}, { retryCount: true, retryIntervalSeconds: 2 }, { retryCount: 301, retryIntervalSeconds: 2 }, { retryCount: 15, retryIntervalSeconds: 0 }, { retryCount: 15, retryIntervalSeconds: 61 }, { retryCount: 15, retryIntervalSeconds: 2, extra: 1 }]) {
+ w.context.agentJsonRequest = async () => ({ composerMediaRetry: value });
+ await assert.rejects(w.context.configuredComposerMediaRetry(), error => error.code === 'AGENT_INVALID_RESPONSE');
+}
+w.context.agentJsonRequest = async () => ({});
+assert.deepEqual(JSON.parse(JSON.stringify(await w.context.configuredComposerMediaRetry())), { retryCount: 15, retryIntervalSeconds: 2 });
+w.context.agentJsonRequest = async () => { throw Object.assign(Error('offline'), { code: 'AGENT_UNAVAILABLE' }); };
+assert.deepEqual(JSON.parse(JSON.stringify(await w.context.configuredComposerMediaRetry())), { retryCount: 15, retryIntervalSeconds: 2 });
+w.context.agentJsonRequest = async () => { throw Object.assign(Error('config'), { code: 'CONFIG_INVALID' }); };
+await assert.rejects(w.context.configuredComposerMediaRetry(), error => error.code === 'CONFIG_INVALID');
+console.log('Composer retry policy: live settings, strict validation, old/offline fallback and visible action timestamps: ok');

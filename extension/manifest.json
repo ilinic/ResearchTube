@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "minimum_chrome_version": "125",
-  "name": "ResearchTube \u2014 YouTube Research for ChatGPT",
-  "version": "2.2.71",
+  "name": "ResearchTube — YouTube Research for ChatGPT",
+  "version": "2.2.78",
   "description": "Public YouTube research tools for ChatGPT through a local MCP connection.",
   "icons": {
     "16": "icons/researchtube-16.png",
@@ -17,7 +17,8 @@
     "scripting",
     "offscreen",
     "clipboardWrite",
-    "debugger"
+    "debugger",
+    "tabGroups"
   ],
   "host_permissions": [
     "https://api.openai.com/*",

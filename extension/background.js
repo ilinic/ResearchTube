@@ -1,3 +1,4 @@
+import { waitForComposerMedia } from "./composer-media-retry.js";
 import { createBrowserAgent, waitForBrowserDocument, waitForBrowserConversation } from "./browser-agent.js";
 import { browserToolDefinitions, BROWSER_TOOL_NAMES } from "./browser-tools.js";
 import { TIMER_TOOL_NAMES, timerDefinitions, validateTimerInput, normalizeTimerResult } from "./timers.js";
@@ -61,7 +62,7 @@ const MCP_TOOL_SETTINGS = Object.freeze({
   clipboard_status: { group: "clipboard" }, clipboard_get: { group: "clipboard" }, clipboard_set: { group: "clipboard" },
   library_store_start: { group: "library" }, library_store_status: { group: "library" }, library_store_cancel: { group: "library" }, online_share_start: { group: "online" }, online_share_status: { group: "online" }, online_share_stop: { group: "online" }
 });
-const EXTENSION_VERSION = "2.2.71";
+const EXTENSION_VERSION = "2.2.78";
 // Chrome dispatches this for requests made by our Extension-owned viewer.
 // Packaged assets and unrelated requests fall through without interception.
 globalThis.addEventListener?.("fetch", createMediaStreamHandler({
@@ -69,7 +70,7 @@ globalThis.addEventListener?.("fetch", createMediaStreamHandler({
   getClient: id => globalThis.clients.get(id),
   resolveMedia: path => showWorkspaceImage(path),
   fetchMedia: (url, options) => fetch(url, options),
-  log: (stage, details = {}) => console.info(`[ResearchTube media stream ${EXTENSION_VERSION}]`, stage, details)
+  log: (stage, details = {}) => consoleAction(`[ResearchTube media stream ${EXTENSION_VERSION}]`, stage, details)
 }));
 const REQUIRED_AGENT_INTERFACE_VERSION = 75;
 // A UI resource URI is a cache key in MCP Apps. Increment it whenever the
@@ -1326,7 +1327,7 @@ function toolDefinitions() {
     {
       name: "media_to_chat",
       title: "Send workspace files to the current chat",
-      description: "Queue any selected Workspace files for attachment and sending in the ChatGPT conversation that invoked this tool. Its compact service widget identifies the originating Chrome tab before any Composer changes; the exact tab ID and conversation are then fixed for the entire task. Active tabs and focused windows are never used to select a destination. If the originating tab cannot be identified within 30 seconds, is duplicated in another tab, closes or changes conversation, the task fails rather than selecting another tab. The ResearchTube Extension must be able to receive the task widget handshake. No new tab is opened. The tool uploads file bytes to ChatGPT using Chrome automation and presses Send without adding prompt text. Count and per-file size limits are configured by mediaToChatMaxFiles and mediaToChatMaxFileSizeMiB in agent/agent-config.json. Oversized files are listed in skippedFiles; eligible files are sent together. composerPolicy defaults to requireEmpty: refuse a Composer containing text or attachments. clear explicitly removes its text and existing attachments once, before uploading the selected files, and verifies that it is empty. After uploading starts, user edits, added or removed attachments, or a changed conversation stop the task without Send; already attached task files stay in the Composer. The task never clears again after upload begins. Optional sendDelaySeconds defaults to 0 and delays Send after all eligible files are accepted in Composer. During waitingToSend, status reports sendNotBefore (UTC) and remainingSeconds. The pause releases browser automation for other tabs; another task targeting the same Composer is refused. Cancellation before Send leaves existing text and attachments untouched. Status polling and cancellation are allowed in the initiating assistant turn, no faster than pollIntervalMs. With a positive sendDelaySeconds, inspect waitingToSend and cancel before sendNotBefore when needed. ChatGPT may keep Send unavailable while the assistant is responding: when the goal is actual submission, finish the response after any required pre-Send checks instead of waiting indefinitely for completed. A timer does not independently resume an ended assistant turn. completed confirms a Send click, not ChatGPT processing or Library storage.",
+      description: "Queue any selected Workspace files for attachment and sending in the ChatGPT conversation that invoked this tool. Its compact service widget identifies the originating Chrome tab before any Composer changes; the exact tab ID and conversation are then fixed for the entire task. Active tabs and focused windows are never used to select a destination. If the originating tab cannot be identified within 30 seconds, is duplicated in another tab, closes or changes conversation, the task fails rather than selecting another tab. The ResearchTube Extension must be able to receive the task widget handshake. No new tab is opened. The tool uploads file bytes to ChatGPT using Chrome automation and presses Send without adding prompt text. Count and per-file size limits are configured by mediaToChatMaxFiles and mediaToChatMaxFileSizeMiB in agent/agent-config.json. Oversized files are listed in skippedFiles; eligible files are sent together. composerPolicy defaults to requireEmpty: refuse a Composer containing text or attachments. clear explicitly removes its text and existing attachments once, before uploading the selected files, and verifies that it is empty. After uploading starts, user edits, added or removed attachments, or a changed conversation stop the task without Send; already attached task files stay in the Composer. The task never clears again after upload begins. Optional sendDelaySeconds defaults to 0 and delays Send after all eligible files are accepted in Composer. During waitingToSend, status reports sendNotBefore (UTC) and remainingSeconds. The pause releases browser automation for other tabs; another task targeting the same Composer is refused. Cancellation before Send leaves existing text and attachments untouched. Status polling and cancellation are allowed in the initiating assistant turn, no faster than pollIntervalMs. With a positive sendDelaySeconds, inspect waitingToSend and cancel before sendNotBefore when needed. ChatGPT may keep Send unavailable while the assistant is responding: when the goal is actual submission, finish the response after any required pre-Send checks instead of waiting indefinitely for completed. The Extension continues the queued attachment/send task independently after the assistant response ends; configured enabled-Send retries stop as soon as submission is acknowledged. A timer does not independently resume an ended assistant turn. completed confirms Send and UI acknowledgement, not ChatGPT processing or Library storage.",
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
       inputSchema: { type: "object", additionalProperties: false, properties: { files: { type: "array", minItems: 1, items: libraryStoreFileSchema, description: "One batch of logical Workspace paths; any file type may be selected, subject to ChatGPT upload support." }, composerPolicy: { type: "string", enum: ["requireEmpty", "clear"], default: "requireEmpty", description: "requireEmpty refuses text or attachments already in the Composer. clear explicitly discards both once before upload. New user edits after preparation always stop Send and leave uploaded files attached." }, sendDelaySeconds: { type: "number", minimum: 0, default: 0, description: "Optional seconds to wait after all files are accepted in Composer, before Send. 0 sends as soon as ready; 600 waits ten minutes. Cancellation leaves files and text in place. Readiness is checked independently of this delay." } }, required: ["files"] },
       outputSchema: mediaToChatStartSchema,
@@ -1585,7 +1586,7 @@ async function mcpToolPreferences() {
     } catch (error) {
       // Schema discovery must work independently of Agent configuration/health.
       // Execution still validates the Agent and its configuration normally.
-      console.info(`[ResearchTube MCP] new-tool default unavailable (${error?.code || "AGENT_UNAVAILABLE"}); using cached default=${developerNewToolsDefault}.`);
+      consoleAction(`[ResearchTube MCP] new-tool default unavailable (${error?.code || "AGENT_UNAVAILABLE"}); using cached default=${developerNewToolsDefault}.`);
     }
     preferences.newToolsEnabledByDefault = developerNewToolsDefault;
   }
@@ -1655,14 +1656,45 @@ function cdpError(message, cause = null) {
   return error;
 }
 
+function consoleAction(message, ...details) {
+  const serialize = value => {
+    if (typeof value === "string") return value;
+    try { return JSON.stringify(value, (_key, item) => item instanceof Error ? { code: item.code, message: safeErrorMessage(item) } : item); }
+    catch { return "[unserializable details]"; }
+  };
+  console.info(`[${new Date().toISOString()}] ${[message, ...details].map(serialize).join(" ")}`);
+}
+
+async function configuredComposerMediaRetry() {
+  try {
+    const document = await agentJsonRequest("/internal/tool-limits");
+    const value = document.composerMediaRetry === undefined ? { retryCount: 15, retryIntervalSeconds: 2 } : document.composerMediaRetry;
+    if (!value || typeof value !== "object" || Object.keys(value).sort().join(",") !== "retryCount,retryIntervalSeconds"
+      || !Number.isSafeInteger(value.retryCount) || value.retryCount < 1 || value.retryCount > 300
+      || !Number.isSafeInteger(value.retryIntervalSeconds) || value.retryIntervalSeconds < 1 || value.retryIntervalSeconds > 60) {
+      throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid Composer media retry settings.");
+    }
+    return { retryCount: value.retryCount, retryIntervalSeconds: value.retryIntervalSeconds };
+  } catch (error) {
+    if (["CONFIG_INVALID", "AGENT_INVALID_RESPONSE"].includes(error.code)) throw error;
+    return { retryCount: 15, retryIntervalSeconds: 2 };
+  }
+}
+
+async function cdpPrepareBackgroundChat(tabId) {
+  await cdpCommand(tabId, "Emulation.setFocusEmulationEnabled", { enabled: true });
+  await cdpCommand(tabId, "Page.setWebLifecycleState", { state: "active" });
+  cdpLog("Background ChatGPT focus/lifecycle emulation enabled", { tabId });
+}
+
 function cdpLog(step, details = undefined) {
   const prefix = "[ResearchTube CDP]";
-  if (details === undefined) console.info(`${prefix} ${step}`);
-  else console.info(`${prefix} ${step}`, details);
+  if (details === undefined) consoleAction(`${prefix} ${step}`);
+  else consoleAction(`${prefix} ${step}`, details);
 }
 
 function cdpErrorLog(step, error) {
-  console.info(`[ResearchTube CDP] ${step}`, error instanceof Error ? error.message : error);
+  consoleAction(`[ResearchTube CDP] ${step}`, error instanceof Error ? error.message : error);
 }
 
 async function cdpAttach(tabId) {
@@ -1920,10 +1952,10 @@ async function cdpSetComposerText(tabId, text) {
         normalizedComposerLength: normalizedActualText?.length ?? null,
         firstDifferenceIndex, error: safeErrorMessage(error)
       };
-      console.info("[ResearchTube CDP] Composer text mismatch; retrying replacement", lastDiagnostic);
+      consoleAction("[ResearchTube CDP] Composer text mismatch; retrying replacement", lastDiagnostic);
     }
   }
-  console.info("[ResearchTube CDP] Composer prompt verification failed after all attempts", lastDiagnostic);
+  consoleAction("[ResearchTube CDP] Composer prompt verification failed after all attempts", lastDiagnostic);
   throw cdpError(`ChatGPT Composer could not be replaced and verified after ${CDP_COMPOSER_PROMPT_ATTEMPTS} attempts: ${safeErrorMessage(lastError)}`);
 }
 
@@ -1989,9 +2021,17 @@ async function describeYouTubeVideoInChatGPT(sourceTab) {
   try {
     await cdpAttach(chatTab.id); attached = true;
     await cdpCommand(chatTab.id, "Runtime.enable");
+    await cdpPrepareBackgroundChat(chatTab.id);
     await cdpWaitForTextComposer(chatTab.id);
+    const newChatTarget = { tabId: chatTab.id, chatPath: "/", newChat: true };
+    await sleep(CDP_COMPOSER_PROMPT_RETRY_DELAY_MS);
+    await prepareCurrentChatComposer(newChatTarget, "clear");
     await cdpSetComposerText(chatTab.id, prompt);
-    await cdpSendComposerText(chatTab.id, prompt);
+    await cdpSendComposerText(chatTab.id, prompt, async () => {
+      await requireCurrentChatTarget(newChatTarget);
+      const matches = (await cdpEvaluate(chatTab.id, cdpComposerTextExpression(prompt)))?.value;
+      if (!matches) throw localAgentError("BROWSER_CHAT_CHANGED", "The video-description prompt changed before Send. It was preserved.");
+    });
     cdpLog("Sent video-description prompt", { tabId: chatTab.id, videoUrl });
     return { ok: true, videoUrl, chatTabId: chatTab.id };
   } catch (error) {
@@ -2017,20 +2057,13 @@ function cdpAttachmentStateExpression(fileNames) {
   })()`;
 }
 
-async function cdpWaitForAttachmentAccepted(tabId, fileNames, timeoutMs = 15_000) {
-  const deadline = Date.now() + timeoutMs;
-  let attempts = 0;
-  cdpLog("Waiting for Composer file acceptance", { tabId, fileNames, timeoutMs });
-  while (Date.now() < deadline) {
-    attempts += 1;
+async function cdpWaitForAttachmentAccepted(tabId, fileNames, retryPolicy, beforeCheck = null) {
+  const policy = retryPolicy || await configuredComposerMediaRetry();
+  cdpLog("Waiting for Composer file acceptance", { tabId, fileCount: fileNames.length, ...policy });
+  await waitForComposerMedia(async () => {
     const state = (await cdpEvaluate(tabId, cdpAttachmentStateExpression(fileNames)))?.value;
-    if (state?.accepted) {
-      cdpLog("Composer accepted file attachment", { tabId, fileNames, attempts, state });
-      return;
-    }
-    await sleep(150);
-  }
-  throw cdpError("ChatGPT did not confirm that it accepted the selected file.");
+    return { ready: Boolean(state?.accepted) };
+  }, policy, { stage: "file acceptance", beforeCheck: beforeCheck || undefined, log: cdpLog, sleep });
 }
 
 async function cdpOpenStableFileChooser(tabId, fileCount = 1) {
@@ -2079,17 +2112,25 @@ const CDP_SUBMIT_COMPOSER_FORM_EXPRESSION = `(() => {
   if (!composer) return false;
   const form = composerForm;
   if (!form) return false;
-  const submitButton = form.querySelector('button[type="submit"]');
-  if (!submitButton || submitButton.disabled || submitButton.getAttribute('aria-disabled') === 'true') return false;
+  const submitButton = composerRoot?.querySelector('button[type="submit"]');
+  if (!submitButton || submitButton.form !== form || submitButton.disabled || submitButton.getAttribute('aria-disabled') === 'true') return false;
   form.requestSubmit(submitButton);
   return true;
+})()`;
+
+const CDP_CAN_SUBMIT_COMPOSER_FORM_EXPRESSION = `(() => {
+  const { composer, root, form } = (${resolveChatComposer.toString()})();
+  const button = root?.querySelector('button[type="submit"]');
+  return Boolean(composer && form && typeof form.requestSubmit === 'function' && button && button.form === form
+    && !button.disabled && button.getAttribute('aria-disabled') !== 'true');
 })()`;
 
 function cdpComposerTextExpression(expectedText) {
   return `(() => {
     const { composer, root: composerRoot, form: composerForm } = (${resolveChatComposer.toString()})();
     const current = composer?.value ?? composer?.innerText ?? composer?.textContent ?? '';
-    return current.trim() === ${JSON.stringify(expectedText)};
+    const normalize = ${normalizeComposerTextForComparison.toString()};
+    return normalize(current) === normalize(${JSON.stringify(expectedText)});
   })()`;
 }
 
@@ -2154,11 +2195,24 @@ async function cdpClearSentComposerDraft(tabId, sentText) {
   }
 }
 
-async function cdpClickEnabledSendButton(tabId, timeoutMs = 45_000, beforeClick = null, onSendCommit = null) {
-  await cdpWaitFor(tabId, CDP_ENABLED_SEND_BUTTON_EXPRESSION, "the enabled ChatGPT Send button", timeoutMs, beforeClick);
+async function cdpDispatchEnabledSend(tabId, timeoutMs = 45_000, beforeClick = null, onSendCommit = null, retryPolicy = null, preferPointer = false) {
+  // One dispatch attempt only; the shared controller owns the retry budget.
+  if ((await cdpEvaluate(tabId, CDP_ENABLED_SEND_BUTTON_EXPRESSION))?.value !== true) return false;
   if (beforeClick) await beforeClick();
+  const nativeForm = (await cdpEvaluate(tabId, CDP_CAN_SUBMIT_COMPOSER_FORM_EXPRESSION))?.value === true;
+  if (nativeForm && !preferPointer) {
+    // Use the same form path as Describe this video. A background pointer
+    // dispatch can return successfully without the page accepting the click.
+    // The retry controller verifies acknowledgement before any later dispatch.
+    if (beforeClick) await beforeClick();
+    if (onSendCommit) onSendCommit();
+    const submitted = (await cdpEvaluate(tabId, CDP_SUBMIT_COMPOSER_FORM_EXPRESSION))?.value;
+    cdpLog("ChatGPT Composer form submission dispatched", { tabId, method: "requestSubmit", submitted: submitted === true });
+    return submitted === true;
+  }
   const target = (await cdpEvaluate(tabId, CDP_SEND_BUTTON_CENTER_EXPRESSION))?.value;
-  if (!Number.isFinite(target?.x) || !Number.isFinite(target?.y)) throw cdpError("The ChatGPT Send button was not available.");
+  if (!Number.isFinite(target?.x) || !Number.isFinite(target?.y)) return false;
+  cdpLog("ChatGPT Send pointer target", { tabId, method: "CDP mouse", x: target.x, y: target.y, nativeForm });
   // button.click() produces an untrusted DOM event, which ChatGPT may ignore.
   // Dispatching CDP mouse input makes the page receive the same trusted click
   // sequence as an ordinary user click.
@@ -2172,20 +2226,83 @@ async function cdpClickEnabledSendButton(tabId, timeoutMs = 45_000, beforeClick 
   cdpLog("Clicked ChatGPT Send button with browser input", { tabId });
 }
 
-async function cdpSendComposerText(tabId, text) {
-  // Send through the Composer's own form. This avoids relying on a synthetic
-  // pointer click, which ChatGPT can ignore even when it shows the button.
-  await cdpWaitFor(tabId, CDP_ENABLED_SEND_BUTTON_EXPRESSION, "the enabled ChatGPT Send button", 5_000);
-  const submitted = (await cdpEvaluate(tabId, CDP_SUBMIT_COMPOSER_FORM_EXPRESSION))?.value;
-  if (submitted !== true) throw cdpError("The ChatGPT Composer form could not be submitted.");
-  cdpLog("Submitted ChatGPT Composer form", { tabId });
+function composerSendAcknowledged(state, baseline) {
+  if (baseline.chatPath && state.chatPath && state.chatPath !== baseline.chatPath) return false;
+  return Boolean(!baseline.chatPath && state.chatPath || state.userCount > baseline.userCount
+    || state.lastUserId && state.lastUserId !== baseline.lastUserId
+    || state.found && state.attachments === 0 && state.textEmpty
+    || !baseline.generating && state.generating);
+}
+
+async function cdpClickEnabledSendButton(tabId, timeoutMs = 45_000, beforeClick = null, onSendCommit = null, retryPolicy = null) {
+  const policy = retryPolicy || await configuredComposerMediaRetry();
+  let baseline = null, attempts = 0, committed = false;
+  await waitForComposerMedia(async () => {
+    let state = await cdpReadMediaSubmissionState(tabId);
+    if (attempts && composerSendAcknowledged(state, baseline)) return { ready: true };
+    try { if (beforeClick) await beforeClick(); }
+    catch (error) {
+      if (attempts && composerSendAcknowledged(await cdpReadMediaSubmissionState(tabId), baseline)) return { ready: true };
+      throw error;
+    }
+    const enabled = (await cdpEvaluate(tabId, CDP_ENABLED_SEND_BUTTON_EXPRESSION))?.value === true;
+    if (enabled) {
+      // Recheck after the awaited readiness probe: acceptance may arrive late.
+      state = await cdpReadMediaSubmissionState(tabId);
+      if (attempts && composerSendAcknowledged(state, baseline)) return { ready: true };
+      if (!attempts) baseline = state;
+      attempts++;
+      cdpLog("ChatGPT Send attempt", { tabId, attempt: attempts, maximumAttempts: policy.retryCount + 1, intervalSeconds: policy.retryIntervalSeconds });
+      try {
+        await cdpDispatchEnabledSend(tabId, timeoutMs, beforeClick, () => {
+          if (!committed) { onSendCommit?.(); committed = true; }
+        }, policy, attempts % 2 === 0);
+      } catch (error) {
+        if (composerSendAcknowledged(await cdpReadMediaSubmissionState(tabId), baseline)) return { ready: true };
+        throw error;
+      }
+      state = await cdpReadMediaSubmissionState(tabId);
+      if (composerSendAcknowledged(state, baseline)) return { ready: true };
+    }
+    cdpLog("ChatGPT Send not yet confirmed", { tabId, attempts, sendPresent: state.sendPresent, disabled: state.sendDisabled, ariaDisabled: state.sendAriaDisabled, label: state.sendLabel, generating: state.generating });
+    // Before the first dispatch retain the existing response wait. Afterwards,
+    // never resubmit while Send is absent/disabled or an answer is generating.
+    return { ready: false, busy: !attempts && Boolean(state.generating || !state.sendPresent) };
+  }, policy, { stage: "Send and submission acknowledgement", log: cdpLog, sleep, busyTimeoutMs: timeoutMs });
+  cdpLog("ChatGPT Send confirmed; attempts stopped", { tabId, attempts });
+}
+
+async function cdpSendComposerText(tabId, text, beforeClick = null) {
+  await cdpClickEnabledSendButton(tabId, 120_000, beforeClick);
+  cdpLog("Confirmed ChatGPT Composer text submission", { tabId });
   await cdpClearSentComposerDraft(tabId, text);
 }
 
-async function cdpSendAttachedFiles(tabId, fileCount, { beforeClick = null, timeoutMs = 90_000, onSendCommit = null } = {}) {
+async function cdpReadMediaSubmissionState(tabId) {
+  const expression = chatComposerPageExpression(function (inspect) {
+    const state = inspect();
+    const { root } = resolveChatComposer();
+    const send = root?.querySelector('button[type="submit"]');
+    const pagePath = typeof location === 'object' ? location.pathname : null;
+    const chatPath = pagePath && new RegExp('/c/[^/]+/?$').test(pagePath) && !pagePath.includes('local-chatgpt') ? (pagePath.endsWith('/') ? pagePath.slice(0, -1) : pagePath) : null;
+    const users = [...document.querySelectorAll('[data-message-author-role="user"]')];
+    const last = users.at(-1);
+    return {
+      found: state.found, attachments: state.attachments.length, textEmpty: state.textEmpty, chatPath,
+      userCount: users.length, lastUserId: last?.getAttribute('data-message-id') || null,
+      sendPresent: Boolean(send), sendDisabled: Boolean(send?.disabled), sendAriaDisabled: send?.getAttribute('aria-disabled') || null,
+      sendLabel: send?.getAttribute('aria-label') || null,
+      generating: Boolean(document.querySelector('button[data-testid="stop-button"], button[aria-label="Stop generating"], button[aria-label="Stop streaming"]'))
+    };
+  }, inspectChatComposer);
+  return (await cdpEvaluate(tabId, expression))?.value || {};
+}
+
+async function cdpSendAttachedFiles(tabId, fileCount, { beforeClick = null, timeoutMs = 90_000, onSendCommit = null, retryPolicy = null } = {}) {
+  const policy = retryPolicy || await configuredComposerMediaRetry();
   cdpLog("Sending attached file batch without Composer text", { tabId, fileCount });
-  await cdpClickEnabledSendButton(tabId, timeoutMs, beforeClick, onSendCommit);
-  cdpLog("Attached file batch sent", { tabId, fileCount });
+  await cdpClickEnabledSendButton(tabId, timeoutMs, beforeClick, onSendCommit, policy);
+  cdpLog("Attached file batch sent and acknowledged", { tabId, fileCount });
 }
 
 async function cdpInsertBrowserContinuation(tabId, currentChatTarget, fileNames, composerGuardToken, continuationText, checkCancelled) {
@@ -2202,6 +2319,7 @@ async function cdpAttachFilesNow(filePathValues, { onPhase = null, currentChatTa
   if (!Array.isArray(filePathValues) || !filePathValues.length) {
     throw cdpError("A file batch must contain at least one eligible file.");
   }
+  const retryPolicy = await configuredComposerMediaRetry();
   const filePaths = filePathValues.map(cdpAbsoluteFilePath);
   const fileNames = filePaths.map((filePath) => filePath.split(/[/\\\\]/).pop());
   cdpLog("File batch attachment started", { fileCount: filePaths.length, fileNames });
@@ -2215,6 +2333,7 @@ async function cdpAttachFilesNow(filePathValues, { onPhase = null, currentChatTa
   let keepGuard = false;
   try {
     await cdpAttach(tab.id); attached = true;
+    await cdpPrepareBackgroundChat(tab.id);
     await cdpCommand(tab.id, "Page.enable"); await cdpCommand(tab.id, "DOM.enable"); await cdpCommand(tab.id, "Runtime.enable");
     cdpLog("Required CDP domains enabled", { tabId: tab.id, domains: ["Page", "DOM", "Runtime"] });
     if (currentChatTarget) {
@@ -2238,7 +2357,7 @@ async function cdpAttachFilesNow(filePathValues, { onPhase = null, currentChatTa
     checkCancelled?.();
     await cdpCommand(tab.id, "DOM.setFileInputFiles", { files: filePaths, backendNodeId: chooser.backendNodeId });
     cdpLog("DOM.setFileInputFiles completed", { tabId: tab.id, backendNodeId: chooser.backendNodeId, fileCount: filePaths.length });
-    await cdpWaitForAttachmentAccepted(tab.id, fileNames);
+    await cdpWaitForAttachmentAccepted(tab.id, fileNames, retryPolicy, async () => { checkCancelled?.(); if (currentChatTarget) await requireCurrentChatTarget(currentChatTarget); });
     checkCancelled?.();
     if (onPhase) await onPhase("composerAccepted");
     if (deferSend && currentChatTarget) {
@@ -2252,14 +2371,15 @@ async function cdpAttachFilesNow(filePathValues, { onPhase = null, currentChatTa
     await cdpSendAttachedFiles(tab.id, filePaths.length, currentChatTarget ? {
       timeoutMs: 5 * 60_000,
       beforeClick: async () => { checkCancelled?.(); await beforeSend?.(); await assertCurrentChatComposer(currentChatTarget, { fileNames, guardToken: composerGuardToken, expectedText: continuationText }); checkCancelled?.(); },
-      onSendCommit
-    } : {});
+      onSendCommit, retryPolicy
+    } : { retryPolicy });
     cdpLog("File batch completed", { tabId: tab.id, fileCount: filePaths.length });
     return { ok: true, tabId: tab.id, fileCount: filePaths.length };
   } finally {
     // Never remove uploaded attachments or clear a draft during cleanup.
     if (composerGuardToken && attached && !keepGuard) await cdpEvaluate(tab.id, `(${disposeChatComposerGuard.toString()})(${JSON.stringify(composerGuardToken)})`).catch(() => {});
     if (attached) await cdpCommand(tab.id, "Page.setInterceptFileChooserDialog", { enabled: false }).then(() => cdpLog("File-chooser interception disabled", { tabId: tab.id })).catch((error) => cdpErrorLog("Could not disable file-chooser interception", error));
+    if (attached) await cdpCommand(tab.id, "Emulation.setFocusEmulationEnabled", { enabled: false }).catch(() => {});
     if (attached) await cdpDetach(tab.id);
   }
 }
@@ -2271,6 +2391,7 @@ async function cdpSendPreparedChatFiles(task) {
   try {
     assertMediaToChatNotCancelled(task);
     await cdpAttach(tab.id); attached = true;
+    await cdpPrepareBackgroundChat(tab.id);
     await cdpCommand(tab.id, "Page.enable"); await cdpCommand(tab.id, "Runtime.enable");
     await cdpSendAttachedFiles(tab.id, fileNames.length, {
       timeoutMs: 5 * 60_000,
@@ -2285,6 +2406,7 @@ async function cdpSendPreparedChatFiles(task) {
     if (attached) {
       await cdpEvaluate(tab.id, `(${disposeChatComposerGuard.toString()})(${JSON.stringify(guardToken)})`).catch(() => {});
       task.prepared.guardDisposed = true;
+      await cdpCommand(tab.id, "Emulation.setFocusEmulationEnabled", { enabled: false }).catch(() => {});
       await cdpDetach(tab.id);
     }
   }
@@ -2314,7 +2436,10 @@ async function requireCurrentChatTarget(target) {
   if (!tab) {
     throw localAgentError("MEDIA_TO_CHAT_TARGET_NOT_FOUND", "The originating ChatGPT tab was not found; no alternate tab will be used.");
   }
-  if (chatConversationPath(tab.url) !== target.chatPath) {
+  const matches = target.newChat === true
+    ? target.chatPath === "/" && tab.url === EXTERNAL_URLS.chatgptNewChat
+    : chatConversationPath(tab.url) === target.chatPath;
+  if (!matches) {
     throw localAgentError("MEDIA_TO_CHAT_TARGET_CHANGED", "The destination ChatGPT conversation was closed or changed; no Send click was made.");
   }
   return tab;
@@ -2973,7 +3098,7 @@ async function bindMediaToChatTarget(message, sender) {
     task.message = "Queued for the originating ChatGPT tab. Finish the current assistant response so Send can become available.";
     await persistMediaToChatTasks();
     await chrome.alarms.clear(`media-chat-bind:${task.taskId}`);
-    console.info(`[ResearchTube CDP] media_to_chat ${task.taskId} bound tabId=${target.tabId}`);
+    consoleAction(`[ResearchTube CDP] media_to_chat ${task.taskId} bound tabId=${target.tabId}`);
     void drainMediaToChatQueue();
     return { ok: true };
   } catch (error) {
@@ -3151,16 +3276,46 @@ async function bootstrapTunnel() {
   return startPolling();
 }
 
+async function configuredBrowserStudyOptions() {
+  try {
+    const document = await agentJsonRequest("/internal/tool-limits");
+    const enabled = document.browserStudyGroupTabs === undefined ? true : document.browserStudyGroupTabs;
+    if (typeof enabled !== "boolean") throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid browserStudyGroupTabs.");
+    const detailedLogging = document.browserStudyDetailedLogging === undefined ? true : document.browserStudyDetailedLogging;
+    if (typeof detailedLogging !== "boolean") throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid browserStudyDetailedLogging.");
+    return { groupTabs: enabled, detailedLogging };
+  } catch (error) {
+    if (["CONFIG_INVALID", "AGENT_INVALID_RESPONSE"].includes(error.code)) throw error;
+    // Browser-only research remains available without the optional Agent.
+    return { groupTabs: true, detailedLogging: true };
+  }
+}
+
+// Serialize timing records at the console boundary. DevTools Save as otherwise
+// exports collapsed objects as "Object" and discards every measurement.
+function browserDiagnosticLog(label, value) {
+  if (label === "timing") {
+    const record = { ...value, extensionVersion: EXTENSION_VERSION, atUtc: new Date().toISOString() };
+    consoleAction(`[ResearchTube Browser] timing ${JSON.stringify(record)}`);
+  } else consoleAction(`[ResearchTube Browser] ${label}`, value);
+  if (value.taskId && Number.isFinite(value.progressPercent)) void reportMcpToolToAgent("browser_resource_status", { taskId: value.taskId, status: value.status || "working", progressPercent: value.progressPercent });
+}
+
 const browserAgent = createBrowserAgent({
   id: createAsyncTaskId,
+  studyOptions: configuredBrowserStudyOptions,
+  groupTabs: async (tabIds, title) => {
+    const groupId = await chrome.tabs.group({ tabIds });
+    await chrome.tabGroups.update(groupId, { title, color: "blue", collapsed: false });
+  },
   getTab: tabId => chrome.tabs.get(tabId),
   duplicateTab: tabId => chrome.tabs.duplicate(tabId),
   restoreSource: tabId => chrome.tabs.update(tabId, { active: true }),
   createChatTab: (source, agent) => chrome.tabs.create({ url: EXTERNAL_URLS.chatgptNewChat, active: false, windowId: source.windowId, index: agent.index + 1 }),
-  waitReady: (tabId, checkStarting) => waitForBrowserDocument({
+  waitReady: (tabId, checkStarting, trace) => waitForBrowserDocument({
     getTab: id => chrome.tabs.get(id),
-    command: (id, method, params) => chrome.debugger.sendCommand({ tabId: id }, method, params),
-    onWaiting: elapsedSeconds => console.info("[ResearchTube Browser] waiting for site document", { elapsedSeconds })
+    command: (id, method, params) => trace.command(method, () => chrome.debugger.sendCommand({ tabId: id }, method, params)),
+    onWaiting: elapsedSeconds => consoleAction("[ResearchTube Browser] waiting for site document", { elapsedSeconds })
   }, tabId, checkStarting),
   updateStatus: async (tabIds, status) => {
     for (const tabId of tabIds) {
@@ -3169,60 +3324,69 @@ const browserAgent = createBrowserAgent({
       else browserAutomationBadges.set(tabId, status);
     }
     // Serialize toolbar writes so Stop cannot be overwritten by an older paint.
-    browserBadgeTail = browserBadgeTail.catch(() => {}).then(() => Promise.all(tabIds.map(tabId => paintBrowserAutomationBadge(tabId))));
+    browserBadgeTail = browserBadgeTail.catch(() => {}).then(() => Promise.allSettled(tabIds.map(tabId => paintBrowserAutomationBadge(tabId))));
     await browserBadgeTail;
   },
   attach: cdpAttach, detach: cdpDetach,
   command: (tabId, method, params, sessionId) => chrome.debugger.sendCommand({ tabId, ...(sessionId ? { sessionId } : {}) }, method, params),
   conversationPath: chatConversationPath,
-  startChat: (tabId, prompt, checkStarting, onPhase) => withChatFileAutomation(async () => {
-    checkStarting();
-    let attached = false;
-    const guardToken = crypto.randomUUID();
-    const verifyStartup = async (expectedText = null) => {
+  startChat: (tabId, prompt, checkStarting, onPhase, trace) => {
+    const queued = trace.begin("chat.queue");
+    return withChatFileAutomation(async () => {
+      queued({ outcome: "ready" });
       checkStarting();
-      const tab = await chrome.tabs.get(tabId);
-      if (tab.url !== EXTERNAL_URLS.chatgptNewChat) throw localAgentError("BROWSER_CHAT_CHANGED", "The new ChatGPT tab navigated before its study prompt was sent. No alternate chat was selected.");
-      const state = (await cdpEvaluate(tabId, chatComposerPageExpression(inspectChatComposer)))?.value;
-      if (!state?.found || composerAttachmentCount(state)) throw localAgentError("BROWSER_CHAT_CHANGED", "The new ChatGPT Composer contains restored or user-added attachments. They were preserved; no study prompt was sent.");
-      if (expectedText === null) {
-        if (!state.textEmpty) throw localAgentError("BROWSER_CHAT_CHANGED", "The new ChatGPT Composer contains a restored or user-added draft. It was preserved; no study prompt was sent.");
-      } else {
-        const text = (await cdpEvaluate(tabId, `(() => { const {composer}=(${resolveChatComposer.toString()})(); return composer ? (composer.value ?? composer.innerText ?? composer.textContent ?? '') : null; })()`))?.value;
-        const guard = (await cdpEvaluate(tabId, `(${readChatComposerGuard.toString()})(${JSON.stringify(guardToken)})`))?.value;
-        if (!guard?.present || guard.changed || normalizeComposerTextForComparison(text) !== normalizeComposerTextForComparison(expectedText)) throw localAgentError("BROWSER_CHAT_CHANGED", "The study prompt was edited before Send. No Send click was made.");
+      let attached = false;
+      const guardToken = crypto.randomUUID();
+      const chatCommand = (method, params) => trace.command(method, () => cdpCommand(tabId, method, params));
+      const evaluate = expression => trace.command("Runtime.evaluate", () => cdpEvaluate(tabId, expression));
+      const verifyStartup = async (expectedText = null) => {
+        checkStarting();
+        const tab = await chrome.tabs.get(tabId);
+        if (tab.url !== EXTERNAL_URLS.chatgptNewChat) throw localAgentError("BROWSER_CHAT_CHANGED", "The new ChatGPT tab navigated before its study prompt was sent. No alternate chat was selected.");
+        const state = (await evaluate(chatComposerPageExpression(inspectChatComposer)))?.value;
+        if (!state?.found || composerAttachmentCount(state)) throw localAgentError("BROWSER_CHAT_CHANGED", "The new ChatGPT Composer contains restored or user-added attachments. They were preserved; no study prompt was sent.");
+        if (expectedText === null) {
+          if (!state.textEmpty) throw localAgentError("BROWSER_CHAT_CHANGED", "The new ChatGPT Composer contains a restored or user-added draft. It was preserved; no study prompt was sent.");
+        } else {
+          const text = (await evaluate(`(() => { const {composer}=(${resolveChatComposer.toString()})(); return composer ? (composer.value ?? composer.innerText ?? composer.textContent ?? '') : null; })()`))?.value;
+          const guard = (await evaluate(`(${readChatComposerGuard.toString()})(${JSON.stringify(guardToken)})`))?.value;
+          if (!guard?.present || guard.changed || normalizeComposerTextForComparison(text) !== normalizeComposerTextForComparison(expectedText)) throw localAgentError("BROWSER_CHAT_CHANGED", "The study prompt was edited before Send. No Send click was made.");
+        }
+        checkStarting();
+      };
+      try {
+        await trace.span("chat.attachDebugger", () => cdpAttach(tabId)); attached = true;
+        await chatCommand("Runtime.enable");
+        await chatCommand("Emulation.setFocusEmulationEnabled", { enabled: true });
+        await chatCommand("Page.setWebLifecycleState", { state: "active" });
+        await trace.span("chat.document", () => waitForBrowserDocument({ getTab: id => chrome.tabs.get(id), command: (id, method, params) => trace.command(method, () => chrome.debugger.sendCommand({ tabId: id }, method, params)), onWaiting: elapsedSeconds => consoleAction("[ResearchTube Browser] waiting for ChatGPT document", { elapsedSeconds }) }, tabId, checkStarting, { requiredOrigin: "https://chatgpt.com" }));
+        await onPhase("waitingForComposer");
+        await cdpWaitForTextComposer(tabId, 120_000, { checkCancelled: checkStarting, requireComplete: false });
+        await onPhase("preparingPrompt");
+        await sleep(CDP_COMPOSER_PROMPT_RETRY_DELAY_MS);
+        await prepareCurrentChatComposer({ tabId, chatPath: "/", newChat: true }, "clear", checkStarting);
+        await verifyStartup();
+        const installed = (await evaluate(chatComposerPageExpression(installChatComposerGuard, [], guardToken, inspectChatComposer)))?.value;
+        if (!installed) throw localAgentError("BROWSER_CHAT_CHANGED", "The new Composer could not be monitored.");
+        await verifyStartup();
+        const authorized = (await evaluate(chatComposerPageExpression(authorizeChatComposerText, guardToken, prompt)))?.value;
+        if (!authorized) throw localAgentError("BROWSER_CHAT_CHANGED", "The new Composer changed before insertion. Its draft was preserved.");
+        checkStarting(); await chatCommand("Input.insertText", { text: prompt });
+        await onPhase("sendingPrompt");
+        await cdpClickEnabledSendButton(tabId, 120_000, () => verifyStartup(prompt), checkStarting);
+        await onPhase("confirmingChat");
+        return await waitForBrowserConversation({
+          getTab: id => chrome.tabs.get(id), conversationPath: chatConversationPath,
+          log: (label, value) => consoleAction(`[ResearchTube Browser] ${label}`, value)
+        }, tabId, checkStarting);
+      } finally {
+        if (attached) await evaluate(`(${disposeChatComposerGuard.toString()})(${JSON.stringify(guardToken)})`).catch(() => {});
+        if (attached) await chatCommand("Emulation.setFocusEmulationEnabled", { enabled: false }).catch(() => {});
+        if (attached) await cdpDetach(tabId);
       }
-      checkStarting();
-    };
-    try {
-      await cdpAttach(tabId); attached = true;
-      await cdpCommand(tabId, "Runtime.enable");
-      await cdpCommand(tabId, "Emulation.setFocusEmulationEnabled", { enabled: true });
-      await cdpCommand(tabId, "Page.setWebLifecycleState", { state: "active" });
-      await waitForBrowserDocument({ getTab: id => chrome.tabs.get(id), command: (id, method, params) => chrome.debugger.sendCommand({ tabId: id }, method, params), onWaiting: elapsedSeconds => console.info("[ResearchTube Browser] waiting for ChatGPT document", { elapsedSeconds }) }, tabId, checkStarting, { requiredOrigin: "https://chatgpt.com" });
-      await onPhase("waitingForComposer");
-      await cdpWaitForTextComposer(tabId, 120_000, { checkCancelled: checkStarting, requireComplete: false });
-      await onPhase("preparingPrompt");
-      await sleep(CDP_COMPOSER_PROMPT_RETRY_DELAY_MS); await verifyStartup();
-      const installed = (await cdpEvaluate(tabId, chatComposerPageExpression(installChatComposerGuard, [], guardToken, inspectChatComposer)))?.value;
-      if (!installed) throw localAgentError("BROWSER_CHAT_CHANGED", "The new Composer could not be monitored.");
-      await verifyStartup();
-      const authorized = (await cdpEvaluate(tabId, chatComposerPageExpression(authorizeChatComposerText, guardToken, prompt)))?.value;
-      if (!authorized) throw localAgentError("BROWSER_CHAT_CHANGED", "The new Composer changed before insertion. Its draft was preserved.");
-      checkStarting(); await cdpCommand(tabId, "Input.insertText", { text: prompt });
-      await onPhase("sendingPrompt");
-      await cdpClickEnabledSendButton(tabId, 120_000, () => verifyStartup(prompt), checkStarting);
-      await onPhase("confirmingChat");
-      return await waitForBrowserConversation({
-        getTab: id => chrome.tabs.get(id), conversationPath: chatConversationPath,
-        log: (label, value) => console.info(`[ResearchTube Browser] ${label}`, value)
-      }, tabId, checkStarting);
-    } finally {
-      if (attached) await cdpEvaluate(tabId, `(${disposeChatComposerGuard.toString()})(${JSON.stringify(guardToken)})`).catch(() => {});
-      if (attached) await cdpCommand(tabId, "Emulation.setFocusEmulationEnabled", { enabled: false }).catch(() => {});
-      if (attached) await cdpDetach(tabId);
-    }
-  }),
+    });
+  },
+  resourceCountLimit: async () => (await configuredToolLimits()).mediaToChatMaxFiles,
   resourceLimit: async () => (await configuredToolLimits()).mediaToChatMaxFileSizeMiB * 1048576,
   historyLimit: () => completedTaskHistoryLimit,
   saveResource: async (taskId, bytes, mimeType) => {
@@ -3241,22 +3405,25 @@ const browserAgent = createBrowserAgent({
     if (result.skippedFiles.length || result.localPaths.length !== paths.length) throw localAgentError("BROWSER_RESOURCE_TOO_LARGE", "The resource exceeds the configured current-chat upload maximum.");
     return result.localPaths;
   },
-  attachFiles: (files, options) => withChatFileAutomation(() => cdpAttachFilesNow(files, { currentChatTarget: options.target, composerPolicy: "requireEmpty", continuationText: options.continuation, beforeSend: options.beforeSend, checkCancelled: options.checkCancelled, onPhase: options.onPhase, onSendCommit: options.onSendCommit })),
-  schedule: work => setTimeout(() => { void work().catch(error => console.info(`[ResearchTube Browser] ${error.code || "BROWSER_UNAVAILABLE"}`)); }, 0),
-  log: (label, value) => {
-    console.info(`[ResearchTube Browser] ${label}`, value);
-    if (value.taskId && Number.isFinite(value.progressPercent)) void reportMcpToolToAgent("browser_resource_status", { taskId: value.taskId, status: value.status || "working", progressPercent: value.progressPercent });
-  }
+  attachFiles: (files, options) => {
+    const queued = options.trace.begin("resource.chatQueue", { taskId: options.taskId });
+    return withChatFileAutomation(() => {
+      queued({ outcome: "ready" });
+      return cdpAttachFilesNow(files, { currentChatTarget: options.target, composerPolicy: "requireEmpty", continuationText: options.continuation, beforeSend: options.beforeSend, checkCancelled: options.checkCancelled, onPhase: options.onPhase, onSendCommit: options.onSendCommit });
+    });
+  },
+  schedule: work => setTimeout(() => { void work().catch(error => consoleAction(`[ResearchTube Browser] ${error.code || "BROWSER_UNAVAILABLE"}`)); }, 0),
+  log: browserDiagnosticLog
 });
-chrome.debugger?.onEvent?.addListener((source, method, params) => { void browserAgent.onEvent(source, method, params).catch(error => console.info(`[ResearchTube Browser] ${error.code || "BROWSER_UNAVAILABLE"}`)); });
-chrome.debugger?.onDetach?.addListener(source => { void browserAgent.onDetached(source).catch(() => {}); });
+chrome.debugger?.onEvent?.addListener((source, method, params) => { void browserAgent.onEvent(source, method, params).catch(error => consoleAction(`[ResearchTube Browser] ${error.code || "BROWSER_UNAVAILABLE"}`)); });
+chrome.debugger?.onDetach?.addListener((source, reason) => { void browserAgent.onDetached(source, reason).catch(() => {}); });
 chrome.tabs?.onRemoved?.addListener(tabId => { void browserAgent.onRemoved(tabId).catch(() => {}).finally(() => { browserAutomationBadges.delete(tabId); browserAutomationToolbarTabs.delete(tabId); }); });
 chrome.tabs?.onUpdated?.addListener((tabId, change) => { void browserAgent.onUpdated(tabId, change).catch(() => {}); });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "researchtube_chat_target_bind") {
     bindMediaToChatTarget(message, sender).then(sendResponse).catch((error) => {
-      console.info(`[ResearchTube CDP] Chat target binding refused: ${error.code || "MEDIA_TO_CHAT_TARGET_NOT_FOUND"} ${safeErrorMessage(error)}`);
+      consoleAction(`[ResearchTube CDP] Chat target binding refused: ${error.code || "MEDIA_TO_CHAT_TARGET_NOT_FOUND"} ${safeErrorMessage(error)}`);
       sendResponse({ ok: false, errorCode: error.code || "MEDIA_TO_CHAT_TARGET_NOT_FOUND", error: safeErrorMessage(error) });
     });
     return true;
@@ -3323,24 +3490,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     chrome.tabs.create({ url, active: true }).then(() => sendResponse({ ok: true })).catch((error) => sendResponse({ ok: false, error: safeErrorMessage(error) }));
     return true;
   }
-  if (["browser-local-status", "browser-local-control"].includes(message?.type)) {
-    if (sender.id !== chrome.runtime.id || sender.tab || sender.url !== chrome.runtime.getURL("popup.html") || !Number.isInteger(message.tabId)) {
-      sendResponse({ ok: false, error: "Browser controls require the ResearchTube popup and an exact tab." }); return false;
-    }
-    if (message.type === "browser-local-status") { sendResponse({ ok: true, session: browserAgent.localStatus(message.tabId) }); return false; }
-    browserAgent.control(message.tabId, message.action).then(session => sendResponse({ ok: true, session })).catch(error => {
-      console.info(`[ResearchTube Browser] ${error.code || "BROWSER_UNAVAILABLE"}: ${safeErrorMessage(error)}`);
-      sendResponse({ ok: false, error: safeErrorMessage(error) });
-    });
-    return true;
-  }
   if (message?.type === "study-site") {
     // Only our popup may initiate a new controller, never an arbitrary page.
     if (sender.id !== chrome.runtime.id || sender.tab || sender.url !== chrome.runtime.getURL("popup.html")) {
       sendResponse({ ok: false, error: "Study this site must be started from the ResearchTube popup." }); return false;
     }
     browserAgent.start(message.tabId).then(sendResponse).catch(error => {
-      console.info(`[ResearchTube Browser] ${error.code || "BROWSER_UNAVAILABLE"}: ${safeErrorMessage(error)}`);
+      consoleAction(`[ResearchTube Browser] ${error.code || "BROWSER_UNAVAILABLE"}: ${safeErrorMessage(error)}`);
       sendResponse({ ok: false, error: safeErrorMessage(error) });
     });
     return true;
@@ -3361,12 +3517,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
   if (message?.type === "researchtube_media_viewer_resolve") {
-    console.info(`[ResearchTube media worker ${EXTENSION_VERSION}] media resolve received`);
+    consoleAction(`[ResearchTube media worker ${EXTENSION_VERSION}] media resolve received`);
     showWorkspaceImage(message.path).then((data) => {
-      console.info(`[ResearchTube media worker ${EXTENSION_VERSION}] media resolve completed`);
+      consoleAction(`[ResearchTube media worker ${EXTENSION_VERSION}] media resolve completed`);
       sendResponse({ ok: true, data });
     }).catch((error) => {
-      console.info(`[ResearchTube media worker ${EXTENSION_VERSION}] media resolve failed`, safeErrorMessage(error));
+      consoleAction(`[ResearchTube media worker ${EXTENSION_VERSION}] media resolve failed`, safeErrorMessage(error));
       sendResponse({ ok: false, error: safeErrorMessage(error) });
     });
     return true;
@@ -5275,7 +5431,7 @@ async function ensureCaptureFrameOffscreenDocument() {
     captureFrameOffscreenPromise = null;
     if (error?.code) throw error;
     const detail = String(error?.message || error || "Unknown offscreen-document error.");
-    console.info("[ResearchTube] Chrome could not open the offscreen clipboard document.", error);
+    consoleAction("[ResearchTube] Chrome could not open the offscreen clipboard document.", error);
     throw localAgentError("CLIPBOARD_UNAVAILABLE", "Chrome could not open its local clipboard helper.", detail);
   }
 }
@@ -5286,20 +5442,20 @@ async function copyCaptureFrameToClipboard(message) {
     const result = await chrome.runtime.sendMessage({ type: "researchtube_copy_capture_frame", ...message });
     if (!result?.ok) {
       const detail = String(result?.message || "The offscreen clipboard document returned no success response.");
-      console.info("[ResearchTube] The offscreen clipboard document rejected the request.", { kind: message.kind, detail });
+      consoleAction("[ResearchTube] The offscreen clipboard document rejected the request.", { kind: message.kind, detail });
       throw localAgentError("CLIPBOARD_UNAVAILABLE", "Chrome could not update the local clipboard.", detail);
     }
   } catch (error) {
     if (error?.code) throw error;
     const detail = String(error?.message || error || "Unknown clipboard messaging error.");
-    console.info("[ResearchTube] Chrome clipboard messaging failed.", error);
+    consoleAction("[ResearchTube] Chrome clipboard messaging failed.", error);
     throw localAgentError("CLIPBOARD_UNAVAILABLE", "Chrome could not update the local clipboard.", detail);
   }
 }
 
 async function copyCaptureFramePath(path) {
   const logicalPath = normalizeWorkspacePath(path, "path");
-  console.info("[ResearchTube] Copying captured-frame workspace path through the Chrome clipboard helper.");
+  consoleAction("[ResearchTube] Copying captured-frame workspace path through the Chrome clipboard helper.");
   await copyCaptureFrameToClipboard({ kind: "path", text: logicalPath });
   return { path: logicalPath, action: "copiedPath" };
 }
@@ -5395,7 +5551,7 @@ async function pollOnceInternal() {
     await refreshActionBadge();
     return { ok: true, handled: commands.length };
   } catch (error) {
-    console.info("ResearchTube:", error);
+    consoleAction("ResearchTube:", error);
     await chrome.storage.local.set({ lastStatus: `error: ${String(error)}` });
     await setActionBadge("connection-error");
     return { ok: false, error: String(error) };
@@ -5476,7 +5632,7 @@ async function setActionBadge(state) {
   } catch (error) {
     // The extension remains functional even if Chrome is restarting or the
     // toolbar action is temporarily unavailable.
-    console.debug("ResearchTube badge update failed:", error);
+    consoleAction("ResearchTube badge update failed:", error);
   }
 }
 
@@ -5492,7 +5648,7 @@ async function paintCameraRecordingBadge() {
     await chrome.action.setTitle({ title: isVideo ? "ResearchTube: camera video recording" : "ResearchTube: camera audio recording" });
     await repaintBrowserAutomationBadges();
   } catch (error) {
-    console.debug("ResearchTube camera recording badge update failed:", error);
+    consoleAction("ResearchTube camera recording badge update failed:", error);
   }
 }
 
@@ -5615,7 +5771,7 @@ async function readCaptureFrameWidgetHtml(uri = CAPTURE_FRAME_WIDGET_URI) {
   if (!response.ok) throw new Error("The bundled workspace-image widget could not be read.");
   const html = await response.text();
   const widgetVersion = html.match(/const WIDGET_VERSION = "([^"]+)";/)?.[1] || "unknown";
-  console.info(`[ResearchTube media resource] extension=${EXTENSION_VERSION} widget=${widgetVersion} requested=${uri} current=${CAPTURE_FRAME_WIDGET_URI}`);
+  consoleAction(`[ResearchTube media resource] extension=${EXTENSION_VERSION} widget=${widgetVersion} requested=${uri} current=${CAPTURE_FRAME_WIDGET_URI}`);
   if (widgetVersion !== EXTENSION_VERSION) throw new Error("The bundled media widget version differs from the Extension. Replace the complete Extension folder.");
   const timeout = await configuredImageWidgetTimeout();
   return html.replace("const IMAGE_HANDSHAKE_TIMEOUT_SECONDS = 10;", `const IMAGE_HANDSHAKE_TIMEOUT_SECONDS = ${timeout};`);
@@ -5681,7 +5837,7 @@ async function handleMcpRequest(request) {
     const tools = await enabledMcpToolDefinitions();
     const enabledTimers = TIMER_TOOL_NAMES.filter((name) => tools.some((tool) => tool.name === name));
     const disabledTimers = TIMER_TOOL_NAMES.filter((name) => !enabledTimers.includes(name));
-    console.info(`[ResearchTube MCP] tools/list extension=${EXTENSION_VERSION} tools=${tools.length} timers=${enabledTimers.join(",") || "none"} disabledTimers=${disabledTimers.join(",") || "none"}`);
+    consoleAction(`[ResearchTube MCP] tools/list extension=${EXTENSION_VERSION} tools=${tools.length} timers=${enabledTimers.join(",") || "none"} disabledTimers=${disabledTimers.join(",") || "none"}`);
     return { jsonrpc: "2.0", id: request.id, result: { tools } };
   }
   if (request?.method === "resources/list") {
@@ -6078,7 +6234,7 @@ async function executeCaptureFrameWidgetActionToolCall(id, tool, path, action) {
     void recordCommandDiagnostic("succeeded", { tool, elapsed_ms: Date.now() - startedAt, output: result });
     return jsonToolResult(id, result);
   } catch (error) {
-    console.info(`[ResearchTube] ${tool} failed.`, error);
+    consoleAction(`[ResearchTube] ${tool} failed.`, error);
     void recordCommandDiagnostic("failed", { tool, elapsed_ms: Date.now() - startedAt, error_code: error?.code || null, error: searchDiagnosticMessage(error) });
     // During capture-action development the ChatGPT widget console is the
     // user's most convenient diagnostic surface. These actions never include
@@ -6246,7 +6402,7 @@ function recordSearchDiagnostic(event, fields = {}) {
       entries.push(entry);
       await chrome.storage.local.set({ searchDiagnostics: entries.slice(-SEARCH_DIAGNOSTIC_MAX_ENTRIES) });
     })
-    .catch((error) => console.debug("ResearchTube search diagnostics write failed:", error));
+    .catch((error) => consoleAction("ResearchTube search diagnostics write failed:", error));
   return searchDiagnosticWrite;
 }
 

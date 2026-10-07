@@ -16,12 +16,16 @@ function worker() {
   const pages = new Map([...tabs.keys()].map(id => {
     const page = pageFixture();
     page.document.readyState = 'complete';
+    const originalQuery = page.document.querySelector;
+    page.document.querySelector = selector => selector.startsWith('button[data-testid=') ? null : originalQuery(selector);
+    const originalQueryAll = page.document.querySelectorAll;
+    page.document.querySelectorAll = selector => selector === '[data-message-author-role="user"]' ? [] : originalQueryAll(selector);
     page.sendButton = { disabled: false, getAttribute: () => '', getBoundingClientRect: () => ({ left: 200, top: 100, width: 20, height: 20 }) };
     page.root.querySelector = selector => selector === 'button[type="submit"]' ? page.sendButton : null;
     return [id, page];
   }));
   class Clock extends Date { static now() { return now; } }
-  const context = vm.createContext({ URL, Intl, TextEncoder, TextDecoder, AbortController, crypto: webcrypto, Date: Clock,
+  const context = vm.createContext({ URL, Intl, TextEncoder, TextDecoder, AbortController, crypto: webcrypto, Date: Clock, performance: { now: () => now },
     console: { info() {}, warn() {}, error() {} },
     setTimeout: (fn, ms) => { const id = ++timerId; timers.set(id, { fn, deadline: now + ms }); return id; },
     clearTimeout: id => timers.delete(id),

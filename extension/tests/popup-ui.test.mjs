@@ -100,36 +100,67 @@ vm.runInNewContext("renderAgentStatus({available: false}, 17844)", popupContext)
 assert.equal(element("agent-status").textContent, "Unavailable · 17844");
 console.log("popup nonblocking Agent status: ok");
 
-// Popup controls bind once to the opened tab, even if another window gains focus.
-const browserElements = new Map(), listeners = new Map(), browserMessages = [], browserTimers = [];
-let activePopupTab = 42, popupHidden;
-const browserElement = id => {
-  if (!browserElements.has(id)) browserElements.set(id, {textContent:'',className:'',hidden:false,disabled:false,addEventListener:(type,callback)=>listeners.set(id,callback)});
-  return browserElements.get(id);
-};
-let browserState = {state:'starting',phase:'waitingForPage',statusMessage:'Waiting for the site document…',error:null};
-const browserContext = {
- document:{getElementById:browserElement},URL,console,
- window:{close(){},addEventListener:(event,callback)=>{popupHidden=callback;}},
- setTimeout:callback=>{browserTimers.push(callback);return browserTimers.length;},
- chrome:{tabs:{query:async()=>[{id:activePopupTab,url:'https://site.test'}]},runtime:{
-  openOptionsPage(){},sendMessage:async message=>{
-   browserMessages.push(message);
-   if(message.type==='status')return {configured:true,tunnelId:'test',extensionVersion:'2.2.69',requiredAgentInterfaceVersion:75,youtubeSearch:{}};
-   if(message.type==='agent-status')return {available:false};
-   assert.equal(message.tabId,42);
-   if(message.type==='browser-local-control')browserState={...browserState,state:message.action==='stop'?'stopped':message.action==='pause'?'paused':'running',statusMessage:message.action};
-   return {ok:true,session:browserState};
-  }
- }}
-};
-vm.runInNewContext(script,browserContext);await new Promise(resolve=>setImmediate(resolve));
-assert.equal(browserElement('browser-session').hidden,false);assert.equal(browserElement('browser-pause').disabled,true);assert.equal(browserElement('browser-stop').disabled,false);
-activePopupTab=81;browserState={...browserState,state:'running',statusMessage:'Studying this page'};browserTimers.shift()();await new Promise(resolve=>setImmediate(resolve));
-assert.equal(browserElement('browser-pause').disabled,false);await listeners.get('browser-pause')();assert.equal(browserElement('browser-resume').disabled,false);
-await listeners.get('browser-resume')();assert.equal(browserElement('browser-pause').disabled,false);
-await listeners.get('browser-stop')();assert.equal(browserElement('browser-stop').disabled,true);
-assert.deepEqual(browserMessages.filter(m=>m.type==='browser-local-control').map(m=>[m.action,m.tabId]),[['pause',42],['resume',42],['stop',42]]);
-popupHidden();browserTimers.shift()();await new Promise(resolve=>setImmediate(resolve));
-assert.equal(browserTimers.length,0,'closing popup ends status polling');
-console.log('Browser popup: startup progress, exact-tab controls and closed-popup cleanup: ok');
+// Exactly one filled action, selected before connection/Agent checks finish.
+assert.match(html, /id="chatgpt" hidden>Study this site/);
+for (const id of ["describe-video", "chatgpt"]) {
+  const button = html.match(new RegExp(`<button id="${id}"[^>]*>`))[0];
+  assert.doesNotMatch(button, /secondary|class="link/, `${id} uses the filled primary style`);
+}
+assert.match(css, /button\{[^}]*background:var\(--blue\);color:#fff/);
+const actionCases = [
+  ["https://www.youtube.com/watch?v=dod4cpb0z1k", true],
+  ["https://www.youtube.com/watch?v=dod4cpb0z1k&list=PL_test&t=20", true],
+  ["https://www.youtube.com/shorts/dod4cpb0z1k?feature=share", true],
+  ["https://www.youtube.com/", false],
+  ["https://www.youtube.com/@ResearchTube", false],
+  ["https://www.youtube.com/results?search_query=research", false],
+  ["https://www.youtube.com/playlist?list=PL_test", false],
+  ["https://www.youtube.com/watch", false],
+  ["https://www.youtube.com/watch?v=invalid", false],
+  ["https://example.com/watch?v=dod4cpb0z1k", false],
+];
+for (const [url, video] of actionCases) {
+  const controls = new Map();
+  const getControl = id => {
+    if (!controls.has(id)) controls.set(id, {
+      hidden: true, textContent: "", className: "", listeners: {},
+      addEventListener(event, callback) { this.listeners[event] = callback; },
+    });
+    return controls.get(id);
+  };
+  const sent = [];
+  const tab = { id: 42, url, title: "Current page", index: 2 };
+  const context = {
+    document: { getElementById: getControl }, URL, console,
+    window: { close() {} },
+    chrome: {
+      tabs: { query: async () => [tab] },
+      runtime: {
+        openOptionsPage() {},
+        sendMessage(message) {
+          sent.push(message);
+          // Keep status pending: contextual actions must not depend on it.
+          return message.type === "status" ? new Promise(() => {}) : Promise.resolve({ ok: true });
+        },
+      },
+    },
+  };
+  vm.runInNewContext(script, context);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(getControl("describe-video").hidden, !video, url);
+  assert.equal(getControl("chatgpt").hidden, video, url);
+  assert.equal(["describe-video", "chatgpt"].filter(id => !getControl(id).hidden).length, 1, url);
+  await getControl(video ? "describe-video" : "chatgpt").listeners.click();
+  const action = sent.at(-1);
+  assert.equal(action.type, video ? "describe-youtube-video" : "study-site", url);
+  if (video) assert.equal(action.tab.url, url);
+  else assert.equal(action.tabId, tab.id);
+}
+console.log("popup contextual filled actions: watch/Shorts describe only; other pages study only: ok");
+
+// Study this site has no popup controls, status polling or error panel.
+assert.doesNotMatch(html,/browser-session|browser-pause|browser-resume|browser-stop/);
+assert.doesNotMatch(script,/browser-local-status|browser-local-control|loadBrowserSession|renderBrowserSession/);
+assert.doesNotMatch(css,/browser-session|browser-controls/);
+assert.doesNotMatch(background,/browser-local-status|browser-local-control/);
+console.log('Browser popup: launch button only; no session panel, controls or polling: ok');

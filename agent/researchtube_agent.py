@@ -41,7 +41,7 @@ except ImportError:
     from task_history import TaskHistory
     from browser_resources import save_browser_resource
 
-AGENT_VERSION = "2.2.58"
+AGENT_VERSION = "2.2.62"
 INTERFACE_VERSION = 75
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
@@ -290,6 +290,31 @@ def configured_new_tools_default() -> bool:
     value = read_agent_config().get("newToolsEnabledByDefault", True)
     if not isinstance(value, bool):
         raise AgentApiError("CONFIG_INVALID", "newToolsEnabledByDefault must be a boolean.")
+    return value
+
+
+def configured_composer_media_retry() -> dict[str, int]:
+    config = read_agent_config()
+    result = {}
+    for name, default, maximum in [("composerMediaRetryCount", 15, 300), ("composerMediaRetryIntervalSeconds", 2, 60)]:
+        value = config.get(name, default)
+        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= maximum:
+            raise AgentApiError("CONFIG_INVALID", f"{name} must be an integer from 1 to {maximum}.")
+        result["retryCount" if name == "composerMediaRetryCount" else "retryIntervalSeconds"] = value
+    return result
+
+
+def configured_browser_study_detailed_logging() -> bool:
+    value = read_agent_config().get("browserStudyDetailedLogging", True)
+    if not isinstance(value, bool):
+        raise AgentApiError("CONFIG_INVALID", "browserStudyDetailedLogging must be a boolean.")
+    return value
+
+
+def configured_browser_study_group_tabs() -> bool:
+    value = read_agent_config().get("browserStudyGroupTabs", True)
+    if not isinstance(value, bool):
+        raise AgentApiError("CONFIG_INVALID", "browserStudyGroupTabs must be a boolean.")
     return value
 
 
@@ -5840,7 +5865,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
         elif method == "GET" and path == "/health":
             response_status, response_body = "200 OK", cached_public_health()
         elif method == "GET" and path == "/internal/tool-limits":
-            response_status, response_body = "200 OK", {"limits": configured_tool_limits(), "newToolsEnabledByDefault": configured_new_tools_default(), "mediaWidgetHandshakeTimeoutSeconds": configured_media_widget_handshake_timeout()}
+            response_status, response_body = "200 OK", {"limits": configured_tool_limits(), "newToolsEnabledByDefault": configured_new_tools_default(), "mediaWidgetHandshakeTimeoutSeconds": configured_media_widget_handshake_timeout(), "browserStudyGroupTabs": configured_browser_study_group_tabs(), "browserStudyDetailedLogging": configured_browser_study_detailed_logging(), "composerMediaRetry": configured_composer_media_retry()}
         elif method == "POST" and path == "/timer/start":
             response_status, response_body = "200 OK", await TIMER_TASKS.create(parse_json_body(body))
         elif method == "GET" and re.fullmatch(r"/tasks/timer/[^/]+", path):

@@ -1,3 +1,4 @@
+import { waitForComposerMedia } from "../composer-media-retry.js";
 import { pruneCompletedTasks } from "../task-history.js";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
@@ -35,6 +36,7 @@ const context = vm.createContext({
   pruneCompletedTasks, completedTaskHistoryLimit: 2000, developerNewToolsDefault: true, refreshTaskHistorySettings: async () => {},
   resolveChatComposer, chatComposerPageExpression, chatComposerAttachmentNamesMatch, inspectChatComposer, clickChatComposerAttachmentRemoval, resetChatComposerFileInputs, installChatComposerGuard, readChatComposerGuard, disposeChatComposerGuard,
   URL, console, Promise, crypto: webcrypto, setTimeout, clearTimeout,
+  EXTERNAL_URLS: { chatgptNewChat: "https://chatgpt.com/" },
   MEDIA_TO_CHAT_BIND_TIMEOUT_MS: 30_000,
   chrome: {
     runtime: { id:"test-extension" },
@@ -47,8 +49,11 @@ const context = vm.createContext({
   },
   cdpError: (message) => new Error(message),
   localAgentError: (code, message) => Object.assign(new Error(message), { code }),
+  consoleAction: () => {},
   cdpLog: () => {}, cdpErrorLog: () => {},
   cdpAbsoluteFilePath: (value) => value,
+  configuredComposerMediaRetry: async () => ({ retryCount: 15, retryIntervalSeconds: 2 }),
+  cdpPrepareBackgroundChat: async () => {},
   cdpAttach: async () => {}, cdpDetach: async () => { detached++; },
   cdpCommand: async (id, method, params) => {
     commands.push({ id, method, params });
@@ -259,6 +264,8 @@ console.log("media to chat: target binding, submission, skipped files, cancellat
 const waiting = vm.createContext({
   Date, Number,
   sleep: async () => {}, cdpLog: () => {}, cdpError: (message) => new Error(message),
+  waitForComposerMedia, configuredComposerMediaRetry: async () => ({ retryCount: 15, retryIntervalSeconds: 2 }),
+  cdpReadMediaSubmissionState: async () => ({ found: true, textEmpty: false, attachments: 1, sendPresent: true, generating: false }),
   CDP_ENABLED_SEND_BUTTON_EXPRESSION: 'ready', CDP_SEND_BUTTON_CENTER_EXPRESSION: 'center',
   cdpEvaluate: async (_id, expression) => ({ value: expression === 'center' ? { x: 1, y: 1 } : false }),
   cdpCommand: async () => { throw new Error('No mouse events are allowed after user editing'); }
@@ -415,3 +422,18 @@ assert.equal(actualSends,sendsBeforeMixed+1);
 assert.equal(live.composer.innerText,'');
 assert.deepEqual([...live.run(inspectChatComposer).attachments].map(card=>card.name),['result.pdf']);
 console.log('media to chat: clear removes every mixed initial attachment before uploading and Send');
+
+resetPage(); tabUrl = 'https://chatgpt.com/';
+live.composer.innerText = 'restored new-chat draft';
+const restored = live.button('Remove restored.png', 'restored.png', { markedCard: true });
+restored.click = () => { live.root.cards = []; live.root.controls = []; };
+const uploadBeforeStartup = actualUploads;
+await context.prepareCurrentChatComposer({ tabId: 42, chatPath: '/', newChat: true }, 'clear');
+assert.equal(live.composer.innerText, '');
+assert.equal(live.run(inspectChatComposer).attachments.length, 0);
+assert.equal(actualUploads, uploadBeforeStartup);
+await assert.rejects(context.requireCurrentChatTarget({ tabId: 42, chatPath: '/' }), /closed or changed/);
+live.composer.innerText = 'KEEP USER DRAFT'; tabUrl = 'https://chatgpt.com/c/example';
+await assert.rejects(context.prepareCurrentChatComposer({ tabId: 42, chatPath: '/', newChat: true }, 'clear'), /closed or changed/);
+assert.equal(live.composer.innerText, 'KEEP USER DRAFT');
+console.log('Startup clear: text and attachment removal only for an explicitly captured new-chat tab, navigation stops before clearing: ok');

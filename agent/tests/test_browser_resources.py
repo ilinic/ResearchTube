@@ -27,9 +27,16 @@ class BrowserResourceTests(unittest.TestCase):
         result = self.save()
         self.assertEqual(set(result), {'workspacePath', 'mimeType', 'sizeBytes'})
         self.assertEqual(result['mimeType'], 'image/png')
-        self.assertTrue(result['workspacePath'].startswith('browser-resources/'))
+        self.assertTrue(result['workspacePath'].startswith('study-this-site/'))
         self.assertEqual((self.workspace / result['workspacePath']).read_bytes(), self.png)
         self.assertNotIn(str(self.workspace), str(result))
+
+    def test_multiple_receipts_keep_distinct_files_and_original_bytes(self):
+        receipts = [self.save(data=self.png + suffix, task_id=task_id) for task_id, suffix in [("tsk_abcdefghij", b"first"), ("tsk_klmnopqrst", b"second")]]
+        self.assertEqual(len({item["workspacePath"] for item in receipts}), 2)
+        for item, suffix in zip(receipts, [b"first", b"second"]):
+            self.assertTrue(item["workspacePath"].startswith("study-this-site/"))
+            self.assertEqual((self.workspace / item["workspacePath"]).read_bytes(), self.png + suffix)
 
     def test_does_not_overwrite(self):
         first = self.save()
@@ -49,7 +56,7 @@ class BrowserResourceTests(unittest.TestCase):
         outside.mkdir()
         self.workspace.mkdir()
         try:
-            (self.workspace / 'browser-resources').symlink_to(outside, target_is_directory=True)
+            (self.workspace / 'study-this-site').symlink_to(outside, target_is_directory=True)
         except OSError:
             self.skipTest('symlinks unavailable')
         with self.assertRaises(agent.AgentApiError) as caught:

@@ -34,7 +34,7 @@
     },
     "mediaToChatMaxFiles": {
       "value": 5,
-      "comment": "Maximum Workspace files in one media_to_chat batch; default 5, range 1–100. Independent of the Library limit."
+      "comment": "Maximum Workspace files in one media_to_chat or Browser Agent resourceIds batch; default 5, range 1–100. Independent of the Library limit."
     },
     "mediaToChatMaxFileSizeMiB": {
       "value": 20,
@@ -52,5 +52,21 @@
   "newToolsEnabledByDefault": {
     "value": true,
     "comment": "Default activation of automatically discovered custom tools without a saved individual preference. true enables those custom tools; false leaves them disabled. Newly introduced built-in ResearchTube tools are enabled independently of this setting. Existing individual tool choices are preserved. The Extension reads this from the Agent, using its last known value (initially true) if unavailable. Refresh the MCP schema after discovering custom tools."
+  },
+  "composerMediaRetryCount": {
+    "value": 15,
+    "comment": "Maximum repeated checks after the initial immediate check for Composer file acceptance, enabled Send and post-click submission acknowledgement. Default 15; integer 1–300. Files are inserted once. Enabled Send may be dispatched again while the same guarded payload remains unacknowledged; stop immediately when submission is confirmed. Cancellation/user-edit/target guards remain active before Send. Active ChatGPT generation has its separate existing response wait. Read for each attachment/send operation."
+  },
+  "composerMediaRetryIntervalSeconds": {
+    "value": 2,
+    "comment": "Seconds between Composer media checks. Default 2; integer 1–60. With 15 retries the normal budget is about 30 seconds plus operation latency. Successful acceptance/readiness/acknowledgement ends polling immediately; no fixed delay is imposed when ready. Applies to media_to_chat, artifact addToChat, Browser Agent resources and Library transfers."
+  },
+  "browserStudyDetailedLogging": {
+    "value": true,
+    "comment": "Detailed Study this site timing diagnostics in the Extension service-worker console. Default true during optimization; set false for normal compact logs. Read once per new study session; existing sessions keep their setting. Logs stage durations, CDP method/count/duration summaries, node/byte counts and gaps between page tool calls; never page text, prompts, resource URLs, file paths or CDP bodies. Gaps include client/model/user waiting and are not pure model processing time."
+  },
+  "browserStudyGroupTabs": {
+    "value": true,
+    "comment": "Group the two new Study this site tabs (site copy and dedicated ChatGPT conversation). Default true; false leaves them ungrouped. Uses a short RT · page title, or hostname when untitled. The source tab is untouched. Read on each new study session; groups already created are unchanged."
   }
 }

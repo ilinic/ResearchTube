@@ -45,7 +45,7 @@ def save_browser_resource(body: bytes, task_id: str, mime_type: str, maximum: in
         normalized_mime, extension = resource_format(body, mime_type.split(";", 1)[0].strip().lower())
     except ValueError as error:
         raise error_type("BROWSER_RESOURCE_INVALID", str(error)) from error
-    logical = f"browser-resources/resource [browser_{task_id}].{extension}"
+    logical = f"study-this-site/resource [browser_{task_id}].{extension}"
     output = resolver.resolve_destination(logical, field_name="workspacePath", error_code="BROWSER_INVALID")
     output.physical_path.parent.mkdir(parents=True, exist_ok=True)
     # Re-resolve after mkdir to detect a substituted/symlinked output directory.

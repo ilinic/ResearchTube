@@ -176,7 +176,7 @@ Do not close the Translate tab as a standard troubleshooting step; reuse is inte
 - Do not navigate the destination tab to another conversation during a task. Switching away to another tab does not change the captured destination.
 - A count-limit rejection names the configured maximum. Check `mediaToChatMaxFiles` in `agent/agent-config.json`; Library uses a separate setting.
 - `skippedFiles` reports oversized files and the applicable size threshold. If every file is skipped, no chooser opens. Check `mediaToChatMaxFileSizeMiB` and ChatGPT's own upload restrictions.
-- A completed task confirms the Send click. For failures or an Extension restart, inspect the chat before retrying to avoid duplicate uploads; do not delete Workspace source files.
+- A completed file-delivery task confirms both the Send click and a subsequent UI acknowledgement (new user turn or cleared Composer). For failures or an Extension restart, inspect the chat before retrying to avoid duplicate uploads; do not delete Workspace source files.
 
 ## Current-chat task fails at attachment verification (80%)
 
@@ -244,9 +244,32 @@ Use the creation tool's taskId with media_task_status. If creation completed and
 - `PAGE_CHANGED`: observe the current page again and use its new node/resource IDs. `STALE_NODE`: the element changed; expand/observe again rather than retrying a blind click.
 - Startup remains at conversation confirmation while ChatGPT saves its temporary `local-chatgpt:` conversation. The worker console reports `waiting for saved conversation` once, then `conversation confirmed` with the saved path. `BROWSER_CHAT_NOT_FOUND` after the bounded wait means saving was not confirmed; the prompt and tabs remain. Start a fresh Study this site session after resolving the connection issue.
 - If `BROWSER_CHAT_CHANGED` appears immediately after the study prompt was sent, inspect the `[ResearchTube Browser] conversation mismatch` console entry: it records the expected and live chat paths and whether a tool or URL event initiated the check. Old URL-event snapshots are ignored only when the actual bound tab still shows the expected conversation.
-- `TAB_CLOSED`, `BROWSER_CHAT_CHANGED` or `DEBUGGER_DETACHED`: the session stopped. Start Study this site again when ready; no alternative tab will be selected.
-- `BROWSER_SESSION_PAUSED`: Resume from the Extension popup or tool. Reading the page while paused is permitted; mutations are blocked.
+- `TAB_CLOSED` means normal session completion, with stopped state and no error. `BROWSER_CHAT_CHANGED` or unexpected `DEBUGGER_DETACHED` fails the session. Start Study this site again when ready; no alternative tab will be selected.
+- `BROWSER_SESSION_PAUSED`: Ask ChatGPT to call browser_session_resume. Reading the page while paused is permitted; mutations are blocked.
 - Resource tasks preserve a saved Workspace path after delivery failure. A user draft/edited attachment blocks Send; no draft is cleared automatically. Cancel leaves the current Composer unchanged.
 - Oversized browser resources use the existing `limits.mediaToChatMaxFileSizeMiB` threshold. Authentication/CORS/cache limitations can produce an explicitly labeled image screenshot fallback. Original audio/video/document bytes must be obtainable; images alone have screenshot fallbacks.
-- If both tabs open but no prompt arrives, open the ResearchTube popup on the copy or dedicated chat to see the startup stage/error. The icon shows AUTO while controlled and ERR after failure; the source page is not covered by controls. Heavy pages do not need all resources to finish downloading. A missing document/Composer times out after two minutes per wait. Stop works while starting.
+- If both tabs open but no prompt arrives, inspect the Extension service-worker console for the startup stage/error. The icon shows AUTO while controlled and ERR after failure; the source page is not covered by controls. Heavy pages do not need all resources to finish downloading. A missing document/Composer times out after two minutes per wait. Stop works while starting.
 - Console entries use `[ResearchTube Browser]` and contain startup stages, the failed stage and specific error, plus short resource progress/session reasons. They do not dump page HTML, credentials or response bytes.
+
+For tab grouping, edit `browserStudyGroupTabs.value` in `agent-config.json` (`true` by default). The next study launch reads it. The two new tabs share a short blue RT group; the source tab is unaffected. Collapse/expand the group by clicking its title. Closing either study tab is normal completion and leaves the other tab and group intact.
+
+### Slow Study this site
+
+Enable `browserStudyDetailedLogging.value` in `agent-config.json` (currently shipped as `true`) and start a new study session. In the Extension service-worker console collect `[ResearchTube Browser] timing` records through the slow operation. All service-worker action lines start with a visible ISO UTC timestamp; timing records and ordinary details are serialized text and survive DevTools Save as without expansion. An older export containing only `timing Object` lacks all measurements and cannot be used to calculate durations; repeat the short study after updating the Extension. AX refresh, DOM enrichment, resource extraction/save, automation queue and enabled-Send waits are measured separately; `tool.gap` is outside page-tool execution and includes client/model/tunnel/user waiting. Set the value to `false` and start a new session to disable these extra records. Existing compact console diagnostics remain. See [Browser Agent timing diagnostics](features/BROWSER_AGENT.md#optional-timing-diagnostics) for fields and interpretation.
+
+## Background Composer upload or Send confirmation times out
+
+`composerMediaRetryCount.value` (default 15) and `composerMediaRetryIntervalSeconds.value` (default 2) in the single Agent configuration control shared media/file acceptance, enabled-Send readiness and post-click acknowledgement. Each stage checks immediately and then repeats up to the configured count: normally about 30 seconds plus request latency. Increasing these values can accommodate slow background tabs. Active ChatGPT generation still has its separate bounded response wait. The Extension emulates focus/lifecycle during the exact bound-tab operation without activating a different tab.
+
+Collect timestamped `[ResearchTube CDP] Composer media condition pending/confirmed` lines and task status. Success stops checks immediately. Cancellation or user edits before Send stop the operation and preserve the Composer. An enabled Send is retried while the same guarded payload remains unacknowledged, up to the configured budget. Files are never reattached; disabled Send is not clicked. A late UI acknowledgement ends attempts immediately. Inspect the chat before manually restarting an unconfirmed timed-out task.
+
+## Startup logs a Send click but stays at confirmingChat
+
+A successful `Input.dispatchMouseEvent` response proves only that Chrome accepted the input command, not that the background page submitted its Composer. Startup prompts and file delivery now prefer the Composer's own `form.requestSubmit()` path, already used for Describe this video. Only an enabled button belonging to the same form is submitted. For an unacknowledged enabled Send, retries alternate the form and trusted pointer paths; no-form layouts use pointer input. Both are bounded by the same Agent retry settings.
+
+Collect the timestamped `ChatGPT Composer form submission dispatched`, `ChatGPT Send pointer target`, `ChatGPT Send not yet confirmed` and subsequent startup/task lines. The form log means a dispatch, not completion. Startup must still reach the saved conversation URL; media must show a new user turn or cleared Composer. Missing Send during a changing response UI retains the prior bounded response wait without requiring a particular Stop label. Existing drafts/files are preserved on timeout.
+
+
+## Study requests several images
+
+Pass `resourceIds` from the latest observation instead of making separate tasks. Actual image bytes are saved under `study-this-site/`, then attached as one batch to the bound study conversation. Inspect the ordered task `files` and `submittedFiles`. A partial extraction/save failure does not upload a partial batch; earlier saved files remain. End the assistant response so ChatGPT can enable Send: the worker continues independently. Saving files locally does not override an OpenAI safety rejection or unsupported-upload restriction.

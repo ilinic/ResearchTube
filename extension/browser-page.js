@@ -48,17 +48,19 @@ export function createBrowserPage(session, host) {
     }
     return output;
   }
-  async function refresh() {
+  async function refreshNative() {
     await host.check(session, false);
     const version = session.pageVersion;
     const revision = session.revision;
     if (indexedVersion !== version) invalidate();
     const next = new Map(), nextRoots = [];
     const frameTargets = await frames();
+    let rawNodes = 0;
     for (const target of frameTargets) {
       let response;
       try { response = await command("Accessibility.getFullAXTree", { frameId: target.frameId }, target); }
       catch (error) { if (!target.sessionId && !next.size) throw browserError("BROWSER_UNAVAILABLE", "The current page Accessibility Tree is unavailable. Wait for page loading or check Chrome debugger permissions."); else continue; }
+      rawNodes += response.nodes?.length || 0;
       const raw = new Map((response.nodes || []).map(node => [node.nodeId, node]));
       const keyOf = axId => `${target.sessionId || "root"}:${target.frameId}:${axId}`;
       const identify = axId => { const key = keyOf(axId), oldId = identifiers.get(key), oldEntry = index.get(oldId), current = raw.get(axId); if (!oldId || !oldEntry || oldEntry.backendNodeId !== current.backendDOMNodeId || nodeSignature(oldEntry.raw) !== nodeSignature(current)) identifiers.set(key, `n_${version}_${++counter}`); return identifiers.get(key); };
@@ -89,8 +91,10 @@ export function createBrowserPage(session, host) {
     for (const [id, item] of resources) if (!index.has(item.entry.id)) resources.delete(id);
     // A frame navigation event may have advanced revision during the read.
     session.observedRevision = revision;
+    host.trace?.event("page.axCounts", { frameCount: frameTargets.length, rawNodes, indexedNodes: index.size });
     return metadata();
   }
+  const refresh = () => host.trace ? host.trace.span("page.axRefresh", refreshNative) : refreshNative();
   async function requireNode(id, requireDom = true) {
     await host.check(session, false);
     if (!String(id).startsWith(`n_${session.pageVersion}_`) || indexedVersion !== session.pageVersion) throw browserError("PAGE_CHANGED", "This node belongs to an earlier page. Observe the current page first.");
@@ -150,6 +154,7 @@ export function createBrowserPage(session, host) {
     const offset = input.offset ?? 0, maxNodes = input.maxNodes ?? 200, maxChars = input.maxChars ?? 16000;
     let chars = 0;
     const nodes = [];
+    const finish = host.trace?.begin("page.projectAndEnrich", { mode: input.mode || "outline" });
     for (const entry of entries.slice(offset, offset + maxNodes)) {
       if (["image", "video", "audio"].includes(entry.role)) await enrich(entry).catch(() => {});
       const remaining = Math.max(0, maxChars - chars);
@@ -158,6 +163,7 @@ export function createBrowserPage(session, host) {
       if (nodes.length && (cost > remaining || remaining < 3)) break;
       nodes.push(projected); chars += cost;
     }
+    finish?.({ outcome: "ok", returnedNodes: nodes.length, totalNodes: entries.length, characters: chars });
     const nextOffset = offset + nodes.length < entries.length ? offset + nodes.length : null;
     return { sessionId: session.sessionId, page: metadata(), roots: [...base], nodes, truncated: nextOffset !== null, nextOffset, totalNodes: entries.length };
   }

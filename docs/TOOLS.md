@@ -180,7 +180,7 @@ The original Workspace files are unchanged. A restarted Extension worker marks q
 
 ## Browser Agent
 
-Start **Study this site** from the Extension popup. The new dedicated chat receives its `sessionId` (`bas_` plus ten random URL-safe characters); every browser call requires it. Startup binds the saved conversation address, after ChatGPT replaces its temporary local address. AX/DOM data describes the page; only real attachments provide model visual input. See [Browser Agent](features/BROWSER_AGENT.md) for sessions, frame handling, limits and resource fallbacks.
+Start **Study this site** from the Extension popup. The two new tabs are grouped by default (`browserStudyGroupTabs` in Agent configuration); the source tab remains outside the new group. Closing either new tab ends the session normally, with `state: stopped`, `error: null` and `stopReason: TAB_CLOSED`. The popup has no session controls. The new dedicated chat receives its `sessionId` (`bas_` plus ten random URL-safe characters); every browser call requires it. Startup binds the saved conversation address, after ChatGPT replaces its temporary local address. AX/DOM data describes the page; only real attachments provide model visual input. See [Browser Agent](features/BROWSER_AGENT.md) for sessions, frame handling, limits and resource fallbacks.
 
 | Tool | Purpose |
 | --- | --- |
@@ -189,7 +189,7 @@ Start **Study this site** from the Extension popup. The new dedicated chat recei
 | `browser_get_node` | Inspect AX details, safe DOM attributes/geometry and resource references. |
 | `browser_get_text` | Read deferred AX subtree text with offset/limit. |
 | `browser_act` | Click, hover, replace editable text, key, scroll or select in the exact agent tab. |
-| `browser_get_resource` | Asynchronously extract one selected resource, save to Workspace and by default attach/send it in the dedicated chat. `addToChat:false` saves only. |
+| `browser_get_resource` | Asynchronously extract one `resourceId` or an ordered `resourceIds` batch, save files in `study-this-site/` and by default attach/send the entire batch in the dedicated chat. `addToChat:false` saves only. |
 | `browser_resource_status` | Read extraction, save and delivery progress plus confirmed outputs. |
 | `browser_resource_cancel` | Cancel before Send commits without deleting files or Composer attachments. |
 | `browser_session_status` | Read session state and safe current page metadata. |
@@ -198,3 +198,9 @@ Start **Study this site** from the Extension popup. The new dedicated chat recei
 | `browser_session_stop` | Stop work, release debugger and clear the automation indicator; tabs remain open. |
 
 Browser resource tasks use their own status/cancel pair rather than `media_task_status`. They are created from a browser resource reference, not a Workspace source path. Source URLs and browser handles are private. Browser tasks/session state are Extension-memory records; they are not resumed after a restart.
+
+Shared Composer file delivery uses `composerMediaRetryCount.value` (15) and `composerMediaRetryIntervalSeconds.value` (2) in Agent configuration: one immediate check plus up to 15 repeats at two-second intervals. These apply to `media_to_chat`, artifact `addToChat`, Browser Agent resources, startup prompts and Library transfers. Active ChatGPT generation retains its separate bounded wait. After files are accepted, an enabled Send may be dispatched repeatedly while the original guarded payload remains and submission has not been acknowledged. Attempts alternate the owning form's `requestSubmit` and trusted CDP pointer input; without a usable form they use pointer input. A new user turn, started response, saved startup conversation or empty Composer confirms submission and ends attempts immediately. Disabled Send is never clicked. Files are supplied once, never reattached during Send retries. An unconfirmed timeout preserves the Composer and saved files. See [Composer delivery retries](features/BROWSER_AGENT.md#composer-delivery-retries).
+
+The Extension continues scheduled extraction and delivery after the tool returns and the assistant response ends. Ending the response lets ChatGPT enable Send; it does not stop the background task. Browser resource tasks expose ordered `resourceIds` and `files` in status; singular `workspacePath`, `mimeType` and `extraction` remain available for one resource and are null for multiple resources. The batch count uses `limits.mediaToChatMaxFiles` (5 by default). If extraction/save fails partway, already saved paths remain in `files`; no partial batch is automatically sent.
+
+Study this site and Describe this video explicitly clear restored text and attachments in their own newly created ChatGPT tab before inserting the initial prompt. Existing user conversations are not cleared by these shortcuts. Later user edits still stop further submission.

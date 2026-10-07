@@ -95,6 +95,36 @@ class AgentConfigTests(unittest.TestCase):
             self.assertEqual(raised.exception.code, 'CONFIG_INVALID')
             self.assertIn('mediaWidgetHandshakeTimeoutSeconds', raised.exception.message)
 
+    def test_browser_study_grouping_defaults_and_live_edits(self):
+        self.assertTrue(self.original['browserStudyGroupTabs']['value'])
+        self.assertTrue(agent.configured_browser_study_group_tabs())
+        self.write({})
+        self.assertTrue(agent.configured_browser_study_group_tabs())
+        for value in [False, True]:
+            self.write({'browserStudyGroupTabs': {'value': value}})
+            self.assertIs(agent.configured_browser_study_group_tabs(), value)
+        for value in [None, 1, 0, 'true', [], {}]:
+            self.write({'browserStudyGroupTabs': {'value': value}})
+            with self.assertRaises(agent.AgentApiError) as raised:
+                agent.configured_browser_study_group_tabs()
+            self.assertEqual(raised.exception.code, 'CONFIG_INVALID')
+            self.assertIn('browserStudyGroupTabs', raised.exception.message)
+
+    def test_browser_study_logging_defaults_and_live_edits(self):
+        self.assertTrue(self.original['browserStudyDetailedLogging']['value'])
+        self.assertTrue(agent.configured_browser_study_detailed_logging())
+        self.write({})
+        self.assertTrue(agent.configured_browser_study_detailed_logging())
+        for value in [False, True]:
+            self.write({'browserStudyDetailedLogging': {'value': value}})
+            self.assertIs(agent.configured_browser_study_detailed_logging(), value)
+        for value in [None, 1, 0, 'true', [], {}]:
+            self.write({'browserStudyDetailedLogging': {'value': value}})
+            with self.assertRaises(agent.AgentApiError) as raised:
+                agent.configured_browser_study_detailed_logging()
+            self.assertEqual(raised.exception.code, 'CONFIG_INVALID')
+            self.assertIn('browserStudyDetailedLogging', raised.exception.message)
+
     def test_defaults_and_cleanup_fallback(self):
         self.write({})
         self.assertEqual(agent.configured_port(), 17843)
@@ -107,3 +137,20 @@ class AgentConfigTests(unittest.TestCase):
             agent.configured_tool_limits()
         self.write({'port': {'value': True}})
         self.assertEqual(agent.configured_port(), 17843)
+
+    def test_composer_retry_defaults_live_edits_and_validation(self):
+        defaults = {'retryCount': 15, 'retryIntervalSeconds': 2}
+        self.assertEqual(agent.configured_composer_media_retry(), defaults)
+        self.write({})
+        self.assertEqual(agent.configured_composer_media_retry(), defaults)
+        for name, output, maximum in [('composerMediaRetryCount', 'retryCount', 300),
+                                      ('composerMediaRetryIntervalSeconds', 'retryIntervalSeconds', 60)]:
+            for value in [1, maximum]:
+                self.write({name: {'value': value, 'comment': 'Human-readable explanation'}})
+                self.assertEqual(agent.configured_composer_media_retry()[output], value)
+            for value in [True, 0, -1, maximum + 1, 1.5, '2', None]:
+                self.write({name: {'value': value}})
+                with self.assertRaises(agent.AgentApiError) as raised:
+                    agent.configured_composer_media_retry()
+                self.assertEqual(raised.exception.code, 'CONFIG_INVALID')
+                self.assertIn(name, raised.exception.message)
