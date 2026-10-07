@@ -1284,6 +1284,25 @@ var ARTIFACT_TOOLS = Object.freeze([
   "camera_capture_frame",
   "clipboard_get"
 ]);
+var ARTIFACT_OPERATION_NAMES = Object.freeze({
+  youtube_download: "YouTube download",
+  youtube_storyboard_download: "Storyboard download",
+  media_capture_frame: "Frame extraction",
+  visual_map_create: "Visual map",
+  media_clip: "Media clipping",
+  camera_record_video: "Video recording",
+  camera_record_audio: "Audio recording",
+  system_speech_speak: "Speech",
+  media_capture_screen: "Screen capture",
+  media_image_crop: "Image crop",
+  camera_capture_frame: "Camera capture",
+  clipboard_get: "Clipboard read"
+});
+function artifactOperationMessage(tool, state = "working") {
+  const name = ARTIFACT_OPERATION_NAMES[tool] ?? "Media";
+  if (state === "working") return tool === "system_speech_speak" ? "Synthesizing speech." : `${name} in progress.`;
+  return `${name} task ${state}.`;
+}
 var ARTIFACT_STATUS_TOOLS = Object.freeze({
   youtube_download_get_task: "youtube_download",
   youtube_storyboard_get_task: "youtube_storyboard_download",
@@ -1306,7 +1325,7 @@ var object3 = (properties, required = Object.keys(properties)) => ({ type: "obje
 var errorSchema = object3({ code: { type: "string" }, message: { type: "string" } });
 var nullable = (schema) => ({ anyOf: [schema, { type: "null" }] });
 var artifactOptionsSchema = {
-  addToChat: { type: "boolean", default: false, description: "Upload all created files to the originating ChatGPT conversation and press Send as the second stage of this task. This supplies attachments to ChatGPT, unlike media_show which only displays a viewer. Default false only creates Workspace files." },
+  addToChat: { type: "boolean", default: false, description: "Upload all created files to the originating ChatGPT conversation and press Send as the second stage of this task. This supplies attachments to ChatGPT, unlike media_show which only displays a viewer. Default false runs only the requested operation." },
   composerPolicy: { type: "string", enum: ["requireEmpty", "clear"], default: "requireEmpty", description: "With addToChat: requireEmpty refuses an existing draft or attachments; clear explicitly discards both once before upload. New user edits stop Send and leave uploaded files attached." },
   sendDelaySeconds: { type: "number", minimum: 0, default: 0, description: "With addToChat: optional seconds between acceptance of all eligible attachments and Send. Readiness is checked separately. Status exposes waitingToSend, sendNotBefore and remainingSeconds. Cancellation leaves the Composer untouched." }
 };
@@ -1388,7 +1407,7 @@ function createArtifactTaskManager(host) {
     task.phase = status;
     task.error = failure;
     delete task.input;
-    task.statusMessage = failure?.message ?? (status === "completed" ? "All requested stages completed." : "Cancelled; created files and existing Composer contents are preserved.");
+    task.statusMessage = failure?.message ?? (status === "completed" && task.addToChat ? "All requested stages completed." : artifactOperationMessage(task.tool, status));
     if (status === "completed") task.progressPercent = 100;
     await host.unschedule(task.taskId);
     if (status !== "completed" && task.chatTaskId) {
@@ -1448,7 +1467,7 @@ function createArtifactTaskManager(host) {
         task.phase = "creating";
         task.creation.status = "working";
         task.creation.phase = "preparing";
-        task.statusMessage = "Creating Workspace artifacts.";
+        task.statusMessage = artifactOperationMessage(task.tool);
         await save(task);
         if (task.cancelRequested) {
           task.creation.status = "cancelled";
@@ -1480,8 +1499,8 @@ function createArtifactTaskManager(host) {
       }
       if (task.addToChat && !task.chatReleased) task.chat = await host.chatStatus(task.chatTaskId);
       if (!terminal(task.creation.status)) {
-        task.phase = task.cancelRequested ? "cancelling" : "creating";
-        task.statusMessage = task.cancelRequested ? "Stopping creation; preserving published files." : "Creating Workspace artifacts.";
+        task.phase = task.cancelRequested ? "cancelling" : task.creation.phase;
+        task.statusMessage = task.cancelRequested ? artifactOperationMessage(task.tool, "cancelling") : task.creation.data?.statusMessage || artifactOperationMessage(task.tool);
         task.nextCreationPoll = host.now() + Math.max(1e3, task.creation.data?.pollIntervalMs ?? 1e3);
         await save(task);
         await host.schedule(id, task.nextCreationPoll - host.now());
@@ -1546,7 +1565,7 @@ function createArtifactTaskManager(host) {
         status: "queued",
         phase: "preparing",
         progressPercent: 0,
-        statusMessage: "Artifact task queued.",
+        statusMessage: artifactOperationMessage(tool, "queued"),
         createdAt,
         lastUpdatedAt: createdAt,
         files: [],
@@ -1598,7 +1617,7 @@ function createArtifactTaskManager(host) {
       }
       task.cancelRequested = true;
       task.phase = "cancelling";
-      task.statusMessage = "Cancellation requested; files and Composer contents are preserved.";
+      task.statusMessage = artifactOperationMessage(task.tool, "cancelling");
       await save(task);
       if (!terminal(task.creation.status) && task.creation.taskId && !task.nativeCancelSent) {
         await host.producers[task.tool].cancel(task.creation.taskId);
@@ -1690,7 +1709,7 @@ function artifactToolDefinitions(definitions, chatSchema, widgetUri, readAnnotat
         ...tool._meta,
         ui: { resourceUri: widgetUri },
         "openai/outputTemplate": widgetUri,
-        "openai/toolInvocation/invoked": "Artifact task created."
+        "openai/toolInvocation/invoked": artifactOperationMessage(tool.name, "started")
       };
     } else if (Object.hasOwn(ARTIFACT_STATUS_TOOLS, tool.name)) {
       tool.outputSchema = schemaFor(ARTIFACT_STATUS_TOOLS[tool.name]);
@@ -2308,7 +2327,7 @@ var MCP_TOOL_SETTINGS = Object.freeze({
   online_share_status: { group: "online" },
   online_share_stop: { group: "online" }
 });
-var EXTENSION_VERSION = "2.2.80";
+var EXTENSION_VERSION = "2.2.81";
 globalThis.addEventListener?.("fetch", createMediaStreamHandler({
   extensionUrl: chrome.runtime.getURL("/"),
   getClient: (id) => globalThis.clients.get(id),
@@ -2317,8 +2336,8 @@ globalThis.addEventListener?.("fetch", createMediaStreamHandler({
   log: (stage, details = {}) => consoleAction(`[ResearchTube media stream ${EXTENSION_VERSION}]`, stage, details)
 }));
 var REQUIRED_AGENT_INTERFACE_VERSION = 76;
-var MEDIA_TO_CHAT_WIDGET_URI = "ui://researchtube/chat-target-v6.html";
-var MEDIA_TO_CHAT_WIDGET_ALIASES = /* @__PURE__ */ new Set(["ui://researchtube/chat-target-v4.html", "ui://researchtube/chat-target-v5.html"]);
+var MEDIA_TO_CHAT_WIDGET_URI = "ui://researchtube/chat-target-v7.html";
+var MEDIA_TO_CHAT_WIDGET_ALIASES = /* @__PURE__ */ new Set(["ui://researchtube/chat-target-v4.html", "ui://researchtube/chat-target-v5.html", "ui://researchtube/chat-target-v6.html"]);
 var MEDIA_TO_CHAT_BIND_TIMEOUT_MS = 3e4;
 var CAPTURE_FRAME_WIDGET_URI = "ui://researchtube/capture-frame-v56.html";
 var CAPTURE_FRAME_WIDGET_ALIASES = /* @__PURE__ */ new Set(["ui://researchtube/capture-frame-v51.html", "ui://researchtube/capture-frame-v52.html", "ui://researchtube/capture-frame-v53.html", "ui://researchtube/capture-frame-v54.html", "ui://researchtube/capture-frame-v55.html"]);
@@ -2331,6 +2350,7 @@ var GOOGLE_TRANSLATE_TAB_TIMEOUT_MS = 2e4;
 var GOOGLE_TRANSLATE_AUDIO_TIMEOUT_MS = 6e4;
 var GOOGLE_TRANSLATE_AUDIO_QUIET_MS = 750;
 var GOOGLE_TRANSLATE_MAX_AUDIO_BYTES = 16 * 1024 * 1024;
+var GOOGLE_TRANSLATE_PLAYBACK_START_TIMEOUT_MS = 6e4;
 var GOOGLE_TRANSLATE_PLAYBACK_TIMEOUT_MS = 10 * 6e4;
 var AGENT_HEALTH_TIMEOUT_MS = 5e3;
 var AGENT_TASK_TIMEOUT_MS = 1e4;
@@ -5594,7 +5614,7 @@ async function executeArtifactStart(id, tool, args) {
   if (task?.taskId) {
     const metadata = await artifactTaskManager.metadata(task.taskId);
     response.result._meta = {
-      "researchtube/artifactTask": { taskId: task.taskId, tool, addToChat: task.addToChat },
+      "researchtube/artifactTask": { taskId: task.taskId, tool, addToChat: task.addToChat, operationLabel: artifactOperationMessage(tool) },
       ...metadata ? { "researchtube/chatTarget": metadata } : {}
     };
   }
@@ -6276,6 +6296,7 @@ function googleTranslatePlaybackPage(action, expectedText) {
     const fields2 = [...document.querySelectorAll("textarea, [contenteditable='true']")].filter(visible);
     return fields2.length === 1 && (fields2[0] instanceof HTMLTextAreaElement ? fields2[0].value : fields2[0].textContent) === expectedText;
   };
+  const markedSource = (element) => element?.getAttribute?.("data-aria-label-off") === "Listen to source text" && element.getAttribute?.("data-aria-label-on") === "Stop listening";
   let monitor = globalThis[key];
   if (action === "arm") {
     if (monitor) return { error: "alreadyMonitoring" };
@@ -6283,42 +6304,65 @@ function googleTranslatePlaybackPage(action, expectedText) {
     const controls = [...document.querySelectorAll('button[aria-label="Listen to source text"], [role="button"][aria-label="Listen to source text"]')].filter((element) => visible(element) && !element.disabled && element.getAttribute("aria-disabled") !== "true");
     if (controls.length !== 1) return { error: "sourceControlUnavailable" };
     const button2 = controls[0];
-    monitor = { button: button2, started: false, finished: false, observer: null };
+    monitor = { button: button2, scope: button2.parentElement, started: false, replacements: 0, observer: null };
+    const resolve = () => {
+      const controls2 = [...document.querySelectorAll('button[aria-label="Listen to source text"], [role="button"][aria-label="Listen to source text"], button[aria-label="Stop listening"], [role="button"][aria-label="Stop listening"], [data-aria-label-off="Listen to source text"][data-aria-label-on="Stop listening"]')].filter((element) => visible(element) && (element === monitor.button || markedSource(element) || element.getAttribute("aria-label") === "Listen to source text" || element.getAttribute("aria-label") === "Stop listening" && monitor.scope?.contains(element)));
+      if (controls2.length !== 1) return null;
+      if (controls2[0] !== monitor.button) {
+        monitor.button = controls2[0];
+        monitor.replacements += 1;
+      }
+      return controls2[0];
+    };
     const update = (records) => {
       for (const record of records) {
-        if (record.attributeName === "aria-label" && record.oldValue === "Stop listening") monitor.started = true;
+        if (record.attributeName === "aria-label" && record.oldValue === "Stop listening" && (record.target === monitor.button || markedSource(record.target))) monitor.started = true;
+        for (const added of record.addedNodes ?? []) {
+          if (markedSource(added) && added.getAttribute("aria-label") === "Stop listening") monitor.started = true;
+        }
       }
-      const label = button2.getAttribute("aria-label");
-      if (label === "Stop listening") monitor.started = true;
-      if (monitor.started && label === "Listen to source text") monitor.finished = true;
+      const current2 = resolve();
+      if (current2?.getAttribute("aria-label") === "Stop listening") monitor.started = true;
     };
+    monitor.resolve = resolve;
     monitor.update = update;
     monitor.observer = new MutationObserver(update);
-    monitor.observer.observe(button2, { attributes: true, attributeFilter: ["aria-label"], attributeOldValue: true });
+    monitor.observer.observe(document.documentElement, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      attributeFilter: ["aria-label", "data-aria-label-off", "data-aria-label-on"],
+      attributeOldValue: true
+    });
     globalThis[key] = monitor;
   }
   if (!monitor) return { error: "monitorUnavailable" };
   monitor.update(monitor.observer.takeRecords());
-  const button = monitor.button;
+  const button = monitor.resolve();
   if (action === "dispose") {
     monitor.observer.disconnect();
     delete globalThis[key];
-    if (expectedText === true && !monitor.finished && button.isConnected && button.getAttribute("aria-label") === "Stop listening") button.click();
+    if (expectedText === true && button?.getAttribute("aria-label") === "Stop listening") button.click();
     return { disposed: true };
   }
   if (action === "fallback" && !monitor.started) {
     if (!sourceTextMatches()) return { error: "textMismatch" };
-    if (!visible(button) || button.disabled || button.getAttribute("aria-disabled") === "true" || button.getAttribute("aria-label") !== "Listen to source text") return { error: "sourceControlUnavailable" };
-    button.click();
-    monitor.update(monitor.observer.takeRecords());
+    if (button && !button.disabled && button.getAttribute("aria-disabled") !== "true" && button.getAttribute("aria-label") === "Listen to source text") {
+      button.click();
+      monitor.update(monitor.observer.takeRecords());
+    } else return { started: monitor.started, retryDeferred: true };
   }
-  const rect = button.getBoundingClientRect();
+  const current = monitor.resolve();
+  const rect = current?.getBoundingClientRect();
+  const label = current?.getAttribute("aria-label");
   return {
     started: monitor.started,
-    finished: monitor.finished,
-    available: visible(button),
-    x: rect.left + rect.width / 2,
-    y: rect.top + rect.height / 2
+    finished: monitor.started && label === "Listen to source text",
+    available: Boolean(current),
+    enabled: Boolean(current && !current.disabled && current.getAttribute("aria-disabled") !== "true"),
+    replacements: monitor.replacements,
+    x: rect ? rect.left + rect.width / 2 : null,
+    y: rect ? rect.top + rect.height / 2 : null
   };
 }
 async function googleTranslatePlaybackState(tabId, action = "read", expectedText = null) {
@@ -6337,22 +6381,36 @@ async function googleTranslatePressListen(tabId, signal, expectedText) {
   await cdpCommand(tabId, "Input.dispatchMouseEvent", { type: "mouseReleased", x: target.x, y: target.y, button: "left", buttons: 0, clickCount: 1 });
   cdpLog("Clicked Google Translate source listen button; waiting for Stop listening", { tabId });
   const start = Date.now();
-  const deadline = start + GOOGLE_TRANSLATE_TAB_TIMEOUT_MS;
+  const deadline = start + GOOGLE_TRANSLATE_PLAYBACK_START_TIMEOUT_MS * 2;
   let fallbackUsed = false;
+  let lastDiagnostic = null;
   while (Date.now() < deadline) {
     googleTranslateAbort(signal);
     const state = await googleTranslatePlaybackState(tabId);
     if (state?.started === true) {
-      cdpLog("Confirmed Google Translate source playback", { tabId });
+      cdpLog("Confirmed Google Translate source playback", { tabId, elapsedMs: Date.now() - start, replacements: state.replacements });
       return;
     }
-    if (state?.error || !state?.available) throw new Error("Google Translate source listen control became unavailable before playback started.");
-    if (!fallbackUsed && Date.now() - start >= 2e3) {
-      fallbackUsed = true;
+    if (state?.error) throw new Error("Google Translate source playback monitor is unavailable.");
+    const diagnostic = `${state?.available === true}/${state?.enabled === true}/${state?.replacements}`;
+    if (diagnostic !== lastDiagnostic) {
+      lastDiagnostic = diagnostic;
+      cdpLog("Waiting for Google Translate source Stop listening", {
+        tabId,
+        elapsedMs: Date.now() - start,
+        sourceControlAvailable: state?.available === true,
+        sourceControlEnabled: state?.enabled === true,
+        replacements: state?.replacements ?? 0
+      });
+    }
+    if (!fallbackUsed && Date.now() - start >= GOOGLE_TRANSLATE_PLAYBACK_START_TIMEOUT_MS) {
       googleTranslateAbort(signal);
       const fallback = await googleTranslatePlaybackState(tabId, "fallback", expectedText);
       if (fallback?.error) throw new Error("Google Translate source text or listen control changed before playback retry.");
-      cdpLog("Retried Google Translate source listen control directly", { tabId });
+      if (!fallback?.retryDeferred) {
+        fallbackUsed = true;
+        cdpLog("Retried Google Translate source listen control after startup window", { tabId, elapsedMs: Date.now() - start });
+      }
       if (fallback?.started === true) return;
     }
     await sleep(100);
@@ -6361,12 +6419,15 @@ async function googleTranslatePressListen(tabId, signal, expectedText) {
 }
 async function waitForGoogleTranslatePlaybackEnd(tabId, signal) {
   const deadline = Date.now() + GOOGLE_TRANSLATE_PLAYBACK_TIMEOUT_MS;
+  let idleSince = null;
   while (Date.now() < deadline) {
     googleTranslateAbort(signal);
     const state = await googleTranslatePlaybackState(tabId);
     if (state?.started !== true) throw new Error("Google Translate playback start was not confirmed.");
-    if (state.finished === true) return;
-    if (!state.available) throw new Error("Google Translate source playback control became unavailable.");
+    if (state.finished && state.enabled) {
+      idleSince ??= Date.now();
+      if (Date.now() - idleSince >= 1e3) return;
+    } else idleSince = null;
     await sleep(100);
   }
   throw new Error("Google Translate playback did not finish in time.");

@@ -107,3 +107,27 @@ const history=fixture();const ids=[];for(let i=0;i<3;i++){const h=await history.
 assert.equal(history.records.length,2);await assert.rejects(history.manager.status(ids[0]),e=>e.code==='MEDIA_ARTIFACT_TASK_NOT_FOUND');
 await assert.rejects(history.manager.status(ids[2],'media_clip'),e=>e.code==='MEDIA_ARTIFACT_TASK_NOT_FOUND');
 console.log('Artifact lifecycle: all 12 tools, binding, ordered outputs, polling, upload errors, cancellation races, committed Send, restart and history verified.');
+
+// A speakers-only speech task has no files; wrapper status must describe its
+// current native stage instead of claiming Workspace creation.
+const speech=fixture({asyncCreation:true,files:[]});
+speech.host.producers.system_speech_speak.start=async()=>({taskId:'native-id',status:'working',phase:'openingTranslate',statusMessage:'Opening Google Translate.',progressPercent:5,pollIntervalMs:1000,files:[]});
+const speechTask=await speech.manager.start('system_speech_speak',{outputMode:'speakers'},options);
+assert.equal(speechTask.statusMessage,'Speech task queued.');
+await speech.manager.advance(speechTask.taskId);
+assert.equal((await speech.manager.status(speechTask.taskId)).statusMessage,'Opening Google Translate.');
+for(const [phase,message] of [['synthesizing','Waiting for Google Translate to prepare speech.'],['playing','Playing Google Translate speech.']]) {
+  speech.host.producers.system_speech_speak.status=async()=>({taskId:'native-id',status:'working',phase,statusMessage:message,progressPercent:28,pollIntervalMs:1000,files:[]});
+  speech.tick();await speech.manager.advance(speechTask.taskId);
+  const current=await speech.manager.status(speechTask.taskId);
+  assert.equal(current.statusMessage,message);assert.equal(current.phase,phase);
+  assert.deepEqual(current.files,[]);assert.doesNotMatch(current.statusMessage,/Workspace|files/i);
+}
+assert.ok(speech.reports.every(report=>!report.statusMessage.includes('Creating Workspace')));
+for(const tool of ARTIFACT_TOOLS) {
+  const f=fixture({asyncCreation:true});const t=await f.manager.start(tool,{},options);
+  assert.notEqual(t.statusMessage,'Artifact task queued.');
+  await f.manager.advance(t.taskId);
+  assert.doesNotMatch((await f.manager.status(t.taskId)).statusMessage,/Creating Workspace/);
+}
+console.log('Artifact operation status: every producer has its own label; native speech phases/messages remain visible with empty files: ok');

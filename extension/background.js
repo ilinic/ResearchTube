@@ -2,7 +2,7 @@ import { waitForComposerMedia } from "./composer-media-retry.js";
 import { createBrowserAgent, waitForBrowserDocument, waitForBrowserConversation } from "./browser-agent.js";
 import { browserToolDefinitions, BROWSER_TOOL_NAMES } from "./browser-tools.js";
 import { TIMER_TOOL_NAMES, timerDefinitions, validateTimerInput, normalizeTimerResult } from "./timers.js";
-import { ARTIFACT_TOOLS, ARTIFACT_STATUS_TOOLS, ARTIFACT_CANCEL_TOOLS, createArtifactTaskManager } from "./artifact-tasks.js";
+import { ARTIFACT_TOOLS, ARTIFACT_STATUS_TOOLS, ARTIFACT_CANCEL_TOOLS, createArtifactTaskManager, artifactOperationMessage } from "./artifact-tasks.js";
 import { artifactToolDefinitions, publicWorkspaceArguments } from "./artifact-tools.js";
 import { pruneCompletedTasks } from "./task-history.js";
 import { createMediaStreamHandler } from "./media-stream.js";
@@ -62,7 +62,7 @@ const MCP_TOOL_SETTINGS = Object.freeze({
   clipboard_status: { group: "clipboard" }, clipboard_get: { group: "clipboard" }, clipboard_set: { group: "clipboard" },
   library_store_start: { group: "library" }, library_store_status: { group: "library" }, library_store_cancel: { group: "library" }, online_share_start: { group: "online" }, online_share_status: { group: "online" }, online_share_stop: { group: "online" }
 });
-const EXTENSION_VERSION = "2.2.80";
+const EXTENSION_VERSION = "2.2.81";
 // Chrome dispatches this for requests made by our Extension-owned viewer.
 // Packaged assets and unrelated requests fall through without interception.
 globalThis.addEventListener?.("fetch", createMediaStreamHandler({
@@ -75,8 +75,8 @@ globalThis.addEventListener?.("fetch", createMediaStreamHandler({
 const REQUIRED_AGENT_INTERFACE_VERSION = 76;
 // A UI resource URI is a cache key in MCP Apps. Increment it whenever the
 // rendered template changes so ChatGPT does not reuse a stale iframe bundle.
-const MEDIA_TO_CHAT_WIDGET_URI = "ui://researchtube/chat-target-v6.html";
-const MEDIA_TO_CHAT_WIDGET_ALIASES = new Set(["ui://researchtube/chat-target-v4.html", "ui://researchtube/chat-target-v5.html"]);
+const MEDIA_TO_CHAT_WIDGET_URI = "ui://researchtube/chat-target-v7.html";
+const MEDIA_TO_CHAT_WIDGET_ALIASES = new Set(["ui://researchtube/chat-target-v4.html", "ui://researchtube/chat-target-v5.html", "ui://researchtube/chat-target-v6.html"]);
 const MEDIA_TO_CHAT_BIND_TIMEOUT_MS = 30_000;
 const CAPTURE_FRAME_WIDGET_URI = "ui://researchtube/capture-frame-v56.html";
 const CAPTURE_FRAME_WIDGET_ALIASES = new Set(["ui://researchtube/capture-frame-v51.html", "ui://researchtube/capture-frame-v52.html", "ui://researchtube/capture-frame-v53.html", "ui://researchtube/capture-frame-v54.html", "ui://researchtube/capture-frame-v55.html"]);
@@ -89,6 +89,7 @@ const GOOGLE_TRANSLATE_TAB_TIMEOUT_MS = 20_000;
 const GOOGLE_TRANSLATE_AUDIO_TIMEOUT_MS = 60_000;
 const GOOGLE_TRANSLATE_AUDIO_QUIET_MS = 750;
 const GOOGLE_TRANSLATE_MAX_AUDIO_BYTES = 16 * 1024 * 1024;
+const GOOGLE_TRANSLATE_PLAYBACK_START_TIMEOUT_MS = 60_000;
 const GOOGLE_TRANSLATE_PLAYBACK_TIMEOUT_MS = 10 * 60_000;
 const AGENT_HEALTH_TIMEOUT_MS = 5_000;
 const AGENT_TASK_TIMEOUT_MS = 10_000;
@@ -3225,7 +3226,7 @@ async function executeArtifactStart(id, tool, args) {
   const task = response.result?.structuredContent;
   if (task?.taskId) {
     const metadata = await artifactTaskManager.metadata(task.taskId);
-    response.result._meta = { "researchtube/artifactTask": { taskId: task.taskId, tool, addToChat: task.addToChat },
+    response.result._meta = { "researchtube/artifactTask": { taskId: task.taskId, tool, addToChat: task.addToChat, operationLabel: artifactOperationMessage(tool) },
       ...(metadata ? { "researchtube/chatTarget": metadata } : {}) };
   }
   return response;
@@ -3913,8 +3914,8 @@ async function acquireGoogleTranslateTab() {
   return tab;
 }
 
-// This fixed page routine tracks only the uniquely resolved source control.
-// Observe before input so even Stop -> Listen between polls proves playback.
+// Google can replace the source control while language detection or playback
+// starts. Track source identity across DOM replacement, never the target Listen.
 function googleTranslatePlaybackPage(action, expectedText) {
   const key = "__researchTubeSourcePlayback";
   const visible = element => {
@@ -3926,6 +3927,8 @@ function googleTranslatePlaybackPage(action, expectedText) {
     const fields = [...document.querySelectorAll("textarea, [contenteditable='true']")].filter(visible);
     return fields.length === 1 && (fields[0] instanceof HTMLTextAreaElement ? fields[0].value : fields[0].textContent) === expectedText;
   };
+  const markedSource = element => element?.getAttribute?.("data-aria-label-off") === "Listen to source text"
+    && element.getAttribute?.("data-aria-label-on") === "Stop listening";
   let monitor = globalThis[key];
   if (action === "arm") {
     if (monitor) return { error: "alreadyMonitoring" };
@@ -3934,39 +3937,61 @@ function googleTranslatePlaybackPage(action, expectedText) {
       .filter(element => visible(element) && !element.disabled && element.getAttribute("aria-disabled") !== "true");
     if (controls.length !== 1) return { error: "sourceControlUnavailable" };
     const button = controls[0];
-    monitor = { button, started: false, finished: false, observer: null };
-    const update = records => {
-      for (const record of records) {
-        if (record.attributeName === "aria-label" && record.oldValue === "Stop listening") monitor.started = true;
-      }
-      const label = button.getAttribute("aria-label");
-      if (label === "Stop listening") monitor.started = true;
-      if (monitor.started && label === "Listen to source text") monitor.finished = true;
+    monitor = { button, scope: button.parentElement, started: false, replacements: 0, observer: null };
+    const resolve = () => {
+      const controls = [...document.querySelectorAll('button[aria-label="Listen to source text"], [role="button"][aria-label="Listen to source text"], button[aria-label="Stop listening"], [role="button"][aria-label="Stop listening"], [data-aria-label-off="Listen to source text"][data-aria-label-on="Stop listening"]')]
+        .filter(element => visible(element) && (element === monitor.button || markedSource(element)
+          || element.getAttribute("aria-label") === "Listen to source text"
+          || element.getAttribute("aria-label") === "Stop listening" && monitor.scope?.contains(element)));
+      if (controls.length !== 1) return null;
+      if (controls[0] !== monitor.button) { monitor.button = controls[0]; monitor.replacements += 1; }
+      return controls[0];
     };
+    const update = records => {
+      // attributeOldValue catches even a complete Stop -> Listen transition
+      // between polls. Only source controls are allowed to confirm playback.
+      for (const record of records) {
+        if (record.attributeName === "aria-label" && record.oldValue === "Stop listening"
+          && (record.target === monitor.button || markedSource(record.target))) monitor.started = true;
+        for (const added of record.addedNodes ?? []) {
+          if (markedSource(added) && added.getAttribute("aria-label") === "Stop listening") monitor.started = true;
+        }
+      }
+      const current = resolve();
+      if (current?.getAttribute("aria-label") === "Stop listening") monitor.started = true;
+    };
+    monitor.resolve = resolve;
     monitor.update = update;
     monitor.observer = new MutationObserver(update);
-    monitor.observer.observe(button, { attributes: true, attributeFilter: ["aria-label"], attributeOldValue: true });
+    monitor.observer.observe(document.documentElement, { subtree: true, childList: true,
+      attributes: true, attributeFilter: ["aria-label", "data-aria-label-off", "data-aria-label-on"], attributeOldValue: true });
     globalThis[key] = monitor;
   }
   if (!monitor) return { error: "monitorUnavailable" };
   monitor.update(monitor.observer.takeRecords());
-  const button = monitor.button;
+  const button = monitor.resolve();
   if (action === "dispose") {
     monitor.observer.disconnect();
     delete globalThis[key];
-    // Cancellation/failure must not leave the retained tab speaking.
-    if (expectedText === true && !monitor.finished && button.isConnected && button.getAttribute("aria-label") === "Stop listening") button.click();
+    if (expectedText === true && button?.getAttribute("aria-label") === "Stop listening") button.click();
     return { disposed: true };
   }
   if (action === "fallback" && !monitor.started) {
     if (!sourceTextMatches()) return { error: "textMismatch" };
-    if (!visible(button) || button.disabled || button.getAttribute("aria-disabled") === "true" || button.getAttribute("aria-label") !== "Listen to source text") return { error: "sourceControlUnavailable" };
-    button.click();
-    monitor.update(monitor.observer.takeRecords());
+    // Missing/disabled controls may simply mean the original click is pending.
+    // Wait through that state instead of treating it as an immediate failure.
+    if (button && !button.disabled && button.getAttribute("aria-disabled") !== "true"
+      && button.getAttribute("aria-label") === "Listen to source text") {
+      button.click();
+      monitor.update(monitor.observer.takeRecords());
+    } else return { started: monitor.started, retryDeferred: true };
   }
-  const rect = button.getBoundingClientRect();
-  return { started: monitor.started, finished: monitor.finished,
-    available: visible(button), x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+  const current = monitor.resolve();
+  const rect = current?.getBoundingClientRect();
+  const label = current?.getAttribute("aria-label");
+  return { started: monitor.started, finished: monitor.started && label === "Listen to source text",
+    available: Boolean(current), enabled: Boolean(current && !current.disabled && current.getAttribute("aria-disabled") !== "true"),
+    replacements: monitor.replacements, x: rect ? rect.left + rect.width / 2 : null, y: rect ? rect.top + rect.height / 2 : null };
 }
 
 async function googleTranslatePlaybackState(tabId, action = "read", expectedText = null) {
@@ -3986,24 +4011,33 @@ async function googleTranslatePressListen(tabId, signal, expectedText) {
   await cdpCommand(tabId, "Input.dispatchMouseEvent", { type: "mouseReleased", x: target.x, y: target.y, button: "left", buttons: 0, clickCount: 1 });
   cdpLog("Clicked Google Translate source listen button; waiting for Stop listening", { tabId });
   const start = Date.now();
-  const deadline = start + GOOGLE_TRANSLATE_TAB_TIMEOUT_MS;
+  // Allow a complete startup window for asynchronous engine/language work.
+  // Confirmation is bounded at 120s overall; never retry at 2s.
+  const deadline = start + GOOGLE_TRANSLATE_PLAYBACK_START_TIMEOUT_MS * 2;
   let fallbackUsed = false;
+  let lastDiagnostic = null;
   while (Date.now() < deadline) {
     googleTranslateAbort(signal);
     const state = await googleTranslatePlaybackState(tabId);
     if (state?.started === true) {
-      cdpLog("Confirmed Google Translate source playback", { tabId });
+      cdpLog("Confirmed Google Translate source playback", { tabId, elapsedMs: Date.now() - start, replacements: state.replacements });
       return;
     }
-    if (state?.error || !state?.available) throw new Error("Google Translate source listen control became unavailable before playback started.");
-    // A background renderer may ignore pointer input. Retry the exact control
-    // once, and only after the monitor confirms playback has not started.
-    if (!fallbackUsed && Date.now() - start >= 2_000) {
-      fallbackUsed = true;
+    if (state?.error) throw new Error("Google Translate source playback monitor is unavailable.");
+    const diagnostic = `${state?.available === true}/${state?.enabled === true}/${state?.replacements}`;
+    if (diagnostic !== lastDiagnostic) {
+      lastDiagnostic = diagnostic;
+      cdpLog("Waiting for Google Translate source Stop listening", { tabId, elapsedMs: Date.now() - start,
+        sourceControlAvailable: state?.available === true, sourceControlEnabled: state?.enabled === true, replacements: state?.replacements ?? 0 });
+    }
+    if (!fallbackUsed && Date.now() - start >= GOOGLE_TRANSLATE_PLAYBACK_START_TIMEOUT_MS) {
       googleTranslateAbort(signal);
       const fallback = await googleTranslatePlaybackState(tabId, "fallback", expectedText);
       if (fallback?.error) throw new Error("Google Translate source text or listen control changed before playback retry.");
-      cdpLog("Retried Google Translate source listen control directly", { tabId });
+      if (!fallback?.retryDeferred) {
+        fallbackUsed = true;
+        cdpLog("Retried Google Translate source listen control after startup window", { tabId, elapsedMs: Date.now() - start });
+      }
       if (fallback?.started === true) return;
     }
     await sleep(100);
@@ -4013,12 +4047,16 @@ async function googleTranslatePressListen(tabId, signal, expectedText) {
 
 async function waitForGoogleTranslatePlaybackEnd(tabId, signal) {
   const deadline = Date.now() + GOOGLE_TRANSLATE_PLAYBACK_TIMEOUT_MS;
+  let idleSince = null;
   while (Date.now() < deadline) {
     googleTranslateAbort(signal);
     const state = await googleTranslatePlaybackState(tabId);
     if (state?.started !== true) throw new Error("Google Translate playback start was not confirmed.");
-    if (state.finished === true) return;
-    if (!state.available) throw new Error("Google Translate source playback control became unavailable.");
+    if (state.finished && state.enabled) {
+      idleSince ??= Date.now();
+      if (Date.now() - idleSince >= 1_000) return;
+    } else idleSince = null;
+    // A transient missing/replaced control is not evidence of playback failure.
     await sleep(100);
   }
   throw new Error("Google Translate playback did not finish in time.");

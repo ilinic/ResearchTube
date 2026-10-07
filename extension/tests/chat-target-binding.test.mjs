@@ -104,7 +104,7 @@ assert.equal(invalid.alarms.size,0);
 await assert.rejects(invalid.context.bindMediaToChatTarget(protectedTask.metadata,sender()),e=>e.code==='MEDIA_TO_CHAT_TARGET_NOT_FOUND');
 // Tools/list and resources/read expose the correct task template, not a media viewer.
 const tool=current.context.publicMcpTools().find(tool=>tool.name==='media_to_chat');
-assert.equal(tool._meta.ui.resourceUri,'ui://researchtube/chat-target-v6.html');
+assert.equal(tool._meta.ui.resourceUri,'ui://researchtube/chat-target-v7.html');
 const resources=await current.context.handleMcpRequest({id:2,method:'resources/list'});
 assert.ok(resources.result.resources.some(item=>item.uri===tool._meta.ui.resourceUri));
 const resource=await current.context.readMcpResource(3,tool._meta.ui.resourceUri);
@@ -237,7 +237,7 @@ const createOnly={'researchtube/artifactTask':{taskId:'tsk_CREATEONLY',tool:'med
 const nextBinding={taskId:'tsk_NEXTUPLOAD',bindingToken:webcrypto.randomUUID()};
 const followingBinding={taskId:'tsk_FOLLOWING1',bindingToken:webcrypto.randomUUID()};
 const reused=pageHarness({metadata:createOnly});
-assert.equal(reused.status.textContent,'Creating Workspace files…');
+assert.equal(reused.status.textContent,'Processing media task…');
 assert.equal(reused.pageMessages.length,0,'creation-only tasks must not request tab binding');
 reused.advance(45_000);
 reused.message({jsonrpc:'2.0',method:'ui/notifications/tool-result',params:{_meta:{'researchtube/chatTarget':nextBinding}}});
@@ -277,3 +277,11 @@ staged.message({jsonrpc:'2.0',method:'ui/notifications/tool-result',params:{_met
 staged.globals({'researchtube/artifactTask':parentArtifact,'researchtube/chatTarget':nextBinding});
 assert.equal(JSON.parse(staged.attributes.get('data-researchtube-chat-target')).taskId,followingBinding.taskId);
 console.log('chat target: visible 32px row, bounded retries, reusable task handshakes and fixed tab binding passed');
+
+const speechCaption=pageHarness({metadata:{'researchtube/artifactTask':{taskId:'tsk_SPEAKONLY1',tool:'system_speech_speak',addToChat:false,operationLabel:'Synthesizing speech.'}}});
+assert.equal(speechCaption.status.textContent,'Synthesizing speech.');
+assert.equal(speechCaption.pageMessages.length,0);
+assert.doesNotMatch(speechCaption.status.textContent,/files|Workspace/i);
+const legacySpeech=pageHarness({metadata:{'researchtube/artifactTask':{taskId:'tsk_OLDSPEECH1',tool:'system_speech_speak',addToChat:false}}});
+assert.equal(legacySpeech.status.textContent,'Synthesizing speech…');
+console.log('Artifact captions: operation-specific speech, no file claim or current-chat binding in speakers mode: ok');

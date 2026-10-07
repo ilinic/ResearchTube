@@ -10,13 +10,13 @@ function harness(options = {}) {
   const observers = [];
   const events = [];
   class Element {
-    constructor(label) { this.label = label; this.isConnected = true; this.disabled = false; this.clicks = 0; this.style = { visibility: 'visible', display: 'block' }; }
+    constructor(label) { this.label = label; this.isConnected = true; this.disabled = false; this.clicks = 0; this.style = { visibility: 'visible', display: 'block' }; this.source = false; }
     getBoundingClientRect() { return { left: 5, top: 10, width: 30, height: 30 }; }
-    getAttribute(name) { return name === 'aria-label' ? this.label : null; }
+    getAttribute(name) { return name === 'aria-label' ? this.label : this.source && name === 'data-aria-label-off' ? 'Listen to source text' : this.source && name === 'data-aria-label-on' ? 'Stop listening' : null; }
     setLabel(label) {
       const oldValue = this.label;
       this.label = label;
-      for (const observer of observers) if (observer.target === this) observer.records.push({ attributeName: 'aria-label', oldValue });
+      for (const observer of observers) if (observer.target === this || observer.target === page.document.documentElement) observer.records.push({ target: this, attributeName: 'aria-label', oldValue });
     }
     click() {
       this.clicks += 1;
@@ -38,13 +38,23 @@ function harness(options = {}) {
     disconnect() { this.target = null; this.records.length = 0; }
   }
   const field = new TextArea();
-  const button = new Element('Listen to source text');
+  const button = new Element('Listen to source text'); button.source = true; button.disabled = options.readyAt != null;
   const targetButton = new Element('Listen to translation');
   const buttons = [button, targetButton];
+  const root = { contains: element => element.source && element.isConnected };
+  button.parentElement = root;
+  const currentButton = () => buttons.find(element => element.source && element.isConnected) ?? button;
+  const replaceButton = label => {
+    const old = currentButton(); old.isConnected = false;
+    const replacement = new Element(label); replacement.source = true; replacement.parentElement = root;
+    buttons.splice(buttons.indexOf(old), 1, replacement);
+    for (const observer of observers) if (observer.target === root) observer.records.push({ addedNodes: [replacement], removedNodes: [old] });
+    return replacement;
+  };
   const page = vm.createContext({
-    document: { readyState: 'complete', querySelectorAll(selector) {
+    document: { readyState: 'complete', documentElement: root, querySelectorAll(selector) {
       if (selector.startsWith('textarea')) return [field];
-      if (selector.includes('Listen to source text')) return buttons.filter(item => item.label === 'Listen to source text');
+      if (selector.includes('Listen to source text')) return buttons.filter(item => item.label === 'Listen to source text' || selector.includes('Stop listening') && (item.label === 'Stop listening' || item.source));
       return [];
     } },
     getComputedStyle: element => element.style,
@@ -58,13 +68,15 @@ function harness(options = {}) {
     Date: { now: () => now }, DOMException, AbortController, Uint8Array,
     GOOGLE_TRANSLATE_URL: 'https://translate.google.com/',
     GOOGLE_TRANSLATE_TAB_TIMEOUT_MS: 3_000,
-    GOOGLE_TRANSLATE_PLAYBACK_TIMEOUT_MS: 4_000,
+    GOOGLE_TRANSLATE_PLAYBACK_START_TIMEOUT_MS: options.startTimeout ?? 3_000,
+    GOOGLE_TRANSLATE_PLAYBACK_TIMEOUT_MS: 10_000,
     googleTranslateSpeechRunners: new Map(), googleTranslateSpeechTabId: 9,
     cdpEvaluate: evaluate,
     cdpCommand: async (tabId, method, params) => {
       events.push([method, now, params]);
       if (method === 'Input.dispatchMouseEvent' && params.type === 'mouseReleased' && options.pointerWorks !== false) {
-        button.setLabel('Stop listening');
+        if (options.pendingStartAt != null) button.disabled = true;
+        else button.setLabel('Stop listening');
         if (options.short) button.setLabel('Listen to source text');
       }
     },
@@ -73,8 +85,11 @@ function harness(options = {}) {
     cdpLog: () => {}, cdpErrorLog: () => {}, safeErrorMessage: error => error.message,
     sleep: async ms => {
       now += ms;
-      if (options.endAt != null && now >= options.endAt && button.label === 'Stop listening') button.setLabel('Listen to source text');
-      options.onSleep?.({ now, button, field, controller: context.googleTranslateSpeechRunners.get("test")?.controller ?? controller });
+      const source = currentButton();
+      if (options.readyAt != null && now >= options.readyAt) source.disabled = false;
+      if (options.pendingStartAt != null && now >= options.pendingStartAt && !source.startedOnce) { source.startedOnce = true; source.disabled = false; source.setLabel('Stop listening'); }
+      if (options.endAt != null && now >= options.endAt && source.label === 'Stop listening') source.setLabel('Listen to source text');
+      options.onSleep?.({ now, button: currentButton(), field, replaceButton, targetButton, controller: context.googleTranslateSpeechRunners.get("test")?.controller ?? controller });
     },
     agentJsonRequest: async (route, request) => { events.push([route.split('/').at(-1), now, request.body]); return {}; },
     chrome: { tabs: {
@@ -93,7 +108,7 @@ function harness(options = {}) {
     dispose: () => events.push(['captureDisposed', now])
   });
   context.uploadGoogleTranslateAudio = async () => events.push(['audioSaved', now]);
-  return { context, page, field, button, buttons, targetButton, events, controller, observers, evaluate };
+  return { context, page, field, button, buttons, targetButton, events, controller, observers, evaluate, replaceButton, currentButton };
 }
 
 {
@@ -109,7 +124,7 @@ function harness(options = {}) {
 {
   const h = harness({ pointerWorks: false, endAt: 2_400 });
   await h.context.googleTranslatePressListen(9, h.controller.signal, 'Hello');
-  assert.equal(h.button.clicks, 1, 'ignored pointer gets exactly one direct fallback');
+  assert.equal(h.button.clicks, 1, 'ignored pointer gets exactly one fallback after the full startup window');
   assert.equal(h.targetButton.clicks, 0, 'translation control must never be clicked');
   assert.equal(h.button.label, 'Stop listening');
   await h.context.waitForGoogleTranslatePlaybackEnd(9, h.controller.signal);
@@ -174,4 +189,61 @@ for (const outputMode of ['speakers', 'file', 'both']) {
   await h.context.startGoogleTranslateSpeechTask('test', 'token', { text: 'Hello', outputMode: 'file' });
   assert.ok(!h.events.some(event => event[0] === 'tabUpdate'), 'user mute must remain unchanged');
 }
-console.log('Google Translate confirmed background playback: ok');
+// The Google engine can start late, while the control remains disabled.
+// An audible/accepted start is not rejected or clicked again after 2 seconds.
+{
+  const h = harness({ startTimeout: 60_000, pendingStartAt: 45_000 });
+  await h.context.googleTranslatePressListen(9, h.controller.signal, 'Hello');
+  assert.equal(h.button.clicks, 0, '45-second startup must not be clicked twice');
+  assert.equal(h.button.label, 'Stop listening');
+  assert.equal(h.events.filter(event => event[0] === 'Input.dispatchMouseEvent' && event[2].type === 'mouseReleased').length, 1);
+}
+{
+  const h = harness({ readyAt: 750, pendingStartAt: 2_500, endAt: 3_000 });
+  await h.context.startGoogleTranslateSpeechTask('test', 'token', { text: 'Hello', outputMode: 'speakers' });
+  const input = h.events.find(event => event[0] === 'Input.dispatchMouseEvent');
+  assert.ok(input[1] >= 750, 'recognition/readiness must finish before Listen');
+  const playing = h.events.find(event => event[0] === 'google-translate-progress' && event[2].phase === 'playing');
+  assert.ok(playing[1] >= 2_500, 'playing cannot precede Stop listening');
+  assert.ok(h.events.some(event => event[0] === 'google-translate-complete'));
+  assert.equal(h.button.clicks, 0);
+}
+{
+  let replaced = false;
+  const h = harness({ pointerWorks: false, onSleep({ now, replaceButton }) {
+    if (now >= 2_500 && !replaced) { replaced = true; replaceButton('Stop listening'); }
+  } });
+  await h.context.googleTranslatePressListen(9, h.controller.signal, 'Hello');
+  assert.equal(h.currentButton().label, 'Stop listening');
+  assert.equal(h.currentButton().clicks, 0, 'replacement Stop must confirm source playback');
+  assert.equal(h.targetButton.clicks, 0);
+}
+{
+  const h = harness({ pendingStartAt: 2_500, onSleep({ now, button }) {
+    button.style.display = now >= 100 && now < 2_000 ? 'none' : 'block';
+  } });
+  await h.context.googleTranslatePressListen(9, h.controller.signal, 'Hello');
+  assert.equal(h.button.clicks, 0, 'temporary disappearance is pending, not failure');
+}
+{
+  const h = harness({ pointerWorks: false, directWorks: false });
+  h.targetButton.setLabel('Stop listening');
+  await assert.rejects(h.context.googleTranslatePressListen(9, h.controller.signal, 'Hello'), /did not start/);
+  assert.equal(h.targetButton.clicks, 0, 'target-language Stop cannot confirm source speech');
+}
+{
+  let replaced = false;
+  const h = harness({ endAt: 2_000, onSleep({ now, replaceButton }) {
+    if (now >= 500 && !replaced) { replaced = true; replaceButton('Stop listening'); }
+  } });
+  await h.context.startGoogleTranslateSpeechTask('test', 'token', { text: 'Hello', outputMode: 'speakers' });
+  assert.ok(h.events.find(event => event[0] === 'google-translate-complete')[1] >= 3_000, 'replacement during playback must settle, not fail');
+}
+console.log('Google Translate confirmed asynchronous background playback: ok');
+
+{
+ const h=harness();await h.context.googleTranslatePlaybackState(9,'arm','Hello');
+ h.observers[0].records.push({addedNodes:[{nodeType:3}],removedNodes:[]});
+ const state=await h.context.googleTranslatePlaybackState(9);
+ assert.equal(state.started,false,'unrelated text mutations must neither crash nor confirm playback');
+}

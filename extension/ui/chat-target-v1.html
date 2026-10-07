@@ -60,9 +60,9 @@ body{display:flex;align-items:center;gap:8px;padding:0 8px;box-sizing:border-box
     if(incoming.binding) metadata=incoming.binding;
     if(bound || stopped) return true;
     if(artifact && !artifact.addToChat) {
-      status.textContent='Creating Workspace files…';bound=true;finish();return true;
+      status.textContent=typeof artifact.operationLabel==='string' && artifact.operationLabel.length<=160?artifact.operationLabel:(artifact.tool==='system_speech_speak'?'Synthesizing speech…':'Processing media task…');bound=true;finish();return true;
     }
-    if(artifact)status.textContent='Creating files, then adding to chat…';
+    if(artifact)status.textContent=typeof artifact.operationLabel==='string' && artifact.operationLabel.length<=160?`${artifact.operationLabel} Then adding files to chat…`:'Processing media, then adding files to chat…';
     announce();
     return true;
   }

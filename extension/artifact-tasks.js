@@ -7,6 +7,17 @@ export const ARTIFACT_TOOLS = Object.freeze([
   'system_speech_speak', 'media_capture_screen', 'media_image_crop',
   'camera_capture_frame', 'clipboard_get'
 ]);
+export const ARTIFACT_OPERATION_NAMES = Object.freeze({
+  youtube_download:'YouTube download', youtube_storyboard_download:'Storyboard download',
+  media_capture_frame:'Frame extraction', visual_map_create:'Visual map', media_clip:'Media clipping',
+  camera_record_video:'Video recording', camera_record_audio:'Audio recording', system_speech_speak:'Speech',
+  media_capture_screen:'Screen capture', media_image_crop:'Image crop', camera_capture_frame:'Camera capture', clipboard_get:'Clipboard read'
+});
+export function artifactOperationMessage(tool, state='working') {
+  const name=ARTIFACT_OPERATION_NAMES[tool] ?? 'Media';
+  if(state==='working') return tool==='system_speech_speak'?'Synthesizing speech.':`${name} in progress.`;
+  return `${name} task ${state}.`;
+}
 export const ARTIFACT_STATUS_TOOLS = Object.freeze({
   youtube_download_get_task: 'youtube_download', youtube_storyboard_get_task: 'youtube_storyboard_download',
   media_capture_frame_get_task: 'media_capture_frame', visual_map_get_task: 'visual_map_create',
@@ -23,7 +34,7 @@ const object = (properties, required = Object.keys(properties)) => ({type:'objec
 const errorSchema = object({code:{type:'string'}, message:{type:'string'}});
 const nullable = schema => ({anyOf:[schema,{type:'null'}]});
 export const artifactOptionsSchema = {
-  addToChat:{type:'boolean',default:false,description:'Upload all created files to the originating ChatGPT conversation and press Send as the second stage of this task. This supplies attachments to ChatGPT, unlike media_show which only displays a viewer. Default false only creates Workspace files.'},
+  addToChat:{type:'boolean',default:false,description:'Upload all created files to the originating ChatGPT conversation and press Send as the second stage of this task. This supplies attachments to ChatGPT, unlike media_show which only displays a viewer. Default false runs only the requested operation.'},
   composerPolicy:{type:'string',enum:['requireEmpty','clear'],default:'requireEmpty',description:'With addToChat: requireEmpty refuses an existing draft or attachments; clear explicitly discards both once before upload. New user edits stop Send and leave uploaded files attached.'},
   sendDelaySeconds:{type:'number',minimum:0,default:0,description:'With addToChat: optional seconds between acceptance of all eligible attachments and Send. Readiness is checked separately. Status exposes waitingToSend, sendNotBefore and remainingSeconds. Cancellation leaves the Composer untouched.'}
 };
@@ -72,7 +83,7 @@ export function createArtifactTaskManager(host) {
   async function finish(task,status,failure=null) {
     task.status=status;task.phase=status;task.error=failure;
     delete task.input;
-    task.statusMessage=failure?.message ?? (status==='completed'?'All requested stages completed.':'Cancelled; created files and existing Composer contents are preserved.');
+    task.statusMessage=failure?.message ?? (status==='completed' && task.addToChat?'All requested stages completed.':artifactOperationMessage(task.tool,status));
     if(status==='completed')task.progressPercent=100;
     await host.unschedule(task.taskId);
     if(status!=='completed' && task.chatTaskId) {
@@ -130,7 +141,7 @@ export function createArtifactTaskManager(host) {
       task.status='working';
       if(task.creation.status==='queued') {
         task.phase='creating';task.creation.status='working';task.creation.phase='preparing';
-        task.statusMessage='Creating Workspace artifacts.';
+        task.statusMessage=artifactOperationMessage(task.tool);
         // This write is the no-replay boundary, before issuing the Agent call.
         await save(task);
         if(task.cancelRequested) {task.creation.status='cancelled';await finish(task,'cancelled');return;}
@@ -160,8 +171,8 @@ export function createArtifactTaskManager(host) {
       }
       if(task.addToChat && !task.chatReleased) task.chat=await host.chatStatus(task.chatTaskId);
       if(!terminal(task.creation.status)) {
-        task.phase=task.cancelRequested?'cancelling':'creating';
-        task.statusMessage=task.cancelRequested?'Stopping creation; preserving published files.':'Creating Workspace artifacts.';
+        task.phase=task.cancelRequested?'cancelling':task.creation.phase;
+        task.statusMessage=task.cancelRequested?artifactOperationMessage(task.tool,'cancelling'):(task.creation.data?.statusMessage || artifactOperationMessage(task.tool));
         task.nextCreationPoll=host.now()+Math.max(1000,task.creation.data?.pollIntervalMs??1000);
         await save(task);await host.schedule(id,task.nextCreationPoll-host.now());return;
       }
@@ -197,7 +208,7 @@ export function createArtifactTaskManager(host) {
       const createdAt=now();let taskId;
       do {taskId=host.id();}while(tasks.has(taskId));
       const task={taskId,tool,input,...options,status:'queued',phase:'preparing',progressPercent:0,
-        statusMessage:'Artifact task queued.',createdAt,lastUpdatedAt:createdAt,files:[],chat:null,error:null,
+        statusMessage:artifactOperationMessage(tool,'queued'),createdAt,lastUpdatedAt:createdAt,files:[],chat:null,error:null,
         creation:{status:'queued',phase:'preparing',progressPercent:0,data:null,error:null,taskId:null}};
       if(options.addToChat) {
         task.chatTaskId=await host.reserveChat(options);
@@ -228,7 +239,7 @@ export function createArtifactTaskManager(host) {
           await advance(id);return {task:document(get(id)),cancelled:false};
         }
       }
-      task.cancelRequested=true;task.phase='cancelling';task.statusMessage='Cancellation requested; files and Composer contents are preserved.';
+      task.cancelRequested=true;task.phase='cancelling';task.statusMessage=artifactOperationMessage(task.tool,'cancelling');
       await save(task);
       if(!terminal(task.creation.status) && task.creation.taskId && !task.nativeCancelSent) {
         await host.producers[task.tool].cancel(task.creation.taskId);task.nativeCancelSent=true;await save(task);

@@ -1,4 +1,4 @@
-import { ARTIFACT_TOOLS, ARTIFACT_STATUS_TOOLS, ARTIFACT_CANCEL_TOOLS, artifactOptionsSchema, artifactTaskSchema } from './artifact-tasks.js';
+import { ARTIFACT_TOOLS, ARTIFACT_STATUS_TOOLS, ARTIFACT_CANCEL_TOOLS, artifactOptionsSchema, artifactTaskSchema, artifactOperationMessage } from './artifact-tasks.js';
 
 // Public names are uniform. Agent request names remain private and are
 // translated once at the MCP boundary, avoiding unrelated Agent migrations.
@@ -70,7 +70,7 @@ export function artifactToolDefinitions(definitions,chatSchema,widgetUri,readAnn
       tool.outputSchema=schemaFor(tool.name);
       tool.annotations={...tool.annotations,destructiveHint:true,openWorldHint:true};
       tool._meta={...tool._meta,ui:{resourceUri:widgetUri},'openai/outputTemplate':widgetUri,
-        'openai/toolInvocation/invoked':'Artifact task created.'};
+        'openai/toolInvocation/invoked':artifactOperationMessage(tool.name,'started')};
     } else if(Object.hasOwn(ARTIFACT_STATUS_TOOLS,tool.name)) {
       tool.outputSchema=schemaFor(ARTIFACT_STATUS_TOOLS[tool.name]);
       tool.description='Read the complete creation-and-optional-chat lifecycle for the task returned by its creation tool. Alias of media_task_status; completed means all requested stages finished. Native progress and results are in creation.data, created paths in files, upload/delay state in chat. Respect pollIntervalMs; finish the assistant response if Send is waiting for ChatGPT readiness.';

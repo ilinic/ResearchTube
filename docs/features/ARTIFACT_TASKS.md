@@ -75,3 +75,5 @@ Public tools use `workspacePath` for the existing source/selected file (also a s
 Old public names such as `path`, `targetPath`, `outputPath`, `outputDir`, `source`, `destination`, `file` and `folder` are rejected with the canonical replacement. Private Agent requests retain their independently validated native names; this is an MCP-boundary translation, not permission to use host paths. Private viewer actions retain their existing contract so the working media viewer is unaffected.
 
 Sources: `extension/artifact-tasks.js`, `extension/artifact-tools.js`, `extension/background.js`, and the native producer modules.
+
+During native processing, the public task forwards the producer phase and status message. Queued captions and service widgets identify the concrete operation (speech, download, capture, clipping or clipboard read), rather than asserting file creation. Speakers-only speech and text clipboard reads may complete with no Workspace files.
