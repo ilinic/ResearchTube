@@ -71,6 +71,8 @@ For a new Agent operation:
 
 ### 5. Use the task lifecycle for long work
 
+Artifact producers must register in `extension/artifact-tasks.js`, provide validated native start/status/cancel callbacks and an explicit output-path extractor in `extension/background.js`, and use `extension/artifact-tools.js` for common options and public schemas. Never select newly created outputs with a directory scan. Public paths use `workspacePath` for the source and an explicit destination role; private Agent adapters retain native names. A producer's specialized status/cancel tools must forward the public supervisor ID, not poll/cancel just the underlying creation handle. Keep graceful recording Stop separate from workflow cancellation. See [Artifact tasks](features/ARTIFACT_TASKS.md).
+
 An asynchronous feature normally has start, status and cancel public tools. The task should expose:
 
 - an opaque task ID;

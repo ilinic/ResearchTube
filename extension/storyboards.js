@@ -34,8 +34,10 @@ const sheetTimestampSchema = object({ sheetIndex: integer,
 const taskSchema = object({ taskId, status: { enum: statuses }, phase: { enum: ["resolving", "downloading", "publishing", "completed", "cancelled", "failed"] },
   progressPercent: { type: "number", minimum: 0, maximum: 100 }, completedSheets: integer, totalSheets: positive,
   downloadedSheets: integer, reusedSheets: integer, workspaceDirectory: { const: "storyboards" }, pollIntervalMs: { type: "integer", minimum: 1000 },
-  frameTimestampPosition, sheetTimestamps: { type: "array", minItems: 1, items: sheetTimestampSchema }, failedSheetIndex: integer, error: errorSchema },
-["taskId", "status", "phase", "progressPercent", "completedSheets", "totalSheets", "downloadedSheets", "reusedSheets", "workspaceDirectory", "pollIntervalMs", "frameTimestampPosition", "sheetTimestamps"]);
+  frameTimestampPosition, sheetTimestamps: { type: "array", minItems: 1, items: sheetTimestampSchema },
+  publishedSheets: {type:"array",items:object({sheetIndex:integer,workspacePath:{type:"string",minLength:1}})},
+  failedSheetIndex: integer, error: errorSchema },
+["taskId", "status", "phase", "progressPercent", "completedSheets", "totalSheets", "downloadedSheets", "reusedSheets", "workspaceDirectory", "pollIntervalMs", "frameTimestampPosition", "sheetTimestamps", "publishedSheets"]);
 const cancelSchema = object({ taskId, status: { enum: statuses } });
 export const STORYBOARD_TOOL_NAMES = Object.freeze(["youtube_storyboard_get_info", "youtube_storyboard_download", "youtube_storyboard_get_task", "youtube_storyboard_cancel_task"]);
 
@@ -44,8 +46,8 @@ export function storyboardDefinitions(readAnnotations, writeAnnotations) {
     annotations: { ...(write ? writeAnnotations : readAnnotations), openWorldHint: name.endsWith("get_info") || name.endsWith("download") } });
   return [
     make(STORYBOARD_TOOL_NAMES[0], "Get YouTube storyboard variants", "Discover pre-generated timeline-preview sheet variants. Returns cell geometry, interval and sheet count. frameIntervalEstimated marks timing inferred when YouTube has no nonzero interval or the last yt-dlp fallback only provides average fps; range boundaries then use that estimate. Reads the matching open YouTube tab first, then yt-dlp metadata. Creates no files and downloads no media or sheets. variantId is opaque; retain it unchanged.", object({ videoId }), infoSchema),
-    make(STORYBOARD_TOOL_NAMES[1], "Download YouTube storyboard sheets", "Start one asynchronous task for all sheets, an inclusive time range within video duration, or zero-based sheet indexes of one discovered variant. Downloads YouTube's ready preview JPEG sheets only, never video/audio. sheetTimestamps always returns the calculated absolute time for every real tile. frameTimestampPosition controls whether those labels are drawn on the ready-made grid: bottomRight by default, or none, topLeft, topRight, or bottomLeft when explicitly requested; unused cells of a final partial sheet stay untouched. Files are directly in storyboards/ with video ID, sz_widthxheight, tstp_seconds, mesh_columnsxrows and sheet index tags in each filename. Never displays an image automatically. Poll youtube_storyboard_get_task at pollIntervalMs; use workspace_list on workspaceDirectory to find files.", object({ videoId, variantId, selection: selectionSchema, frameTimestampPosition }, ["videoId", "variantId", "selection"]), { type: "object", oneOf: [taskSchema, rejected] }, true),
-    make(STORYBOARD_TOOL_NAMES[2], "Get storyboard task progress", "Get compact sheet counts and monotonic progress. Poll no faster than pollIntervalMs. Complete sheets remain in storyboards/ after failure or cancellation. Does not return images or a sheet-path array.", object({ taskId }), { type: "object", oneOf: [taskSchema, rejected] }),
+    make(STORYBOARD_TOOL_NAMES[1], "Download YouTube storyboard sheets", "Start one asynchronous task for all sheets, an inclusive time range within video duration, or zero-based sheet indexes of one discovered variant. Downloads YouTube's ready preview JPEG sheets only, never video/audio. sheetTimestamps always returns the calculated absolute time for every real tile. frameTimestampPosition controls whether those labels are drawn on the ready-made grid: bottomRight by default, or none, topLeft, topRight, or bottomLeft when explicitly requested; unused cells of a final partial sheet stay untouched. Files are directly in storyboards/ with video ID, sz_widthxheight, tstp_seconds, mesh_columnsxrows and sheet index tags in each filename. Never displays an image automatically. Poll youtube_storyboard_get_task at pollIntervalMs; use the returned publishedSheets for exact safely published files.", object({ videoId, variantId, selection: selectionSchema, frameTimestampPosition }, ["videoId", "variantId", "selection"]), { type: "object", oneOf: [taskSchema, rejected] }, true),
+    make(STORYBOARD_TOOL_NAMES[2], "Get storyboard task progress", "Get compact sheet counts, monotonic progress and publishedSheets with exact verified sheet indexes and logical paths. Poll no faster than pollIntervalMs. Complete sheets remain in storyboards/ after failure or cancellation. Does not return image bytes.", object({ taskId }), { type: "object", oneOf: [taskSchema, rejected] }),
     make(STORYBOARD_TOOL_NAMES[3], "Cancel storyboard download", "Stop current and queued transfers for one storyboard task. Preserves all completely published sheets. Repeating cancellation returns the existing terminal status.", object({ taskId }), { type: "object", oneOf: [cancelSchema, rejected] }, true)
   ];
 }
@@ -100,10 +102,16 @@ export function normalizeStoryboardResult(name, data) {
   if (new Set(data.sheetTimestamps.map(sheet => sheet?.sheetIndex)).size !== data.sheetTimestamps.length || data.sheetTimestamps.some(sheet =>
       !plain(sheet) || !Number.isInteger(sheet.sheetIndex) || sheet.sheetIndex < 0 || !Array.isArray(sheet.frameTimestampsSeconds) || !sheet.frameTimestampsSeconds.length ||
       sheet.frameTimestampsSeconds.some(timestamp => !finite(timestamp) || timestamp < 0))) bad();
+  if (!Array.isArray(data.publishedSheets) || data.publishedSheets.length !== data.completedSheets
+    || new Set(data.publishedSheets.map(sheet=>sheet?.workspacePath)).size !== data.publishedSheets.length
+    || data.publishedSheets.some((sheet,index)=>!plain(sheet) || sheet.sheetIndex !== data.sheetTimestamps[index].sheetIndex
+      || typeof sheet.workspacePath !== 'string' || !/^storyboards\/[^/]+$/.test(sheet.workspacePath)
+      || /[\\<>:"|?*\u0000-\u001f]/.test(sheet.workspacePath) || /\/(?:\.|\.\.)$/.test(sheet.workspacePath))) bad();
   if (data.status !== "working" && data.phase !== data.status || data.status === "working" && !["resolving", "downloading", "publishing"].includes(data.phase)) bad();
   if (data.status === "completed" && (data.progressPercent !== 100 || data.completedSheets !== data.totalSheets)) bad();
   if (data.status !== "failed" && data.error) bad();
   const result = Object.fromEntries(taskSchema.required.map(k => [k, data[k]]));
+  result.publishedSheets = data.publishedSheets.map(({sheetIndex,workspacePath})=>({sheetIndex,workspacePath}));
   if (data.status === "failed") {
     if (data.error?.code !== "STORYBOARD_DOWNLOAD_FAILED" || !Number.isInteger(data.failedSheetIndex) || data.failedSheetIndex < 0) bad();
     result.failedSheetIndex = data.failedSheetIndex;

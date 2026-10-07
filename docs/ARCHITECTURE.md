@@ -85,7 +85,7 @@ The Extension independently validates paths and allowlists Agent response fields
 
 ## Asynchronous task model
 
-Long-running downloads and media work use a start/status/cancel lifecycle.
+All artifact producers use one public creation-and-optional-delivery supervisor in extension/artifact-tasks.js. media_task_status/media_task_cancel and specialized aliases expose the same lifecycle. Native metadata is in creation.data, created paths in files, and optional upload/delay/Send in chat. Single captures/crops/clipboard reads also return an asynchronous handle. Public file sources use workspacePath; destination roles have explicit Workspace-qualified names. See [Artifact tasks](features/ARTIFACT_TASKS.md).
 
 ```mermaid
 stateDiagram-v2

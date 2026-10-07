@@ -1,5 +1,8 @@
 # Text to Speech
 
+
+All start/status/cancel calls use the common [artifact workflow](ARTIFACT_TASKS.md). Public results expose native task metadata under `creation.data` and created paths under `files`; `addToChat` optionally extends the same task through upload and Send. `media_task_status` and `media_task_cancel` are shared follow-up tools. Specialized status/cancel names are aliases.
+
 ResearchTube exposes asynchronous speech synthesis through Google Translate and Windows voices.
 
 ## Tools

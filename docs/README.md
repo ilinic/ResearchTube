@@ -41,6 +41,7 @@ This directory is the canonical documentation set for ResearchTube. Source code 
 - [Workspace media viewer](features/MEDIA_VIEWER.md)
 - [Text to Speech](features/TEXT_TO_SPEECH.md)
 - [Media clips](features/MEDIA_CLIP.md)
+- [Artifact tasks and automatic chat delivery](features/ARTIFACT_TASKS.md)
 
 ## Documentation rules
 

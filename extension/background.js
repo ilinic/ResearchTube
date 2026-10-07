@@ -1,4 +1,6 @@
 import { TIMER_TOOL_NAMES, timerDefinitions, validateTimerInput, normalizeTimerResult } from "./timers.js";
+import { ARTIFACT_TOOLS, ARTIFACT_STATUS_TOOLS, ARTIFACT_CANCEL_TOOLS, createArtifactTaskManager } from "./artifact-tasks.js";
+import { artifactToolDefinitions, publicWorkspaceArguments } from "./artifact-tools.js";
 import { pruneCompletedTasks } from "./task-history.js";
 import { createMediaStreamHandler } from "./media-stream.js";
 import { resolveChatComposer, chatComposerPageExpression, chatComposerAttachmentNamesMatch, inspectChatComposer, clickChatComposerAttachmentRemoval, resetChatComposerFileInputs, installChatComposerGuard, readChatComposerGuard, disposeChatComposerGuard } from "./chat-composer.js";
@@ -48,14 +50,14 @@ const MCP_TOOL_SETTINGS = Object.freeze({
   workspace_list: { group: "workspace" }, workspace_stat: { group: "workspace" }, workspace_mkdir: { group: "workspace" }, workspace_move: { group: "workspace" }, workspace_delete: { group: "workspace" },
   media_probe: { group: "media" }, media_clip: { group: "media" }, media_clip_get_task: { group: "media" }, media_clip_cancel_task: { group: "media" }, media_capture_frame: { group: "media" }, media_capture_frame_get_task: { group: "media" }, media_capture_frame_task_diagnostics: { group: "media" }, media_capture_frame_cancel_task: { group: "media" }, media_capture_screen: { group: "media" }, media_image_crop: { group: "media" }, media_show: { group: "media" }, media_image_inspect: { group: "media" },
   visual_map_create: { group: "visualMaps" }, visual_map_get_task: { group: "visualMaps" }, visual_map_cancel_task: { group: "visualMaps" },
-  media_to_chat: { group: "media" }, media_to_chat_status: { group: "media" }, media_to_chat_cancel: { group: "media" },
+  media_to_chat: { group: "media" }, media_to_chat_status: { group: "media" }, media_to_chat_cancel: { group: "media" }, media_task_status: { group: "media" }, media_task_cancel: { group: "media" },
   camera_list: { group: "camera" }, camera_capture_frame: { group: "camera" }, camera_record_video: { group: "camera" }, camera_record_audio: { group: "camera" }, camera_record_status: { group: "camera" }, camera_record_stop: { group: "camera" },
   youtube_search: { group: "youtube" }, youtube_get_video: { group: "youtube" }, youtube_get_channel_videos: { group: "youtube" }, youtube_get_channel_playlists: { group: "youtube" }, youtube_get_playlist_videos: { group: "youtube" }, youtube_get_transcript: { group: "youtube" }, youtube_get_comments: { group: "youtube" }, youtube_get_comment_replies: { group: "youtube" },
   youtube_download_get_formats: { group: "downloads" }, youtube_download: { group: "downloads" }, youtube_download_get_task: { group: "downloads" }, youtube_download_task_diagnostics: { group: "downloads" }, youtube_download_cancel_task: { group: "downloads" },
   clipboard_status: { group: "clipboard" }, clipboard_get: { group: "clipboard" }, clipboard_set: { group: "clipboard" },
   library_store_start: { group: "library" }, library_store_status: { group: "library" }, library_store_cancel: { group: "library" }, online_share_start: { group: "online" }, online_share_status: { group: "online" }, online_share_stop: { group: "online" }
 });
-const EXTENSION_VERSION = "2.2.65";
+const EXTENSION_VERSION = "2.2.66";
 // Chrome dispatches this for requests made by our Extension-owned viewer.
 // Packaged assets and unrelated requests fall through without interception.
 globalThis.addEventListener?.("fetch", createMediaStreamHandler({
@@ -65,16 +67,16 @@ globalThis.addEventListener?.("fetch", createMediaStreamHandler({
   fetchMedia: (url, options) => fetch(url, options),
   log: (stage, details = {}) => console.info(`[ResearchTube media stream ${EXTENSION_VERSION}]`, stage, details)
 }));
-const REQUIRED_AGENT_INTERFACE_VERSION = 73;
+const REQUIRED_AGENT_INTERFACE_VERSION = 74;
 // A UI resource URI is a cache key in MCP Apps. Increment it whenever the
 // rendered template changes so ChatGPT does not reuse a stale iframe bundle.
-const MEDIA_TO_CHAT_WIDGET_URI = "ui://researchtube/chat-target-v4.html";
+const MEDIA_TO_CHAT_WIDGET_URI = "ui://researchtube/chat-target-v5.html";
 const MEDIA_TO_CHAT_BIND_TIMEOUT_MS = 30_000;
 const CAPTURE_FRAME_WIDGET_URI = "ui://researchtube/capture-frame-v56.html";
 const CAPTURE_FRAME_WIDGET_ALIASES = new Set(["ui://researchtube/capture-frame-v51.html", "ui://researchtube/capture-frame-v52.html", "ui://researchtube/capture-frame-v53.html", "ui://researchtube/capture-frame-v54.html", "ui://researchtube/capture-frame-v55.html"]);
 const RESEARCHTUBE_DEMO_GUIDE_URL = "https://github.com/ilinic/ResearchTube/blob/main/docs/DEMO.md";
 const RESEARCHTUBE_SERVER_DESCRIPTION = "ResearchTube provides YouTube research, local media and image operations, workspace management, screenshots, clipboard, Library integration, real asynchronous timers, and a guided demonstration using bundled local media. Search this server when the user refers to ResearchTube, YouTube analysis, a previously created workspace file, captured frame, screenshot, crop, clipboard, or asks to continue a previous ResearchTube operation. In clients with deferred tools, ResearchTube is discoverable through functions.exec lazy MCP-tool discovery; search there before treating the capability as unavailable.";
-const RESEARCHTUBE_MCP_INSTRUCTIONS = "ResearchTube exposes MCP tools that may be loaded or discovered lazily by the client. When the user mentions ResearchTube, invokes @ResearchTube, asks to repeat a ResearchTube operation, or requests a capability previously provided by ResearchTube, do not infer that ResearchTube is unavailable merely because its tools are not currently visible as a top-level tool namespace. In this client, ResearchTube is available through functions.exec with lazy MCP-tool discovery: search there for the appropriate ResearchTube tool before reporting that the capability is unavailable. Only report ResearchTube as unavailable if tool discovery actually fails, the required tool cannot be found after discovery, or an actual ResearchTube tool invocation returns an availability, connection, compatibility, or transport error. Successful use earlier in the conversation is evidence that the tools may be discoverable again; rediscover them rather than assuming access has disappeared. On the first ResearchTube interaction in a conversation, when the user asks what ResearchTube can do or gives no concrete operation, briefly offer the guided demo. Run it only with consent, use the bundled logical Workspace path demo/researchtube-demo.mp4, follow " + RESEARCHTUBE_DEMO_GUIDE_URL + ", never modify or delete the bundled source, and explain each benefit in the user's language. media_clip and media_capture_frame are asynchronous: poll their corresponding get_task tools no faster than pollIntervalMs. media_clip creates one separate file per requested interval and never renders or concatenates results automatically. media_capture_frame, media_capture_screen, and media_image_crop never render a widget themselves. Call media_show only for specific completed image paths the user asks to see. For media_capture_screen and media_image_crop, when showInChat is true, after the successful creation result call media_show once with the returned workspace image path; otherwise do not call the display tool. timer_start, timer_status, and timer_cancel provide real timed pauses because LLMs have no precise internal running clock. Show the user any requested preparation instruction, start a timer, and continue status calls at pollIntervalMs within the same turn until completed before dependent actions. An ended assistant turn is not automatically resumed by a timer. media_to_chat queues attachments for the current ChatGPT conversation. Finish the assistant response after starting it; do not poll in the same turn because Send may remain unavailable until the response ends.";
+const RESEARCHTUBE_MCP_INSTRUCTIONS = "ResearchTube exposes MCP tools that may be loaded or discovered lazily by the client. When the user mentions ResearchTube, invokes @ResearchTube, asks to repeat a ResearchTube operation, or requests a capability previously provided by ResearchTube, do not infer that ResearchTube is unavailable merely because its tools are not currently visible as a top-level tool namespace. In this client, ResearchTube is available through functions.exec with lazy MCP-tool discovery: search there for the appropriate ResearchTube tool before reporting that the capability is unavailable. Only report ResearchTube as unavailable if tool discovery actually fails, the required tool cannot be found after discovery, or an actual ResearchTube tool invocation returns an availability, connection, compatibility, or transport error. Successful use earlier in the conversation is evidence that the tools may be discoverable again; rediscover them rather than assuming access has disappeared. On the first ResearchTube interaction in a conversation, when the user asks what ResearchTube can do or gives no concrete operation, briefly offer the guided demo. Run it only with consent, use the bundled logical Workspace path demo/researchtube-demo.mp4, follow " + RESEARCHTUBE_DEMO_GUIDE_URL + ", never modify or delete the bundled source, and explain each benefit in the user's language. All artifact-producing tools are asynchronous and accept addToChat (default false), composerPolicy (requireEmpty by default), and sendDelaySeconds (0 by default). Use the returned taskId with media_task_status/media_task_cancel; specialized status/cancel tools return the same full workflow. files contains created Workspace paths; creation.data holds native results. With addToChat true the Extension binds the invoking tab immediately and automatically uploads/sends after creation. Do not duplicate that delivery with media_to_chat. completed requires every requested stage. Native file-source parameters are uniformly workspacePath; destinations use outputWorkspacePath or outputWorkspaceDirectory. media_show only displays a viewer and does not upload visual input. No automatic media viewer is created by artifact tools. timer_start, timer_status and timer_cancel provide real timed pauses; status polling cannot independently wake an ended assistant turn. After pre-Send checks, finish the response so ChatGPT can enable Send; the Extension continues automatically. Status polling and cancellation before Send are allowed in the initiating turn at pollIntervalMs.";
 const CAPTURE_FRAME_OFFSCREEN_DOCUMENT = "capture-frame-offscreen.html";
 const GOOGLE_TRANSLATE_URL = "https://translate.google.com/";
 const GOOGLE_TRANSLATE_TAB_TIMEOUT_MS = 20_000;
@@ -944,7 +946,7 @@ const mediaToChatStartSchema = { type: "object", additionalProperties: false, pr
 const mediaToChatCancelSchema = { type: "object", additionalProperties: false, properties: { task: mediaToChatTaskSchema, cancelled: { type: "boolean" } }, required: ["task", "cancelled"] };
 
 function toolDefinitions() {
-  return [
+  const definitions = [
     ...storyboardDefinitions(localAgentReadAnnotations, localWorkspaceWriteAnnotations),
     ...timerDefinitions(localAgentReadAnnotations, localWorkspaceWriteAnnotations),
     {
@@ -1425,7 +1427,7 @@ function toolDefinitions() {
     {
       name: "youtube_download",
       title: "Download a public YouTube video",
-      description: "Start an asynchronous download of one public YouTube video through the optional ResearchTube Local Agent and its locally resolved yt-dlp, Deno, and ffmpeg executables. First call youtube_download_get_formats(videoId) immediately before this tool and select exact numeric formatId values from that tool's local-yt-dlp downloadFormats response; never select a numeric ID only from youtube_get_video.youtubeFormats because that direct-YouTube snapshot is advisory and can differ. formatSelection chooses the downloaded media tracks: combined alone, video alone, audio alone, or video plus audio; never mix combined with video/audio. 'best' remains allowed for one requested component. startSeconds and endSeconds are optional as a pair: omit both to download the full video, or provide both to download only that source-video interval. A partial download requires ffmpeg and its resulting filename includes [partial_<start>_<end>]. A video+audio pair is remuxed into MP4 without re-encoding and therefore requires ffmpeg. The Agent accepts no arbitrary yt-dlp selector or arguments, no credentials, and no playlist. Returns a start handle only. Poll youtube_download_get_task no faster than pollIntervalMs; phase identifies the real yt-dlp operation and progressPercent is the percent within that phase, not a fabricated whole-task percentage. If a task fails or its output is unexpected, use youtube_download_task_diagnostics to inspect its normalized lifecycle and cleanup record. outputDir, when supplied, must be a safe workspace-relative directory.",
+      description: "Start an asynchronous download of one public YouTube video through the optional ResearchTube Local Agent and its locally resolved yt-dlp, Deno, and ffmpeg executables. First call youtube_download_get_formats(videoId) immediately before this tool and select exact numeric formatId values from that tool's local-yt-dlp downloadFormats response; never select a numeric ID only from youtube_get_video.youtubeFormats because that direct-YouTube snapshot is advisory and can differ. formatSelection chooses the downloaded media tracks: combined alone, video alone, audio alone, or video plus audio; never mix combined with video/audio. 'best' remains allowed for one requested component. startSeconds and endSeconds are optional as a pair: omit both to download the full video, or provide both to download only that source-video interval. A partial download requires ffmpeg and its resulting filename includes [partial_<start>_<end>]. A video+audio pair is remuxed into MP4 without re-encoding and therefore requires ffmpeg. The Agent accepts no arbitrary yt-dlp selector or arguments, no credentials, and no playlist. Returns a start handle only. Poll youtube_download_get_task no faster than pollIntervalMs; creation.data.phase identifies the real yt-dlp operation and creation.data.progressPercent is the native percentage within that phase. If a task fails or its output is unexpected, use youtube_download_task_diagnostics to inspect its normalized lifecycle and cleanup record. outputDir, when supplied, must be a safe workspace-relative directory.",
       annotations: localDownloadAnnotations,
       inputSchema: {
         type: "object", additionalProperties: false,
@@ -1531,6 +1533,7 @@ function toolDefinitions() {
       outputSchema: { type: "object", additionalProperties: false, properties: { videoId: { type: "string" }, parentCommentId: { type: "string" }, parent: commentParentSchema, replies: { type: "array", items: replySchema }, returned: { type: "integer" }, requested: { type: "integer" }, totalReplies: nullableInteger }, required: ["videoId", "parentCommentId", "parent", "replies", "returned", "requested", "totalReplies"] }
     }
   ];
+  return artifactToolDefinitions(definitions, mediaToChatTaskSchema, MEDIA_TO_CHAT_WIDGET_URI, localAgentReadAnnotations, localWorkspaceWriteAnnotations);
 }
 
 function isPrivateMcpTool(tool) {
@@ -2657,6 +2660,7 @@ async function ensureMediaToChatLoaded() {
     mediaToChatQueue = Array.isArray(stored[MEDIA_TO_CHAT_QUEUE_STORAGE_KEY])
       ? stored[MEDIA_TO_CHAT_QUEUE_STORAGE_KEY].filter((taskId) => typeof taskId === "string" && mediaToChatTasks.get(taskId)?.status === "queued") : [];
     for (const task of mediaToChatTasks.values()) {
+      if (task.status === "queued" && task.awaitingArtifacts) continue;
       // A detached waiting task has no host paths and no partially executed
       // click to replay. Its page-side edit guard must still match on resume.
       if (task.status === "working" && task.phase === "waitingToSend" && task.prepared?.guardToken
@@ -2668,7 +2672,7 @@ async function ensureMediaToChatLoaded() {
         task.message = task.error;
       }
     }
-    mediaToChatQueue = [];
+    mediaToChatQueue = [...mediaToChatTasks.values()].filter(task => task.status === "queued" && task.awaitingArtifacts).map(task => task.taskId);
     mediaToChatLoaded = true;
     await persistMediaToChatTasks();
     for (const task of mediaToChatTasks.values()) {
@@ -2797,7 +2801,7 @@ async function drainMediaToChatQueue() {
   try {
     while (mediaToChatQueue.length) {
       mediaToChatQueue = mediaToChatQueue.filter((id) => mediaToChatTasks.get(id)?.status === "queued");
-      const index = mediaToChatQueue.findIndex((id) => mediaToChatTasks.get(id)?.target);
+      const index = mediaToChatQueue.findIndex((id) => mediaToChatTasks.get(id)?.target && !mediaToChatTasks.get(id)?.awaitingArtifacts);
       if (index < 0) break;
       const [taskId] = mediaToChatQueue.splice(index, 1);
       const task = mediaToChatTasks.get(taskId);
@@ -2849,7 +2853,7 @@ async function drainMediaToChatQueue() {
   }
 }
 
-async function mediaToChatStart(argumentsValue = {}) {
+async function mediaToChatStart(argumentsValue = {}, { awaitingArtifacts = false } = {}) {
   if (!argumentsValue || typeof argumentsValue !== "object" || Array.isArray(argumentsValue) || Object.keys(argumentsValue).some((name) => !["files", "composerPolicy", "sendDelaySeconds"].includes(name))) {
     throw localAgentError("MEDIA_TO_CHAT_INVALID", "media_to_chat accepts only files, composerPolicy and sendDelaySeconds.");
   }
@@ -2857,12 +2861,12 @@ async function mediaToChatStart(argumentsValue = {}) {
   const sendDelaySeconds = normalizeMediaToChatSendDelay(argumentsValue.sendDelaySeconds);
   await ensureMediaToChatLoaded();
   const limits = await configuredToolLimits();
-  const files = normalizeLibraryStoreFiles(argumentsValue.files, limits.mediaToChatMaxFiles, "MEDIA_TO_CHAT_INVALID");
+  const files = awaitingArtifacts ? [] : normalizeLibraryStoreFiles(argumentsValue.files, limits.mediaToChatMaxFiles, "MEDIA_TO_CHAT_INVALID");
   const createdAt = libraryStoreNow();
   let taskId;
   do { taskId = createAsyncTaskId(); } while (mediaToChatTasks.has(taskId));
   const task = {
-    taskId, target: null, bindingToken: crypto.randomUUID(), bindingDeadline: Date.now() + MEDIA_TO_CHAT_BIND_TIMEOUT_MS, composerPolicy,
+    taskId, awaitingArtifacts, target: null, bindingToken: crypto.randomUUID(), bindingDeadline: Date.now() + MEDIA_TO_CHAT_BIND_TIMEOUT_MS, composerPolicy,
     sendDelaySeconds, sendNotBefore: null, sendStarted: false,
     status: "queued", phase: "queued", progressPercent: 0,
     files, submittedFiles: [], skippedFiles: [], createdAt, updatedAt: createdAt, submittedAt: null,
@@ -2982,6 +2986,101 @@ async function mediaToChatCancel(taskId) {
   return { task: mediaToChatTaskDocument(task), cancelled: true };
 }
 
+async function releaseArtifactChat(taskId, files) {
+  await ensureMediaToChatLoaded();
+  const task = mediaToChatTasks.get(taskId);
+  if (!task || task.status !== "queued" || !task.awaitingArtifacts) {
+    throw localAgentError("MEDIA_ARTIFACT_CHAT_INVALID", task?.error || "The originating chat reservation is no longer available.");
+  }
+  // Validate the complete ordered batch. Never send only the first N files.
+  const limits = await configuredToolLimits();
+  task.files = normalizeLibraryStoreFiles(files, limits.mediaToChatMaxFiles, "MEDIA_TO_CHAT_INVALID");
+  task.awaitingArtifacts = false;
+  await persistMediaToChatTasks();
+  void drainMediaToChatQueue();
+}
+
+const artifactTaskTimers = new Map();
+async function unscheduleArtifactTask(taskId) {
+  const timer = artifactTaskTimers.get(taskId);
+  if (timer !== undefined) clearTimeout(timer);
+  artifactTaskTimers.delete(taskId);
+  await chrome.alarms.clear(`artifact-task:${taskId}`);
+}
+async function scheduleArtifactTask(taskId, delayMs) {
+  await unscheduleArtifactTask(taskId);
+  const delay = Math.max(1, delayMs);
+  await chrome.alarms.create(`artifact-task:${taskId}`, { when: Date.now() + delay });
+  // Alarms recover suspended workers; the timer gives ordinary short tasks
+  // accurate progress without depending on model status calls.
+  artifactTaskTimers.set(taskId, setTimeout(() => {
+    artifactTaskTimers.delete(taskId);
+    void artifactTaskManager.advance(taskId);
+  }, delay));
+}
+
+function artifactProducers() {
+  const resultFile = data => data.result?.filePath ? [data.result.filePath] : [];
+  return {
+    youtube_download: { validate: normalizeDownloadInput, start: startYouTubeDownload, status: getYouTubeDownloadTask, cancel: cancelYouTubeDownloadTask, files: resultFile },
+    youtube_storyboard_download: { validate: args => validateStoryboardInput("youtube_storyboard_download", args), start: args => storyboardCall("youtube_storyboard_download", args), status: taskId => storyboardCall("youtube_storyboard_get_task", { taskId }), cancel: taskId => storyboardCall("youtube_storyboard_cancel_task", { taskId }), files: data => (data.publishedSheets ?? []).map(sheet => sheet.workspacePath) },
+    media_capture_frame: { validate: normalizeCaptureFrameBatchInput, start: createCaptureFrameTask, status: getCaptureFrameTask, cancel: cancelCaptureFrameTask, files: data => data.frames.map(frame => frame.image.workspacePath) },
+    visual_map_create: { validate: normalizeVisualMapInput, start: createVisualMap, status: getVisualMapTask, cancel: cancelVisualMapTask, files: data => (data.result?.maps ?? []).map(map => map.workspacePath) },
+    media_clip: { validate: normalizeMediaClipInput, start: createMediaClipTask, status: getMediaClipTask, cancel: cancelMediaClipTask, files: data => data.clips.map(clip => clip.workspacePath) },
+    camera_record_video: { validate: normalizeCameraRecordInput, start: cameraRecordVideo, status: cameraRecordStatus, cancel: cameraRecordStop, files: resultFile },
+    camera_record_audio: { validate: normalizeCameraAudioRecordInput, start: cameraRecordAudio, status: cameraRecordStatus, cancel: cameraRecordStop, files: resultFile },
+    system_speech_speak: { validate: normalizeSpeechInput, start: speechSpeak, status: speechStatus, cancel: speechCancel, files: resultFile },
+    media_capture_screen: { validate: normalizeScreenCaptureInput, start: captureScreen, files: data => [data.workspacePath] },
+    media_image_crop: { validate: normalizeImageCropInput, start: imageCrop, files: data => [data.image.workspacePath] },
+    camera_capture_frame: { validate: normalizeCameraCaptureInput, start: cameraCaptureFrame, files: data => [data.workspacePath] },
+    clipboard_get: { validate: normalizeClipboardGetInput, start: clipboardGet, files: data => data.workspacePath ? [data.workspacePath] : [] }
+  };
+}
+
+const artifactTaskManager = createArtifactTaskManager({
+  now: () => Date.now(), id: createAsyncTaskId, path: path => normalizeWorkspacePath(path, "workspacePath"),
+  // Only normalized producer documents are stored and exposed. Raw Agent
+  // responses, upload capabilities and absolute paths never enter this Map.
+  producers: artifactProducers(),
+  load: async () => (await chrome.storage.local.get({ researchtubeArtifactTasksV1: [] })).researchtubeArtifactTasksV1 ?? [],
+  save: records => chrome.storage.local.set({ researchtubeArtifactTasksV1: records }),
+  prune: tasks => pruneCompletedTasks(tasks, completedTaskHistoryLimit),
+  errorMessage: value => safeErrorMessage(value),
+  report: task => { void reportMcpToolToAgent(task.tool, task); },
+  schedule: scheduleArtifactTask, unschedule: unscheduleArtifactTask,
+  reserveChat: async ({ composerPolicy, sendDelaySeconds }) => (await mediaToChatStart({ composerPolicy, sendDelaySeconds }, { awaitingArtifacts: true })).task.taskId,
+  releaseChat: releaseArtifactChat, chatStatus: mediaToChatStatus,
+  cancelChat: mediaToChatCancel, chatMetadata: mediaToChatWidgetMetadata
+});
+
+async function startArtifactTask(tool, argumentsValue) {
+  const args = { ...argumentsValue };
+  const addToChat = args.addToChat ?? false;
+  if (typeof addToChat !== "boolean") throw localAgentError("MEDIA_ARTIFACT_INVALID", "addToChat must be a boolean.");
+  const composerPolicy = normalizeComposerPolicy(args.composerPolicy);
+  const sendDelaySeconds = normalizeMediaToChatSendDelay(args.sendDelaySeconds);
+  delete args.addToChat; delete args.composerPolicy; delete args.sendDelaySeconds;
+  // Validate before queueing side effects. The producer repeats normalization
+  // at its private boundary; retain the original normalized public arguments.
+  const input = artifactProducers()[tool].validate(args);
+  if (addToChat && tool === "system_speech_speak" && input.outputMode === "speakers") {
+    throw localAgentError("SPEECH_INVALID", "addToChat requires outputMode file or both; speakers creates no file.");
+  }
+  await refreshTaskHistorySettings();
+  return artifactTaskManager.start(tool, args, { addToChat, composerPolicy, sendDelaySeconds });
+}
+
+async function executeArtifactStart(id, tool, args) {
+  const response = await executeToolCall(id, tool, args, () => startArtifactTask(tool, args));
+  const task = response.result?.structuredContent;
+  if (task?.taskId) {
+    const metadata = await artifactTaskManager.metadata(task.taskId);
+    response.result._meta = { "researchtube/artifactTask": { taskId: task.taskId, tool, addToChat: task.addToChat },
+      ...(metadata ? { "researchtube/chatTarget": metadata } : {}) };
+  }
+  return response;
+}
+
 chrome.runtime.onInstalled.addListener(({ reason }) => {
   // Do not overwrite chrome.storage.local here. Reloading or updating an
   // unpacked extension fires onInstalled and previously erased the tunnel
@@ -2989,6 +3088,7 @@ chrome.runtime.onInstalled.addListener(({ reason }) => {
   void bootstrapTunnel();
   void ensureLibraryStoreLoaded().then(drainLibraryStoreQueue);
   void ensureMediaToChatLoaded().then(drainMediaToChatQueue);
+  void artifactTaskManager.ensure();
   if (reason === "install") {
     void chrome.tabs.create({ url: chrome.runtime.getURL("settings.html"), active: true });
   }
@@ -2998,9 +3098,11 @@ chrome.runtime.onStartup.addListener(() => {
   void bootstrapTunnel();
   void ensureLibraryStoreLoaded().then(drainLibraryStoreQueue);
   void ensureMediaToChatLoaded().then(drainMediaToChatQueue);
+  void artifactTaskManager.ensure();
 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name.startsWith("artifact-task:")) void artifactTaskManager.advance(alarm.name.slice("artifact-task:".length));
   if (alarm.name === "tunnel-poll") void startPolling();
   if (alarm.name.startsWith("media-chat-bind:")) void expireMediaToChatBinding(alarm.name.slice("media-chat-bind:".length));
   if (alarm.name.startsWith("media-chat-send:")) void resumeDelayedMediaToChatTask(alarm.name.slice("media-chat-send:".length));
@@ -3913,7 +4015,8 @@ function normalizeFormatSelection(value) {
   return selection;
 }
 
-async function startYouTubeDownload(args = {}) {
+function normalizeDownloadInput(args = {}) {
+  captureFrameObject(args, "youtube_download", new Set(["videoId", "formatSelection", "startSeconds", "endSeconds", "outputDir"]));
   const videoId = typeof args.videoId === "string" ? args.videoId.trim() : "";
   if (!/^[A-Za-z0-9_-]{6,}$/.test(videoId)) throw localAgentError("INVALID_VIDEO_ID", "videoId is required.");
   const formatSelection = normalizeFormatSelection(args.formatSelection);
@@ -3926,7 +4029,12 @@ async function startYouTubeDownload(args = {}) {
   if (outputDir !== undefined && (typeof outputDir !== "string" || !outputDir.trim())) {
     throw localAgentError("OUTPUT_DIR_INVALID", "outputDir must be a non-empty workspace-relative directory string.");
   }
-  return publicDownloadStartTask(normalizeAgentTask(await agentJsonRequest("/tasks/youtube-download", { method: "POST", body: { videoId, formatSelection, ...(startSeconds === undefined ? {} : { startSeconds, endSeconds }), ...(outputDir === undefined ? {} : { outputDir: outputDir.trim() }) } })));
+  return { videoId, formatSelection, ...(startSeconds === undefined ? {} : { startSeconds, endSeconds }), ...(outputDir === undefined ? {} : { outputDir: normalizeWorkspacePath(outputDir, "outputDir") }) };
+}
+
+async function startYouTubeDownload(args = {}) {
+  const input = normalizeDownloadInput(args);
+  return publicDownloadStartTask(normalizeAgentTask(await agentJsonRequest("/tasks/youtube-download", { method: "POST", body: input })));
 }
 
 function normalizeYtDlpDownloadFormats(value) {
@@ -5348,11 +5456,11 @@ function mediaToChatWidgetResource() {
 }
 
 async function readMcpResource(id, uri) {
-  if (uri !== CAPTURE_FRAME_WIDGET_URI && !CAPTURE_FRAME_WIDGET_ALIASES.has(uri) && uri !== MEDIA_TO_CHAT_WIDGET_URI) {
+  if (uri !== CAPTURE_FRAME_WIDGET_URI && !CAPTURE_FRAME_WIDGET_ALIASES.has(uri) && uri !== MEDIA_TO_CHAT_WIDGET_URI && uri !== "ui://researchtube/chat-target-v4.html") {
     return { jsonrpc: "2.0", id, error: { code: -32602, message: "Unknown MCP resource URI" } };
   }
   try {
-    const chatTargetWidget = uri === MEDIA_TO_CHAT_WIDGET_URI;
+    const chatTargetWidget = uri === MEDIA_TO_CHAT_WIDGET_URI || uri === "ui://researchtube/chat-target-v4.html";
     let text;
     if (chatTargetWidget) {
       const response = await fetch(chrome.runtime.getURL("ui/chat-target-v1.html"));
@@ -5405,6 +5513,38 @@ async function handleMcpRequest(request) {
   }
   if (request?.method === "tools/call" && typeof request.params?.name === "string" && !(await isMcpToolEnabled(request.params.name))) {
     return disabledMcpToolError(request.id, request.params.name);
+  }
+  if (request?.method === "tools/call" && typeof request.params?.name === "string") {
+    const name = request.params.name;
+    let args;
+    try { args = publicWorkspaceArguments(name, request.params.arguments ?? {}, toolDefinitions()); }
+    catch (error) { return toolError(request.id, error); }
+    if (ARTIFACT_TOOLS.includes(name)) return executeArtifactStart(request.id, name, args);
+    const taskId = args.taskId;
+    if (name === "media_task_status" || Object.hasOwn(ARTIFACT_STATUS_TOOLS, name)) {
+      return executeToolCall(request.id, name, { taskId }, async () => {
+        await refreshTaskHistorySettings();
+        return artifactTaskManager.status(taskId, ARTIFACT_STATUS_TOOLS[name]);
+      });
+    }
+    if (name === "media_task_cancel" || Object.hasOwn(ARTIFACT_CANCEL_TOOLS, name)) {
+      return executeToolCall(request.id, name, { taskId }, () => artifactTaskManager.cancel(taskId, ARTIFACT_CANCEL_TOOLS[name]));
+    }
+    if (name === "camera_record_stop") {
+      return executeToolCall(request.id, name, { taskId }, async () => {
+        const nativeId = await artifactTaskManager.nativeId(taskId, ["camera_record_audio", "camera_record_video"]);
+        const result = await cameraRecordStop(nativeId);
+        return { ...result, taskId }; // graceful stop still permits requested delivery
+      });
+    }
+    if (name === "youtube_download_task_diagnostics" || name === "media_capture_frame_task_diagnostics") {
+      return executeToolCall(request.id, name, args, async () => {
+        const nativeId = await artifactTaskManager.nativeId(taskId, name === "youtube_download_task_diagnostics" ? "youtube_download" : "media_capture_frame");
+        const result = name === "youtube_download_task_diagnostics" ? await getYouTubeDownloadTaskDiagnostics(nativeId, args) : await getCaptureFrameTaskDiagnostics(nativeId);
+        return { ...result, taskId };
+      });
+    }
+    request = { ...request, params: { ...request.params, arguments: args } };
   }
   if (request?.method === "tools/call" && request.params?.name === "youtube_download") {
     const input = request.params.arguments ?? {};
@@ -5777,7 +5917,7 @@ async function executeToolCall(id, tool, input, work, operation = null) {
   // youtube_download_get_task already reaches /tasks/... and the Agent logs
   // its native percentage there. Library status is Extension-local, so it
   // needs this small status-only report to remain visible in the Agent log.
-  const reportsLongOperationStatus = tool === "library_store_status" || tool === "media_to_chat_status";
+  const reportsLongOperationStatus = tool === "library_store_status" || tool === "media_to_chat_status" || tool === "media_task_status" || Object.hasOwn(ARTIFACT_STATUS_TOOLS, tool);
   void recordCommandDiagnostic("started", { tool, input: summarizeCommandInput(tool, input) });
   await setActionBadge("working");
   try {

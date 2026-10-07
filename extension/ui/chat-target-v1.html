@@ -33,7 +33,17 @@ body{display:flex;align-items:center;gap:8px;padding:0 8px;box-sizing:border-box
     }
     return null;
   }
-  function consume(value) { if(!metadata) metadata=binding(value); announce(); }
+  function consume(value) {
+    if(!metadata) metadata=binding(value);
+    const candidates=[value,value?._meta,value?.call_tool_result?._meta,value?.mcp_tool_result?._meta,
+      value?.call_tool_result?.result?._meta,value?.mcp_tool_result?.result?._meta];
+    const artifact=candidates.map(item=>item?.['researchtube/artifactTask']).find(Boolean);
+    if(artifact && !artifact.addToChat) {
+      status.textContent='Creating Workspace files…';bound=true;finish();return;
+    }
+    if(artifact)status.textContent='Creating files, then adding to chat…';
+    announce();
+  }
   function announce() {
     if(bound || stopped || !metadata) return;
     const detail={source:SOURCE,...metadata};

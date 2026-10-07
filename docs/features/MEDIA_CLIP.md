@@ -1,5 +1,8 @@
 # Media clips
 
+
+All start/status/cancel calls use the common [artifact workflow](ARTIFACT_TASKS.md). Public results expose native task metadata under `creation.data` and created paths under `files`; `addToChat` optionally extends the same task through upload and Send. `media_task_status` and `media_task_cancel` are shared follow-up tools. Specialized status/cancel names are aliases.
+
 `media_clip` is the unified asynchronous local cutter for video and audio.
 
 ## Supported transformations

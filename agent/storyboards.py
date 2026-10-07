@@ -15,7 +15,7 @@ import secrets
 import ssl
 import tempfile
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit, urlunsplit, parse_qsl, urlencode
 
@@ -333,6 +333,7 @@ class Task:
     failed_index: int | None = None
     error: dict | None = None
     runner: asyncio.Task | None = None
+    published_sheets: list = field(default_factory=list)
 
     def snapshot(self):
         result = dict(taskId=self.task_id, status=self.status, phase=self.phase,
@@ -340,6 +341,7 @@ class Task:
                       completedSheets=self.completed, downloadedSheets=self.downloaded,
                       reusedSheets=self.reused, workspaceDirectory='storyboards', pollIntervalMs=1000,
                       frameTimestampPosition=self.timestamp_position,
+                      publishedSheets=[dict(sheet) for sheet in self.published_sheets],
                       sheetTimestamps=[dict(sheetIndex=index,
                                             frameTimestampsSeconds=sheet_frame_timestamps(
                                                 self.variant, index, self.source['durationSeconds']))
@@ -533,6 +535,7 @@ class StoryboardService:
                             self.published.pop(next(iter(self.published)))
                     task.reused += int(reused)
                     task.downloaded += int(not reused)
+                    task.published_sheets.append(dict(sheetIndex=index, workspacePath=logical))
                     task.completed += 1
                     task.progress = 100 * task.completed / len(task.indexes)
                     await asyncio.sleep(0)

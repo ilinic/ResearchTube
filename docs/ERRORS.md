@@ -127,3 +127,7 @@ For an unlisted code, preserve its exact code and bounded message, collect compo
 - `TIMER_FAILED`: unexpected timer execution failure, represented in the failed task without provider/host details.
 
 Clock-change and execution-gap warnings are task metadata rather than MCP tool errors. Other asynchronous not-found codes can also result from terminal-history eviction. Output files remain available in Workspace after their task record is removed.
+
+## Artifact workflows
+
+`MEDIA_ARTIFACT_TASK_NOT_FOUND` means the Extension history no longer has that workflow, or its ID belongs to a different producer. Files may still exist. `MEDIA_ARTIFACT_INTERRUPTED` means an unacknowledged start or single capture/crop/read was interrupted by a worker restart; check Workspace before retrying because work is never replayed automatically. `MEDIA_ARTIFACT_NO_FILES` means successful creation produced no attachment (for example clipboard text). `MEDIA_ARTIFACT_CHAT_FAILED` retains the current-chat error text and successful creation metadata. Other native creation errors retain their existing codes under creation.error. Old path parameter names are rejected with their canonical replacement.

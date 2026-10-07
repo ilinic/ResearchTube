@@ -29,7 +29,7 @@ Call `system_agent_status`.
 Call:
 
 ```json
-{"path":"demo/researchtube-demo.mp4"}
+{"workspacePath":"demo/researchtube-demo.mp4"}
 ```
 
 with `workspace_stat`, then `media_probe`. Confirm one H.264 video stream, one AAC audio stream, 640×360 dimensions and approximately 12 seconds duration.
@@ -42,7 +42,7 @@ Call `media_capture_frame` with:
 
 ```json
 {
-  "path": "demo/researchtube-demo.mp4",
+  "workspacePath": "demo/researchtube-demo.mp4",
   "timestampsSeconds": [2, 8],
   "seekMode": "accurate",
   "applyDisplayRotation": true,
@@ -50,7 +50,7 @@ Call `media_capture_frame` with:
 }
 ```
 
-Poll `media_capture_frame_get_task` no faster than `pollIntervalMs`. After completion, call `media_show` only for the first returned frame. Explain that batch extraction avoids repeated setup and can also work from selected YouTube ranges.
+Poll `media_task_status` no faster than `pollIntervalMs`. After completion, call `media_show` with `workspacePath: files[0].workspacePath` only for the first returned frame. Native frame timestamps remain in creation.data.frames. Explain that batch extraction avoids repeated setup and can also work from selected YouTube ranges.
 
 ### 4. Build a visual map
 
@@ -67,7 +67,7 @@ Call `visual_map_create` with:
 }
 ```
 
-Poll `visual_map_get_task`, then show the first returned map through `media_show`. Explain how a visual map provides a compact timeline and how scene-detect or hybrid selection can be used for real videos.
+Poll `media_task_status`, then show files[0].workspacePath through `media_show` using its workspacePath argument. Native map details are in creation.data.result.maps. Explain how a visual map provides a compact timeline and how scene-detect or hybrid selection can be used for real videos.
 
 ### 5. Cut two video intervals
 
@@ -75,7 +75,7 @@ Call `media_clip` with:
 
 ```json
 {
-  "path": "demo/researchtube-demo.mp4",
+  "workspacePath": "demo/researchtube-demo.mp4",
   "outputKind": "video",
   "cutMode": "accurate",
   "segments": [
@@ -85,7 +85,7 @@ Call `media_clip` with:
 }
 ```
 
-Poll `media_clip_get_task`. Report actual FFmpeg progress and confirm two independent output files in caller order. Show the first video clip only after completion. Explain the difference between accurate re-encoding and fast stream-copy boundaries.
+Poll `media_task_status`. Report actual FFmpeg progress and confirm two independent output files in caller order. Show the first video clip only after completion. Explain the difference between accurate re-encoding and fast stream-copy boundaries.
 
 ### 6. Extract complete audio
 
@@ -93,7 +93,7 @@ Call `media_clip` again with:
 
 ```json
 {
-  "path": "demo/researchtube-demo.mp4",
+  "workspacePath": "demo/researchtube-demo.mp4",
   "outputKind": "audio",
   "cutMode": "copy"
 }

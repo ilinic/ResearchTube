@@ -19,6 +19,7 @@ ResearchTube uses an OpenAI Secure MCP Tunnel for the private ChatGPT connection
 - Extract frames from Workspace videos or selected YouTube ranges.
 - Build visual maps from uniform samples or detected scene changes.
 - Cut several video or audio intervals in one asynchronous task.
+- Optionally upload created frames, clips, maps, downloads, captures or speech files to the originating ChatGPT conversation using `addToChat` in the same task.
 - Inspect, crop and display local images, video and audio in ChatGPT.
 - Capture the desktop, a screen region, camera video or camera audio.
 - Synthesize speech with Google Translate or Windows voices.

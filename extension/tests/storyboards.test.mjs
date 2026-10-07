@@ -24,7 +24,7 @@ const normalized = normalizeStoryboardResult(info, { videoId: vid, available: tr
 assert.equal(JSON.stringify(normalized).includes('secret'), false);
 assert.deepEqual(normalized.variants, [variant]);
 assert.throws(() => normalizeStoryboardResult(info, { videoId: vid, available: true, durationSeconds: 20, variants: [{ ...variant, framesPerSheet: 24 }] }), { code: 'AGENT_INVALID_RESPONSE' });
-const task = { taskId: id, status: 'working', phase: 'downloading', progressPercent: 35, completedSheets: 1, totalSheets: 3, downloadedSheets: 1, reusedSheets: 0, workspaceDirectory: 'storyboards', pollIntervalMs: 1000, frameTimestampPosition: 'bottomRight', sheetTimestamps: [{ sheetIndex: 0, frameTimestampsSeconds: [0, 5] }, { sheetIndex: 1, frameTimestampsSeconds: [125, 130] }, { sheetIndex: 2, frameTimestampsSeconds: [250, 255, 260] }] };
+const task = { taskId: id, status: 'working', phase: 'downloading', progressPercent: 35, completedSheets: 1, totalSheets: 3, downloadedSheets: 1, reusedSheets: 0, workspaceDirectory: 'storyboards', pollIntervalMs: 1000, publishedSheets: [{sheetIndex: 0, workspacePath: 'storyboards/example.jpeg'}], frameTimestampPosition: 'bottomRight', sheetTimestamps: [{ sheetIndex: 0, frameTimestampsSeconds: [0, 5] }, { sheetIndex: 1, frameTimestampsSeconds: [125, 130] }, { sheetIndex: 2, frameTimestampsSeconds: [250, 255, 260] }] };
 assert.deepEqual(normalizeStoryboardResult(status, { ...task, rawSpec: 'secret', paths: ['C:\\private'] }), task);
 assert.throws(() => normalizeStoryboardResult(status, { ...task, completedSheets: 2 }), { code: 'AGENT_INVALID_RESPONSE' });
 assert.throws(() => normalizeStoryboardResult(status, { ...task, workspaceDirectory: 'C:\\private' }), { code: 'AGENT_INVALID_RESPONSE' });

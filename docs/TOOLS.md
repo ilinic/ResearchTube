@@ -2,6 +2,17 @@
 
 This is a behavioral index, not a duplicate of the JSON Schemas. Exact schemas and defaults are authoritative in `extension/background.js` and `extension/storyboards.js`.
 
+## Artifact tasks and paths
+
+Every artifact producer accepts `addToChat` (false by default), `composerPolicy` (`requireEmpty` by default) and `sendDelaySeconds` (zero by default). Captures, cropping and clipboard reads are asynchronous as well. One task covers creation plus optional upload/Send in the originating chat. Use `media_task_status` and `media_task_cancel`; specialized status/cancel commands return the same complete workflow. `files[].workspacePath` selects created outputs uniformly; native results and counters are in `creation.data`, upload and delay information in `chat`. See [Artifact tasks](features/ARTIFACT_TASKS.md) for limits, cancellation and restart behavior.
+
+| Tool | Behavior |
+| --- | --- |
+| `media_task_status` | Checks any artifact task: creation, produced paths, optional chat upload/Send, delay, errors and progress. |
+| `media_task_cancel` | Cancels creation or pending delivery, preserving published files and Composer contents; cannot undo committed Send. |
+
+Public source/selection arguments use `workspacePath`. Destination files use `outputWorkspacePath`, output folders `outputWorkspaceDirectory`; move uses `destinationWorkspacePath`. Sharing distinguishes `workspacePath`, `workspaceDirectory` and `probeWorkspacePath`. Older public argument names are rejected; Agent-only names and private viewer actions are unchanged.
+
 ## Timers
 
 LLMs have no precise internal running clock. These tools provide real elapsed-time checks for pauses, test preparation and calendar deadlines. See [timer behavior](features/TIMERS.md).
@@ -55,18 +66,18 @@ Timers live only in Agent memory. They do not wake a finished chat. Old terminal
 | --- | --- |
 | `media_probe` | Returns selected ffprobe format, stream, chapter and program metadata without the physical filename. |
 | `media_clip` | Starts one task that creates separate video or audio files for up to `limits.mediaClipMaxSegments` ordered intervals, or processes the whole source when intervals are omitted. |
-| `media_clip_get_task` | Returns real FFmpeg-derived progress and completed clip metadata. |
+| `media_clip_get_task` | Returns the complete workflow with native FFmpeg progress and clips in creation.data. |
 | `media_clip_cancel_task` | Cancels clipping and preserves clips already published. |
 | `media_capture_frame` | Starts extraction of frames from a Workspace video or selected YouTube format/ranges, up to `limits.mediaCaptureFrameMaxFrames`. |
-| `media_capture_frame_get_task` | Returns extraction/download progress and completed frame paths. |
+| `media_capture_frame_get_task` | Returns the complete workflow with extraction progress/frames in creation.data and created paths in files. |
 | `media_capture_frame_task_diagnostics` | Returns bounded sanitized diagnostics for failed YouTube frame extraction. |
 | `media_capture_frame_cancel_task` | Cancels frame extraction and preserves completed frames. |
 | `media_capture_screen` | Captures the complete virtual desktop or an explicit global `x`, `y`, `width`, `height` region. |
 | `media_image_crop` | Writes a rectangular crop from an existing PNG, JPEG or WebP source. |
 | `media_show` | Displays image, video or audio through the Extension-owned viewer; native audio/video playback and seeking stream through byte ranges. It does not upload attachments or autoplay. |
 | `media_to_chat` | Queues selected Workspace files of any type for upload and Send in the ChatGPT conversation that invoked the tool. Uses independent configured count and per-file size limits. |
-| `media_to_chat_status` | Reports phase, approximate percentage, submitted files and oversized skipped files. Poll in a later conversation turn. |
-| `media_to_chat_cancel` | Cancels only a task that is still queued, like Library storage. |
+| `media_to_chat_status` | Reports phase, approximate percentage, submitted files and oversized skipped files. Polling is allowed in the initiating turn; actual Send may require finishing the response. |
+| `media_to_chat_cancel` | Cancels queued or working delivery before Send commits, including waitingToSend; leaves Composer contents untouched. |
 | `media_image_inspect` | Verifies image format, dimensions and byte size without returning image bytes. |
 
 `media_load_workspace_image` and `media_copy_workspace_path` are private widget actions. They are not normal public tools and do not appear in Settings.
@@ -76,7 +87,7 @@ Timers live only in Agent memory. They do not wake a finished chat. Old terminal
 | Tool | Behavior |
 | --- | --- |
 | `visual_map_create` | Starts PNG contact-sheet creation using uniform, scene-detect or hybrid frame selection and optional corner timestamps. |
-| `visual_map_get_task` | Returns phase, percentage, frame/map counts and final Workspace map paths. |
+| `visual_map_get_task` | Returns the complete workflow with frame/map counts and native result.maps in creation.data. |
 | `visual_map_cancel_task` | Cancels a working visual-map task. |
 
 ## Camera
@@ -87,7 +98,7 @@ Timers live only in Agent memory. They do not wake a finished chat. Old terminal
 | `camera_capture_frame` | Captures one image from a selected camera. |
 | `camera_record_video` | Starts video recording with optional camera audio; duration is limited by `limits.cameraRecordVideoMaxMinutes`. |
 | `camera_record_audio` | Starts audio-only recording from a camera microphone; duration is limited by `limits.cameraRecordAudioMaxMinutes`. |
-| `camera_record_status` | Returns recording or stopping state, progress and output metadata. |
+| `camera_record_status` | Returns the complete artifact workflow; native recording/stopping state and metadata are in creation.data. |
 | `camera_record_stop` | Requests graceful stop and finalization of a working recording. |
 
 ## YouTube Storyboards
@@ -96,7 +107,7 @@ Timers live only in Agent memory. They do not wake a finished chat. Old terminal
 | --- | --- |
 | `youtube_storyboard_get_info` | Discovers ready-made storyboard variants, geometry, interval and sheet count without downloading sheets. |
 | `youtube_storyboard_download` | Starts download of all sheets, an inclusive time range or explicit indexes; optional timestamps are drawn into a selected corner. |
-| `youtube_storyboard_get_task` | Returns monotonic sheet progress, calculated tile timestamps and the flat `storyboards/` directory. |
+| `youtube_storyboard_get_task` | Returns the complete workflow with native progress/tile timestamps and publishedSheets in creation.data; created paths are in files. |
 | `youtube_storyboard_cancel_task` | Stops queued/current transfers while retaining complete sheets. |
 
 ## YouTube research

@@ -1,5 +1,8 @@
 # YouTube Storyboards
 
+
+All start/status/cancel calls use the common [artifact workflow](ARTIFACT_TASKS.md). Public results expose native task metadata under `creation.data` and created paths under `files`; `addToChat` optionally extends the same task through upload and Send. `media_task_status` and `media_task_cancel` are shared follow-up tools. Specialized status/cancel names are aliases.
+
 ResearchTube can discover and download YouTube's ready-made timeline preview sheets without downloading video or audio.
 
 ## Public tools
@@ -77,6 +80,6 @@ Existing files are reused only after byte verification. A conflicting file is ne
 
 ## Privacy
 
-Raw storyboard specs, signed URLs, cookies, tokens, physical paths and image bytes never enter MCP results or diagnostics. HTTPS transfers and redirects are restricted to expected YouTube storyboard paths. Sheets are not displayed automatically; use `workspace_list` and `media_show` deliberately.
+Raw storyboard specs, signed URLs, cookies, tokens, physical paths and image bytes never enter MCP results or diagnostics. HTTPS transfers and redirects are restricted to expected YouTube storyboard paths. Sheets are not displayed automatically; use the task files or creation.data.publishedSheets with media_show deliberately. Exact published paths are available without scanning storyboards/.
 
 The authoritative implementation is `extension/storyboards.js` and `agent/storyboards.py`.

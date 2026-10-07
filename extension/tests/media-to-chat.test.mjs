@@ -100,7 +100,7 @@ const mediaToChatResuming = new Set();
 ${section("async function cdpAttachFilesNow(", "\nfunction libraryStoreNow(")}
 ${section("function createAsyncTaskId(", "\nfunction libraryStoreQueuePosition(")}
 ${section("function normalizeLibraryStoreFiles(", "\nasync function resolveLibraryStoreFiles(")}
-${section("function mediaToChatTaskDocument(", "\nchrome.runtime.onInstalled")}
+${section("function mediaToChatTaskDocument(", "\nasync function releaseArtifactChat(")}
 `, context);
 const target = {tabId:42,chatPath:"/c/example"};
 const bind = async (taskId) => context.bindMediaToChatTarget(context.mediaToChatWidgetMetadata(taskId), {id:"test-extension",tab:{id:42,url:tabUrl}});

@@ -28,7 +28,7 @@ for (const tool of ["youtube_download_get_formats", "youtube_download_get_task",
 assert.match(background, /youtubeFormats: youtubeFormatsSchema/);
 assert.match(background, /youtube_download_get_formats\.downloadFormats/);
 assert.match(background, /afterEventId/);
-assert.match(background, /const REQUIRED_AGENT_INTERFACE_VERSION = 73;/);
+assert.match(background, /const REQUIRED_AGENT_INTERFACE_VERSION = 74;/);
 assert.match(background, /outputMode: \{ type: "string", enum: \["file", "speakers", "both"\]/, "speech must choose exactly one output mode");
 assert.match(background, /voiceName: \{ type: "string", minLength: 1 \}/, "speech status must report the selected voice name");
 assert.match(background, /engine: \{ type: "string", enum: \["googleTranslate", "windows"\], default: "googleTranslate" \}/, "Google Translate must be the default TTS engine");
@@ -104,7 +104,7 @@ assert.match(background, /working: \{ text: "\?", color: \[0, 0, 0, 0\]/, "ordin
 assert.doesNotMatch(background, /researchtube-busy-/, "ordinary MCP work must retain the original toolbar icon");
 assert.match(background, /state === "working" && cameraRecordingBadgeKind/, "a camera recording badge must take precedence over the general MCP hourglass");
 assert.match(background, /showInChat defaults to false/);
-assert.match(background, /never render a widget themselves/, "creation tools must not create blank static-template iframes");
+assert.match(background, /No automatic media viewer is created by artifact tools/, "creation tools must keep media presentation separate from file delivery");
 assert.match(background, /After a successful result, call media_show/, "showInChat must route presentation through the dedicated display tool");
 assert.match(background, /A successful result means the card has already been shown; do not call it again for the same file/, "the display tool must prevent duplicate retries");
 assert.match(background, /text: "Workspace media shown\."/, "the display tool must return an explicit compact success result to the model");

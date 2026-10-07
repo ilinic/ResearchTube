@@ -158,7 +158,13 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
             result3 = await self.start(); task3 = self.service.get(result3['taskId']); await task3.runner
             self.assertEqual(task3.reused, 3)
             snapshot = json.dumps(task.snapshot())
-            for private in ['sigh', 'secret', 'https', 'spec', str(self.root), 'sheet_0000']: self.assertNotIn(private, snapshot)
+            for private in ['sigh', 'secret', 'https', 'spec', str(self.root)]: self.assertNotIn(private, snapshot)
+            published = task.snapshot()['publishedSheets']
+            self.assertEqual(len(published), task.completed)
+            self.assertEqual([sheet['sheetIndex'] for sheet in published], task.indexes)
+            self.assertEqual({sheet['workspacePath'] for sheet in published},
+                             {'storyboards/' + p.name for p in files})
+            self.assertEqual(task2.snapshot()['publishedSheets'], published)
 
     async def test_none_preserves_youtube_jpeg_without_annotation(self):
         with patch.object(sb, 'fetch_sheet', AsyncMock(return_value=JPEG)):
@@ -188,6 +194,8 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(entered.wait(), 2)
             snapshot = await self.service.dispatch('cancel', {'taskId': task.task_id})
         self.assertEqual(snapshot['status'], 'cancelled'); self.assertEqual(task.completed, 1)
+        self.assertEqual(task.snapshot()['publishedSheets'], [dict(sheetIndex=0,
+            workspacePath=sb.filename(CONTEXT['title'], VID, task.variant, 0))])
         self.assertEqual(len(list((self.workspace / 'storyboards').iterdir())), 1)
         self.assertEqual([p.name for p in self.root.iterdir()], ['workspace'])
         self.assertEqual((await self.service.cancel(task.task_id))['status'], 'cancelled')

@@ -10,6 +10,7 @@ Read this file before changing the repository. Then read `docs/ARCHITECTURE.md` 
 - `extension/youtube-content.js` is the isolated YouTube content script.
 - `extension/chatgpt-capture-frame-bridge.js` and `extension/media-viewer.html` implement the ChatGPT local-media bridge.
 - `extension/chat-composer.js` owns scoped Composer inspection and user-edit monitoring for file submission.
+- `extension/artifact-tasks.js` owns the unified asynchronous creation-and-delivery supervisor; `extension/artifact-tools.js` owns common MCP flags, result schemas and canonical Workspace argument translation.
 - `agent/researchtube_agent.py` is the loopback Agent and most Agent services.
 - `agent/storyboards.py` owns Agent-side storyboard discovery and tasks.
 - `agent/timers.py` owns real timer tasks; `agent/task_history.py` bounds all Agent terminal-task histories.

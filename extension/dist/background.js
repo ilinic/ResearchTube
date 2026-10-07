@@ -134,12 +134,451 @@ function normalizeTimerResult(name, value) {
   return result;
 }
 
+// artifact-tasks.js
+var ARTIFACT_TOOLS = Object.freeze([
+  "youtube_download",
+  "youtube_storyboard_download",
+  "media_capture_frame",
+  "visual_map_create",
+  "media_clip",
+  "camera_record_video",
+  "camera_record_audio",
+  "system_speech_speak",
+  "media_capture_screen",
+  "media_image_crop",
+  "camera_capture_frame",
+  "clipboard_get"
+]);
+var ARTIFACT_STATUS_TOOLS = Object.freeze({
+  youtube_download_get_task: "youtube_download",
+  youtube_storyboard_get_task: "youtube_storyboard_download",
+  media_capture_frame_get_task: "media_capture_frame",
+  visual_map_get_task: "visual_map_create",
+  media_clip_get_task: "media_clip",
+  camera_record_status: ["camera_record_video", "camera_record_audio"],
+  system_speech_status: "system_speech_speak"
+});
+var ARTIFACT_CANCEL_TOOLS = Object.freeze({
+  youtube_download_cancel_task: "youtube_download",
+  youtube_storyboard_cancel_task: "youtube_storyboard_download",
+  media_capture_frame_cancel_task: "media_capture_frame",
+  visual_map_cancel_task: "visual_map_create",
+  media_clip_cancel_task: "media_clip",
+  system_speech_cancel: "system_speech_speak"
+});
+var terminal = (status) => ["completed", "failed", "cancelled"].includes(status);
+var object2 = (properties, required = Object.keys(properties)) => ({ type: "object", additionalProperties: false, properties, required });
+var errorSchema = object2({ code: { type: "string" }, message: { type: "string" } });
+var nullable = (schema) => ({ anyOf: [schema, { type: "null" }] });
+var artifactOptionsSchema = {
+  addToChat: { type: "boolean", default: false, description: "Upload all created files to the originating ChatGPT conversation and press Send as the second stage of this task. This supplies attachments to ChatGPT, unlike media_show which only displays a viewer. Default false only creates Workspace files." },
+  composerPolicy: { type: "string", enum: ["requireEmpty", "clear"], default: "requireEmpty", description: "With addToChat: requireEmpty refuses an existing draft or attachments; clear explicitly discards both once before upload. New user edits stop Send and leave uploaded files attached." },
+  sendDelaySeconds: { type: "number", minimum: 0, default: 0, description: "With addToChat: optional seconds between acceptance of all eligible attachments and Send. Readiness is checked separately. Status exposes waitingToSend, sendNotBefore and remainingSeconds. Cancellation leaves the Composer untouched." }
+};
+function artifactTaskSchema(chatSchema, dataSchema = { type: "object" }) {
+  return object2({
+    taskId: { type: "string", pattern: "^tsk_[A-Za-z0-9_-]{10}$" },
+    tool: { type: "string", enum: ARTIFACT_TOOLS },
+    status: { enum: ["queued", "working", "completed", "failed", "cancelled"] },
+    phase: { type: "string" },
+    progressPercent: { type: "number", minimum: 0, maximum: 100 },
+    statusMessage: { type: "string" },
+    createdAt: { type: "string" },
+    lastUpdatedAt: { type: "string" },
+    pollIntervalMs: { type: "integer", minimum: 1e3 },
+    statusTool: { const: "media_task_status" },
+    cancelTool: { const: "media_task_cancel" },
+    addToChat: { type: "boolean" },
+    files: { type: "array", items: object2({ workspacePath: { type: "string", minLength: 1 } }) },
+    creation: object2({
+      status: { enum: ["queued", "working", "completed", "failed", "cancelled"] },
+      phase: { type: "string" },
+      progressPercent: { type: "number", minimum: 0, maximum: 100 },
+      data: nullable(dataSchema),
+      error: nullable(errorSchema)
+    }),
+    chat: nullable(chatSchema),
+    error: nullable(errorSchema)
+  });
+}
+function createArtifactTaskManager(host) {
+  let tasks = /* @__PURE__ */ new Map(), loaded = false, loading;
+  const running = /* @__PURE__ */ new Set();
+  let persistence = Promise.resolve();
+  const now = () => new Date(host.now()).toISOString();
+  const error2 = (code, message) => Object.assign(new Error(message), { code });
+  const publicError = (value) => ({
+    code: typeof value?.code === "string" ? value.code : "MEDIA_ARTIFACT_FAILED",
+    message: host.errorMessage(value)
+  });
+  const persist = () => {
+    host.prune(tasks);
+    const snapshot = JSON.parse(JSON.stringify([...tasks.values()]));
+    const write = persistence.catch(() => {
+    }).then(() => host.save(snapshot));
+    persistence = write;
+    return write;
+  };
+  const document2 = (task) => ({
+    taskId: task.taskId,
+    tool: task.tool,
+    status: task.status,
+    phase: task.phase,
+    progressPercent: task.progressPercent,
+    statusMessage: task.statusMessage,
+    createdAt: task.createdAt,
+    lastUpdatedAt: task.lastUpdatedAt,
+    pollIntervalMs: 1e3,
+    statusTool: "media_task_status",
+    cancelTool: "media_task_cancel",
+    addToChat: task.addToChat,
+    files: task.files.map(({ workspacePath }) => ({ workspacePath })),
+    creation: {
+      status: task.creation.status,
+      phase: task.creation.phase,
+      progressPercent: task.creation.progressPercent,
+      data: task.creation.data,
+      error: task.creation.error
+    },
+    chat: task.chat,
+    error: task.error
+  });
+  async function save(task) {
+    task.lastUpdatedAt = now();
+    await persist();
+    host.report(document2(task));
+  }
+  async function finish(task, status, failure = null) {
+    task.status = status;
+    task.phase = status;
+    task.error = failure;
+    delete task.input;
+    task.statusMessage = failure?.message ?? (status === "completed" ? "All requested stages completed." : "Cancelled; created files and existing Composer contents are preserved.");
+    if (status === "completed") task.progressPercent = 100;
+    await host.unschedule(task.taskId);
+    if (status !== "completed" && task.chatTaskId) {
+      try {
+        const result = await host.cancelChat(task.chatTaskId);
+        task.chat = result.task ?? await host.chatStatus(task.chatTaskId);
+      } catch {
+      }
+    }
+    await save(task);
+  }
+  async function ensure() {
+    if (loaded) return;
+    if (loading) return loading;
+    loading = (async () => {
+      tasks = new Map((await host.load()).filter((t) => t && ARTIFACT_TOOLS.includes(t.tool) && /^tsk_[A-Za-z0-9_-]{10}$/.test(t.taskId)).map((t) => [t.taskId, t]));
+      loaded = true;
+      for (const task of tasks.values()) {
+        if (terminal(task.status)) continue;
+        if (task.creation.status !== "completed" && !task.creation.taskId) {
+          await finish(task, "failed", publicError(error2("MEDIA_ARTIFACT_INTERRUPTED", "The Extension restarted during file creation. Check the Workspace before retrying; creation is not replayed.")));
+        } else await host.schedule(task.taskId, 1);
+      }
+    })().finally(() => {
+      loading = null;
+    });
+    return loading;
+  }
+  const get = (id, tools = null) => {
+    const task = tasks.get(id);
+    if (!task || tools && !(Array.isArray(tools) ? tools : [tools]).includes(task.tool)) {
+      throw error2("MEDIA_ARTIFACT_TASK_NOT_FOUND", "This artifact task was not found in Extension history. It may have been evicted or belong to another tool.");
+    }
+    return task;
+  };
+  async function acceptCreation(task, data) {
+    const producer = host.producers[task.tool];
+    task.creation.data = data;
+    task.creation.phase = data.phase ?? "completed";
+    task.files = producer.files(data).map((path) => ({ workspacePath: host.path(path) }));
+    const status = data.status === "stopping" ? "working" : data.status;
+    task.creation.status = producer.status ? status : data.ok === false ? "failed" : "completed";
+    task.creation.progressPercent = Math.max(task.creation.progressPercent, Number.isFinite(data.progressPercent) ? data.progressPercent : task.creation.status === "completed" ? 100 : 0);
+    task.creation.error = data.error ? publicError(data.error) : null;
+    if (task.creation.status === "failed" && !task.creation.error) task.creation.error = publicError(error2("MEDIA_ARTIFACT_FAILED", data.message ?? "File creation failed."));
+    task.progressPercent = Math.max(task.progressPercent, Math.min(task.addToChat ? 70 : 99, task.creation.progressPercent * (task.addToChat ? 0.7 : 0.99)));
+  }
+  async function advance(id) {
+    await ensure();
+    const task = tasks.get(id);
+    if (!task || terminal(task.status) || running.has(id)) return;
+    running.add(id);
+    try {
+      const producer = host.producers[task.tool];
+      task.status = "working";
+      if (task.creation.status === "queued") {
+        task.phase = "creating";
+        task.creation.status = "working";
+        task.creation.phase = "preparing";
+        task.statusMessage = "Creating Workspace artifacts.";
+        await save(task);
+        if (task.cancelRequested) {
+          task.creation.status = "cancelled";
+          await finish(task, "cancelled");
+          return;
+        }
+        const data = await producer.start(task.input);
+        if (data.status === "rejected") throw data.error;
+        if (producer.status) {
+          if (typeof data.taskId !== "string") throw error2("AGENT_INVALID_RESPONSE", "Creation returned no native task identifier.");
+          task.creation.taskId = data.taskId;
+        }
+        delete task.input;
+        await acceptCreation(task, data);
+        if (task.cancelRequested && producer.cancel && !terminal(task.creation.status)) {
+          await producer.cancel(task.creation.taskId);
+          task.nativeCancelSent = true;
+        }
+      } else if (task.creation.status === "working") {
+        if (host.now() < (task.nextCreationPoll ?? 0)) return;
+        const data = await producer.status(task.creation.taskId);
+        if (data.status === "rejected") throw data.error;
+        if (data.taskId !== task.creation.taskId) throw error2("AGENT_INVALID_RESPONSE", "The Agent returned another native creation task. No files were selected for delivery.");
+        await acceptCreation(task, data);
+        if (task.cancelRequested && !task.nativeCancelSent && !terminal(task.creation.status)) {
+          await producer.cancel(task.creation.taskId);
+          task.nativeCancelSent = true;
+        }
+      }
+      if (task.addToChat && !task.chatReleased) task.chat = await host.chatStatus(task.chatTaskId);
+      if (!terminal(task.creation.status)) {
+        task.phase = task.cancelRequested ? "cancelling" : "creating";
+        task.statusMessage = task.cancelRequested ? "Stopping creation; preserving published files." : "Creating Workspace artifacts.";
+        task.nextCreationPoll = host.now() + Math.max(1e3, task.creation.data?.pollIntervalMs ?? 1e3);
+        await save(task);
+        await host.schedule(id, task.nextCreationPoll - host.now());
+        return;
+      }
+      if (task.cancelRequested || task.creation.status === "cancelled") {
+        await finish(task, "cancelled");
+        return;
+      }
+      if (task.creation.status === "failed") {
+        await finish(task, "failed", task.creation.error);
+        return;
+      }
+      if (!task.addToChat) {
+        await finish(task, "completed");
+        return;
+      }
+      if (!task.files.length) {
+        await finish(task, "failed", publicError(error2("MEDIA_ARTIFACT_NO_FILES", "Creation produced no file to attach. Clipboard text is returned in creation.data and is not automatically sent.")));
+        return;
+      }
+      if (!task.chatReleased) {
+        await host.releaseChat(task.chatTaskId, task.files);
+        task.chatReleased = true;
+      }
+      task.chat = await host.chatStatus(task.chatTaskId);
+      task.phase = task.chat.phase === "queued" ? "chatPreparing" : task.chat.phase;
+      task.statusMessage = task.chat.message;
+      task.progressPercent = Math.max(task.progressPercent, 70 + task.chat.progressPercent * 0.29);
+      if (terminal(task.chat.status)) {
+        await finish(task, task.chat.status, task.chat.error ? publicError(error2("MEDIA_ARTIFACT_CHAT_FAILED", task.chat.error)) : null);
+        return;
+      }
+      await save(task);
+      await host.schedule(id, 1e3);
+    } catch (failure) {
+      if (task.creation.status !== "completed") {
+        task.creation.status = "failed";
+        task.creation.phase = "failed";
+        task.creation.error = publicError(failure);
+      }
+      await finish(task, task.cancelRequested ? "cancelled" : "failed", task.cancelRequested ? null : publicError(failure));
+    } finally {
+      running.delete(id);
+    }
+  }
+  return {
+    ensure,
+    advance,
+    async start(tool, input, options) {
+      await ensure();
+      const createdAt = now();
+      let taskId3;
+      do {
+        taskId3 = host.id();
+      } while (tasks.has(taskId3));
+      const task = {
+        taskId: taskId3,
+        tool,
+        input,
+        ...options,
+        status: "queued",
+        phase: "preparing",
+        progressPercent: 0,
+        statusMessage: "Artifact task queued.",
+        createdAt,
+        lastUpdatedAt: createdAt,
+        files: [],
+        chat: null,
+        error: null,
+        creation: { status: "queued", phase: "preparing", progressPercent: 0, data: null, error: null, taskId: null }
+      };
+      if (options.addToChat) {
+        task.chatTaskId = await host.reserveChat(options);
+        task.chat = await host.chatStatus(task.chatTaskId);
+      }
+      tasks.set(taskId3, task);
+      await save(task);
+      await host.schedule(taskId3, 1);
+      return document2(task);
+    },
+    async status(id, tools = null) {
+      await ensure();
+      const task = get(id, tools);
+      if (task.creation.status === "queued") {
+        void advance(id);
+        return document2(task);
+      }
+      await advance(id);
+      return document2(get(id, tools));
+    },
+    async metadata(id) {
+      await ensure();
+      const task = get(id);
+      return task.chatTaskId ? host.chatMetadata(task.chatTaskId) : null;
+    },
+    async nativeId(id, tools = null) {
+      await ensure();
+      const task = get(id, tools);
+      if (!task.creation.taskId) throw error2("MEDIA_ARTIFACT_INVALID", "Creation has not acquired its native task handle yet. Check media_task_status first.");
+      return task.creation.taskId;
+    },
+    async cancel(id, tools = null) {
+      await ensure();
+      const task = get(id, tools);
+      if (terminal(task.status)) return { task: document2(task), cancelled: false };
+      if (task.chatTaskId) {
+        const result = await host.cancelChat(task.chatTaskId);
+        task.chat = result.task ?? await host.chatStatus(task.chatTaskId);
+        if (!result.cancelled && task.chatReleased) {
+          await advance(id);
+          return { task: document2(get(id)), cancelled: false };
+        }
+      }
+      task.cancelRequested = true;
+      task.phase = "cancelling";
+      task.statusMessage = "Cancellation requested; files and Composer contents are preserved.";
+      await save(task);
+      if (!terminal(task.creation.status) && task.creation.taskId && !task.nativeCancelSent) {
+        await host.producers[task.tool].cancel(task.creation.taskId);
+        task.nativeCancelSent = true;
+        await save(task);
+      }
+      if (!running.has(id)) {
+        if (task.creation.status === "queued") {
+          task.creation.status = "cancelled";
+          await finish(task, "cancelled");
+        } else await advance(id);
+      }
+      return { task: document2(task), cancelled: true };
+    }
+  };
+}
+
+// artifact-tools.js
+var WORKSPACE_ARGUMENT_NAMES = Object.freeze({
+  workspace_list: { path: "workspacePath" },
+  workspace_stat: { path: "workspacePath" },
+  workspace_mkdir: { path: "workspacePath" },
+  workspace_delete: { path: "workspacePath" },
+  workspace_move: { source: "workspacePath", destination: "destinationWorkspacePath" },
+  media_probe: { path: "workspacePath" },
+  media_show: { path: "workspacePath" },
+  media_image_inspect: { path: "workspacePath" },
+  media_capture_frame: { path: "workspacePath" },
+  media_clip: { path: "workspacePath", outputDir: "outputWorkspaceDirectory" },
+  media_image_crop: { path: "workspacePath", outputPath: "outputWorkspacePath" },
+  media_capture_screen: { outputPath: "outputWorkspacePath" },
+  camera_capture_frame: { targetPath: "outputWorkspacePath" },
+  system_speech_speak: { outputPath: "outputWorkspacePath" },
+  youtube_download: { outputDir: "outputWorkspaceDirectory" },
+  online_share_start: { file: "workspacePath", folder: "workspaceDirectory", probePath: "probeWorkspacePath" }
+});
+function renameSchema(schema, names) {
+  if (Array.isArray(schema)) return schema.map((s) => renameSchema(s, names));
+  if (!schema || typeof schema !== "object") return schema;
+  return Object.fromEntries(Object.entries(schema).map(([key, value]) => [
+    key,
+    key === "properties" ? Object.fromEntries(Object.entries(value).map(([name, property]) => [names[name] ?? name, renameSchema(property, names)])) : key === "required" ? value.map((name) => names[name] ?? name) : renameSchema(value, names)
+  ]));
+}
+function renameDescription(text2, names) {
+  return Object.entries(names).reduce((result, [oldName, newName]) => result.replace(new RegExp(`\\b${oldName}\\b`, "g"), newName), text2);
+}
+function publicWorkspaceArguments(tool, args, definitions) {
+  if (!args || typeof args !== "object" || Array.isArray(args)) throw Object.assign(new Error("Tool arguments must be an object."), { code: "INVALID_ARGUMENT" });
+  const definition = definitions.find((t) => t.name === tool);
+  if (!definition) return args;
+  const names = WORKSPACE_ARGUMENT_NAMES[tool] ?? {};
+  const allowed = new Set(Object.keys(definition.inputSchema.properties ?? {}));
+  for (const key of Object.keys(args)) {
+    if (!allowed.has(key)) throw Object.assign(new Error(`Unsupported ${tool} parameter ${key}.${names[key] ? ` Use ${names[key]} instead.` : ""}`), { code: "INVALID_ARGUMENT" });
+  }
+  const reverse = Object.fromEntries(Object.entries(names).map(([a, b]) => [b, a]));
+  return Object.fromEntries(Object.entries(args).map(([key, value]) => [reverse[key] ?? key, value]));
+}
+function artifactToolDefinitions(definitions, chatSchema, widgetUri, readAnnotations, writeAnnotations) {
+  const workflowChatSchema = { ...chatSchema, properties: {
+    ...chatSchema.properties,
+    files: { ...chatSchema.properties.files, minItems: 0 }
+  } };
+  const dataSchemas = Object.fromEntries(definitions.filter((t) => ARTIFACT_TOOLS.includes(t.name)).map((t) => [
+    t.name,
+    t.name === "youtube_download" ? { type: "object", anyOf: [t.outputSchema, definitions.find((d) => d.name === "youtube_download_get_task").outputSchema] } : t.outputSchema
+  ]));
+  const taskSchema2 = artifactTaskSchema(workflowChatSchema, { type: "object", anyOf: Object.values(dataSchemas) });
+  const schemaFor = (names) => artifactTaskSchema(workflowChatSchema, Array.isArray(names) ? { type: "object", anyOf: names.map((name) => dataSchemas[name]) } : dataSchemas[names]);
+  const taskInput = { type: "object", additionalProperties: false, properties: { taskId: { type: "string", pattern: "^tsk_[A-Za-z0-9_-]{10}$" } }, required: ["taskId"] };
+  const cancelSchema2 = { type: "object", additionalProperties: false, properties: { task: taskSchema2, cancelled: { type: "boolean" } }, required: ["task", "cancelled"] };
+  const result = definitions.map((definition) => {
+    const names = WORKSPACE_ARGUMENT_NAMES[definition.name] ?? {};
+    let tool = { ...definition, inputSchema: renameSchema(definition.inputSchema, names), description: renameDescription(definition.description, names) };
+    for (const property of Object.values(tool.inputSchema.properties ?? {})) {
+      if (property.description) property.description = renameDescription(property.description, names);
+    }
+    if (ARTIFACT_TOOLS.includes(tool.name)) {
+      tool.inputSchema.properties = { ...tool.inputSchema.properties, ...artifactOptionsSchema };
+      delete tool.inputSchema.properties.showInChat;
+      tool.description = tool.description.replace(/showInChat defaults to false:[\s\S]*?The tool never/, "The tool never").replace(/For media_capture_screen[^.]*\./g, "").replace(/For text, returns Unicode text directly\./, "For text, returns Unicode text in creation.data after the asynchronous read.");
+      tool.description += " Always returns one asynchronous task immediately, including single captures, cropping and clipboard reads. Use media_task_status and media_task_cancel with its unchanged taskId; specialized status/cancel tools are aliases for the same task. creation.data retains full native metadata; files lists only artifacts created by this operation, in output order. addToChat defaults to false. When true, the compact service widget binds the originating Chrome tab at launch, before lengthy creation; the Extension automatically uploads all completed outputs and presses Send after creation. completed means every requested stage finished; creation may be completed while chat is still waitingToSend or has failed. Limits mediaToChatMaxFiles and mediaToChatMaxFileSizeMiB apply: an excessive output count refuses the entire upload, oversized files are reported in chat.skippedFiles, eligible files are sent together. Files remain in Workspace on failure or cancellation. composerPolicy and sendDelaySeconds use the same semantics as media_to_chat. Do not call media_to_chat again for an addToChat task. No media viewer is rendered; use media_show only when separate presentation is requested. Poll no faster than pollIntervalMs. ChatGPT may withhold Send while this assistant response is running; finish the response after required pre-Send checks when the goal is actual submission.";
+      if (tool.name === "system_speech_speak") tool.description += " addToChat requires outputMode file or both; speakers-only is rejected.";
+      if (tool.name === "clipboard_get") tool.description += " addToChat attaches a saved clipboard image only; clipboard text produces no file and is never automatically submitted.";
+      tool.outputSchema = schemaFor(tool.name);
+      tool.annotations = { ...tool.annotations, destructiveHint: true, openWorldHint: true };
+      tool._meta = {
+        ...tool._meta,
+        ui: { resourceUri: widgetUri },
+        "openai/outputTemplate": widgetUri,
+        "openai/toolInvocation/invoked": "Artifact task created."
+      };
+    } else if (Object.hasOwn(ARTIFACT_STATUS_TOOLS, tool.name)) {
+      tool.outputSchema = schemaFor(ARTIFACT_STATUS_TOOLS[tool.name]);
+      tool.description = "Read the complete creation-and-optional-chat lifecycle for the task returned by its creation tool. Alias of media_task_status; completed means all requested stages finished. Native progress and results are in creation.data, created paths in files, upload/delay state in chat. Respect pollIntervalMs; finish the assistant response if Send is waiting for ChatGPT readiness.";
+    } else if (Object.hasOwn(ARTIFACT_CANCEL_TOOLS, tool.name)) {
+      tool.outputSchema = { ...cancelSchema2, properties: { ...cancelSchema2.properties, task: schemaFor(ARTIFACT_CANCEL_TOOLS[tool.name]) } };
+      tool.description = "Alias of media_task_cancel for this creation tool. Cancel creation or optional chat delivery before Send commits; preserve published files and Composer contents. Status may remain working/cancelling until native processing settles. After Send commits cancelled is false.";
+    }
+    return tool;
+  });
+  return [
+    ...result,
+    { name: "media_task_status", title: "Check artifact task", description: "Check any artifact-producing task, whether addToChat was requested or not. Exposes creation.data (native metadata), files (created Workspace paths), and chat (upload, skips, waitingToSend UTC deadline and remaining seconds). One unchanged taskId covers both stages. completed requires every requested stage; a chat failure preserves successful creation. Poll no faster than pollIntervalMs. Send may require finishing the current assistant response.", annotations: readAnnotations, inputSchema: taskInput, outputSchema: taskSchema2 },
+    { name: "media_task_cancel", title: "Cancel artifact task", description: "Cancel any artifact-producing task and prevent later upload/Send. Stop native asynchronous creation where supported; an already running single capture/crop/read settles without replay or file deletion. Preserve every published file and all Composer text/attachments. Wait for cancellation to settle through media_task_status. Send already committed cannot be undone; cancelled then is false.", annotations: writeAnnotations, inputSchema: taskInput, outputSchema: cancelSchema2 }
+  ];
+}
+
 // task-history.js
 function pruneCompletedTasks(tasks, maximum = 2e3) {
   if (!Number.isSafeInteger(maximum) || maximum < 1) maximum = 2e3;
-  const terminal = [...tasks.values()].filter((task) => ["completed", "failed", "cancelled"].includes(task.status));
-  terminal.sort((a, b) => String(a.updatedAt || a.createdAt).localeCompare(String(b.updatedAt || b.createdAt)));
-  for (const task of terminal.slice(0, Math.max(0, terminal.length - maximum))) tasks.delete(task.taskId);
+  const terminal2 = [...tasks.values()].filter((task) => ["completed", "failed", "cancelled"].includes(task.status));
+  terminal2.sort((a, b) => String(a.updatedAt || a.createdAt).localeCompare(String(b.updatedAt || b.createdAt)));
+  for (const task of terminal2.slice(0, Math.max(0, terminal2.length - maximum))) tasks.delete(task.taskId);
 }
 
 // media-stream.js
@@ -474,7 +913,7 @@ function disposeChatComposerGuard(token) {
 }
 
 // storyboards.js
-var object2 = (properties, required = Object.keys(properties)) => ({ type: "object", additionalProperties: false, properties, required });
+var object3 = (properties, required = Object.keys(properties)) => ({ type: "object", additionalProperties: false, properties, required });
 var integer = { type: "integer", minimum: 0 };
 var positive = { type: "integer", minimum: 1 };
 var videoId = { type: "string", pattern: "^[A-Za-z0-9_-]{11}$" };
@@ -493,8 +932,8 @@ var messages = {
   STORYBOARD_DOWNLOAD_FAILED: "A sheet could not be downloaded or safely published. Check availability, free space, and conflicting files.",
   TASK_NOT_FOUND: "The storyboard task does not exist in this Agent session."
 };
-var errorSchema = object2({ code: { type: "string", enum: Object.keys(messages) }, message: { type: "string" } });
-var variantSchema = object2({
+var errorSchema2 = object3({ code: { type: "string", enum: Object.keys(messages) }, message: { type: "string" } });
+var variantSchema = object3({
   variantId,
   cellWidth: positive,
   cellHeight: positive,
@@ -507,22 +946,22 @@ var variantSchema = object2({
   format: { const: "jpeg" }
 });
 var selectionSchema = { oneOf: [
-  object2({ mode: { const: "all" } }),
-  object2({ mode: { const: "range" }, startSeconds: { type: "number", minimum: 0 }, endSeconds: { type: "number", minimum: 0 } }),
-  object2({ mode: { const: "sheets" }, sheetIndexes: { type: "array", minItems: 1, items: integer } })
+  object3({ mode: { const: "all" } }),
+  object3({ mode: { const: "range" }, startSeconds: { type: "number", minimum: 0 }, endSeconds: { type: "number", minimum: 0 } }),
+  object3({ mode: { const: "sheets" }, sheetIndexes: { type: "array", minItems: 1, items: integer } })
 ] };
-var rejected = object2({ status: { const: "rejected" }, error: errorSchema });
+var rejected = object3({ status: { const: "rejected" }, error: errorSchema2 });
 var infoSchema = { type: "object", oneOf: [
-  object2({ videoId, durationSeconds: { type: "number", exclusiveMinimum: 0 }, available: { const: true }, variants: { type: "array", minItems: 1, items: variantSchema } }),
-  object2({ videoId, available: { const: false }, reason: { enum: reasons } }),
+  object3({ videoId, durationSeconds: { type: "number", exclusiveMinimum: 0 }, available: { const: true }, variants: { type: "array", minItems: 1, items: variantSchema } }),
+  object3({ videoId, available: { const: false }, reason: { enum: reasons } }),
   rejected
 ] };
 var statuses = ["working", "completed", "cancelled", "failed"];
-var sheetTimestampSchema = object2({
+var sheetTimestampSchema = object3({
   sheetIndex: integer,
   frameTimestampsSeconds: { type: "array", minItems: 1, items: { type: "number", minimum: 0 } }
 });
-var taskSchema = object2(
+var taskSchema = object3(
   {
     taskId: taskId2,
     status: { enum: statuses },
@@ -536,12 +975,13 @@ var taskSchema = object2(
     pollIntervalMs: { type: "integer", minimum: 1e3 },
     frameTimestampPosition,
     sheetTimestamps: { type: "array", minItems: 1, items: sheetTimestampSchema },
+    publishedSheets: { type: "array", items: object3({ sheetIndex: integer, workspacePath: { type: "string", minLength: 1 } }) },
     failedSheetIndex: integer,
-    error: errorSchema
+    error: errorSchema2
   },
-  ["taskId", "status", "phase", "progressPercent", "completedSheets", "totalSheets", "downloadedSheets", "reusedSheets", "workspaceDirectory", "pollIntervalMs", "frameTimestampPosition", "sheetTimestamps"]
+  ["taskId", "status", "phase", "progressPercent", "completedSheets", "totalSheets", "downloadedSheets", "reusedSheets", "workspaceDirectory", "pollIntervalMs", "frameTimestampPosition", "sheetTimestamps", "publishedSheets"]
 );
-var cancelSchema = object2({ taskId: taskId2, status: { enum: statuses } });
+var cancelSchema = object3({ taskId: taskId2, status: { enum: statuses } });
 var STORYBOARD_TOOL_NAMES = Object.freeze(["youtube_storyboard_get_info", "youtube_storyboard_download", "youtube_storyboard_get_task", "youtube_storyboard_cancel_task"]);
 function storyboardDefinitions(readAnnotations, writeAnnotations) {
   const make = (name, title, description, inputSchema, outputSchema, write = false) => ({
@@ -553,10 +993,10 @@ function storyboardDefinitions(readAnnotations, writeAnnotations) {
     annotations: { ...write ? writeAnnotations : readAnnotations, openWorldHint: name.endsWith("get_info") || name.endsWith("download") }
   });
   return [
-    make(STORYBOARD_TOOL_NAMES[0], "Get YouTube storyboard variants", "Discover pre-generated timeline-preview sheet variants. Returns cell geometry, interval and sheet count. frameIntervalEstimated marks timing inferred when YouTube has no nonzero interval or the last yt-dlp fallback only provides average fps; range boundaries then use that estimate. Reads the matching open YouTube tab first, then yt-dlp metadata. Creates no files and downloads no media or sheets. variantId is opaque; retain it unchanged.", object2({ videoId }), infoSchema),
-    make(STORYBOARD_TOOL_NAMES[1], "Download YouTube storyboard sheets", "Start one asynchronous task for all sheets, an inclusive time range within video duration, or zero-based sheet indexes of one discovered variant. Downloads YouTube's ready preview JPEG sheets only, never video/audio. sheetTimestamps always returns the calculated absolute time for every real tile. frameTimestampPosition controls whether those labels are drawn on the ready-made grid: bottomRight by default, or none, topLeft, topRight, or bottomLeft when explicitly requested; unused cells of a final partial sheet stay untouched. Files are directly in storyboards/ with video ID, sz_widthxheight, tstp_seconds, mesh_columnsxrows and sheet index tags in each filename. Never displays an image automatically. Poll youtube_storyboard_get_task at pollIntervalMs; use workspace_list on workspaceDirectory to find files.", object2({ videoId, variantId, selection: selectionSchema, frameTimestampPosition }, ["videoId", "variantId", "selection"]), { type: "object", oneOf: [taskSchema, rejected] }, true),
-    make(STORYBOARD_TOOL_NAMES[2], "Get storyboard task progress", "Get compact sheet counts and monotonic progress. Poll no faster than pollIntervalMs. Complete sheets remain in storyboards/ after failure or cancellation. Does not return images or a sheet-path array.", object2({ taskId: taskId2 }), { type: "object", oneOf: [taskSchema, rejected] }),
-    make(STORYBOARD_TOOL_NAMES[3], "Cancel storyboard download", "Stop current and queued transfers for one storyboard task. Preserves all completely published sheets. Repeating cancellation returns the existing terminal status.", object2({ taskId: taskId2 }), { type: "object", oneOf: [cancelSchema, rejected] }, true)
+    make(STORYBOARD_TOOL_NAMES[0], "Get YouTube storyboard variants", "Discover pre-generated timeline-preview sheet variants. Returns cell geometry, interval and sheet count. frameIntervalEstimated marks timing inferred when YouTube has no nonzero interval or the last yt-dlp fallback only provides average fps; range boundaries then use that estimate. Reads the matching open YouTube tab first, then yt-dlp metadata. Creates no files and downloads no media or sheets. variantId is opaque; retain it unchanged.", object3({ videoId }), infoSchema),
+    make(STORYBOARD_TOOL_NAMES[1], "Download YouTube storyboard sheets", "Start one asynchronous task for all sheets, an inclusive time range within video duration, or zero-based sheet indexes of one discovered variant. Downloads YouTube's ready preview JPEG sheets only, never video/audio. sheetTimestamps always returns the calculated absolute time for every real tile. frameTimestampPosition controls whether those labels are drawn on the ready-made grid: bottomRight by default, or none, topLeft, topRight, or bottomLeft when explicitly requested; unused cells of a final partial sheet stay untouched. Files are directly in storyboards/ with video ID, sz_widthxheight, tstp_seconds, mesh_columnsxrows and sheet index tags in each filename. Never displays an image automatically. Poll youtube_storyboard_get_task at pollIntervalMs; use the returned publishedSheets for exact safely published files.", object3({ videoId, variantId, selection: selectionSchema, frameTimestampPosition }, ["videoId", "variantId", "selection"]), { type: "object", oneOf: [taskSchema, rejected] }, true),
+    make(STORYBOARD_TOOL_NAMES[2], "Get storyboard task progress", "Get compact sheet counts, monotonic progress and publishedSheets with exact verified sheet indexes and logical paths. Poll no faster than pollIntervalMs. Complete sheets remain in storyboards/ after failure or cancellation. Does not return image bytes.", object3({ taskId: taskId2 }), { type: "object", oneOf: [taskSchema, rejected] }),
+    make(STORYBOARD_TOOL_NAMES[3], "Cancel storyboard download", "Stop current and queued transfers for one storyboard task. Preserves all completely published sheets. Repeating cancellation returns the existing terminal status.", object3({ taskId: taskId2 }), { type: "object", oneOf: [cancelSchema, rejected] }, true)
   ];
 }
 function fail2(code = "STORYBOARD_INVALID") {
@@ -605,10 +1045,12 @@ function normalizeStoryboardResult(name, data) {
   if (name.endsWith("cancel_task")) return { taskId: data.taskId, status: data.status };
   if (!taskSchema.properties.phase.enum.includes(data.phase) || !finite(data.progressPercent) || data.progressPercent < 0 || data.progressPercent > 100 || !["completedSheets", "totalSheets", "downloadedSheets", "reusedSheets", "pollIntervalMs"].every((k) => Number.isInteger(data[k]) && data[k] >= 0) || data.pollIntervalMs < 1e3 || data.totalSheets < 1 || data.completedSheets > data.totalSheets || data.completedSheets !== data.downloadedSheets + data.reusedSheets || data.workspaceDirectory !== "storyboards" || !timestampPositions.includes(data.frameTimestampPosition) || !Array.isArray(data.sheetTimestamps) || data.sheetTimestamps.length !== data.totalSheets) bad();
   if (new Set(data.sheetTimestamps.map((sheet) => sheet?.sheetIndex)).size !== data.sheetTimestamps.length || data.sheetTimestamps.some((sheet) => !plain2(sheet) || !Number.isInteger(sheet.sheetIndex) || sheet.sheetIndex < 0 || !Array.isArray(sheet.frameTimestampsSeconds) || !sheet.frameTimestampsSeconds.length || sheet.frameTimestampsSeconds.some((timestamp) => !finite(timestamp) || timestamp < 0))) bad();
+  if (!Array.isArray(data.publishedSheets) || data.publishedSheets.length !== data.completedSheets || new Set(data.publishedSheets.map((sheet) => sheet?.workspacePath)).size !== data.publishedSheets.length || data.publishedSheets.some((sheet, index) => !plain2(sheet) || sheet.sheetIndex !== data.sheetTimestamps[index].sheetIndex || typeof sheet.workspacePath !== "string" || !/^storyboards\/[^/]+$/.test(sheet.workspacePath) || /[\\<>:"|?*\u0000-\u001f]/.test(sheet.workspacePath) || /\/(?:\.|\.\.)$/.test(sheet.workspacePath))) bad();
   if (data.status !== "working" && data.phase !== data.status || data.status === "working" && !["resolving", "downloading", "publishing"].includes(data.phase)) bad();
   if (data.status === "completed" && (data.progressPercent !== 100 || data.completedSheets !== data.totalSheets)) bad();
   if (data.status !== "failed" && data.error) bad();
   const result = Object.fromEntries(taskSchema.required.map((k) => [k, data[k]]));
+  result.publishedSheets = data.publishedSheets.map(({ sheetIndex, workspacePath }) => ({ sheetIndex, workspacePath }));
   if (data.status === "failed") {
     if (data.error?.code !== "STORYBOARD_DOWNLOAD_FAILED" || !Number.isInteger(data.failedSheetIndex) || data.failedSheetIndex < 0) bad();
     result.failedSheetIndex = data.failedSheetIndex;
@@ -689,6 +1131,8 @@ var MCP_TOOL_SETTINGS = Object.freeze({
   media_to_chat: { group: "media" },
   media_to_chat_status: { group: "media" },
   media_to_chat_cancel: { group: "media" },
+  media_task_status: { group: "media" },
+  media_task_cancel: { group: "media" },
   camera_list: { group: "camera" },
   camera_capture_frame: { group: "camera" },
   camera_record_video: { group: "camera" },
@@ -718,7 +1162,7 @@ var MCP_TOOL_SETTINGS = Object.freeze({
   online_share_status: { group: "online" },
   online_share_stop: { group: "online" }
 });
-var EXTENSION_VERSION = "2.2.65";
+var EXTENSION_VERSION = "2.2.66";
 globalThis.addEventListener?.("fetch", createMediaStreamHandler({
   extensionUrl: chrome.runtime.getURL("/"),
   getClient: (id) => globalThis.clients.get(id),
@@ -726,14 +1170,14 @@ globalThis.addEventListener?.("fetch", createMediaStreamHandler({
   fetchMedia: (url, options) => fetch(url, options),
   log: (stage, details = {}) => console.info(`[ResearchTube media stream ${EXTENSION_VERSION}]`, stage, details)
 }));
-var REQUIRED_AGENT_INTERFACE_VERSION = 73;
-var MEDIA_TO_CHAT_WIDGET_URI = "ui://researchtube/chat-target-v4.html";
+var REQUIRED_AGENT_INTERFACE_VERSION = 74;
+var MEDIA_TO_CHAT_WIDGET_URI = "ui://researchtube/chat-target-v5.html";
 var MEDIA_TO_CHAT_BIND_TIMEOUT_MS = 3e4;
 var CAPTURE_FRAME_WIDGET_URI = "ui://researchtube/capture-frame-v56.html";
 var CAPTURE_FRAME_WIDGET_ALIASES = /* @__PURE__ */ new Set(["ui://researchtube/capture-frame-v51.html", "ui://researchtube/capture-frame-v52.html", "ui://researchtube/capture-frame-v53.html", "ui://researchtube/capture-frame-v54.html", "ui://researchtube/capture-frame-v55.html"]);
 var RESEARCHTUBE_DEMO_GUIDE_URL = "https://github.com/ilinic/ResearchTube/blob/main/docs/DEMO.md";
 var RESEARCHTUBE_SERVER_DESCRIPTION = "ResearchTube provides YouTube research, local media and image operations, workspace management, screenshots, clipboard, Library integration, real asynchronous timers, and a guided demonstration using bundled local media. Search this server when the user refers to ResearchTube, YouTube analysis, a previously created workspace file, captured frame, screenshot, crop, clipboard, or asks to continue a previous ResearchTube operation. In clients with deferred tools, ResearchTube is discoverable through functions.exec lazy MCP-tool discovery; search there before treating the capability as unavailable.";
-var RESEARCHTUBE_MCP_INSTRUCTIONS = "ResearchTube exposes MCP tools that may be loaded or discovered lazily by the client. When the user mentions ResearchTube, invokes @ResearchTube, asks to repeat a ResearchTube operation, or requests a capability previously provided by ResearchTube, do not infer that ResearchTube is unavailable merely because its tools are not currently visible as a top-level tool namespace. In this client, ResearchTube is available through functions.exec with lazy MCP-tool discovery: search there for the appropriate ResearchTube tool before reporting that the capability is unavailable. Only report ResearchTube as unavailable if tool discovery actually fails, the required tool cannot be found after discovery, or an actual ResearchTube tool invocation returns an availability, connection, compatibility, or transport error. Successful use earlier in the conversation is evidence that the tools may be discoverable again; rediscover them rather than assuming access has disappeared. On the first ResearchTube interaction in a conversation, when the user asks what ResearchTube can do or gives no concrete operation, briefly offer the guided demo. Run it only with consent, use the bundled logical Workspace path demo/researchtube-demo.mp4, follow " + RESEARCHTUBE_DEMO_GUIDE_URL + ", never modify or delete the bundled source, and explain each benefit in the user's language. media_clip and media_capture_frame are asynchronous: poll their corresponding get_task tools no faster than pollIntervalMs. media_clip creates one separate file per requested interval and never renders or concatenates results automatically. media_capture_frame, media_capture_screen, and media_image_crop never render a widget themselves. Call media_show only for specific completed image paths the user asks to see. For media_capture_screen and media_image_crop, when showInChat is true, after the successful creation result call media_show once with the returned workspace image path; otherwise do not call the display tool. timer_start, timer_status, and timer_cancel provide real timed pauses because LLMs have no precise internal running clock. Show the user any requested preparation instruction, start a timer, and continue status calls at pollIntervalMs within the same turn until completed before dependent actions. An ended assistant turn is not automatically resumed by a timer. media_to_chat queues attachments for the current ChatGPT conversation. Finish the assistant response after starting it; do not poll in the same turn because Send may remain unavailable until the response ends.";
+var RESEARCHTUBE_MCP_INSTRUCTIONS = "ResearchTube exposes MCP tools that may be loaded or discovered lazily by the client. When the user mentions ResearchTube, invokes @ResearchTube, asks to repeat a ResearchTube operation, or requests a capability previously provided by ResearchTube, do not infer that ResearchTube is unavailable merely because its tools are not currently visible as a top-level tool namespace. In this client, ResearchTube is available through functions.exec with lazy MCP-tool discovery: search there for the appropriate ResearchTube tool before reporting that the capability is unavailable. Only report ResearchTube as unavailable if tool discovery actually fails, the required tool cannot be found after discovery, or an actual ResearchTube tool invocation returns an availability, connection, compatibility, or transport error. Successful use earlier in the conversation is evidence that the tools may be discoverable again; rediscover them rather than assuming access has disappeared. On the first ResearchTube interaction in a conversation, when the user asks what ResearchTube can do or gives no concrete operation, briefly offer the guided demo. Run it only with consent, use the bundled logical Workspace path demo/researchtube-demo.mp4, follow " + RESEARCHTUBE_DEMO_GUIDE_URL + ", never modify or delete the bundled source, and explain each benefit in the user's language. All artifact-producing tools are asynchronous and accept addToChat (default false), composerPolicy (requireEmpty by default), and sendDelaySeconds (0 by default). Use the returned taskId with media_task_status/media_task_cancel; specialized status/cancel tools return the same full workflow. files contains created Workspace paths; creation.data holds native results. With addToChat true the Extension binds the invoking tab immediately and automatically uploads/sends after creation. Do not duplicate that delivery with media_to_chat. completed requires every requested stage. Native file-source parameters are uniformly workspacePath; destinations use outputWorkspacePath or outputWorkspaceDirectory. media_show only displays a viewer and does not upload visual input. No automatic media viewer is created by artifact tools. timer_start, timer_status and timer_cancel provide real timed pauses; status polling cannot independently wake an ended assistant turn. After pre-Send checks, finish the response so ChatGPT can enable Send; the Extension continues automatically. Status polling and cancellation before Send are allowed in the initiating turn at pollIntervalMs.";
 var CAPTURE_FRAME_OFFSCREEN_DOCUMENT = "capture-frame-offscreen.html";
 var GOOGLE_TRANSLATE_URL = "https://translate.google.com/";
 var GOOGLE_TRANSLATE_TAB_TIMEOUT_MS = 2e4;
@@ -1744,7 +2188,7 @@ var mediaToChatTaskSchema = {
 var mediaToChatStartSchema = { type: "object", additionalProperties: false, properties: { task: mediaToChatTaskSchema }, required: ["task"] };
 var mediaToChatCancelSchema = { type: "object", additionalProperties: false, properties: { task: mediaToChatTaskSchema, cancelled: { type: "boolean" } }, required: ["task", "cancelled"] };
 function toolDefinitions() {
-  return [
+  const definitions = [
     ...storyboardDefinitions(localAgentReadAnnotations, localWorkspaceWriteAnnotations),
     ...timerDefinitions(localAgentReadAnnotations, localWorkspaceWriteAnnotations),
     {
@@ -2248,7 +2692,7 @@ function toolDefinitions() {
     {
       name: "youtube_download",
       title: "Download a public YouTube video",
-      description: "Start an asynchronous download of one public YouTube video through the optional ResearchTube Local Agent and its locally resolved yt-dlp, Deno, and ffmpeg executables. First call youtube_download_get_formats(videoId) immediately before this tool and select exact numeric formatId values from that tool's local-yt-dlp downloadFormats response; never select a numeric ID only from youtube_get_video.youtubeFormats because that direct-YouTube snapshot is advisory and can differ. formatSelection chooses the downloaded media tracks: combined alone, video alone, audio alone, or video plus audio; never mix combined with video/audio. 'best' remains allowed for one requested component. startSeconds and endSeconds are optional as a pair: omit both to download the full video, or provide both to download only that source-video interval. A partial download requires ffmpeg and its resulting filename includes [partial_<start>_<end>]. A video+audio pair is remuxed into MP4 without re-encoding and therefore requires ffmpeg. The Agent accepts no arbitrary yt-dlp selector or arguments, no credentials, and no playlist. Returns a start handle only. Poll youtube_download_get_task no faster than pollIntervalMs; phase identifies the real yt-dlp operation and progressPercent is the percent within that phase, not a fabricated whole-task percentage. If a task fails or its output is unexpected, use youtube_download_task_diagnostics to inspect its normalized lifecycle and cleanup record. outputDir, when supplied, must be a safe workspace-relative directory.",
+      description: "Start an asynchronous download of one public YouTube video through the optional ResearchTube Local Agent and its locally resolved yt-dlp, Deno, and ffmpeg executables. First call youtube_download_get_formats(videoId) immediately before this tool and select exact numeric formatId values from that tool's local-yt-dlp downloadFormats response; never select a numeric ID only from youtube_get_video.youtubeFormats because that direct-YouTube snapshot is advisory and can differ. formatSelection chooses the downloaded media tracks: combined alone, video alone, audio alone, or video plus audio; never mix combined with video/audio. 'best' remains allowed for one requested component. startSeconds and endSeconds are optional as a pair: omit both to download the full video, or provide both to download only that source-video interval. A partial download requires ffmpeg and its resulting filename includes [partial_<start>_<end>]. A video+audio pair is remuxed into MP4 without re-encoding and therefore requires ffmpeg. The Agent accepts no arbitrary yt-dlp selector or arguments, no credentials, and no playlist. Returns a start handle only. Poll youtube_download_get_task no faster than pollIntervalMs; creation.data.phase identifies the real yt-dlp operation and creation.data.progressPercent is the native percentage within that phase. If a task fails or its output is unexpected, use youtube_download_task_diagnostics to inspect its normalized lifecycle and cleanup record. outputDir, when supplied, must be a safe workspace-relative directory.",
       annotations: localDownloadAnnotations,
       inputSchema: {
         type: "object",
@@ -2355,6 +2799,7 @@ function toolDefinitions() {
       outputSchema: { type: "object", additionalProperties: false, properties: { videoId: { type: "string" }, parentCommentId: { type: "string" }, parent: commentParentSchema, replies: { type: "array", items: replySchema }, returned: { type: "integer" }, requested: { type: "integer" }, totalReplies: nullableInteger }, required: ["videoId", "parentCommentId", "parent", "replies", "returned", "requested", "totalReplies"] }
     }
   ];
+  return artifactToolDefinitions(definitions, mediaToChatTaskSchema, MEDIA_TO_CHAT_WIDGET_URI, localAgentReadAnnotations, localWorkspaceWriteAnnotations);
 }
 function isPrivateMcpTool(tool) {
   return tool?._meta?.["openai/visibility"] === "private" || tool?._meta?.ui?.visibility?.includes("app");
@@ -3451,6 +3896,7 @@ async function ensureMediaToChatLoaded() {
     mediaToChatTasks = new Map(tasks.filter((task) => task && typeof task.taskId === "string").map((task) => [task.taskId, task]));
     mediaToChatQueue = Array.isArray(stored[MEDIA_TO_CHAT_QUEUE_STORAGE_KEY]) ? stored[MEDIA_TO_CHAT_QUEUE_STORAGE_KEY].filter((taskId3) => typeof taskId3 === "string" && mediaToChatTasks.get(taskId3)?.status === "queued") : [];
     for (const task of mediaToChatTasks.values()) {
+      if (task.status === "queued" && task.awaitingArtifacts) continue;
       if (task.status === "working" && task.phase === "waitingToSend" && task.prepared?.guardToken && task.prepared?.fileNames?.length && task.target && Number.isFinite(Date.parse(task.sendNotBefore))) continue;
       if (task.status === "working" || task.status === "queued") {
         task.status = "failed";
@@ -3461,7 +3907,7 @@ async function ensureMediaToChatLoaded() {
         task.message = task.error;
       }
     }
-    mediaToChatQueue = [];
+    mediaToChatQueue = [...mediaToChatTasks.values()].filter((task) => task.status === "queued" && task.awaitingArtifacts).map((task) => task.taskId);
     mediaToChatLoaded = true;
     await persistMediaToChatTasks();
     for (const task of mediaToChatTasks.values()) {
@@ -3588,7 +4034,7 @@ async function drainMediaToChatQueue() {
   try {
     while (mediaToChatQueue.length) {
       mediaToChatQueue = mediaToChatQueue.filter((id) => mediaToChatTasks.get(id)?.status === "queued");
-      const index = mediaToChatQueue.findIndex((id) => mediaToChatTasks.get(id)?.target);
+      const index = mediaToChatQueue.findIndex((id) => mediaToChatTasks.get(id)?.target && !mediaToChatTasks.get(id)?.awaitingArtifacts);
       if (index < 0) break;
       const [taskId3] = mediaToChatQueue.splice(index, 1);
       const task = mediaToChatTasks.get(taskId3);
@@ -3641,7 +4087,7 @@ async function drainMediaToChatQueue() {
     mediaToChatDraining = false;
   }
 }
-async function mediaToChatStart(argumentsValue = {}) {
+async function mediaToChatStart(argumentsValue = {}, { awaitingArtifacts = false } = {}) {
   if (!argumentsValue || typeof argumentsValue !== "object" || Array.isArray(argumentsValue) || Object.keys(argumentsValue).some((name) => !["files", "composerPolicy", "sendDelaySeconds"].includes(name))) {
     throw localAgentError("MEDIA_TO_CHAT_INVALID", "media_to_chat accepts only files, composerPolicy and sendDelaySeconds.");
   }
@@ -3649,7 +4095,7 @@ async function mediaToChatStart(argumentsValue = {}) {
   const sendDelaySeconds = normalizeMediaToChatSendDelay(argumentsValue.sendDelaySeconds);
   await ensureMediaToChatLoaded();
   const limits = await configuredToolLimits();
-  const files = normalizeLibraryStoreFiles(argumentsValue.files, limits.mediaToChatMaxFiles, "MEDIA_TO_CHAT_INVALID");
+  const files = awaitingArtifacts ? [] : normalizeLibraryStoreFiles(argumentsValue.files, limits.mediaToChatMaxFiles, "MEDIA_TO_CHAT_INVALID");
   const createdAt = libraryStoreNow();
   let taskId3;
   do {
@@ -3657,6 +4103,7 @@ async function mediaToChatStart(argumentsValue = {}) {
   } while (mediaToChatTasks.has(taskId3));
   const task = {
     taskId: taskId3,
+    awaitingArtifacts,
     target: null,
     bindingToken: crypto.randomUUID(),
     bindingDeadline: Date.now() + MEDIA_TO_CHAT_BIND_TIMEOUT_MS,
@@ -3776,10 +4223,106 @@ async function mediaToChatCancel(taskId3) {
   });
   return { task: mediaToChatTaskDocument(task), cancelled: true };
 }
+async function releaseArtifactChat(taskId3, files) {
+  await ensureMediaToChatLoaded();
+  const task = mediaToChatTasks.get(taskId3);
+  if (!task || task.status !== "queued" || !task.awaitingArtifacts) {
+    throw localAgentError("MEDIA_ARTIFACT_CHAT_INVALID", task?.error || "The originating chat reservation is no longer available.");
+  }
+  const limits = await configuredToolLimits();
+  task.files = normalizeLibraryStoreFiles(files, limits.mediaToChatMaxFiles, "MEDIA_TO_CHAT_INVALID");
+  task.awaitingArtifacts = false;
+  await persistMediaToChatTasks();
+  void drainMediaToChatQueue();
+}
+var artifactTaskTimers = /* @__PURE__ */ new Map();
+async function unscheduleArtifactTask(taskId3) {
+  const timer = artifactTaskTimers.get(taskId3);
+  if (timer !== void 0) clearTimeout(timer);
+  artifactTaskTimers.delete(taskId3);
+  await chrome.alarms.clear(`artifact-task:${taskId3}`);
+}
+async function scheduleArtifactTask(taskId3, delayMs) {
+  await unscheduleArtifactTask(taskId3);
+  const delay2 = Math.max(1, delayMs);
+  await chrome.alarms.create(`artifact-task:${taskId3}`, { when: Date.now() + delay2 });
+  artifactTaskTimers.set(taskId3, setTimeout(() => {
+    artifactTaskTimers.delete(taskId3);
+    void artifactTaskManager.advance(taskId3);
+  }, delay2));
+}
+function artifactProducers() {
+  const resultFile = (data) => data.result?.filePath ? [data.result.filePath] : [];
+  return {
+    youtube_download: { validate: normalizeDownloadInput, start: startYouTubeDownload, status: getYouTubeDownloadTask, cancel: cancelYouTubeDownloadTask, files: resultFile },
+    youtube_storyboard_download: { validate: (args) => validateStoryboardInput("youtube_storyboard_download", args), start: (args) => storyboardCall("youtube_storyboard_download", args), status: (taskId3) => storyboardCall("youtube_storyboard_get_task", { taskId: taskId3 }), cancel: (taskId3) => storyboardCall("youtube_storyboard_cancel_task", { taskId: taskId3 }), files: (data) => (data.publishedSheets ?? []).map((sheet) => sheet.workspacePath) },
+    media_capture_frame: { validate: normalizeCaptureFrameBatchInput, start: createCaptureFrameTask, status: getCaptureFrameTask, cancel: cancelCaptureFrameTask, files: (data) => data.frames.map((frame) => frame.image.workspacePath) },
+    visual_map_create: { validate: normalizeVisualMapInput, start: createVisualMap, status: getVisualMapTask, cancel: cancelVisualMapTask, files: (data) => (data.result?.maps ?? []).map((map) => map.workspacePath) },
+    media_clip: { validate: normalizeMediaClipInput, start: createMediaClipTask, status: getMediaClipTask, cancel: cancelMediaClipTask, files: (data) => data.clips.map((clip) => clip.workspacePath) },
+    camera_record_video: { validate: normalizeCameraRecordInput, start: cameraRecordVideo, status: cameraRecordStatus, cancel: cameraRecordStop, files: resultFile },
+    camera_record_audio: { validate: normalizeCameraAudioRecordInput, start: cameraRecordAudio, status: cameraRecordStatus, cancel: cameraRecordStop, files: resultFile },
+    system_speech_speak: { validate: normalizeSpeechInput, start: speechSpeak, status: speechStatus, cancel: speechCancel, files: resultFile },
+    media_capture_screen: { validate: normalizeScreenCaptureInput, start: captureScreen, files: (data) => [data.workspacePath] },
+    media_image_crop: { validate: normalizeImageCropInput, start: imageCrop, files: (data) => [data.image.workspacePath] },
+    camera_capture_frame: { validate: normalizeCameraCaptureInput, start: cameraCaptureFrame, files: (data) => [data.workspacePath] },
+    clipboard_get: { validate: normalizeClipboardGetInput, start: clipboardGet, files: (data) => data.workspacePath ? [data.workspacePath] : [] }
+  };
+}
+var artifactTaskManager = createArtifactTaskManager({
+  now: () => Date.now(),
+  id: createAsyncTaskId,
+  path: (path) => normalizeWorkspacePath(path, "workspacePath"),
+  // Only normalized producer documents are stored and exposed. Raw Agent
+  // responses, upload capabilities and absolute paths never enter this Map.
+  producers: artifactProducers(),
+  load: async () => (await chrome.storage.local.get({ researchtubeArtifactTasksV1: [] })).researchtubeArtifactTasksV1 ?? [],
+  save: (records) => chrome.storage.local.set({ researchtubeArtifactTasksV1: records }),
+  prune: (tasks) => pruneCompletedTasks(tasks, completedTaskHistoryLimit),
+  errorMessage: (value) => safeErrorMessage(value),
+  report: (task) => {
+    void reportMcpToolToAgent(task.tool, task);
+  },
+  schedule: scheduleArtifactTask,
+  unschedule: unscheduleArtifactTask,
+  reserveChat: async ({ composerPolicy, sendDelaySeconds }) => (await mediaToChatStart({ composerPolicy, sendDelaySeconds }, { awaitingArtifacts: true })).task.taskId,
+  releaseChat: releaseArtifactChat,
+  chatStatus: mediaToChatStatus,
+  cancelChat: mediaToChatCancel,
+  chatMetadata: mediaToChatWidgetMetadata
+});
+async function startArtifactTask(tool, argumentsValue) {
+  const args = { ...argumentsValue };
+  const addToChat = args.addToChat ?? false;
+  if (typeof addToChat !== "boolean") throw localAgentError("MEDIA_ARTIFACT_INVALID", "addToChat must be a boolean.");
+  const composerPolicy = normalizeComposerPolicy(args.composerPolicy);
+  const sendDelaySeconds = normalizeMediaToChatSendDelay(args.sendDelaySeconds);
+  delete args.addToChat;
+  delete args.composerPolicy;
+  delete args.sendDelaySeconds;
+  const input = artifactProducers()[tool].validate(args);
+  if (addToChat && tool === "system_speech_speak" && input.outputMode === "speakers") {
+    throw localAgentError("SPEECH_INVALID", "addToChat requires outputMode file or both; speakers creates no file.");
+  }
+  await refreshTaskHistorySettings();
+  return artifactTaskManager.start(tool, args, { addToChat, composerPolicy, sendDelaySeconds });
+}
+async function executeArtifactStart(id, tool, args) {
+  const response = await executeToolCall(id, tool, args, () => startArtifactTask(tool, args));
+  const task = response.result?.structuredContent;
+  if (task?.taskId) {
+    const metadata = await artifactTaskManager.metadata(task.taskId);
+    response.result._meta = {
+      "researchtube/artifactTask": { taskId: task.taskId, tool, addToChat: task.addToChat },
+      ...metadata ? { "researchtube/chatTarget": metadata } : {}
+    };
+  }
+  return response;
+}
 chrome.runtime.onInstalled.addListener(({ reason }) => {
   void bootstrapTunnel();
   void ensureLibraryStoreLoaded().then(drainLibraryStoreQueue);
   void ensureMediaToChatLoaded().then(drainMediaToChatQueue);
+  void artifactTaskManager.ensure();
   if (reason === "install") {
     void chrome.tabs.create({ url: chrome.runtime.getURL("settings.html"), active: true });
   }
@@ -3788,8 +4331,10 @@ chrome.runtime.onStartup.addListener(() => {
   void bootstrapTunnel();
   void ensureLibraryStoreLoaded().then(drainLibraryStoreQueue);
   void ensureMediaToChatLoaded().then(drainMediaToChatQueue);
+  void artifactTaskManager.ensure();
 });
 chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name.startsWith("artifact-task:")) void artifactTaskManager.advance(alarm.name.slice("artifact-task:".length));
   if (alarm.name === "tunnel-poll") void startPolling();
   if (alarm.name.startsWith("media-chat-bind:")) void expireMediaToChatBinding(alarm.name.slice("media-chat-bind:".length));
   if (alarm.name.startsWith("media-chat-send:")) void resumeDelayedMediaToChatTask(alarm.name.slice("media-chat-send:".length));
@@ -4648,7 +5193,8 @@ function normalizeFormatSelection(value) {
   }
   return selection;
 }
-async function startYouTubeDownload(args = {}) {
+function normalizeDownloadInput(args = {}) {
+  captureFrameObject(args, "youtube_download", /* @__PURE__ */ new Set(["videoId", "formatSelection", "startSeconds", "endSeconds", "outputDir"]));
   const videoId2 = typeof args.videoId === "string" ? args.videoId.trim() : "";
   if (!/^[A-Za-z0-9_-]{6,}$/.test(videoId2)) throw localAgentError("INVALID_VIDEO_ID", "videoId is required.");
   const formatSelection = normalizeFormatSelection(args.formatSelection);
@@ -4661,7 +5207,11 @@ async function startYouTubeDownload(args = {}) {
   if (outputDir !== void 0 && (typeof outputDir !== "string" || !outputDir.trim())) {
     throw localAgentError("OUTPUT_DIR_INVALID", "outputDir must be a non-empty workspace-relative directory string.");
   }
-  return publicDownloadStartTask(normalizeAgentTask(await agentJsonRequest("/tasks/youtube-download", { method: "POST", body: { videoId: videoId2, formatSelection, ...startSeconds === void 0 ? {} : { startSeconds, endSeconds }, ...outputDir === void 0 ? {} : { outputDir: outputDir.trim() } } })));
+  return { videoId: videoId2, formatSelection, ...startSeconds === void 0 ? {} : { startSeconds, endSeconds }, ...outputDir === void 0 ? {} : { outputDir: normalizeWorkspacePath(outputDir, "outputDir") } };
+}
+async function startYouTubeDownload(args = {}) {
+  const input = normalizeDownloadInput(args);
+  return publicDownloadStartTask(normalizeAgentTask(await agentJsonRequest("/tasks/youtube-download", { method: "POST", body: input })));
 }
 function normalizeYtDlpDownloadFormats(value) {
   if (!value || typeof value !== "object" || typeof value.available !== "boolean" || !["ytDlp", "unavailable"].includes(value.source) || !Array.isArray(value.combined) || !Array.isArray(value.video) || !Array.isArray(value.audio)) {
@@ -5974,11 +6524,11 @@ function mediaToChatWidgetResource() {
   return { uri: MEDIA_TO_CHAT_WIDGET_URI, name: "ResearchTube current-chat task", description: "Binds a file-submission task to the Chrome tab that invoked it.", mimeType: "text/html;profile=mcp-app" };
 }
 async function readMcpResource(id, uri) {
-  if (uri !== CAPTURE_FRAME_WIDGET_URI && !CAPTURE_FRAME_WIDGET_ALIASES.has(uri) && uri !== MEDIA_TO_CHAT_WIDGET_URI) {
+  if (uri !== CAPTURE_FRAME_WIDGET_URI && !CAPTURE_FRAME_WIDGET_ALIASES.has(uri) && uri !== MEDIA_TO_CHAT_WIDGET_URI && uri !== "ui://researchtube/chat-target-v4.html") {
     return { jsonrpc: "2.0", id, error: { code: -32602, message: "Unknown MCP resource URI" } };
   }
   try {
-    const chatTargetWidget = uri === MEDIA_TO_CHAT_WIDGET_URI;
+    const chatTargetWidget = uri === MEDIA_TO_CHAT_WIDGET_URI || uri === "ui://researchtube/chat-target-v4.html";
     let text2;
     if (chatTargetWidget) {
       const response = await fetch(chrome.runtime.getURL("ui/chat-target-v1.html"));
@@ -6033,6 +6583,41 @@ async function handleMcpRequest(request) {
   }
   if (request?.method === "tools/call" && typeof request.params?.name === "string" && !await isMcpToolEnabled(request.params.name)) {
     return disabledMcpToolError(request.id, request.params.name);
+  }
+  if (request?.method === "tools/call" && typeof request.params?.name === "string") {
+    const name = request.params.name;
+    let args;
+    try {
+      args = publicWorkspaceArguments(name, request.params.arguments ?? {}, toolDefinitions());
+    } catch (error2) {
+      return toolError(request.id, error2);
+    }
+    if (ARTIFACT_TOOLS.includes(name)) return executeArtifactStart(request.id, name, args);
+    const taskId3 = args.taskId;
+    if (name === "media_task_status" || Object.hasOwn(ARTIFACT_STATUS_TOOLS, name)) {
+      return executeToolCall(request.id, name, { taskId: taskId3 }, async () => {
+        await refreshTaskHistorySettings();
+        return artifactTaskManager.status(taskId3, ARTIFACT_STATUS_TOOLS[name]);
+      });
+    }
+    if (name === "media_task_cancel" || Object.hasOwn(ARTIFACT_CANCEL_TOOLS, name)) {
+      return executeToolCall(request.id, name, { taskId: taskId3 }, () => artifactTaskManager.cancel(taskId3, ARTIFACT_CANCEL_TOOLS[name]));
+    }
+    if (name === "camera_record_stop") {
+      return executeToolCall(request.id, name, { taskId: taskId3 }, async () => {
+        const nativeId = await artifactTaskManager.nativeId(taskId3, ["camera_record_audio", "camera_record_video"]);
+        const result = await cameraRecordStop(nativeId);
+        return { ...result, taskId: taskId3 };
+      });
+    }
+    if (name === "youtube_download_task_diagnostics" || name === "media_capture_frame_task_diagnostics") {
+      return executeToolCall(request.id, name, args, async () => {
+        const nativeId = await artifactTaskManager.nativeId(taskId3, name === "youtube_download_task_diagnostics" ? "youtube_download" : "media_capture_frame");
+        const result = name === "youtube_download_task_diagnostics" ? await getYouTubeDownloadTaskDiagnostics(nativeId, args) : await getCaptureFrameTaskDiagnostics(nativeId);
+        return { ...result, taskId: taskId3 };
+      });
+    }
+    request = { ...request, params: { ...request.params, arguments: args } };
   }
   if (request?.method === "tools/call" && request.params?.name === "youtube_download") {
     const input = request.params.arguments ?? {};
@@ -6375,7 +6960,7 @@ async function executeCaptureFrameWidgetActionToolCall(id, tool, path, action) {
 }
 async function executeToolCall(id, tool, input, work, operation = null) {
   const startedAt = Date.now();
-  const reportsLongOperationStatus = tool === "library_store_status" || tool === "media_to_chat_status";
+  const reportsLongOperationStatus = tool === "library_store_status" || tool === "media_to_chat_status" || tool === "media_task_status" || Object.hasOwn(ARTIFACT_STATUS_TOOLS, tool);
   void recordCommandDiagnostic("started", { tool, input: summarizeCommandInput(tool, input) });
   await setActionBadge("working");
   try {
