@@ -86,7 +86,7 @@ Timers live only in Agent memory. They do not wake a finished chat. Old terminal
 
 | Tool | Behavior |
 | --- | --- |
-| `visual_map_create` | Starts PNG contact-sheet creation using uniform, scene-detect or hybrid frame selection and optional corner timestamps. |
+| `visual_map_create` | Starts PNG contact-sheet creation using uniform, scene-detect or hybrid frame selection and optional corner timestamps. Omit sceneDetectThreshold for uniform; sceneDetect/hybrid default to 10. |
 | `visual_map_get_task` | Returns the complete workflow with frame/map counts and native result.maps in creation.data. |
 | `visual_map_cancel_task` | Cancels a working visual-map task. |
 

@@ -14,8 +14,10 @@ body{display:flex;align-items:center;gap:8px;padding:0 8px;box-sizing:border-box
   const anchor=document.getElementById('anchor');
   const status=document.getElementById('status');
   const HEIGHT=32;
-  const deadline=Date.now()+30_000;
-  let metadata=null, bound=false, stopped=false, bridgeReady=false;
+  let deadline=Date.now()+30_000;
+  let metadata=null, bound=false, stopped=false, bridgeReady=false, tornDown=false, timer=null;
+  let taskHandles=new Set();
+  const retired=new Set();
   const notify=(method,params)=>window.parent.postMessage({jsonrpc:'2.0',method,params},'*');
   function reportSize() {
     // Shared MCP Apps sizing, with the optional ChatGPT compatibility helper.
@@ -23,26 +25,46 @@ body{display:flex;align-items:center;gap:8px;padding:0 8px;box-sizing:border-box
     try { window.openai?.notifyIntrinsicHeight?.(HEIGHT); } catch (_error) { /* optional helper */ }
   }
   // Read the documented canonical result wrappers, never ChatGPT page markup.
-  function binding(value) {
+  function taskResult(value) {
     const candidates=[value,value?._meta,value?.call_tool_result?._meta,value?.mcp_tool_result?._meta,
       value?.call_tool_result?.result?._meta,value?.mcp_tool_result?.result?._meta];
     for(const candidate of candidates) {
       const item=candidate?.['researchtube/chatTarget'];
-      if(item && /^tsk_[A-Za-z0-9_-]{10}$/.test(item.taskId)
-        && typeof item.bindingToken==='string' && /^[a-f0-9-]{36}$/.test(item.bindingToken)) return item;
+      const artifact=candidate?.['researchtube/artifactTask'];
+      const validBinding=item && /^tsk_[A-Za-z0-9_-]{10}$/.test(item.taskId)
+        && typeof item.bindingToken==='string' && /^[a-f0-9-]{36}$/.test(item.bindingToken);
+      const validArtifact=artifact && /^tsk_[A-Za-z0-9_-]{10}$/.test(artifact.taskId)
+        && typeof artifact.addToChat==='boolean';
+      if(validBinding || validArtifact) return {binding:validBinding?item:null,artifact:validArtifact?artifact:null};
     }
     return null;
   }
   function consume(value) {
-    if(!metadata) metadata=binding(value);
-    const candidates=[value,value?._meta,value?.call_tool_result?._meta,value?.mcp_tool_result?._meta,
-      value?.call_tool_result?.result?._meta,value?.mcp_tool_result?.result?._meta];
-    const artifact=candidates.map(item=>item?.['researchtube/artifactTask']).find(Boolean);
+    if(tornDown) return false;
+    const incoming=taskResult(value);
+    if(!incoming) return false;
+    const artifact=incoming.artifact;
+    // The host may reuse one iframe for many tool calls. Reset only for a new
+    // task; old globals and late acknowledgments must not revive earlier calls.
+    const handles=[artifact?.taskId,incoming.binding?.taskId].filter(Boolean);
+    if(handles.some(key=>retired.has(key))) return true;
+    if(!handles.some(key=>taskHandles.has(key))) {
+      for(const key of taskHandles) retired.add(key);
+      taskHandles=new Set();metadata=null;bound=false;stopped=false;
+      deadline=Date.now()+30_000;
+      anchor.removeAttribute('data-researchtube-chat-target');
+      status.textContent='Adding files to chat…';
+      startPolling();
+    }
+    for(const key of handles) taskHandles.add(key);
+    if(incoming.binding) metadata=incoming.binding;
+    if(bound || stopped) return true;
     if(artifact && !artifact.addToChat) {
-      status.textContent='Creating Workspace files…';bound=true;finish();return;
+      status.textContent='Creating Workspace files…';bound=true;finish();return true;
     }
     if(artifact)status.textContent='Creating files, then adding to chat…';
     announce();
+    return true;
   }
   function announce() {
     if(bound || stopped || !metadata) return;
@@ -51,7 +73,11 @@ body{display:flex;align-items:center;gap:8px;padding:0 8px;box-sizing:border-box
     window.dispatchEvent(new CustomEvent('researchtube-chat-target-ready',{detail}));
     window.parent.postMessage(detail,'*');
   }
-  function finish() { stopped=true; anchor.removeAttribute('data-researchtube-chat-target'); reportSize(); }
+  function finish() {
+    stopped=true;
+    if(timer!==null) {clearInterval(timer);timer=null;}
+    anchor.removeAttribute('data-researchtube-chat-target');reportSize();
+  }
   function result(value) {
     if(!metadata || value?.source!==SOURCE || value.taskId!==metadata.taskId || bound || stopped) return;
     if(value.ok) {bound=true;finish();}
@@ -72,21 +98,27 @@ body{display:flex;align-items:center;gap:8px;padding:0 8px;box-sizing:border-box
     if(value?.source===SOURCE && value.type==='binding-result') {result(value);return;}
     if(value?.jsonrpc!=='2.0') return;
     if(value.id===initId && value.result) {bridgeReady=true;notify('ui/notifications/initialized',{});reportSize();}
-    if(value.method==='ui/notifications/tool-result') {consume(value.params);consume(window.openai?.toolResponseMetadata);}
+    if(value.method==='ui/notifications/tool-result') {
+      // Canonical notification wins over potentially stale compatibility globals.
+      if(!consume(value.params)) consume(window.openai?.toolResponseMetadata);
+    }
     if(value.method==='ui/notifications/host-context-changed') reportSize();
     if(value.method==='ui/notifications/tool-cancelled') {status.textContent='File upload cancelled.';finish();}
-    if(value.method==='ui/resource-teardown') {finish();window.parent.postMessage({jsonrpc:'2.0',id:value.id,result:{}},'*');}
+    if(value.method==='ui/resource-teardown') {tornDown=true;finish();window.parent.postMessage({jsonrpc:'2.0',id:value.id,result:{}},'*');}
   });
   window.parent.postMessage({jsonrpc:'2.0',id:initId,method:'ui/initialize',params:{appInfo:{name:'researchtube-chat-target',version:'2.0.0'},appCapabilities:{},protocolVersion:'2026-01-26'}},'*');
-  reportSize();consume(window.openai?.toolResponseMetadata);
-  const timer=setInterval(()=>{
-    if(bound || stopped) {clearInterval(timer);return;}
+  function poll() {
+    if(tornDown) {finish();return;}
+    consume(window.openai?.toolResponseMetadata);
+    if(bound || stopped) return;
     if(Date.now()>=deadline) {
       console.info('[ResearchTube] Chat binding timed out; task status contains the result.');
       status.textContent='Unable to identify this chat. Check task status.';
-      finish();clearInterval(timer);return;
+      finish();return;
     }
-    consume(window.openai?.toolResponseMetadata);
-  },250);
+    announce();
+  }
+  function startPolling() {if(timer===null && !tornDown) timer=setInterval(poll,250);}
+  reportSize();startPolling();consume(window.openai?.toolResponseMetadata);
 })();
 </script></body></html>

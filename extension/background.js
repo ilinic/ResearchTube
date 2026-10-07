@@ -57,7 +57,7 @@ const MCP_TOOL_SETTINGS = Object.freeze({
   clipboard_status: { group: "clipboard" }, clipboard_get: { group: "clipboard" }, clipboard_set: { group: "clipboard" },
   library_store_start: { group: "library" }, library_store_status: { group: "library" }, library_store_cancel: { group: "library" }, online_share_start: { group: "online" }, online_share_status: { group: "online" }, online_share_stop: { group: "online" }
 });
-const EXTENSION_VERSION = "2.2.66";
+const EXTENSION_VERSION = "2.2.67";
 // Chrome dispatches this for requests made by our Extension-owned viewer.
 // Packaged assets and unrelated requests fall through without interception.
 globalThis.addEventListener?.("fetch", createMediaStreamHandler({
@@ -70,7 +70,8 @@ globalThis.addEventListener?.("fetch", createMediaStreamHandler({
 const REQUIRED_AGENT_INTERFACE_VERSION = 74;
 // A UI resource URI is a cache key in MCP Apps. Increment it whenever the
 // rendered template changes so ChatGPT does not reuse a stale iframe bundle.
-const MEDIA_TO_CHAT_WIDGET_URI = "ui://researchtube/chat-target-v5.html";
+const MEDIA_TO_CHAT_WIDGET_URI = "ui://researchtube/chat-target-v6.html";
+const MEDIA_TO_CHAT_WIDGET_ALIASES = new Set(["ui://researchtube/chat-target-v4.html", "ui://researchtube/chat-target-v5.html"]);
 const MEDIA_TO_CHAT_BIND_TIMEOUT_MS = 30_000;
 const CAPTURE_FRAME_WIDGET_URI = "ui://researchtube/capture-frame-v56.html";
 const CAPTURE_FRAME_WIDGET_ALIASES = new Set(["ui://researchtube/capture-frame-v51.html", "ui://researchtube/capture-frame-v52.html", "ui://researchtube/capture-frame-v53.html", "ui://researchtube/capture-frame-v54.html", "ui://researchtube/capture-frame-v55.html"]);
@@ -5456,11 +5457,11 @@ function mediaToChatWidgetResource() {
 }
 
 async function readMcpResource(id, uri) {
-  if (uri !== CAPTURE_FRAME_WIDGET_URI && !CAPTURE_FRAME_WIDGET_ALIASES.has(uri) && uri !== MEDIA_TO_CHAT_WIDGET_URI && uri !== "ui://researchtube/chat-target-v4.html") {
+  if (uri !== CAPTURE_FRAME_WIDGET_URI && !CAPTURE_FRAME_WIDGET_ALIASES.has(uri) && uri !== MEDIA_TO_CHAT_WIDGET_URI && !MEDIA_TO_CHAT_WIDGET_ALIASES.has(uri)) {
     return { jsonrpc: "2.0", id, error: { code: -32602, message: "Unknown MCP resource URI" } };
   }
   try {
-    const chatTargetWidget = uri === MEDIA_TO_CHAT_WIDGET_URI || uri === "ui://researchtube/chat-target-v4.html";
+    const chatTargetWidget = uri === MEDIA_TO_CHAT_WIDGET_URI || MEDIA_TO_CHAT_WIDGET_ALIASES.has(uri);
     let text;
     if (chatTargetWidget) {
       const response = await fetch(chrome.runtime.getURL("ui/chat-target-v1.html"));
@@ -5471,7 +5472,7 @@ async function readMcpResource(id, uri) {
       jsonrpc: "2.0", id,
       result: {
         contents: [{
-          ...(chatTargetWidget ? mediaToChatWidgetResource() : { ...captureFrameWidgetResource(), uri }), text,
+          ...(chatTargetWidget ? { ...mediaToChatWidgetResource(), uri } : { ...captureFrameWidgetResource(), uri }), text,
           _meta: {
             ui: { prefersBorder: !chatTargetWidget },
             ...(chatTargetWidget ? { "openai/widgetPrefersBorder": false, "openai/ui": { availableDisplayModes: ["inline"] } } : {}),

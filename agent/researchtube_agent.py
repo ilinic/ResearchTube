@@ -39,7 +39,7 @@ try:
 except ImportError:
     from task_history import TaskHistory
 
-AGENT_VERSION = "2.2.56"
+AGENT_VERSION = "2.2.57"
 INTERFACE_VERSION = 74
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
@@ -2757,6 +2757,9 @@ class VisualMapTaskManager:
     async def create(self, payload: Any) -> dict[str, Any]:
         options = visual_map_options(payload)
         WorkspacePathResolver().resolve_existing(options["workspacePath"], field_name="workspacePath", expected_type="file")
+        # Rendering validates this payload again. Inapplicable threshold and
+        # absent end time must stay omitted, rather than becoming public nulls.
+        options = {name: value for name, value in options.items() if value is not None}
         now = utc_now()
         task = VisualMapTask(self.new_task_id(), options, now, now)
         self.tasks[task.task_id] = task

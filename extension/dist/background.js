@@ -1162,7 +1162,7 @@ var MCP_TOOL_SETTINGS = Object.freeze({
   online_share_status: { group: "online" },
   online_share_stop: { group: "online" }
 });
-var EXTENSION_VERSION = "2.2.66";
+var EXTENSION_VERSION = "2.2.67";
 globalThis.addEventListener?.("fetch", createMediaStreamHandler({
   extensionUrl: chrome.runtime.getURL("/"),
   getClient: (id) => globalThis.clients.get(id),
@@ -1171,7 +1171,8 @@ globalThis.addEventListener?.("fetch", createMediaStreamHandler({
   log: (stage, details = {}) => console.info(`[ResearchTube media stream ${EXTENSION_VERSION}]`, stage, details)
 }));
 var REQUIRED_AGENT_INTERFACE_VERSION = 74;
-var MEDIA_TO_CHAT_WIDGET_URI = "ui://researchtube/chat-target-v5.html";
+var MEDIA_TO_CHAT_WIDGET_URI = "ui://researchtube/chat-target-v6.html";
+var MEDIA_TO_CHAT_WIDGET_ALIASES = /* @__PURE__ */ new Set(["ui://researchtube/chat-target-v4.html", "ui://researchtube/chat-target-v5.html"]);
 var MEDIA_TO_CHAT_BIND_TIMEOUT_MS = 3e4;
 var CAPTURE_FRAME_WIDGET_URI = "ui://researchtube/capture-frame-v56.html";
 var CAPTURE_FRAME_WIDGET_ALIASES = /* @__PURE__ */ new Set(["ui://researchtube/capture-frame-v51.html", "ui://researchtube/capture-frame-v52.html", "ui://researchtube/capture-frame-v53.html", "ui://researchtube/capture-frame-v54.html", "ui://researchtube/capture-frame-v55.html"]);
@@ -6524,11 +6525,11 @@ function mediaToChatWidgetResource() {
   return { uri: MEDIA_TO_CHAT_WIDGET_URI, name: "ResearchTube current-chat task", description: "Binds a file-submission task to the Chrome tab that invoked it.", mimeType: "text/html;profile=mcp-app" };
 }
 async function readMcpResource(id, uri) {
-  if (uri !== CAPTURE_FRAME_WIDGET_URI && !CAPTURE_FRAME_WIDGET_ALIASES.has(uri) && uri !== MEDIA_TO_CHAT_WIDGET_URI && uri !== "ui://researchtube/chat-target-v4.html") {
+  if (uri !== CAPTURE_FRAME_WIDGET_URI && !CAPTURE_FRAME_WIDGET_ALIASES.has(uri) && uri !== MEDIA_TO_CHAT_WIDGET_URI && !MEDIA_TO_CHAT_WIDGET_ALIASES.has(uri)) {
     return { jsonrpc: "2.0", id, error: { code: -32602, message: "Unknown MCP resource URI" } };
   }
   try {
-    const chatTargetWidget = uri === MEDIA_TO_CHAT_WIDGET_URI || uri === "ui://researchtube/chat-target-v4.html";
+    const chatTargetWidget = uri === MEDIA_TO_CHAT_WIDGET_URI || MEDIA_TO_CHAT_WIDGET_ALIASES.has(uri);
     let text2;
     if (chatTargetWidget) {
       const response = await fetch(chrome.runtime.getURL("ui/chat-target-v1.html"));
@@ -6540,7 +6541,7 @@ async function readMcpResource(id, uri) {
       id,
       result: {
         contents: [{
-          ...chatTargetWidget ? mediaToChatWidgetResource() : { ...captureFrameWidgetResource(), uri },
+          ...chatTargetWidget ? { ...mediaToChatWidgetResource(), uri } : { ...captureFrameWidgetResource(), uri },
           text: text2,
           _meta: {
             ui: { prefersBorder: !chatTargetWidget },

@@ -50,6 +50,10 @@ With delivery disabled, completed creation completes the overall task. With deli
 
 Creation tools use the same compact inline service widget as `media_to_chat`, not the media viewer. With delivery enabled its private handshake binds an exact Chrome tab and conversation at launch, before potentially long processing. No focused/active-tab fallback exists. A missing handshake, duplicated conversation, closed tab or changed conversation prevents delivery. The widget does not hold a Composer lock or change the draft during creation. The bound chat reservation holds no placeholder file.
 
+The host may reuse a service-widget iframe for successive tool results. Each distinct task starts a fresh binding window, including after a creation-only task, a completed handshake or a timeout. Older result metadata and acknowledgments cannot replace the current task. Canonical tool-result notifications take precedence over compatibility globals; completed handshakes stop their retry timer.
+
+For `visual_map_create`, `sceneDetectThreshold` is optional for scene-detect/hybrid selection and is omitted for uniform selection. Uniform result metadata reports it as null; that result-only null is not copied into the subsequently validated task input.
+
 The Extension advances creation and delivery independently of LLM polling through short timers and Chrome alarms. Native creation polling respects its returned interval. Public status is bounded by at least one second. Progress is approximate for the overall workflow; the native percentage remains in `creation.data`. Compact percentage-only updates are also reported to the Agent log.
 
 ChatGPT can keep Send disabled during the current assistant response. After any required pre-Send checks, finish that response; the Extension will continue. Neither polling nor a timer independently wakes an ended LLM turn.

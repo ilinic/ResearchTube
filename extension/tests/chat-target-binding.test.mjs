@@ -104,11 +104,16 @@ assert.equal(invalid.alarms.size,0);
 await assert.rejects(invalid.context.bindMediaToChatTarget(protectedTask.metadata,sender()),e=>e.code==='MEDIA_TO_CHAT_TARGET_NOT_FOUND');
 // Tools/list and resources/read expose the correct task template, not a media viewer.
 const tool=current.context.publicMcpTools().find(tool=>tool.name==='media_to_chat');
-assert.equal(tool._meta.ui.resourceUri,'ui://researchtube/chat-target-v5.html');
+assert.equal(tool._meta.ui.resourceUri,'ui://researchtube/chat-target-v6.html');
 const resources=await current.context.handleMcpRequest({id:2,method:'resources/list'});
 assert.ok(resources.result.resources.some(item=>item.uri===tool._meta.ui.resourceUri));
 const resource=await current.context.readMcpResource(3,tool._meta.ui.resourceUri);
 assert.equal(resource.result.contents[0].text,widget);
+for(const uri of ['ui://researchtube/chat-target-v4.html','ui://researchtube/chat-target-v5.html']) {
+ const retained=await current.context.readMcpResource(3,uri);
+ assert.equal(retained.result.contents[0].uri,uri);
+ assert.equal(retained.result.contents[0].text,widget,'retained descriptors also receive the corrected handshake');
+}
 const mediaResource=resources.result.resources.find(item=>item.uri!==tool._meta.ui.resourceUri);
 assert.equal((await current.context.readMcpResource(4,mediaResource.uri)).result.contents[0]._meta.ui.prefersBorder,true,'media_show remains a visible viewer');
 
@@ -225,4 +230,50 @@ const sandbox=pageHarness({top:true});const sandboxChild={postMessage(){}};
 sandbox.frames.push({...untouchedHost(),contentWindow:sandboxChild});
 sandbox.window.dispatchEvent({type:'message',source:sandboxChild,origin:'https://mcp-app-test.web-sandbox.oaiusercontent.com',data:ready});await settle();
 assert.equal(sandbox.pageMessages.length,1);
-console.log('chat target: visible 32px row, numeric height helper, no host CSS mutations, bounded retries and fixed tab binding passed');
+// The host may reuse an iframe for successive calls sharing the same resource.
+// A create-only result must not disable the next addToChat handshake, nor may
+// stale compatibility globals replace the newer canonical tool result.
+const createOnly={'researchtube/artifactTask':{taskId:'tsk_CREATEONLY',tool:'media_image_crop',addToChat:false}};
+const nextBinding={taskId:'tsk_NEXTUPLOAD',bindingToken:webcrypto.randomUUID()};
+const followingBinding={taskId:'tsk_FOLLOWING1',bindingToken:webcrypto.randomUUID()};
+const reused=pageHarness({metadata:createOnly});
+assert.equal(reused.status.textContent,'Creating Workspace files…');
+assert.equal(reused.pageMessages.length,0,'creation-only tasks must not request tab binding');
+reused.advance(45_000);
+reused.message({jsonrpc:'2.0',method:'ui/notifications/tool-result',params:{_meta:{'researchtube/chatTarget':nextBinding}}});
+await settle();await settle();
+assert.equal(reused.pageMessages.length,1,'a reused create-only widget must bind the new delivery task');
+assert.equal(reused.pageMessages[0].taskId,nextBinding.taskId);
+assert.equal(reused.status.textContent,'Adding files to chat…');
+reused.globals(createOnly);reused.tickAll();
+assert.equal(reused.status.textContent,'Adding files to chat…','stale globals cannot restore the older create-only result');
+reused.message({jsonrpc:'2.0',method:'ui/notifications/tool-result',params:{_meta:{'researchtube/chatTarget':followingBinding}}});
+await settle();await settle();
+assert.equal(reused.pageMessages.length,2,'a bound widget must accept the next distinct delivery task');
+assert.equal(reused.pageMessages[1].taskId,followingBinding.taskId);
+reused.globals({'researchtube/chatTarget':nextBinding});reused.tickAll();
+assert.equal(reused.pageMessages.length,2,'old task metadata cannot retarget a reused widget');
+// A new task arriving after timeout gets its own deadline. Late replies for
+// the previous task cannot terminate the new binding attempt.
+const afterTimeout=pageHarness({withBridge:false,metadata:{'researchtube/chatTarget':nextBinding}});
+afterTimeout.advance(30_001);afterTimeout.tickAll();
+assert.match(afterTimeout.status.textContent,/Unable to identify/);
+afterTimeout.message({jsonrpc:'2.0',method:'ui/notifications/tool-result',params:{_meta:{'researchtube/chatTarget':followingBinding}}});
+afterTimeout.local({source:'researchtube-chat-target-widget',taskId:nextBinding.taskId,ok:true});
+assert.equal(JSON.parse(afterTimeout.attributes.get('data-researchtube-chat-target')).taskId,followingBinding.taskId);
+afterTimeout.advance(29_000);afterTimeout.tickAll();
+assert.equal(afterTimeout.attributes.has('data-researchtube-chat-target'),true,'new call has a fresh 30-second binding window');
+afterTimeout.advance(1_001);afterTimeout.tickAll();
+assert.equal(afterTimeout.attributes.has('data-researchtube-chat-target'),false);
+// Metadata can arrive in stages, with a public parent and private child.
+const staged=pageHarness({withBridge:false});
+const parentArtifact={taskId:'tsk_ARTIFACT01',tool:'media_image_crop',addToChat:true};
+staged.globals({'researchtube/artifactTask':parentArtifact});
+staged.message({jsonrpc:'2.0',method:'ui/notifications/tool-result',params:{_meta:{'researchtube/artifactTask':parentArtifact,'researchtube/chatTarget':nextBinding}}});
+staged.local({source:'researchtube-chat-target-widget',taskId:nextBinding.taskId,ok:true});
+staged.globals({'researchtube/artifactTask':parentArtifact});
+assert.equal(staged.attributes.has('data-researchtube-chat-target'),false,'same parent cannot restart a completed child binding');
+staged.message({jsonrpc:'2.0',method:'ui/notifications/tool-result',params:{_meta:{'researchtube/chatTarget':followingBinding}}});
+staged.globals({'researchtube/artifactTask':parentArtifact,'researchtube/chatTarget':nextBinding});
+assert.equal(JSON.parse(staged.attributes.get('data-researchtube-chat-target')).taskId,followingBinding.taskId);
+console.log('chat target: visible 32px row, bounded retries, reusable task handshakes and fixed tab binding passed');

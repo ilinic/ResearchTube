@@ -462,6 +462,28 @@ class MediaProbeTests(unittest.IsolatedAsyncioTestCase):
         agent.WORKSPACE_PATH = self.old_workspace
         self.temp.cleanup()
 
+    async def test_visual_map_task_revalidates_optional_fields_before_rendering(self) -> None:
+        async def render(payload, progress):
+            options = agent.visual_map_options(payload)
+            return {"selection": options["selection"], "sceneDetectThreshold": options["sceneDetectThreshold"]}
+
+        with patch.object(agent, "media_create_visual_map", side_effect=render):
+            for selection in ("uniform", "sceneDetect", "hybrid"):
+                with self.subTest(selection=selection):
+                    manager = agent.VisualMapTaskManager()
+                    started = await manager.create({"workspacePath": "downloads/sample.mp4", "columns": 2, "rows": 2, "maxTotalFrames": 4, "selection": selection})
+                    task = manager.get(started["taskId"])
+                    await task.runner
+                    result = manager.snapshot(task)
+                    self.assertEqual(result["status"], "completed", result.get("error"))
+                    self.assertEqual(result["result"]["sceneDetectThreshold"], None if selection == "uniform" else 10.0)
+
+        # Null/wrongly applicable public inputs remain invalid; only the
+        # manager's internal normalized payload is made revalidatable.
+        for selection in ("uniform", "sceneDetect"):
+            with self.assertRaises(agent.AgentApiError):
+                agent.visual_map_options({"workspacePath": "downloads/sample.mp4", "columns": 2, "rows": 2, "maxTotalFrames": 4, "selection": selection, "sceneDetectThreshold": None})
+
     async def test_media_probe_returns_full_requested_metadata_without_host_filename(self) -> None:
         class Process:
             returncode = 0
