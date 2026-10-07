@@ -93,3 +93,6 @@ Startup explicitly clears restored text and attachments in the exact newly creat
 `ChatGPT Send attempt` logs attempt/maximum counts; `ChatGPT Composer form submission dispatched` identifies `requestSubmit`; `ChatGPT Send pointer target` identifies CDP input and coordinates. `ChatGPT Send not yet confirmed` records presence, disabled state, label and generation state. Only `ChatGPT Send confirmed; attempts stopped` reports acknowledgement.
 
 Extraction and delivery are Extension-owned asynchronous work. Finishing the assistant response enables Send but does not end the worker task. Each resource is saved in Workspace before Composer receives actual file bytes. `addToChat:false` saves only; status polling does not independently wake an ended assistant turn. OpenAI safety and upload restrictions still apply.
+
+
+Detailed records also emit `tab.state` checkpoints for the agent and ChatGPT tabs. They include the tab/window activity state (`active`, `windowFocused`) and page lifecycle state (`visibilityState`, `hidden`, `hasFocus`, `readyState`) without URLs, prompts or page content. The `point` field identifies the checkpoint, such as `chat.documentReady`, `resource.composerAccepted` or `resource.beforeSend`.

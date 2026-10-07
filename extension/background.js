@@ -68,7 +68,7 @@ const MCP_TOOL_SETTINGS = Object.freeze({
   library_store_start: { group: "library" }, library_store_status: { group: "library" }, library_store_cancel: { group: "library" }, online_share_start: { group: "online" }, online_share_status: { group: "online" }, online_share_stop: { group: "online" },
   custom_tool_status: { group: "custom" }, custom_tool_cancel: { group: "custom" }
 });
-const EXTENSION_VERSION = "2.2.82";
+const EXTENSION_VERSION = "2.2.83";
 // Chrome dispatches this for requests made by our Extension-owned viewer.
 // Packaged assets and unrelated requests fall through without interception.
 globalThis.addEventListener?.("fetch", createMediaStreamHandler({
@@ -2353,7 +2353,7 @@ async function cdpInsertBrowserContinuation(tabId, currentChatTarget, fileNames,
   await assertCurrentChatComposer(currentChatTarget, { fileNames, guardToken: composerGuardToken, expectedText: continuationText });
 }
 
-async function cdpAttachFilesNow(filePathValues, { onPhase = null, currentChatTarget = null, composerPolicy = "requireEmpty", deferSend = false, checkCancelled = null, onSendCommit = null, continuationText = null, beforeSend = null } = {}) {
+async function cdpAttachFilesNow(filePathValues, { onPhase = null, currentChatTarget = null, composerPolicy = "requireEmpty", deferSend = false, checkCancelled = null, onSendCommit = null, continuationText = null, beforeSend = null, trace = null } = {}) {
   checkCancelled?.();
   if (!Array.isArray(filePathValues) || !filePathValues.length) {
     throw cdpError("A file batch must contain at least one eligible file.");
@@ -2372,12 +2372,16 @@ async function cdpAttachFilesNow(filePathValues, { onPhase = null, currentChatTa
   let keepGuard = false;
   try {
     await cdpAttach(tab.id); attached = true;
+    await logBrowserTabState(trace, tab.id, "resource.attached");
     await cdpPrepareBackgroundChat(tab.id);
+    await logBrowserTabState(trace, tab.id, "resource.focusEmulation");
     await cdpCommand(tab.id, "Page.enable"); await cdpCommand(tab.id, "DOM.enable"); await cdpCommand(tab.id, "Runtime.enable");
     cdpLog("Required CDP domains enabled", { tabId: tab.id, domains: ["Page", "DOM", "Runtime"] });
+    await logBrowserTabState(trace, tab.id, "resource.domainsReady");
     if (currentChatTarget) {
       await cdpWaitForTextComposer(tab.id);
       await prepareCurrentChatComposer(currentChatTarget, composerPolicy, checkCancelled);
+      await logBrowserTabState(trace, tab.id, "resource.composerReady");
     }
     checkCancelled?.();
     await cdpCommand(tab.id, "Page.setInterceptFileChooserDialog", { enabled: true });
@@ -2397,6 +2401,7 @@ async function cdpAttachFilesNow(filePathValues, { onPhase = null, currentChatTa
     await cdpCommand(tab.id, "DOM.setFileInputFiles", { files: filePaths, backendNodeId: chooser.backendNodeId });
     cdpLog("DOM.setFileInputFiles completed", { tabId: tab.id, backendNodeId: chooser.backendNodeId, fileCount: filePaths.length });
     await cdpWaitForAttachmentAccepted(tab.id, fileNames, retryPolicy, async () => { checkCancelled?.(); if (currentChatTarget) await requireCurrentChatTarget(currentChatTarget); });
+    await logBrowserTabState(trace, tab.id, "resource.composerAccepted");
     checkCancelled?.();
     if (onPhase) await onPhase("composerAccepted");
     if (deferSend && currentChatTarget) {
@@ -2406,13 +2411,15 @@ async function cdpAttachFilesNow(filePathValues, { onPhase = null, currentChatTa
       return { fileNames, guardToken: composerGuardToken };
     }
     if (continuationText && currentChatTarget) await cdpInsertBrowserContinuation(tab.id, currentChatTarget, fileNames, composerGuardToken, continuationText, checkCancelled);
-    if (onPhase) await onPhase("submitting");
+        await logBrowserTabState(trace, tab.id, "resource.beforeSend");
+if (onPhase) await onPhase("submitting");
     await cdpSendAttachedFiles(tab.id, filePaths.length, currentChatTarget ? {
       timeoutMs: 5 * 60_000,
       beforeClick: async () => { checkCancelled?.(); await beforeSend?.(); await assertCurrentChatComposer(currentChatTarget, { fileNames, guardToken: composerGuardToken, expectedText: continuationText }); checkCancelled?.(); },
       onSendCommit, retryPolicy
     } : { retryPolicy });
     cdpLog("File batch completed", { tabId: tab.id, fileCount: filePaths.length });
+    await logBrowserTabState(trace, tab.id, "resource.afterSend");
     return { ok: true, tabId: tab.id, fileCount: filePaths.length };
   } finally {
     // Never remove uploaded attachments or clear a draft during cleanup.
@@ -3340,6 +3347,39 @@ function browserDiagnosticLog(label, value) {
   if (value.taskId && Number.isFinite(value.progressPercent)) void reportMcpToolToAgent("browser_resource_status", { taskId: value.taskId, status: value.status || "working", progressPercent: value.progressPercent });
 }
 
+async function logBrowserTabState(trace, tabId, point) {
+  if (!trace?.enabled || !Number.isInteger(tabId)) return;
+  const record = { point, tabId };
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    record.windowId = tab.windowId;
+    record.active = Boolean(tab.active);
+    record.tabStatus = typeof tab.status === "string" ? tab.status : null;
+    try {
+      const window = await chrome.windows.get(tab.windowId);
+      record.windowFocused = Boolean(window.focused);
+    } catch {
+      record.windowFocused = null;
+    }
+    try {
+      const evaluated = await trace.command("Runtime.evaluate", () => chrome.debugger.sendCommand(
+        { tabId },
+        "Runtime.evaluate",
+        {
+          expression: "({visibilityState:document.visibilityState,hidden:Boolean(document.hidden),hasFocus:document.hasFocus(),readyState:document.readyState})",
+          returnByValue: true,
+          awaitPromise: false
+        }
+      ));
+      Object.assign(record, evaluated?.result?.value || {});
+    } catch {
+      record.cdpState = "unavailable";
+    }
+  } catch {
+    record.tabState = "unavailable";
+  }
+  trace.event("tab.state", record);
+}
 const browserAgent = createBrowserAgent({
   id: createAsyncTaskId,
   studyOptions: configuredBrowserStudyOptions,
@@ -3351,11 +3391,16 @@ const browserAgent = createBrowserAgent({
   duplicateTab: tabId => chrome.tabs.duplicate(tabId),
   restoreSource: tabId => chrome.tabs.update(tabId, { active: true }),
   createChatTab: (source, agent) => chrome.tabs.create({ url: EXTERNAL_URLS.chatgptNewChat, active: false, windowId: source.windowId, index: agent.index + 1 }),
-  waitReady: (tabId, checkStarting, trace) => waitForBrowserDocument({
-    getTab: id => chrome.tabs.get(id),
-    command: (id, method, params) => trace.command(method, () => chrome.debugger.sendCommand({ tabId: id }, method, params)),
-    onWaiting: elapsedSeconds => consoleAction("[ResearchTube Browser] waiting for site document", { elapsedSeconds })
-  }, tabId, checkStarting),
+  waitReady: async (tabId, checkStarting, trace) => {
+    await logBrowserTabState(trace, tabId, "agent.beforeWaitReady");
+    const result = await waitForBrowserDocument({
+      getTab: id => chrome.tabs.get(id),
+      command: (id, method, params) => trace.command(method, () => chrome.debugger.sendCommand({ tabId: id }, method, params)),
+      onWaiting: elapsedSeconds => consoleAction("[ResearchTube Browser] waiting for site document", { elapsedSeconds })
+    }, tabId, checkStarting);
+    await logBrowserTabState(trace, tabId, "agent.documentReady");
+    return result;
+  },
   updateStatus: async (tabIds, status) => {
     for (const tabId of tabIds) {
       browserAutomationToolbarTabs.add(tabId);
@@ -3395,12 +3440,15 @@ const browserAgent = createBrowserAgent({
       };
       try {
         await trace.span("chat.attachDebugger", () => cdpAttach(tabId)); attached = true;
+        await logBrowserTabState(trace, tabId, "chat.attached");
         await chatCommand("Runtime.enable");
         await chatCommand("Emulation.setFocusEmulationEnabled", { enabled: true });
         await chatCommand("Page.setWebLifecycleState", { state: "active" });
         await trace.span("chat.document", () => waitForBrowserDocument({ getTab: id => chrome.tabs.get(id), command: (id, method, params) => trace.command(method, () => chrome.debugger.sendCommand({ tabId: id }, method, params)), onWaiting: elapsedSeconds => consoleAction("[ResearchTube Browser] waiting for ChatGPT document", { elapsedSeconds }) }, tabId, checkStarting, { requiredOrigin: "https://chatgpt.com" }));
-        await onPhase("waitingForComposer");
+                await logBrowserTabState(trace, tabId, "chat.documentReady");
+await onPhase("waitingForComposer");
         await cdpWaitForTextComposer(tabId, 120_000, { checkCancelled: checkStarting, requireComplete: false });
+        await logBrowserTabState(trace, tabId, "chat.composerReady");
         await onPhase("preparingPrompt");
         await sleep(CDP_COMPOSER_PROMPT_RETRY_DELAY_MS);
         await prepareCurrentChatComposer({ tabId, chatPath: "/", newChat: true }, "clear", checkStarting);
@@ -3412,7 +3460,9 @@ const browserAgent = createBrowserAgent({
         if (!authorized) throw localAgentError("BROWSER_CHAT_CHANGED", "The new Composer changed before insertion. Its draft was preserved.");
         checkStarting(); await chatCommand("Input.insertText", { text: prompt });
         await onPhase("sendingPrompt");
-        await cdpClickEnabledSendButton(tabId, 120_000, () => verifyStartup(prompt), checkStarting);
+                await logBrowserTabState(trace, tabId, "chat.beforeSend");
+await cdpClickEnabledSendButton(tabId, 120_000, () => verifyStartup(prompt), checkStarting);
+        await logBrowserTabState(trace, tabId, "chat.afterSend");
         await onPhase("confirmingChat");
         return await waitForBrowserConversation({
           getTab: id => chrome.tabs.get(id), conversationPath: chatConversationPath,
@@ -3448,7 +3498,7 @@ const browserAgent = createBrowserAgent({
     const queued = options.trace.begin("resource.chatQueue", { taskId: options.taskId });
     return withChatFileAutomation(() => {
       queued({ outcome: "ready" });
-      return cdpAttachFilesNow(files, { currentChatTarget: options.target, composerPolicy: "requireEmpty", continuationText: options.continuation, beforeSend: options.beforeSend, checkCancelled: options.checkCancelled, onPhase: options.onPhase, onSendCommit: options.onSendCommit });
+      return cdpAttachFilesNow(files, { currentChatTarget: options.target, composerPolicy: "requireEmpty", continuationText: options.continuation, beforeSend: options.beforeSend, checkCancelled: options.checkCancelled, onPhase: options.onPhase, onSendCommit: options.onSendCommit, trace: options.trace });
     });
   },
   schedule: work => setTimeout(() => { void work().catch(error => consoleAction(`[ResearchTube Browser] ${error.code || "BROWSER_UNAVAILABLE"}`)); }, 0),
