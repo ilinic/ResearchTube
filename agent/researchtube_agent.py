@@ -41,7 +41,7 @@ except ImportError:
     from task_history import TaskHistory
     from browser_resources import save_browser_resource
 
-AGENT_VERSION = "2.2.64"
+AGENT_VERSION = "2.2.65"
 INTERFACE_VERSION = 77
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
@@ -144,7 +144,7 @@ except ImportError:  # Direct python researchtube_agent.py launch.
     from custom_tools import CustomToolRegistry
 
 
-CUSTOM_TOOLS = CustomToolRegistry(ROOT / "custom-tools", AgentApiError, lambda: configured_task_history_limit())
+CUSTOM_TOOLS = CustomToolRegistry(ROOT / "custom-tools", AgentApiError, lambda: configured_task_history_limit(), logger=lambda message: log(message))
 
 
 @dataclass(frozen=True)
@@ -5815,6 +5815,17 @@ def response_log_suffix(path: str, body: dict[str, Any] | None) -> str:
     """Add a compact, user-visible state to task and MCP log lines."""
     if not isinstance(body, dict):
         return ""
+    if path.startswith("/custom-tools/"):
+        if body.get("kind") == "result":
+            return " completed"
+        document = body.get("task", body)
+        if not isinstance(document, dict):
+            return ""
+        progress = document.get("progressPercent")
+        percentage = f" {progress:g}%" if isinstance(progress, (int, float)) and not isinstance(progress, bool) and math.isfinite(progress) and 0 <= progress <= 100 else ""
+        status = document.get("status", "")
+        state = f" {status}" if isinstance(status, str) and status in {"working", "completed", "failed", "cancelled"} else ""
+        return state + percentage
     if path.startswith("/mcp/log/") and isinstance(body.get("status"), str):
         progress = body.get("progressPercent")
         percentage = f" {progress:g}%" if isinstance(progress, (int, float)) and not isinstance(progress, bool) and 0 <= progress <= 100 else ""
@@ -5834,6 +5845,23 @@ def internal_google_translate_speech_path(path: str) -> bool:
         r"/tasks/system-speech/tsk_[A-Za-z0-9_-]{10}/google-translate-(?:progress|complete|fail|audio)",
         path,
     ))
+
+
+def compact_custom_tool_log_path(path: str, body: dict[str, Any] | None) -> str:
+    """Resolve the manifest name for start, status and cancellation requests."""
+    if not path.startswith("/custom-tools/") or not isinstance(body, dict):
+        return path
+    document = body.get("task", body)
+    if not isinstance(document, dict):
+        return path
+    tool = document.get("tool")
+    if not isinstance(tool, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,79}", tool):
+        return path
+    task_id = document.get("taskId")
+    suffix = f"/{task_id}" if isinstance(task_id, str) and re.fullmatch(r"ct_[A-Za-z0-9_-]{11}", task_id) else ""
+    if path.endswith("/cancel"):
+        suffix += "/cancel"
+    return f"/custom-tools/{tool}{suffix}"
 
 
 def compact_google_translate_speech_log_path(path: str, body: dict[str, Any] | None) -> str:
@@ -6073,6 +6101,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
         writer.write(http_response(response_status, response_body))
         await writer.drain()
         log_path = compact_google_translate_speech_log_path(path, response_body)
+        log_path = compact_custom_tool_log_path(log_path, response_body)
         log(f"{method or 'INVALID'} {log_path or '/'} -> {response_status.split()[0]}{response_log_suffix(path, response_body)}")
     except AgentApiError as error:
         status = "404 Not Found" if error.code in {"TASK_NOT_FOUND", "VISUAL_MAP_TASK_NOT_FOUND", "CAMERA_RECORD_TASK_NOT_FOUND", "CAPTURE_FRAME_TASK_NOT_FOUND", "MEDIA_CLIP_TASK_NOT_FOUND", "TIMER_NOT_FOUND", "CUSTOM_TOOL_NOT_FOUND", "CUSTOM_TOOL_TASK_NOT_FOUND"} else "400 Bad Request"

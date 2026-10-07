@@ -23,6 +23,7 @@ async function waitForComposerMedia(probe, policy, { stage, beforeCheck = async 
   error3.code = "MEDIA_TO_CHAT_TIMEOUT";
   throw error3;
 }
+
 // browser-tools.js
 var string = { type: "string" };
 var integer = { type: "integer" };
@@ -85,7 +86,7 @@ function validateBrowserInput(name, input) {
   if (name === "browser_act") {
     const required = { type: "text", key: "key", select: "value" }[input.action];
     if (required && !Object.hasOwn(input, required)) throw browserError("BROWSER_INVALID", `${required} is required for ${input.action}.`);
-    const allowed = /* @__PURE__ */ new Set(["sessionId", "action", "nodeId", ...{ type: ["text"], key: ["key"], select: ["value"], scroll: ["direction", "amount"] }[input.action] || [], "point", "tabId", "windowId", "tabStatus", "active", "windowFocused", "visibilityState", "hidden", "hasFocus", "readyState", "tabState", "cdpState]);
+    const allowed = /* @__PURE__ */ new Set(["sessionId", "action", "nodeId", ...{ type: ["text"], key: ["key"], select: ["value"], scroll: ["direction", "amount"] }[input.action] || []]);
     for (const key of Object.keys(input)) if (!allowed.has(key)) throw browserError("BROWSER_INVALID", `${key} does not apply to action ${input.action}.`);
   }
   return { ...input };
@@ -557,7 +558,7 @@ function pruneCompletedTasks(tasks, maximum = 2e3) {
 }
 
 // browser-diagnostics.js
-var DETAIL_KEYS = /* @__PURE__ */ new Set(["sessionId", "taskId", "stage", "event", "spanId", "method", "outcome", "code", "elapsedMs", "sinceLaunchMs", "gapMs", "count", "frameCount", "rawNodes", "indexedNodes", "returnedNodes", "totalNodes", "characters", "bytes", "extraction", "mode", "enabled", "addedNodes", "updatedNodes", "removedNodes", "addedResources", "removedResources"]);
+var DETAIL_KEYS = /* @__PURE__ */ new Set(["sessionId", "taskId", "stage", "event", "spanId", "method", "outcome", "code", "elapsedMs", "sinceLaunchMs", "gapMs", "count", "frameCount", "rawNodes", "indexedNodes", "returnedNodes", "totalNodes", "characters", "bytes", "extraction", "mode", "enabled", "addedNodes", "updatedNodes", "removedNodes", "addedResources", "removedResources", "point", "tabId", "windowId", "tabStatus", "active", "windowFocused", "visibilityState", "hidden", "hasFocus", "readyState", "tabState", "cdpState"]);
 var round = (value) => Math.round(Math.max(0, value) * 10) / 10;
 function createBrowserDiagnostics({ enabled = false, sessionId: sessionId2, log = () => {
 }, now = () => performance.now() } = {}) {
@@ -2472,7 +2473,7 @@ var MCP_TOOL_SETTINGS = Object.freeze({
   custom_tool_status: { group: "custom" },
   custom_tool_cancel: { group: "custom" }
 });
-var EXTENSION_VERSION = "2.2.84";
+var EXTENSION_VERSION = "2.2.85";
 globalThis.addEventListener?.("fetch", createMediaStreamHandler({
   extensionUrl: chrome.runtime.getURL("/"),
   getClient: (id) => globalThis.clients.get(id),
@@ -4660,7 +4661,6 @@ function cdpAttachmentStateExpression(fileNames) {
     };
   })()`;
 }
-
 async function cdpWaitForAttachmentAccepted(tabId, fileNames, retryPolicy, beforeCheck = null) {
   const policy = retryPolicy || await configuredComposerMediaRetry();
   cdpLog("Waiting for Composer file acceptance", { tabId, fileCount: fileNames.length, ...policy });
@@ -4957,8 +4957,8 @@ async function cdpAttachFilesNow(filePathValues, { onPhase = null, currentChatTa
       return { fileNames, guardToken: composerGuardToken };
     }
     if (continuationText && currentChatTarget) await cdpInsertBrowserContinuation(tab.id, currentChatTarget, fileNames, composerGuardToken, continuationText, checkCancelled);
-        await logBrowserTabState(trace, tab.id, "resource.beforeSend");
-if (onPhase) await onPhase("submitting");
+    await logBrowserTabState(trace, tab.id, "resource.beforeSend");
+    if (onPhase) await onPhase("submitting");
     await cdpSendAttachedFiles(tab.id, filePaths.length, currentChatTarget ? {
       timeoutMs: 5 * 6e4,
       beforeClick: async () => {
@@ -5908,8 +5908,8 @@ async function logBrowserTabState(trace, tabId, point) {
     record.active = Boolean(tab.active);
     record.tabStatus = typeof tab.status === "string" ? tab.status : null;
     try {
-      const window = await chrome.windows.get(tab.windowId);
-      record.windowFocused = Boolean(window.focused);
+      const window2 = await chrome.windows.get(tab.windowId);
+      record.windowFocused = Boolean(window2.focused);
     } catch {
       record.windowFocused = null;
     }
@@ -5946,9 +5946,9 @@ var browserAgent = createBrowserAgent({
   waitReady: async (tabId, checkStarting, trace) => {
     await logBrowserTabState(trace, tabId, "agent.beforeWaitReady");
     const result = await waitForBrowserDocument({
-      getTab: id => chrome.tabs.get(id),
+      getTab: (id) => chrome.tabs.get(id),
       command: (id, method, params) => trace.command(method, () => chrome.debugger.sendCommand({ tabId: id }, method, params)),
-      onWaiting: elapsedSeconds => consoleAction("[ResearchTube Browser] waiting for site document", { elapsedSeconds })
+      onWaiting: (elapsedSeconds) => consoleAction("[ResearchTube Browser] waiting for site document", { elapsedSeconds })
     }, tabId, checkStarting);
     await logBrowserTabState(trace, tabId, "agent.documentReady");
     return result;
@@ -5999,8 +5999,8 @@ var browserAgent = createBrowserAgent({
         await chatCommand("Emulation.setFocusEmulationEnabled", { enabled: true });
         await chatCommand("Page.setWebLifecycleState", { state: "active" });
         await trace.span("chat.document", () => waitForBrowserDocument({ getTab: (id) => chrome.tabs.get(id), command: (id, method, params) => trace.command(method, () => chrome.debugger.sendCommand({ tabId: id }, method, params)), onWaiting: (elapsedSeconds) => consoleAction("[ResearchTube Browser] waiting for ChatGPT document", { elapsedSeconds }) }, tabId, checkStarting, { requiredOrigin: "https://chatgpt.com" }));
-                await logBrowserTabState(trace, tabId, "chat.documentReady");
-await onPhase("waitingForComposer");
+        await logBrowserTabState(trace, tabId, "chat.documentReady");
+        await onPhase("waitingForComposer");
         await cdpWaitForTextComposer(tabId, 12e4, { checkCancelled: checkStarting, requireComplete: false });
         await logBrowserTabState(trace, tabId, "chat.composerReady");
         await onPhase("preparingPrompt");
@@ -6015,8 +6015,8 @@ await onPhase("waitingForComposer");
         checkStarting();
         await chatCommand("Input.insertText", { text: prompt });
         await onPhase("sendingPrompt");
-                await logBrowserTabState(trace, tabId, "chat.beforeSend");
-await cdpClickEnabledSendButton(tabId, 12e4, () => verifyStartup(prompt), checkStarting);
+        await logBrowserTabState(trace, tabId, "chat.beforeSend");
+        await cdpClickEnabledSendButton(tabId, 12e4, () => verifyStartup(prompt), checkStarting);
         await logBrowserTabState(trace, tabId, "chat.afterSend");
         await onPhase("confirmingChat");
         return await waitForBrowserConversation({

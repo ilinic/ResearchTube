@@ -1,6 +1,6 @@
 // All optional Browser Agent performance logging lives behind this boundary.
 // Never log CDP parameters/results, page text, URLs, prompts or file paths.
-const DETAIL_KEYS = new Set(["sessionId", "taskId", "stage", "event", "spanId", "method", "outcome", "code", "elapsedMs", "sinceLaunchMs", "gapMs", "count", "frameCount", "rawNodes", "indexedNodes", "returnedNodes", "totalNodes", "characters", "bytes", "extraction", "mode", "enabled", "addedNodes", "updatedNodes", "removedNodes", "addedResources", "removedResources", "point", "tabId", "windowId", "tabStatus", "active", "windowFocused", "visibilityState", "hidden", "hasFocus", "readyState", "tabState", "cdpState]);
+const DETAIL_KEYS = new Set(["sessionId", "taskId", "stage", "event", "spanId", "method", "outcome", "code", "elapsedMs", "sinceLaunchMs", "gapMs", "count", "frameCount", "rawNodes", "indexedNodes", "returnedNodes", "totalNodes", "characters", "bytes", "extraction", "mode", "enabled", "addedNodes", "updatedNodes", "removedNodes", "addedResources", "removedResources", "point", "tabId", "windowId", "tabStatus", "active", "windowFocused", "visibilityState", "hidden", "hasFocus", "readyState", "tabState", "cdpState"]);
 const round = value => Math.round(Math.max(0, value) * 10) / 10;
 export function createBrowserDiagnostics({ enabled = false, sessionId, log = () => {}, now = () => performance.now() } = {}) {
   const launched = enabled ? now() : 0;

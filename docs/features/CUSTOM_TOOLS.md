@@ -45,6 +45,13 @@ context exposes the package directory, `progress(percent, message)` and
 task function returns a task record immediately; its progress, result and
 cancellation use `custom_tool_status` and `custom_tool_cancel`.
 
+Agent console logs use the manifest's exact tool name for invocation, status,
+cancellation and terminal outcomes. `context.progress(percent, message)` logs
+the supplied percentage for task tools, including updates between status polls.
+Sync tools log their name and outcome without percentages; their context's
+progress callback has no effect. Input/result payloads and progress messages
+are not printed.
+
 The bundled `custom-toolset` demonstrates both modes. `count_words` is a
 small synchronous operation. `wait_seconds` is an asynchronous example that
 waits for one to sixty seconds, publishes progress and responds to

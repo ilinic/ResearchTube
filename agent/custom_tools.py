@@ -12,6 +12,7 @@ import asyncio
 import importlib.util
 import inspect
 import json
+import math
 import re
 import secrets
 import sys
@@ -116,9 +117,10 @@ class CustomTask:
 
 
 class CustomToolContext:
-    def __init__(self, package_dir: Path, task: CustomTask | None = None) -> None:
+    def __init__(self, package_dir: Path, task: CustomTask | None = None, on_progress: Callable[[float], None] | None = None) -> None:
         self.package_dir = package_dir
         self._task = task
+        self._on_progress = on_progress
 
     def progress(self, percent: int | float, message: str) -> None:
         if self._task is None:
@@ -127,9 +129,12 @@ class CustomToolContext:
             raise CustomToolError("CUSTOM_TOOL_PROGRESS_INVALID", "Custom tool progress must be between 0 and 100.")
         if not isinstance(message, str) or not message.strip() or len(message) > 240:
             raise CustomToolError("CUSTOM_TOOL_PROGRESS_INVALID", "Custom tool progress message is invalid.")
-        self._task.progress_percent = float(percent)
-        self._task.status_message = message.strip()
-        self._task.last_updated_at = utc_now()
+        if self._task is not None:
+            self._task.progress_percent = float(percent)
+            self._task.status_message = message.strip()
+            self._task.last_updated_at = utc_now()
+        if self._on_progress is not None:
+            self._on_progress(float(percent))
 
     def check_cancelled(self) -> None:
         if self._task is not None and self._task.status == "cancelled":
@@ -137,15 +142,28 @@ class CustomToolContext:
 
 
 class CustomToolRegistry:
-    def __init__(self, root: Path, error_type: type[Exception], history_limit: Callable[[], int] | None = None) -> None:
+    def __init__(self, root: Path, error_type: type[Exception], history_limit: Callable[[], int] | None = None, logger: Callable[[str], None] | None = None) -> None:
         self.root = root
         self.error_type = error_type
         self.history_limit = history_limit or (lambda: 2000)
+        self.logger = logger
         self.tools: dict[str, CustomToolSpec] = {}
         self.errors: list[dict[str, str]] = []
         self.modules: dict[Path, ModuleType] = {}
         self.tasks: dict[str, CustomTask] = {}
         self.reload()
+
+    def _log(self, spec: CustomToolSpec, status: str, percent: Any = None, task_id: str | None = None) -> None:
+        if self.logger is None:
+            return
+        percentage = f" {percent:g}%" if isinstance(percent, (int, float)) and not isinstance(percent, bool) and math.isfinite(percent) and 0 <= percent <= 100 else ""
+        task_label = f" taskId={task_id}" if task_id is not None else ""
+        try:
+            # Progress messages and input/result payloads can contain private data.
+            self.logger(f"{spec.name}{task_label} -> {status}{percentage}")
+        except Exception:
+            # Console failure must not change a tool's outcome.
+            pass
 
     def prune(self) -> None:
         try:
@@ -320,17 +338,30 @@ class CustomToolRegistry:
             self._raise("CUSTOM_TOOL_ARGUMENTS_INVALID", "Custom tool arguments must be an object.")
         self._validate_arguments(spec, arguments)
         if spec.execution == "sync":
-            return {"kind": "result", "tool": name, "result": await self._invoke(spec, arguments, CustomToolContext(spec.package_dir))}
+            self._log(spec, "working")
+            context = CustomToolContext(spec.package_dir)
+            try:
+                result = await self._invoke(spec, arguments, context)
+            except asyncio.CancelledError:
+                self._log(spec, "cancelled")
+                raise
+            except Exception:
+                self._log(spec, "failed")
+                raise
+            self._log(spec, "completed")
+            return {"kind": "result", "tool": name, "result": result}
         now = utc_now()
         task_id = f"ct_{secrets.token_urlsafe(8)}"
         task = CustomTask(task_id, spec, now, now)
         self.tasks[task_id] = task
+        self._log(spec, task.status, task.progress_percent, task_id)
         task.runner = asyncio.create_task(self._run_task(task, arguments), name=f"researchtube-custom-{task_id}")
         return {"kind": "task", "task": task.document()}
 
     async def _run_task(self, task: CustomTask, arguments: dict[str, Any]) -> None:
         try:
-            task.result = await self._invoke(task.spec, arguments, CustomToolContext(task.spec.package_dir, task))
+            context = CustomToolContext(task.spec.package_dir, task, lambda percent: self._log(task.spec, "working", percent, task.task_id))
+            task.result = await self._invoke(task.spec, arguments, context)
             task.status, task.phase, task.progress_percent = "completed", "completed", 100
             task.status_message, task.last_updated_at = "Custom tool completed.", utc_now()
         except asyncio.CancelledError:
@@ -340,6 +371,7 @@ class CustomToolRegistry:
             task.status, task.phase = "failed", "failed"
             task.error = {"code": getattr(error, "code", "CUSTOM_TOOL_EXECUTION_FAILED"), "message": getattr(error, "message", str(error))}
             task.status_message, task.last_updated_at = "Custom tool failed.", utc_now()
+        self._log(task.spec, task.status, task.progress_percent, task.task_id)
 
     def status(self, task_id: str) -> dict[str, Any]:
         self.prune()
@@ -359,6 +391,7 @@ class CustomToolRegistry:
         if task.runner is not None:
             task.runner.cancel()
         task.status_message, task.last_updated_at = "Custom tool cancellation accepted.", utc_now()
+        self._log(task.spec, task.status, task.progress_percent, task.task_id)
         return task.document()
 
     async def shutdown(self) -> None:

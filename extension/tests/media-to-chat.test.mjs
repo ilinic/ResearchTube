@@ -50,6 +50,7 @@ const context = vm.createContext({
   cdpError: (message) => new Error(message),
   localAgentError: (code, message) => Object.assign(new Error(message), { code }),
   consoleAction: () => {},
+  logBrowserTabState: async () => {},
   cdpLog: () => {}, cdpErrorLog: () => {},
   cdpAbsoluteFilePath: (value) => value,
   configuredComposerMediaRetry: async () => ({ retryCount: 15, retryIntervalSeconds: 2 }),
