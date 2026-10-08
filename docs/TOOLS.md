@@ -213,11 +213,9 @@ Start **Study this site** from the Extension popup. The two new tabs are grouped
 | `site_files_status` | Read extraction, save and delivery progress plus confirmed outputs. |
 | `site_files_cancel` | Cancel before Send commits without deleting files or Composer attachments. |
 | `site_session_status` | Read session state and safe current page metadata. |
-| `site_session_pause` | Block new mutations/delivery, retaining live observation. |
-| `site_session_resume` | Refresh and resume a paused session. |
 | `site_session_stop` | Stop work, release debugger and clear the automation indicator; tabs remain open. |
 
-Browser resource tasks use their own status/cancel pair rather than `media_task_status`. They are created from a browser resource reference, not a Workspace source path. Source URLs and browser handles are private. Browser tasks/session state are Extension-memory records; they are not resumed after a restart.
+Browser resource tasks use their own status/cancel pair rather than `media_task_status`. They are created from a browser resource reference, not a Workspace source path. Source URLs and browser handles are private. Browser tasks/session state are Extension-memory records; they are not resumed after a restart. Pause and Resume are not public session controls; use Stop to end automation while keeping the tabs open, or close either session tab.
 
 `site_get_images` and `site_get_files` accept only resource IDs already observed in the supplied session, with no arbitrary source URL or destination-chat parameter. Both save new Workspace files without overwriting. The session fixes the source page and delivery conversation. Their default `addToChat:true` performs attachment and Send there; `false` saves only. MCP metadata explicitly describes both persistence and optional delivery, and retains state-changing/open-world annotations. Images and non-images cannot be mixed in a call: a wrong observed kind rejects the entire batch before a task is created. Downloaded bytes are checked again before saving. Both tools use `site_files_status` and `site_files_cancel`.
 

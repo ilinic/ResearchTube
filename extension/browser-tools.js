@@ -11,7 +11,7 @@ const error = { anyOf: [object({ code: string, message: string }), { type: "null
 const resource = object({ resourceId: string, kind: { enum: ["image", "audio", "video", "document"] }, label: string });
 const node = object({ nodeId: string, parentId: nullableString, childIds: { type: "array", items: string }, role: string, name: string, description: string, text: string, relationships: { type: "array", items: object({ type: string, nodeIds: { type: "array", items: string } }) }, value: nullableString, states: { type: "array", items: string }, childCount: integer, truncated: { type: "boolean" }, resources: { type: "array", items: resource } }, ["nodeId", "parentId", "childIds", "role", "name", "childCount", "truncated", "resources"]);
 const page = object({ pageVersion: integer, revision: integer, title: string, url: string });
-const session = object({ sessionId: string, state: { enum: ["starting", "running", "paused", "stopped", "failed"] }, page, createdAt: string, updatedAt: string, error, stopReason: error });
+const session = object({ sessionId: string, state: { enum: ["starting", "running", "stopped", "failed"] }, page, createdAt: string, updatedAt: string, error, stopReason: error });
 const ids = { type: "array", items: string };
 const changes = object({ pageChanged: { type: "boolean" }, addedNodeIds: ids, updatedNodeIds: ids, removedNodeIds: ids, addedResourceIds: ids, removedResourceIds: ids, addedNodes: integer, updatedNodes: integer, removedNodes: integer, addedResources: integer, removedResources: integer, truncated: { type: "boolean" } });
 const observation = object({ sessionId: string, page, roots: ids, nodes: { type: "array", items: node }, truncated: { type: "boolean" }, nextOffset: { type: ["integer", "null"] }, totalNodes: integer, changes });
@@ -39,8 +39,6 @@ export function browserToolDefinitions() {
     define("site_files_status", "Site file task status", "Read resource extraction/delivery progress, ordered saved files and confirmed submission. Poll at pollIntervalMs; completion notifies the session’s ChatGPT tab only if idle.", { taskId }, ["taskId"], resourceTask),
     define("site_files_cancel", "Cancel site file task", "Cancel extraction/delivery before Send commits. Saved files, Composer attachments and tabs remain; committed Send cannot be cancelled.", { taskId }, ["taskId"], object({ cancelled: { type: "boolean" }, task: resourceTask }), write),
     define("site_session_status", "Site session status", "Read the bound session's state and page revision. Focus changes do not redirect it. Closing either controlled tab ends it normally with TAB_CLOSED; the next call reports closure.", {}, [], session),
-    define("site_session_pause", "Pause site session", "Pause actions and resource delivery; observations remain available. Dispatched input cannot be undone; waiting tasks retain Composer contents.", {}, [], session, write),
-    define("site_session_resume", "Resume site session", "Resume a paused session and refresh its page. Manual navigation is respected; invalidated node IDs stay stale.", {}, [], session, write),
     define("site_session_stop", "Stop site session", "Stop actions/delivery and release automation. Tabs and saved files remain. Sessions do not survive browser/Extension restart.", {}, [], session, write)
   ].map(tool => {
     if (["site_get_images", "site_get_files"].includes(tool.name)) tool.inputSchema.oneOf = [{ required: ["resourceId"] }, { required: ["resourceIds"] }];
@@ -53,8 +51,7 @@ export const LEGACY_SITE_TOOL_NAMES = Object.freeze({
   browser_observe: "site_read", browser_act: "site_interact", browser_get_resource: "site_get_files",
   browser_get_children: "site_get_children", browser_get_node: "site_get_node", browser_get_text: "site_get_text",
   browser_resource_status: "site_files_status", browser_resource_cancel: "site_files_cancel",
-  browser_session_status: "site_session_status", browser_session_pause: "site_session_pause",
-  browser_session_resume: "site_session_resume", browser_session_stop: "site_session_stop"
+  browser_session_status: "site_session_status", browser_session_stop: "site_session_stop"
 });
 export function browserError(code, message) { return Object.assign(new Error(message), { code }); }
 export function validateBrowserInput(name, input) {

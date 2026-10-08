@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {webcrypto} from 'node:crypto';
 import {createBrowserAgent,waitForBrowserDocument,waitForBrowserConversation,browserStudyGroupTitle} from '../browser-agent.js';
-import {browserToolDefinitions,validateBrowserInput} from '../browser-tools.js';
+import {browserToolDefinitions,BROWSER_TOOL_NAMES,validateBrowserInput} from '../browser-tools.js';
 import {assertSchema} from './fixtures/schema-check.mjs';
 globalThis.crypto ||= webcrypto;
 const definitions=browserToolDefinitions();
@@ -104,7 +104,11 @@ for(const [action,parameters] of [['hover',{}],['click',{}],['key',{key:'Ctrl+A'
 await f.run('site_interact',{sessionId,action:'type',nodeId:byRole('textbox').nodeId,text:'Search text'});
 await f.run('site_interact',{sessionId,action:'select',nodeId:byRole('combobox').nodeId,value:'a'});
 const inputEvents=f.events.filter(event=>event[0]==='Input.dispatchKeyEvent');assert.ok(inputEvents.some(event=>event[2].code==='KeyA'&&event[2].windowsVirtualKeyCode===65&&event[2].modifiers===2));
-await f.run('site_session_pause',{sessionId});await f.run('site_read',{sessionId});await assert.rejects(f.run('site_interact',{sessionId,action:'click',nodeId:byRole('button').nodeId}),{code:'BROWSER_SESSION_PAUSED'});await f.run('site_session_resume',{sessionId});
+for(const name of ['site_session_pause','site_session_resume','browser_session_pause','browser_session_resume']) {
+ assert.ok(!BROWSER_TOOL_NAMES.includes(name),'removed session controls are not public tools');
+ await assert.rejects(f.agent.execute(name,{sessionId}),{code:'BROWSER_INVALID'});
+}
+assert.ok(!browserToolDefinitions().find(tool=>tool.name==='site_session_status').outputSchema.properties.state.enum.includes('paused'));
 const queued=await f.run('site_get_images',{sessionId,resourceId});assert.equal(queued.status,'queued');assert.match(queued.taskId,/^tsk_[A-Za-z0-9_-]{10}$/);await f.scheduled.shift()();
 const finished=await f.run('site_files_status',{sessionId,taskId:queued.taskId});assert.equal(finished.status,'completed');assert.equal(finished.extraction,'original');assert.equal(finished.progressPercent,100);assert.equal(finished.submittedFiles.length,1);
 assert.equal(f.uploads[0].options.target.tabId,22);assert.equal(f.uploads[0].options.target.chatPath,'/c/study22');assert.match(f.uploads[0].options.continuation,new RegExp(resourceId));assert.ok(!JSON.stringify(finished).includes('PRIVATE'));

@@ -90,7 +90,6 @@ const SESSION_MESSAGES = {
   sendingPrompt: "Sending the study prompt…",
   confirmingChat: "Confirming the new conversation…",
   running: "Studying this page",
-  paused: "Paused — you can browse manually",
   stopped: "Study session stopped",
   failed: "Study session failed"
 };
@@ -115,7 +114,7 @@ export function createBrowserAgent(host) {
   function publicTask(task) { return Object.fromEntries(["taskId", "tabId", "sessionId", "resourceId", "resourceIds", "files", "status", "phase", "progressPercent", "pollIntervalMs", "createdAt", "updatedAt", "workspacePath", "mimeType", "extraction", "submittedFiles", "submittedAt", "error"].map(key => [key, structuredClone(task[key]) ])); }
   async function check(session, mutation = false, trigger = "tool", eventUrl = null) {
     if (["stopped", "failed"].includes(session.state)) throw browserError(session.error?.code || session.stopReason?.code || "BROWSER_SESSION_STOPPED", session.error?.message || session.stopReason?.message || "This Browser Agent session is stopped.");
-    if (mutation && session.state !== "running") throw browserError("BROWSER_SESSION_PAUSED", "This Browser Agent session is paused or still starting. Resume it before actions or delivery.");
+    if (mutation && session.state !== "running") throw browserError("BROWSER_SESSION_NOT_READY", "This Browser Agent session is still starting. Wait for initialization before actions or delivery.");
     let agent, chat;
     try { [agent, chat] = await Promise.all([host.getTab(session.agentTabId), host.getTab(session.chatTabId)]); }
     catch { await stopClosed(session); throw browserError("TAB_CLOSED", "A bound session tab closed. Start a new Study this site session."); }
@@ -259,7 +258,7 @@ export function createBrowserAgent(host) {
   }
   async function waitRunning(task, session) {
     checkTask(task, session); await check(session, false);
-    while (["paused", "starting"].includes(session.state)) { progress(task, session.state === "paused" ? "paused" : "initializing", task.progressPercent); await sleep(500); checkTask(task, session); await check(session, false); }
+    while (session.state === "starting") { progress(task, "initializing", task.progressPercent); await sleep(500); checkTask(task, session); await check(session, false); }
     await check(session, true); checkTask(task, session);
   }
   async function readStream(stream, task, session, target, maximum) {
@@ -391,7 +390,7 @@ export function createBrowserAgent(host) {
             for (const item of items) await verifyResource(item, session);
           },
           onPhase: async phase => { checkTask(task, session); progress(task, phase === "composerAccepted" ? "waitingToSend" : phase, phase === "composerAccepted" ? 80 : 70); },
-          onSendCommit: () => { checkTask(task, session); if (session.state !== "running") throw browserError("BROWSER_SESSION_PAUSED", "The session paused before Send."); task.sendCommitted = true; }
+          onSendCommit: () => { checkTask(task, session); if (session.state !== "running") throw browserError("BROWSER_SESSION_NOT_READY", "The session is not ready to send."); task.sendCommitted = true; }
         });
         task.submittedFiles = task.files.map(file => file.workspacePath); task.submittedAt = timestamp();
       }
@@ -413,8 +412,6 @@ export function createBrowserAgent(host) {
     if (name === "site_files_cancel") { const task = taskOf(session, input.taskId); return { cancelled: cancelTask(task), task: publicTask(task) }; }
     if (name === "site_session_stop") return stop(session);
     await check(session, false);
-    if (name === "site_session_pause") { session.state = "paused"; await notify(session, "paused"); return publicSession(session); }
-    if (name === "site_session_resume") { session.state = "running"; await notify(session, "running"); return publicSession(session); }
     if (name === "site_read") return session.page.observe(input);
     if (name === "site_get_children") return session.page.observe({ ...input, mode: "subtree", depth: input.depth ?? 1 });
     if (name === "site_get_node") return session.page.getNode(input.nodeId);
@@ -422,7 +419,6 @@ export function createBrowserAgent(host) {
     if (name === "site_interact") return session.page.act(input);
     if (["site_get_images", "site_get_files"].includes(name)) {
       if (input.tabId !== undefined && input.tabId !== session.chatTabId) throw browserError("BROWSER_INVALID", "tabId must be this session’s ChatGPT tab.");
-      if (session.state === "paused") await check(session, true);
       const resourceIds = input.resourceIds ? [...input.resourceIds] : [input.resourceId];
       const maximumCount = await (host.resourceCountLimit?.() ?? 5);
       if (!Number.isSafeInteger(maximumCount) || maximumCount < 1) throw browserError("BROWSER_INVALID", "The configured resource batch maximum is invalid.");

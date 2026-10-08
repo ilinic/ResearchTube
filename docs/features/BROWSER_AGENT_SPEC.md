@@ -1,5 +1,7 @@
 # ResearchTube Browser Agent — Technical Specification
 
+This original design document is retained for development history. The current contract is documented in [Browser Agent](BROWSER_AGENT.md) and [Tools](../TOOLS.md). Historical Pause/Resume controls and the page overlay described below are not implemented in the current public interface; Status and Stop are the session controls.
+
 ## 1. Purpose
 
 Add a generic **Study Page** capability to ResearchTube that lets ChatGPT inspect and interact with any page already open in the user's normal Chrome profile, including authenticated sites such as Facebook Marketplace, Mumsnet, Quora, forums, shops, web applications, and ChatGPT itself.
