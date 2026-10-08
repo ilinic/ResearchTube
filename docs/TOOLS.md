@@ -203,18 +203,18 @@ Start **Study this site** from the Extension popup. The two new tabs are grouped
 
 | Tool | Purpose |
 | --- | --- |
-| `browser_observe` | Bounded full-depth content by default, resource references, hierarchy and added/updated/removed IDs; optional outline/subtree and pagination. |
-| `browser_get_children` | Expand a selected node's current children with depth and pagination. |
-| `browser_get_node` | Inspect AX details, safe DOM attributes/geometry and resource references. |
-| `browser_get_text` | Read deferred AX subtree text with offset/limit. |
-| `browser_act` | Click, hover, replace editable text, key, scroll or select in the exact agent tab. |
-| `browser_get_resource` | Asynchronously extract one `resourceId` or an ordered `resourceIds` batch, save files in `study-this-site/` named `res_… [tsk_…].ext`, and by default attach/send the entire batch in the dedicated chat. `addToChat:false` saves only. |
-| `browser_resource_status` | Read extraction, save and delivery progress plus confirmed outputs. |
-| `browser_resource_cancel` | Cancel before Send commits without deleting files or Composer attachments. |
-| `browser_session_status` | Read session state and safe current page metadata. |
-| `browser_session_pause` | Block new mutations/delivery, retaining live observation. |
-| `browser_session_resume` | Refresh and resume a paused session. |
-| `browser_session_stop` | Stop work, release debugger and clear the automation indicator; tabs remain open. |
+| `site_read` | Bounded full-depth content by default, resource references, hierarchy and added/updated/removed IDs; optional outline/subtree and pagination. |
+| `site_get_children` | Expand a selected node's current children with depth and pagination. |
+| `site_get_node` | Inspect AX details, safe DOM attributes/geometry and resource references. |
+| `site_get_text` | Read deferred AX subtree text with offset/limit. |
+| `site_interact` | Click, hover, replace editable text, key, scroll or select in the exact agent tab. |
+| `site_get_files` | Asynchronously extract one `resourceId` or an ordered `resourceIds` batch, save files in `study-this-site/` named `res_… [tsk_…].ext`, and by default attach/send the entire batch in the dedicated chat. `addToChat:false` saves only. |
+| `site_files_status` | Read extraction, save and delivery progress plus confirmed outputs. |
+| `site_files_cancel` | Cancel before Send commits without deleting files or Composer attachments. |
+| `site_session_status` | Read session state and safe current page metadata. |
+| `site_session_pause` | Block new mutations/delivery, retaining live observation. |
+| `site_session_resume` | Refresh and resume a paused session. |
+| `site_session_stop` | Stop work, release debugger and clear the automation indicator; tabs remain open. |
 
 Browser resource tasks use their own status/cancel pair rather than `media_task_status`. They are created from a browser resource reference, not a Workspace source path. Source URLs and browser handles are private. Browser tasks/session state are Extension-memory records; they are not resumed after a restart.
 

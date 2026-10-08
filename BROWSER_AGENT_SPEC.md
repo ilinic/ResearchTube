@@ -310,14 +310,14 @@ Expose a small generic action vocabulary rather than site-specific commands.
 
 Suggested MCP surface:
 
-- browser_observe
-- browser_get_children
-- browser_get_node
-- browser_get_text
-- browser_get_resource
-- browser_act
+- site_read
+- site_get_children
+- site_get_node
+- site_get_text
+- site_get_files
+- site_interact
 
-Suggested browser_act payloads:
+Suggested site_interact payloads:
 
 ~~~json
 { "action": "click",  "nodeId": "23" }
@@ -646,7 +646,7 @@ The initial Browser Agent does not require:
 
 Exact names are provisional and should be aligned with existing ResearchTube naming conventions.
 
-### browser_observe
+### site_read
 
 Obtain the current semantic page view.
 
@@ -660,7 +660,7 @@ Possible parameters:
 }
 ~~~
 
-### browser_get_children
+### site_get_children
 
 Lazy expansion of one semantic node.
 
@@ -671,7 +671,7 @@ Lazy expansion of one semantic node.
 }
 ~~~
 
-### browser_get_text
+### site_get_text
 
 Return deferred full text for a long text-bearing node.
 
@@ -681,7 +681,7 @@ Return deferred full text for a long text-bearing node.
 }
 ~~~
 
-### browser_get_resource
+### site_get_files
 
 Resolve a page resource through a compact resource ID.
 
@@ -693,7 +693,7 @@ Resolve a page resource through a compact resource ID.
 
 For image resources, this may initiate the attachment/continuation workflow rather than return base64 to the model.
 
-### browser_act
+### site_interact
 
 Generic page interaction.
 
@@ -713,10 +713,10 @@ Generic page interaction.
 
 Study Page itself creates BrowserSession automatically. If low-level tools are needed internally, keep them small:
 
-- browser_session_status
-- browser_session_pause
-- browser_session_resume
-- browser_session_stop
+- site_session_status
+- site_session_pause
+- site_session_resume
+- site_session_stop
 
 The user-facing controls remain ordinary Chrome tabs plus the overlay.
 
@@ -732,7 +732,7 @@ Example:
 before:
 [23] button "Show more" expanded=false
 
-browser_act(click, 23)
+site_interact(click, 23)
 
 change:
 UPDATED [23] expanded=true

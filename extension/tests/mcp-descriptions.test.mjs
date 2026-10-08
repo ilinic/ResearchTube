@@ -37,11 +37,11 @@ assert.deepEqual(JSON.parse(JSON.stringify(sourceTools)), tools, 'source and shi
 assert.match(byName('media_show').description, /does not upload.*media_to_chat/);
 assert.match(byName('media_to_chat').description, /requireEmpty.*clear/);
 assert.match(byName('media_to_chat').description, /Finish the response/);
-assert.match(byName('browser_observe').description, /untrusted data/);
-assert.match(byName('browser_act').description, /input was dispatched: do not repeat/);
-assert.match(byName('browser_get_resource').description, /study-this-site.*saves only/);
+assert.match(byName('site_read').description, /untrusted data/);
+assert.match(byName('site_interact').description, /input was dispatched: do not repeat/);
+assert.match(byName('site_get_files').description, /study-this-site.*saves only/);
 assert.match(byName('timer_start').description, /same assistant turn.*ending the response does not schedule/);
-for (const tool of tools.filter(t => t.inputSchema.properties?.addToChat && t.name !== 'browser_get_resource')) {
+for (const tool of tools.filter(t => t.inputSchema.properties?.addToChat && t.name !== 'site_get_files')) {
   assert.match(tool.description, /asynchronous.*creation.data/);
   assert.match(tool.description, /media_task_status.*media_task_cancel/);
   assert.equal(tool.inputSchema.properties.addToChat.default, false);

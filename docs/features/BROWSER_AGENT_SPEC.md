@@ -315,15 +315,15 @@ Expose a small generic action vocabulary rather than site-specific commands.
 Suggested MCP surface:
 
 ```text
-browser_observe
-browser_get_children
-browser_get_node
-browser_get_text
-browser_get_resource
-browser_act
+site_read
+site_get_children
+site_get_node
+site_get_text
+site_get_files
+site_interact
 ```
 
-`browser_act` should use a compact action union, for example:
+`site_interact` should use a compact action union, for example:
 
 ```json
 { "action": "click",  "nodeId": "23" }
@@ -663,7 +663,7 @@ The initial generic Browser Agent does not require:
 
 Names are provisional and should be aligned with existing ResearchTube conventions.
 
-### 14.1 `browser_observe`
+### 14.1 `site_read`
 
 Purpose: obtain the current semantic page view.
 
@@ -679,7 +679,7 @@ Possible arguments:
 
 Return compact semantic tree data plus page identity/state metadata.
 
-### 14.2 `browser_get_children`
+### 14.2 `site_get_children`
 
 Purpose: lazy expansion of one semantic node.
 
@@ -690,7 +690,7 @@ Purpose: lazy expansion of one semantic node.
 }
 ```
 
-### 14.3 `browser_get_text`
+### 14.3 `site_get_text`
 
 Purpose: return deferred full text for a long text-bearing node.
 
@@ -700,7 +700,7 @@ Purpose: return deferred full text for a long text-bearing node.
 }
 ```
 
-### 14.4 `browser_get_resource`
+### 14.4 `site_get_files`
 
 Purpose: resolve a page resource without automatically embedding all of its bytes in the MCP response.
 
@@ -712,7 +712,7 @@ Purpose: resolve a page resource without automatically embedding all of its byte
 
 For image resources, the result may start the attachment/continuation workflow rather than return base64 to the model.
 
-### 14.5 `browser_act`
+### 14.5 `site_interact`
 
 Purpose: generic page interaction.
 
@@ -737,10 +737,10 @@ The user-facing Study Page command creates the BrowserSession automatically; Cha
 If explicit tools are useful internally, keep them minimal:
 
 ```text
-browser_session_status
-browser_session_pause
-browser_session_resume
-browser_session_stop
+site_session_status
+site_session_pause
+site_session_resume
+site_session_stop
 ```
 
 User-facing UI remains the overlay and ordinary Chrome tabs.
@@ -757,7 +757,7 @@ Preferred behavior after an action:
 before:
 [23] button "Show more" expanded=false
 
-browser_act(click, 23)
+site_interact(click, 23)
 
 change:
 UPDATED [23] expanded=true

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { LEGACY_SITE_TOOL_NAMES } from '../browser-tools.js';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import { TIMER_TOOL_NAMES, timerDefinitions, validateTimerInput, normalizeTimerResult, timerTaskSchema } from '../timers.js';
@@ -66,6 +67,7 @@ const prefLast=source.indexOf('\nasync function mcpToolSettingsCatalog',prefFirs
 const storage={mcpToolPreferences:{newToolsEnabledByDefault:false,enabledByName:{existing:true}}};
 let developerDefault=false;
 const ctx=vm.createContext({
+ LEGACY_SITE_TOOL_NAMES,
  chrome:{storage:{local:{get:async()=>storage,set:async v=>Object.assign(storage,v)}}},
  DEFAULT_MCP_TOOL_PREFERENCES:{enabledByName:{}}, developerNewToolsDefault:false,
  publicMcpTools:()=>[{name:'existing'},{name:'new_custom'},{name:'new_builtin'}],

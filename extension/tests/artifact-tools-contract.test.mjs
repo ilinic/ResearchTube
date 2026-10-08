@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {webcrypto} from 'node:crypto';
 import vm from 'node:vm';
-import {BROWSER_TOOL_NAMES} from '../browser-tools.js';
+import {BROWSER_TOOL_NAMES,LEGACY_SITE_TOOL_NAMES} from '../browser-tools.js';
 import {ARTIFACT_TOOLS,ARTIFACT_STATUS_TOOLS,ARTIFACT_CANCEL_TOOLS} from '../artifact-tasks.js';
 import {WORKSPACE_ARGUMENT_NAMES,publicWorkspaceArguments} from '../artifact-tools.js';
 import {assertSchema} from './fixtures/schema-check.mjs';
@@ -47,10 +47,44 @@ for(const name of BROWSER_TOOL_NAMES) {
 }
 const browserCalls=[];
 w.context.browserAgent.execute=async(name,args)=>{browserCalls.push({name,args});return {mockBrowserResult:true};};
-const browserRouted=await w.call('browser_session_status',{sessionId:'bas_abcdefghij'});
-assert.equal(browserRouted.result.structuredContent.mockBrowserResult,true);assert.equal(browserCalls[0].name,'browser_session_status');
-assert.equal((await w.call('browser_session_status',{sessionId:'bas_abcdefghij',tabId:81})).result.isError,false,'extra browser arguments are rejected before routing');
+const browserRouted=await w.call('site_session_status',{sessionId:'bas_abcdefghij'});
+assert.equal(browserRouted.result.structuredContent.mockBrowserResult,true);assert.equal(browserCalls[0].name,'site_session_status');
+assert.equal((await w.call('site_session_status',{sessionId:'bas_abcdefghij',tabId:81})).result.isError,false,'extra browser arguments are rejected before routing');
 assert.equal(browserCalls.length,1);
+
+// The complete renamed public catalog dispatches through the shipped worker.
+assert.equal(BROWSER_TOOL_NAMES.length,12);
+assert.ok(definitions.every(tool=>!tool.name.startsWith('browser_')));
+for(const name of BROWSER_TOOL_NAMES) {
+ const properties=definitions.find(tool=>tool.name===name).inputSchema.properties;
+ const args={sessionId:'bas_abcdefghij'};
+ if(properties.nodeId) args.nodeId='n_1_1';
+ if(properties.taskId) args.taskId='tsk_abcdefghij';
+ if(properties.action) args.action='click';
+ if(properties.resourceId) args.resourceId='r_1_1';
+ const response=await w.call(name,args);
+ assert.equal(response.result.structuredContent.mockBrowserResult,true,name+' MCP route');
+ assert.equal(browserCalls.at(-1).name,name);
+}
+
+// Migrate both enabled and disabled choices once; explicit new-name choices win.
+const oldChoices=Object.fromEntries(Object.keys(LEGACY_SITE_TOOL_NAMES).map((name,index)=>[name,index%2===0]));
+const preferences=worker({mcpToolPreferences:{enabledByName:{...oldChoices,site_read:false,media_probe:false}}});
+const migrated=await preferences.context.mcpToolSettingsCatalog();
+for(const [oldName,newName] of Object.entries(LEGACY_SITE_TOOL_NAMES)) {
+ const enabled=newName==='site_read'?false:oldChoices[oldName];
+ assert.equal(migrated.find(tool=>tool.name===newName).enabled,enabled,newName+' choice');
+ assert.equal(preferences.storage.mcpToolPreferences.enabledByName[newName],enabled);
+ assert.equal(Object.hasOwn(preferences.storage.mcpToolPreferences.enabledByName,oldName),false);
+}
+assert.equal(preferences.storage.mcpToolPreferences.enabledByName.media_probe,false);
+const saved=JSON.stringify(preferences.storage);
+await preferences.context.mcpToolPreferences();
+assert.equal(JSON.stringify(preferences.storage),saved,'migration is idempotent');
+const listed=await preferences.context.enabledMcpToolDefinitions();
+for(const tool of migrated.filter(tool=>BROWSER_TOOL_NAMES.includes(tool.name))) {
+ assert.equal(listed.some(candidate=>candidate.name===tool.name),tool.enabled);
+}
 
 for(const name of ARTIFACT_TOOLS){const tool=definitions.find(t=>t.name===name);
  assert.equal(tool.inputSchema.properties.addToChat.default,false);

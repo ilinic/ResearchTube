@@ -36,8 +36,8 @@ function fixture(observation) {
     return {};
   } };
   const page = createBrowserPage(session, host);
-  const read = async args => { const result = await page.observe(args); assertSchema(browserToolDefinitions().find(tool => tool.name === "browser_observe").outputSchema, result); return result; };
-  const click = async nodeId => { const result = await page.act({ action: "click", nodeId }); assertSchema(browserToolDefinitions().find(tool => tool.name === "browser_act").outputSchema, result); return result; };
+  const read = async args => { const result = await page.observe(args); assertSchema(browserToolDefinitions().find(tool => tool.name === "site_read").outputSchema, result); return result; };
+  const click = async nodeId => { const result = await page.act({ action: "click", nodeId }); assertSchema(browserToolDefinitions().find(tool => tool.name === "site_interact").outputSchema, result); return result; };
   return { session, page, trees, urls, commands, read, click, frame: () => { withFrame = true; }, onAction: fn => { action = fn; }, onRead: fn => { duringRead = fn; }, failRead: () => { failRead = true; } };
 }
 
