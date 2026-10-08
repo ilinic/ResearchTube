@@ -23,7 +23,7 @@ LLMs have no precise internal running clock. These tools provide real elapsed-ti
 | `timer_status` | Read real remaining time, UTC/local timestamps, progress, synchronization details and warnings. |
 | `timer_cancel` | Stop active countdown and retain its terminal status. |
 
-Timers live only in Agent memory. They do not wake a finished chat. Old terminal records may be evicted under `limits.completedTaskHistoryLimit`.
+Timers live only in Agent memory. Optional `tabId` enables an idle-only completion message from the Extension. Old terminal records may be evicted under `limits.completedTaskHistoryLimit`.
 
 ## Common behavior
 
@@ -183,7 +183,7 @@ Attachment verification accepts exact filenames and the observed host insertion 
 
 `media_to_chat_cancel` accepts queued and working tasks before the Send click starts, including the pause and the wait for Send readiness. It stops subsequent automation without clearing text, removing attached files, deleting Workspace files or undoing an earlier explicit preparation. Cancellation takes effect before awaited cleanup. Once the trusted Send sequence begins, or the task is terminal, it returns `cancelled: false`.
 
-Status polling and cancellation are allowed in the initiating assistant turn; respect `pollIntervalMs`. A positive delay permits inspecting `waitingToSend` and cancelling before `sendNotBefore`. ChatGPT may keep Send disabled while the assistant is responding: for actual submission, finish the response after any pre-Send checks rather than indefinitely waiting for completion. The automatically sent attachment message can trigger a following turn to check `media_to_chat_status`; a timer does not resume an ended response. Approximate percentages represent processing phases and are also logged by the Agent. `completed` confirms that Send was clicked, not that ChatGPT finished processing every upload.
+Status polling and cancellation are allowed in the initiating assistant turn; respect `pollIntervalMs`. A positive delay permits inspecting `waitingToSend` and cancelling before `sendNotBefore`. ChatGPT may keep Send disabled while the assistant is responding: for actual submission, finish the response after any pre-Send checks rather than indefinitely waiting for completion. The automatically sent attachment message can trigger a following turn to check `media_to_chat_status`; an optional `tabId` allows an idle-only completion message. Approximate percentages represent processing phases and are also logged by the Agent. `completed` confirms that Send was clicked, not that ChatGPT finished processing every upload.
 
 `limits.mediaToChatMaxFiles` defaults to 5 and `limits.mediaToChatMaxFileSizeMiB` to 20 in `agent/agent-config.json`. Library has its own independent keys. Count limits accept 1–100 and file size 1–512 MiB. Exceeding the count rejects the whole request as an ordinary structured result (`isError: false`) with the configured maximum. Oversized files appear in `skippedFiles`, including actual and maximum byte sizes; eligible files are sent together. If all files are oversized, the task fails without opening a chooser. ChatGPT's own file-type and upload limits still apply.
 
@@ -228,3 +228,5 @@ Study this site and Describe this video explicitly clear restored text and attac
 
 
 Chat delivery verifies only the number of visible Composer attachments, with the shared configurable 15/2 retry defaults. File names and identities are not compared; same-count replacement is allowed. User text edits, cancellation and target changes still stop Send and preserve the remaining Composer contents.
+
+Optional `tabId` on asynchronous launches carries the destination ChatGPT tab from the startup prompt. Task IDs keep their existing format. Completion and the configurable 20-second Composer watchdog use the same guarded Send path; see [Task chat](features/TASK_CHAT.md).

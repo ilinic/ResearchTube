@@ -55,3 +55,5 @@ This directory is the canonical documentation set for ResearchTube. Source code 
 - [Real timers](features/TIMERS.md): duration/deadline tasks, system or internet time, clock warnings and history retention.
 
 - [Browser Agent](features/BROWSER_AGENT.md): Study this site, live page trees, actions, resources and exact session routing.
+
+- [Task chat context and Composer recovery](features/TASK_CHAT.md): optional tabId, idle-only completion messages and configurable automatic Send.

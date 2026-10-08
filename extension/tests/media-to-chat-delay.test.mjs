@@ -38,6 +38,8 @@ function worker() {
   });
   vm.runInContext(bundle, context);
   context.configuredToolLimits = async () => ({ mediaToChatMaxFiles: 10 });
+  context.startComposerWatchdog = async () => {};
+  context.updateComposerWatchdog = async () => {};
   context.refreshTaskHistorySettings = async () => {};
   context.reportMcpToolToAgent = async () => {};
   context.cdpLog = () => {}; context.cdpErrorLog = () => {};

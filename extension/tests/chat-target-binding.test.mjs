@@ -28,6 +28,8 @@ function worker({initialStorage={},initialNow=Date.now()}={}) {
  });
  vm.runInContext(bundle,context);
  context.configuredToolLimits=async()=>({mediaToChatMaxFiles:5});
+ context.startComposerWatchdog=async()=>{};
+ context.updateComposerWatchdog=async()=>{};
  context.refreshTaskHistorySettings=async()=>{};
  context.reportMcpToolToAgent=async()=>{};
  context.recordCommandDiagnostic=async()=>{};

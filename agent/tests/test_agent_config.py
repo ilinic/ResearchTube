@@ -173,3 +173,15 @@ class AgentConfigTests(unittest.TestCase):
                     agent.configured_composer_media_retry()
                 self.assertEqual(raised.exception.code, 'CONFIG_INVALID')
                 self.assertIn(name, raised.exception.message)
+
+    def test_composer_auto_send_timeout_defaults_live_edits_and_validation(self):
+        self.write({})
+        self.assertEqual(agent.configured_composer_auto_send_timeout(), 20)
+        for value in [1, 20, 600, 3600]:
+            self.write({'composerAutoSendTimeoutSeconds': {'value': value, 'comment': 'Watchdog only'}})
+            self.assertEqual(agent.configured_composer_auto_send_timeout(), value)
+        for value in [True, 0, -1, 3601, 1.5, '20', None]:
+            self.write({'composerAutoSendTimeoutSeconds': {'value': value}})
+            with self.assertRaises(agent.AgentApiError) as raised:
+                agent.configured_composer_auto_send_timeout()
+            self.assertEqual(raised.exception.code, 'CONFIG_INVALID')

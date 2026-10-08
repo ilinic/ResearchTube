@@ -14,7 +14,7 @@ const canonical = [
   "docs/README.md", "docs/ARCHITECTURE.md", "docs/DEVELOPMENT.md", "docs/TOOLS.md",
   "docs/INSTALLATION.md", "docs/TROUBLESHOOTING.md", "docs/ERRORS.md", "docs/DEMO.md",
   "docs/features/STORYBOARDS.md", "docs/features/MEDIA_VIEWER.md",
-  "docs/features/TEXT_TO_SPEECH.md", "docs/features/MEDIA_CLIP.md", "docs/features/TIMERS.md", "docs/features/ARTIFACT_TASKS.md", "docs/features/BROWSER_AGENT.md"
+  "docs/features/TEXT_TO_SPEECH.md", "docs/features/MEDIA_CLIP.md", "docs/features/TIMERS.md", "docs/features/ARTIFACT_TASKS.md", "docs/features/BROWSER_AGENT.md", "docs/features/TASK_CHAT.md"
 ];
 
 for (const path of canonical) assert.equal(existsSync(join(root, path)), true, `${path} must exist`);

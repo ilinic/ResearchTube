@@ -1,6 +1,6 @@
 # Real asynchronous timers
 
-LLMs do not have a precise internal running clock. ResearchTube provides `timer_start`, `timer_status` and `timer_cancel` for actual delays, test preparation windows and explicit calendar deadlines. These tools do not schedule a future assistant turn or send a notification to a stopped conversation.
+LLMs do not have a precise internal running clock. ResearchTube provides `timer_start`, `timer_status` and `timer_cancel` for actual delays, test preparation windows and explicit calendar deadlines. Optional `tabId` from the ResearchTube startup prompt allows the Extension to notify the named ChatGPT tab on successful completion when it is idle. Busy or missing tabs consume the notification without queuing it. See [Task chat](TASK_CHAT.md).
 
 ## Input and ownership
 
@@ -49,6 +49,8 @@ Cancellation returns the terminal task and `cancelled: true` only when active wo
 
 Show a visible preparation instruction, start the requested timer, and continue tool calls within the same assistant turn. Poll no faster than `pollIntervalMs`: 250 ms for short delays/preparation, then adaptive intervals up to 30 seconds for long waits. Early repeated status requests receive a bounded short Agent-side wait; no request waits for the whole long countdown.
 
-Once `completed` is observed, execute the dependent test action. Ten elapsed seconds do not prove that the user finished preparation. If an assistant response has ended, timer completion alone cannot resume it.
+Once `completed` is observed, execute the dependent test action. Ten elapsed seconds do not prove that the user finished preparation. With `tabId`, completion can create a following turn if the named chat is idle; without it, completion does not resume an ended response.
 
-For `media_to_chat`, status and cancellation may be used in the initiating assistant turn. With a positive `sendDelaySeconds`, timers can space checks of `waitingToSend` and its countdown before cancellation. For actual submission, finish the response after required pre-Send checks if ChatGPT keeps Send disabled during generation; the automatic attachment message can trigger the next turn. A timer does not independently resume an ended response.
+For `media_to_chat`, status and cancellation may be used in the initiating assistant turn. With a positive `sendDelaySeconds`, timers can space checks of `waitingToSend` and its countdown before cancellation. For actual submission, finish the response after required pre-Send checks if ChatGPT keeps Send disabled during generation; the automatic attachment message can trigger the next turn. A timer with optional `tabId` can send an idle-only completion message through the Extension.
+
+Optional `tabId` on asynchronous launches carries the destination ChatGPT tab from the startup prompt. Task IDs keep their existing format. Completion and the configurable 20-second Composer watchdog use the same guarded Send path; see [Task chat](TASK_CHAT.md).

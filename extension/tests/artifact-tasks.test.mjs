@@ -131,3 +131,14 @@ for(const tool of ARTIFACT_TOOLS) {
   assert.doesNotMatch((await f.manager.status(t.taskId)).statusMessage,/Creating Workspace/);
 }
 console.log('Artifact operation status: every producer has its own label; native speech phases/messages remain visible with empty files: ok');
+
+// Only the public parent completion is announced. Context also inherits the
+// authenticated chat binding when callers omit explicit tabId.
+const contextual=fixture(); let parentNotices=0;
+contextual.host.chatStatus=async()=>({taskId:'child',tabId:42,status:'completed',phase:'submitted',progressPercent:100,message:'sent',error:null});
+contextual.host.completed=async(task)=>{if(task.status==='completed'){parentNotices++;assert.equal(task.tabId,42);}};
+const contextualTask=await contextual.manager.start('media_image_crop',{workspacePath:'source.png'},{...options,addToChat:true});
+await contextual.manager.advance(contextualTask.taskId);
+assert.equal((await contextual.manager.status(contextualTask.taskId)).tabId,42);
+assert.equal(parentNotices,1);
+console.log('Artifact completion context: bound tab inheritance and single parent notification ok');

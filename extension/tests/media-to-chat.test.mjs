@@ -34,6 +34,10 @@ const telemetry = [];
 const commands = [];
 const context = vm.createContext({
   waitForComposerMedia,
+  normalizeTaskTabId: value => value ?? null,
+  startComposerWatchdog: async () => {},
+  updateComposerWatchdog: async () => {},
+  taskCompletionDelivery: { completed: async () => {} },
   pruneCompletedTasks, completedTaskHistoryLimit: 2000, developerNewToolsDefault: true, refreshTaskHistorySettings: async () => {},
   resolveChatComposer, chatComposerPageExpression, chatComposerAttachmentNamesMatch, inspectChatComposer, clickChatComposerAttachmentRemoval, resetChatComposerFileInputs, installChatComposerGuard, readChatComposerGuard, disposeChatComposerGuard,
   URL, console, Promise, crypto: webcrypto, setTimeout, clearTimeout,

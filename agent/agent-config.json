@@ -76,5 +76,9 @@
   "browserStudyMaxChars": {
     "value": 48000,
     "comment": "Maximum serialized node payload characters per Browser Agent observation or automatic post-action update, including node IDs and structure. Default 48000; integer 1000–100000. Page metadata and bounded change summaries add small overhead. MCP maxChars may reduce this ceiling. Long text and omitted nodes remain available through pagination or site_get_text. Read once per new study session."
+  },
+  "composerAutoSendTimeoutSeconds": {
+    "value": 20,
+    "comment": "Idle Composer watchdog: auto-send unchanged nonempty text/attachments after this many seconds in a ResearchTube-used ChatGPT tab. Task completion notifications do not wait for this timeout when the Composer is empty. Range 1–3600."
   }
 }

@@ -3,6 +3,7 @@ import { LEGACY_SITE_TOOL_NAMES } from '../browser-tools.js';
 import { readFile } from 'node:fs/promises';
 import vm from 'node:vm';
 import { TIMER_TOOL_NAMES, timerDefinitions, validateTimerInput, normalizeTimerResult, timerTaskSchema } from '../timers.js';
+import { normalizeTaskTabId } from "../task-chat.js";
 import { pruneCompletedTasks } from '../task-history.js';
 
 assert.deepEqual(TIMER_TOOL_NAMES, ['timer_start', 'timer_status', 'timer_cancel']);
@@ -49,12 +50,13 @@ const last=source.indexOf('  if (request?.method === "tools/call" && request.par
 assert.ok(first>=0 && last>first);
 const calls=[];
 const route = vm.runInNewContext(`(async function(request){${source.slice(first,last)}})`, {
- TIMER_TOOL_NAMES,validateTimerInput,normalizeTimerResult,Intl, AGENT_TASK_TIMEOUT_MS:10000,
+ TIMER_TOOL_NAMES,validateTimerInput,normalizeTimerResult,normalizeTaskTabId,Intl, AGENT_TASK_TIMEOUT_MS:10000,
  localAgentError:(code,message)=>Object.assign(new Error(message),{code}),
  executeToolCall:async (id,name,input,work)=>work(),
  agentJsonRequest:async (path,options)=> {calls.push({path,options}); return path.endsWith('/cancel')?{task:completed,cancelled:false}:task;}
 });
-await route({method:'tools/call',params:{name:'timer_start',arguments:{duration:10}}});
+await route({method:'tools/call',params:{name:'timer_start',arguments:{duration:10,tabId:42}}});
+assert.ok(!Object.hasOwn(calls[0].options.body,'tabId'),'browser context is not a native timer argument');
 assert.equal(calls[0].path,'/timer/start'); assert.ok(calls[0].options.body.localTimeZone);
 await route({method:'tools/call',params:{name:'timer_status',arguments:{taskId:task.taskId}}});
 assert.equal(calls[1].path,`/tasks/timer/${task.taskId}`);

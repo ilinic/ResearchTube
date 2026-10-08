@@ -43,7 +43,7 @@ assert.match(background, /describeYouTubeVideoTitle/, "the shortcut must add the
 assert.doesNotMatch(background, /currentDescribeYouTubeVideo/, "the shortcut must not replace the popup's current-tab snapshot with player state");
 assert.match(background, /shortMatch = url\.pathname\.match/, "the shortcut must normalize a YouTube Short to its video ID");
 assert.match(background, /Open one YouTube video or Short/, "the shortcut must describe ordinary videos and Shorts");
-assert.match(background, /@ResearchTube \$\{videoTitle\} \$\{videoUrl\} Study the video and tell me what it is about in my language\./, "the shortcut must use the requested title-first one-line prompt without URL punctuation");
+assert.match(background, /@ResearchTube \$\{videoTitle\} \$\{videoUrl\}\\nStudy this video and explain it in my language\. Use tabId: \$\{chatTab\.id\} for async tasks\./, "the startup prompt supplies the exact destination tab once");
 assert.match(background, /cdpSetComposerText\(chatTab\.id, prompt\)/, "the shortcut must place its prompt in Composer");
 assert.match(background, /Input\.insertText/, "the shortcut must insert its complete prompt immediately");
 assert.match(background, /CDP_COMPOSER_PROMPT_ATTEMPTS = 4/, "the shortcut must allow four complete prompt replacement attempts");

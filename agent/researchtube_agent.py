@@ -41,7 +41,7 @@ except ImportError:
     from task_history import TaskHistory
     from browser_resources import save_browser_resource
 
-AGENT_VERSION = "2.2.66"
+AGENT_VERSION = "2.2.67"
 INTERFACE_VERSION = 78
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
@@ -299,6 +299,13 @@ def configured_new_tools_default() -> bool:
     value = read_agent_config().get("newToolsEnabledByDefault", True)
     if not isinstance(value, bool):
         raise AgentApiError("CONFIG_INVALID", "newToolsEnabledByDefault must be a boolean.")
+    return value
+
+
+def configured_composer_auto_send_timeout() -> int:
+    value = read_agent_config().get("composerAutoSendTimeoutSeconds", 20)
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 3600:
+        raise AgentApiError("CONFIG_INVALID", "composerAutoSendTimeoutSeconds must be an integer from 1 to 3600.")
     return value
 
 
@@ -5916,7 +5923,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
         elif method == "GET" and path == "/health":
             response_status, response_body = "200 OK", cached_public_health()
         elif method == "GET" and path == "/internal/tool-limits":
-            response_status, response_body = "200 OK", {"limits": configured_tool_limits(), "newToolsEnabledByDefault": configured_new_tools_default(), "mediaWidgetHandshakeTimeoutSeconds": configured_media_widget_handshake_timeout(), "browserStudyGroupTabs": configured_browser_study_group_tabs(), "browserStudyDetailedLogging": configured_browser_study_detailed_logging(), "browserStudyObservation": configured_browser_study_observation(), "composerMediaRetry": configured_composer_media_retry()}
+            response_status, response_body = "200 OK", {"limits": configured_tool_limits(), "newToolsEnabledByDefault": configured_new_tools_default(), "mediaWidgetHandshakeTimeoutSeconds": configured_media_widget_handshake_timeout(), "browserStudyGroupTabs": configured_browser_study_group_tabs(), "browserStudyDetailedLogging": configured_browser_study_detailed_logging(), "browserStudyObservation": configured_browser_study_observation(), "composerMediaRetry": configured_composer_media_retry(), "composerAutoSendTimeoutSeconds": configured_composer_auto_send_timeout()}
         elif method == "GET" and path == "/custom-tools":
             response_status, response_body = "200 OK", CUSTOM_TOOLS.catalog()
         elif method == "POST" and path == "/custom-tools/call":

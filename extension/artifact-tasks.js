@@ -34,13 +34,14 @@ const object = (properties, required = Object.keys(properties)) => ({type:'objec
 const errorSchema = object({code:{type:'string'}, message:{type:'string'}});
 const nullable = schema => ({anyOf:[schema,{type:'null'}]});
 export const artifactOptionsSchema = {
+  tabId:{type:'integer',minimum:0,description:'Optional ChatGPT tabId from the startup prompt; notify on completion only if idle.'},
   addToChat:{type:'boolean',default:false,description:'Upload created files to this conversation and press Send. Default false creates only; media_show displays a viewer instead.'},
   composerPolicy:{type:'string',enum:['requireEmpty','clear'],default:'requireEmpty',description:'With addToChat: requireEmpty refuses drafts/attachments; clear discards both once. Later text edits stop Send and retain files.'},
   sendDelaySeconds:{type:'number',minimum:0,default:0,description:'With addToChat: seconds before Send after files are accepted. Default 0. waitingToSend reports deadline/remaining time; cancel preserves Composer.'}
 };
 export function artifactTaskSchema(chatSchema, dataSchema = {type:'object'}) {
   return object({
-    taskId:{type:'string',pattern:'^tsk_[A-Za-z0-9_-]{10}$'},tool:{type:'string',enum:ARTIFACT_TOOLS},
+    tabId:{type:['integer','null'],minimum:0},taskId:{type:'string',pattern:'^tsk_[A-Za-z0-9_-]{10}$'},tool:{type:'string',enum:ARTIFACT_TOOLS},
     status:{enum:['queued','working','completed','failed','cancelled']},phase:{type:'string'},
     progressPercent:{type:'number',minimum:0,maximum:100},statusMessage:{type:'string'},
     createdAt:{type:'string'},lastUpdatedAt:{type:'string'},pollIntervalMs:{type:'integer',minimum:1000},
@@ -68,7 +69,7 @@ export function createArtifactTaskManager(host) {
     persistence = write;
     return write;
   };
-  const document = task => ({taskId:task.taskId,tool:task.tool,status:task.status,phase:task.phase,
+  const document = task => ({tabId:task.tabId??null,taskId:task.taskId,tool:task.tool,status:task.status,phase:task.phase,
     progressPercent:task.progressPercent,statusMessage:task.statusMessage,
     createdAt:task.createdAt,lastUpdatedAt:task.lastUpdatedAt,pollIntervalMs:1000,
     statusTool:'media_task_status',cancelTool:'media_task_cancel',addToChat:task.addToChat,
@@ -93,6 +94,7 @@ export function createArtifactTaskManager(host) {
       } catch { /* A missing child cannot undo creation or revive delivery. */ }
     }
     await save(task);
+    await host.completed?.(task, persist);
   }
   async function ensure() {
     if(loaded)return;
@@ -170,6 +172,7 @@ export function createArtifactTaskManager(host) {
         }
       }
       if(task.addToChat && !task.chatReleased) task.chat=await host.chatStatus(task.chatTaskId);
+      task.tabId ??= task.chat?.tabId ?? null;
       if(!terminal(task.creation.status)) {
         task.phase=task.cancelRequested?'cancelling':task.creation.phase;
         task.statusMessage=task.cancelRequested?artifactOperationMessage(task.tool,'cancelling'):(task.creation.data?.statusMessage || artifactOperationMessage(task.tool));

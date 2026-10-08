@@ -60,7 +60,7 @@ function fixture({multipleImages=false}={}){
 }
 const f=fixture();const started=await f.agent.start(10),sessionId=started.session.sessionId;
 const startupPrompt=f.events.find(event=>event[0]==='prompt')[2];
-for(const name of ['site_read','site_interact','site_get_files']) assert.ok(startupPrompt.includes(name));
+assert.match(startupPrompt,/Use sessionId: bas_[A-Za-z0-9_-]{10} for site tools and tabId: 22 for async tasks\./);
 assert.doesNotMatch(startupPrompt,/browser_/);
 assert.match(startupPrompt,/in my language/);
 assert.match(startupPrompt,/Download and attach relevant photos and other media to this chat for analysis/);
@@ -366,7 +366,7 @@ console.log('Browser batches: navigation during final save preserves files and s
  const scoped=fixture();
  scoped.host.studyOptions=async()=>({groupTabs:false,detailedLogging:false,observation:{maxNodes:50,maxChars:16000}});
  const sid=(await scoped.agent.start(10)).session.sessionId;
- assert.match(scoped.events.find(row=>row[0]==='prompt')[2],/Start with site_read \(defaults\)/);
+ assert.match(scoped.events.find(row=>row[0]==='prompt')[2],/Use sessionId: bas_[A-Za-z0-9_-]{10} for site tools and tabId: 22 for async tasks/);
  await scoped.agent.onEvent({tabId:21},'Target.attachedToTarget',{sessionId:'child',targetInfo:{type:'iframe'}});
  const before=await scoped.run('site_read',{sessionId:sid});
  const mainImage=before.nodes.find(node=>node.role==='image');

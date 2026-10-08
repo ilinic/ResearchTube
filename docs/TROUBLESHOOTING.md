@@ -283,3 +283,7 @@ Collect the timestamped `ChatGPT Composer form submission dispatched`, `ChatGPT 
 ## Study requests several images
 
 Pass `resourceIds` from the latest observation instead of making separate tasks. Actual image bytes are saved under `study-this-site/`, then attached as one batch to the bound study conversation. Inspect the ordered task `files` and `submittedFiles`. A partial extraction/save failure does not upload a partial batch; earlier saved files remain. End the assistant response so ChatGPT can enable Send: the worker continues independently. Saving files locally does not override an OpenAI safety rejection or unsupported-upload restriction.
+
+## Automatic Composer Send
+
+`composerAutoSendTimeoutSeconds.value` defaults to 20 seconds and controls only the watchdog in ResearchTube-used ChatGPT tabs. Text or attachment-count changes restart it; busy generation postpones Send. Active file-delivery tasks and cancelled drafts are protected. Successful task completion with `tabId` sends immediately into an empty idle Composer, or appends to a stable draft. Busy/missing tabs are skipped without a pending wake-up. Check the Extension service-worker console for `[ResearchTube chat]` confirmation/stopped messages. See [Task chat](features/TASK_CHAT.md).
