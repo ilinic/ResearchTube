@@ -208,6 +208,8 @@ Configuration example (all settings use this layout):
 
 Keep page JS fixed and Extension-owned; never add a public eval/source-string parameter. Preserve AX hierarchy and deferred text access. Keep all physical tabs and authenticated resource URLs private, validate current page versions, and refuse alternate-tab fallbacks. Popup sessions and resource continuations do not use media widgets to identify their destination. Run `extension/tests/browser-agent.test.mjs` and `agent/tests/test_browser_resources.py` with the normal suite; then verify actual Chrome/ChatGPT behavior separately. See [Browser Agent](features/BROWSER_AGENT.md).
 
+Run `extension/tests/browser-visible-images.test.mjs` for fixed DOM discovery of empty-alt images and CSS backgrounds, visibility/clipping, ignored or absent AX backing, stable IDs, resource replacement, bounded pagination and navigation during discovery. Preserve semantic roles and avoid duplicate images when AX already includes the element.
+
 Run `extension/tests/browser-page-updates.test.mjs` for full first reads, actual serialized payload ceilings, automatic action differences, selected-target guards, resource replacement and navigation races. Preserve unchanged IDs outside a navigating iframe, but reject its old IDs even if Chrome reuses AX/backend identifiers. Never reinstall an invalidated frame from an in-flight read. Main-document replacement still invalidates all references. `site_interact` must distinguish dispatched input from a later failed observation, so the model does not repeat an already executed click. Keep new Agent observation settings optional for compatibility; explicit MCP limits may lower configured ceilings only.
 
 ## Browser Agent timing diagnostics

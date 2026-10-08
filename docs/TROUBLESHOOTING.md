@@ -243,6 +243,8 @@ Use the creation tool's taskId with media_task_status. If creation completed and
 
 ## Study this site / Browser Agent
 
+If a visible photograph has an empty `alt` or is a CSS background, the DOM supplement includes it even when Chrome omits it from AX. Reload the updated Extension and start a fresh session. Scroll the controlled page to the image and observe again: supplemental images must intersect the frame viewport. Hidden/transparent/overflow-clipped elements are excluded; pseudo-element backgrounds are not collected. Discovery examines at most 20,000 elements and 1,000 images per frame.
+
 - Start from an ordinary HTTP/HTTPS page. Chrome internal pages and protected debugger targets cannot be studied. The popup creates a copy and a separate ChatGPT conversation; it does not use whichever chat later becomes active.
 - Refresh the ResearchTube MCP schema if `site_read` or other Browser Agent tools are absent, and check their Browser Agent group in Settings.
 - `PAGE_CHANGED`: observe the current page again and use its new node/resource IDs. `STALE_NODE`: the element changed; expand/observe again rather than retrying a blind click.

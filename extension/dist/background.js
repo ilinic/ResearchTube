@@ -444,6 +444,51 @@ var axValue = (value) => value?.value == null ? "" : String(value.value);
 var nodeSignature = (node2) => JSON.stringify([axValue(node2.role), axValue(node2.name), axValue(node2.value), (node2.properties || []).filter((property) => ["disabled", "checked", "expanded", "selected", "readonly", "busy", "url"].includes(property.name)).map((property) => [property.name, axValue(property.value)])]);
 var RESOURCE_ROLES = /* @__PURE__ */ new Set(["image", "video", "audio", "link"]);
 var protectedNode = (node2) => ["textbox", "searchbox"].includes(axValue(node2.role)) && /(?:password|api[ _-]*key|access[ _-]*token|secret|authorization)/i.test(axValue(node2.name)) || node2.role?.value === "password" || node2.properties?.some((property) => ["protected", "password"].includes(property.name) && property.value?.value === true);
+function visibleBrowserImages(maxImages = 1e3, maxElements = 2e4, validate = false) {
+  const doc = this.nodeType === 9 ? this : this.ownerDocument;
+  const view = doc.defaultView;
+  const visible = (element) => {
+    if (!element.isConnected || element.closest('[aria-label="ResearchTube automation controls"]')) return false;
+    const rect = element.getBoundingClientRect();
+    let left = Math.max(0, rect.left), top = Math.max(0, rect.top);
+    let right = Math.min(view.innerWidth, rect.right), bottom = Math.min(view.innerHeight, rect.bottom);
+    if (!(rect.width > 0 && rect.height > 0 && right > left && bottom > top)) return false;
+    const style = view.getComputedStyle(element);
+    if (style.visibility === "hidden" || style.visibility === "collapse") return false;
+    for (let parent = element; parent; parent = parent.parentElement || parent.getRootNode()?.host) {
+      const css = view.getComputedStyle(parent);
+      if (css.display === "none" || css.contentVisibility === "hidden" || Number(css.opacity) === 0) return false;
+      if (parent === element) continue;
+      const box = parent.getBoundingClientRect();
+      if (/^(hidden|clip|scroll|auto)$/.test(css.overflowX)) {
+        left = Math.max(left, box.left);
+        right = Math.min(right, box.right);
+      }
+      if (/^(hidden|clip|scroll|auto)$/.test(css.overflowY)) {
+        top = Math.max(top, box.top);
+        bottom = Math.min(bottom, box.bottom);
+      }
+      if (right <= left || bottom <= top) return false;
+    }
+    return true;
+  };
+  const candidate = (element) => {
+    const image = element.tagName === "IMG" && element.hasAttribute("alt") && !element.getAttribute("alt").trim() && (element.currentSrc || element.src);
+    const background = /url\(/i.test(view.getComputedStyle(element).backgroundImage);
+    return Boolean((image || background) && visible(element));
+  };
+  if (validate) return candidate(this);
+  const result = [], stack = [doc.documentElement];
+  let visited = 0;
+  while (stack.length && visited++ < maxElements && result.length < maxImages) {
+    const element = stack.pop();
+    if (!element) continue;
+    if (candidate(element)) result.push(element);
+    const children = [...element.children, ...element.shadowRoot?.children || []];
+    for (let i = children.length - 1; i >= 0; i--) stack.push(children[i]);
+  }
+  return result;
+}
 function inspectBrowserElement() {
   const element = this.nodeType === 1 ? this : this.parentElement;
   if (!element || !element.isConnected) return null;
@@ -463,7 +508,7 @@ function inspectBrowserElement() {
   if (tag === "canvas" || tag === "svg") add("image", null, tag);
   if (tag === "a" && element.hasAttribute("download")) add("document", element.href);
   const background = getComputedStyle(element).backgroundImage;
-  for (const match of background.matchAll(/url\(["']?([^"')]+)["']?\)/g)) add("image", new URL(match[1], document.baseURI).href);
+  for (const match of background.matchAll(/url\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*))\s*\)/gi)) add("image", new URL((match[1] ?? match[2] ?? match[3]).trim(), document.baseURI).href);
   const attributes = ["alt", "title", "type", "placeholder", "aria-label", "aria-expanded", "aria-checked", "aria-selected", "disabled", "multiple"].filter((name) => element.hasAttribute(name)).map((name) => ({ name, value: element.getAttribute(name).slice(0, 500) }));
   if (tag === "a" && !element.hasAttribute("download")) {
     try {
@@ -486,7 +531,7 @@ function createBrowserPage(session2, host) {
   const metadata = () => ({ pageVersion: session2.pageVersion, revision: session2.revision, title: (session2.title || "").slice(0, 500), url: safePageUrl(session2.url) });
   function pruneReferences() {
     for (const [key2, id] of identifiers) if (!index.has(id)) identifiers.delete(key2);
-    for (const [id, item] of resources) if (!index.has(item.entry.id)) resources.delete(id);
+    for (const [id, item] of resources) if (!index.get(item.entry.id)?.resources.some((resource2) => resource2.resourceId === id)) resources.delete(id);
     for (const [key2, id] of resourceKeys) if (!resources.has(id)) resourceKeys.delete(key2);
   }
   function invalidate() {
@@ -559,6 +604,8 @@ function createBrowserPage(session2, host) {
       rawNodes += response.nodes?.length || 0;
       if (!liveTarget(target)) continue;
       const raw = new Map((response.nodes || []).map((node2) => [node2.nodeId, node2]));
+      const media = await discoverVisualImages(target, response.nodes || []);
+      if (!liveTarget(target)) continue;
       const keyOf = (axId) => `${target.sessionId || "root"}:${target.frameId}:${axId}`;
       const identify = (axId) => {
         const key2 = keyOf(axId), oldId = identifiers.get(key2), oldEntry = index.get(oldId), current = raw.get(axId);
@@ -574,16 +621,30 @@ function createBrowserPage(session2, host) {
         const role = axValue(rawNode.role), name = axValue(rawNode.name), description = axValue(rawNode.description);
         if (name === "ResearchTube automation controls") return [];
         const ignored = rawNode.ignored || role === "InlineTextBox" || ["none", "generic"].includes(role) && !name && !description && !rawNode.value?.value;
-        const id = ignored ? null : identify(axId);
+        const visual = media.get(rawNode.backendDOMNodeId);
+        const id = ignored && !visual ? null : identify(axId);
         const childIds = (rawNode.childIds || []).flatMap((child) => walk2(child, id || parentId));
         if (!id) return childIds;
         const previous = index.get(id);
-        const entry = { id, parentId, childIds, raw: rawNode, role, name, description, text: role === "StaticText" ? name : "", value: protectedNode(rawNode) ? null : rawNode.value?.value == null ? null : axValue(rawNode.value), target, backendNodeId: rawNode.backendDOMNodeId, resources: previous?.resources || [] };
+        const entry = { id, parentId, childIds, raw: rawNode, role: ignored && visual ? "image" : role, name, description, text: role === "StaticText" ? name : "", value: protectedNode(rawNode) ? null : rawNode.value?.value == null ? null : axValue(rawNode.value), target, backendNodeId: rawNode.backendDOMNodeId, visualMedia: Boolean(visual), domOnly: false, resources: previous?.visualMedia && !visual ? [] : previous?.resources || [] };
         next.set(id, entry);
         return [id];
       };
       const rawRoots = (response.nodes || []).filter((node2) => !node2.parentId || !raw.has(node2.parentId));
       for (const root of rawRoots) nextRoots.push(...walk2(root.nodeId, null));
+      const represented = new Set([...next.values()].filter((entry) => entry.target === target).map((entry) => entry.backendNodeId));
+      const parent = [...next.values()].find((entry) => entry.target === target && entry.role === "RootWebArea");
+      for (const backendNodeId of media.keys()) {
+        if (represented.has(backendNodeId)) continue;
+        const key2 = keyOf(`dom-image:${backendNodeId}`);
+        const oldId = identifiers.get(key2);
+        const id = oldId && index.has(oldId) ? oldId : `n_${version}_${++counter}`;
+        identifiers.set(key2, id);
+        const rawNode = { role: { value: "image" }, name: { value: "" } };
+        next.set(id, { id, parentId: parent?.id || null, childIds: [], raw: rawNode, role: "image", name: "", description: "", text: "", value: null, target, backendNodeId, visualMedia: true, domOnly: true, resources: index.get(id)?.resources || [] });
+        if (parent) parent.childIds.push(id);
+        else nextRoots.push(id);
+      }
     }
     await host.check(session2, false);
     if (session2.pageVersion !== version) throw browserError("PAGE_CHANGED", "The page navigated while observing. Request a fresh observation.");
@@ -597,6 +658,29 @@ function createBrowserPage(session2, host) {
     return metadata();
   }
   const refresh = () => host.trace ? host.trace.span("page.axRefresh", refreshNative) : refreshNative();
+  async function discoverVisualImages(target, nodes) {
+    const documentNode = nodes.find((node2) => axValue(node2.role) === "RootWebArea" && node2.backendDOMNodeId);
+    if (!documentNode) return /* @__PURE__ */ new Map();
+    const group = `researchtube-images-${target.frameId}-${++counter}`;
+    const found = /* @__PURE__ */ new Map();
+    try {
+      const resolved = await command("DOM.resolveNode", { backendNodeId: documentNode.backendDOMNodeId, objectGroup: group }, target);
+      if (!resolved.object?.objectId) return found;
+      const result = await command("Runtime.callFunctionOn", { objectId: resolved.object.objectId, functionDeclaration: visibleBrowserImages.toString(), arguments: [{ value: 1e3 }, { value: 2e4 }], objectGroup: group, returnByValue: false, silent: true }, target);
+      if (result.exceptionDetails) throw browserError("BROWSER_UNAVAILABLE", "Visible page images could not be inspected. Observe again after page loading.");
+      if (!result.result?.objectId) return found;
+      const properties = await command("Runtime.getProperties", { objectId: result.result.objectId, ownProperties: true }, target);
+      for (const property of (properties.result || []).filter((item) => /^\d+$/.test(item.name) && item.value?.objectId).slice(0, 1e3)) {
+        if (!liveTarget(target)) break;
+        const described = await command("DOM.describeNode", { objectId: property.value.objectId, depth: 0 }, target);
+        if (described.node?.backendNodeId) found.set(described.node.backendNodeId, true);
+      }
+      return found;
+    } finally {
+      await command("Runtime.releaseObjectGroup", { objectGroup: group }, target).catch(() => {
+      });
+    }
+  }
   async function requireNode(id, requireDom = true) {
     await host.check(session2, false);
     if (!String(id).startsWith(`n_${session2.pageVersion}_`) || indexedVersion !== session2.pageVersion) throw browserError("PAGE_CHANGED", "This node belongs to an earlier page. Observe the current page first.");
@@ -604,13 +688,22 @@ function createBrowserPage(session2, host) {
     if (!entry) throw browserError("STALE_NODE", "This browser node is no longer in the live tree. Re-observe its parent.");
     if (!entry.backendNodeId && !requireDom) return entry;
     if (!entry.backendNodeId) throw browserError("STALE_NODE", "This AX node has no actionable DOM backing; expand its parent or use its accessible text.");
+    if (entry.visualMedia) {
+      let visible = false;
+      try {
+        visible = await withElement(entry, visibleBrowserImages, [1e3, 2e4, true]);
+      } catch {
+      }
+      if (!visible || index.get(id) !== entry || !liveTarget(entry.target)) throw browserError("STALE_NODE", "The image is no longer visible in the selected frame. Observe again.");
+      if (entry.domOnly) return entry;
+    }
     let result;
     try {
       result = await command("Accessibility.getPartialAXTree", { backendNodeId: entry.backendNodeId, fetchRelatives: false }, entry.target);
     } catch {
       throw browserError("STALE_NODE", "The underlying DOM node disappeared. Re-observe the page.");
     }
-    const current = result.nodes?.find((node2) => node2.backendDOMNodeId === entry.backendNodeId && !node2.ignored);
+    const current = result.nodes?.find((node2) => node2.backendDOMNodeId === entry.backendNodeId && (!node2.ignored || entry.visualMedia));
     if (index.get(id) !== entry || !liveTarget(entry.target)) throw browserError("STALE_NODE", "The selected frame changed during validation. Observe that frame again.");
     if (!current || nodeSignature(current) !== nodeSignature(entry.raw)) throw browserError("STALE_NODE", "The element changed after observation. Re-observe before acting.");
     return entry;
@@ -677,7 +770,7 @@ function createBrowserPage(session2, host) {
     return { current, changes: changes2, entries: [...added, ...updated].map((id) => index.get(id)) };
   }
   async function enrichMedia(entries) {
-    for (const entry of entries) if (RESOURCE_ROLES.has(entry.role)) await enrich(entry).catch((error3) => {
+    for (const entry of entries) if (RESOURCE_ROLES.has(entry.role) || entry.visualMedia) await enrich(entry).catch((error3) => {
       if (error3.code === "STALE_NODE") {
         for (const item of entry.resources) resources.delete(item.resourceId);
         entry.resources = [];
@@ -845,7 +938,7 @@ function createBrowserPage(session2, host) {
     session2.revision += 1;
     try {
       await refresh();
-      const media = [...index.values()].filter((entry2) => RESOURCE_ROLES.has(entry2.role) && (entry2.resources.length || !reported.nodes.has(entry2.id)));
+      const media = [...index.values()].filter((entry2) => (RESOURCE_ROLES.has(entry2.role) || entry2.visualMedia) && (entry2.resources.length || !reported.nodes.has(entry2.id)));
       await enrichMedia(media.slice(0, limits.maxNodes));
       await host.check(session2, false);
       if (indexedVersion !== session2.pageVersion) throw browserError("PAGE_CHANGED", "The page navigated during the post-action read.");
@@ -2530,7 +2623,7 @@ var MCP_TOOL_SETTINGS = Object.freeze({
   custom_tool_status: { group: "custom" },
   custom_tool_cancel: { group: "custom" }
 });
-var EXTENSION_VERSION = "2.2.98";
+var EXTENSION_VERSION = "2.2.99";
 globalThis.addEventListener?.("fetch", createMediaStreamHandler({
   extensionUrl: chrome.runtime.getURL("/"),
   getClient: (id) => globalThis.clients.get(id),

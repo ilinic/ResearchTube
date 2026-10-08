@@ -199,7 +199,7 @@ The original Workspace files are unchanged. A restarted Extension worker marks q
 
 ## Browser Agent
 
-Start **Study this site** from the Extension popup. The two new tabs are grouped by default (`browserStudyGroupTabs` in Agent configuration); the source tab remains outside the new group. Closing either new tab ends the session normally, with `state: stopped`, `error: null` and `stopReason: TAB_CLOSED`. The popup has no session controls. The new dedicated chat receives its `sessionId` (`bas_` plus ten random URL-safe characters); every browser call requires it. Startup binds the saved conversation address, after ChatGPT replaces its temporary local address. AX/DOM data describes the page; only real attachments provide model visual input. See [Browser Agent](features/BROWSER_AGENT.md) for sessions, frame handling, limits and resource fallbacks.
+Start **Study this site** from the Extension popup. The two new tabs are grouped by default (`browserStudyGroupTabs` in Agent configuration); the source tab remains outside the new group. Closing either new tab ends the session normally, with `state: stopped`, `error: null` and `stopReason: TAB_CLOSED`. The popup has no session controls. The new dedicated chat receives its `sessionId` (`bas_` plus ten random URL-safe characters); every browser call requires it. Startup binds the saved conversation address, after ChatGPT replaces its temporary local address. AX/DOM data describes the page; visible empty-alt images and URL-based CSS backgrounds also receive image resource references, even when AX omits them. Only real attachments provide model visual input. See [Browser Agent](features/BROWSER_AGENT.md) for sessions, frame handling, limits and resource fallbacks.
 
 | Tool | Purpose |
 | --- | --- |

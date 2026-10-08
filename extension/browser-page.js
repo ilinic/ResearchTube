@@ -9,6 +9,48 @@ const nodeSignature = node => JSON.stringify([axValue(node.role), axValue(node.n
 const RESOURCE_ROLES = new Set(["image", "video", "audio", "link"]);
 const protectedNode = node => ["textbox", "searchbox"].includes(axValue(node.role)) && /(?:password|api[ _-]*key|access[ _-]*token|secret|authorization)/i.test(axValue(node.name)) || node.role?.value === "password" || node.properties?.some(property => ["protected", "password"].includes(property.name) && property.value?.value === true);
 
+// Fixed DOM supplement for visual images which AX intentionally omits. Returns
+// remote element handles, not HTML/URLs. The same predicate guards later use.
+export function visibleBrowserImages(maxImages = 1000, maxElements = 20000, validate = false) {
+  const doc = this.nodeType === 9 ? this : this.ownerDocument;
+  const view = doc.defaultView;
+  const visible = element => {
+    if (!element.isConnected || element.closest('[aria-label="ResearchTube automation controls"]')) return false;
+    const rect = element.getBoundingClientRect();
+    let left = Math.max(0, rect.left), top = Math.max(0, rect.top);
+    let right = Math.min(view.innerWidth, rect.right), bottom = Math.min(view.innerHeight, rect.bottom);
+    if (!(rect.width > 0 && rect.height > 0 && right > left && bottom > top)) return false;
+    const style = view.getComputedStyle(element);
+    if (style.visibility === "hidden" || style.visibility === "collapse") return false;
+    for (let parent = element; parent; parent = parent.parentElement || parent.getRootNode()?.host) {
+      const css = view.getComputedStyle(parent);
+      if (css.display === "none" || css.contentVisibility === "hidden" || Number(css.opacity) === 0) return false;
+      if (parent === element) continue;
+      const box = parent.getBoundingClientRect();
+      if (/^(hidden|clip|scroll|auto)$/.test(css.overflowX)) { left = Math.max(left, box.left); right = Math.min(right, box.right); }
+      if (/^(hidden|clip|scroll|auto)$/.test(css.overflowY)) { top = Math.max(top, box.top); bottom = Math.min(bottom, box.bottom); }
+      if (right <= left || bottom <= top) return false;
+    }
+    return true;
+  };
+  const candidate = element => {
+    const image = element.tagName === "IMG" && element.hasAttribute("alt") && !element.getAttribute("alt").trim() && (element.currentSrc || element.src);
+    const background = /url\(/i.test(view.getComputedStyle(element).backgroundImage);
+    return Boolean((image || background) && visible(element));
+  };
+  if (validate) return candidate(this);
+  const result = [], stack = [doc.documentElement];
+  let visited = 0;
+  while (stack.length && visited++ < maxElements && result.length < maxImages) {
+    const element = stack.pop();
+    if (!element) continue;
+    if (candidate(element)) result.push(element);
+    const children = [...element.children, ...(element.shadowRoot?.children || [])];
+    for (let i = children.length - 1; i >= 0; i--) stack.push(children[i]);
+  }
+  return result;
+}
+
 // Fixed, read-only DOM enrichment. Page code is never supplied by the model.
 export function inspectBrowserElement() {
   const element = this.nodeType === 1 ? this : this.parentElement;
@@ -24,7 +66,7 @@ export function inspectBrowserElement() {
   if (tag === "canvas" || tag === "svg") add("image", null, tag);
   if (tag === "a" && element.hasAttribute("download")) add("document", element.href);
   const background = getComputedStyle(element).backgroundImage;
-  for (const match of background.matchAll(/url\(["']?([^"')]+)["']?\)/g)) add("image", new URL(match[1], document.baseURI).href);
+  for (const match of background.matchAll(/url\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*))\s*\)/gi)) add("image", new URL((match[1] ?? match[2] ?? match[3]).trim(), document.baseURI).href);
   const attributes = ["alt", "title", "type", "placeholder", "aria-label", "aria-expanded", "aria-checked", "aria-selected", "disabled", "multiple"].filter(name => element.hasAttribute(name)).map(name => ({ name, value: element.getAttribute(name).slice(0, 500) }));
   // Link destinations are safe page addresses, never signed resource URLs.
   if (tag === "a" && !element.hasAttribute("download")) { try { const url = new URL(element.href); if (["https:", "http:"].includes(url.protocol)) attributes.push({ name: "href", value: url.origin + url.pathname }); } catch {} }
@@ -43,7 +85,7 @@ export function createBrowserPage(session, host) {
   const metadata = () => ({ pageVersion: session.pageVersion, revision: session.revision, title: (session.title || "").slice(0, 500), url: safePageUrl(session.url) });
   function pruneReferences() {
     for (const [key, id] of identifiers) if (!index.has(id)) identifiers.delete(key);
-    for (const [id, item] of resources) if (!index.has(item.entry.id)) resources.delete(id);
+    for (const [id, item] of resources) if (!index.get(item.entry.id)?.resources.some(resource => resource.resourceId === id)) resources.delete(id);
     for (const [key, id] of resourceKeys) if (!resources.has(id)) resourceKeys.delete(key);
   }
   function invalidate() { index.clear(); identifiers.clear(); resources.clear(); resourceKeys.clear(); frameParents.clear(); frameEpochs.clear(); targetEpochs.clear(); roots = []; counter = resourceCounter = 0; indexedVersion = -1; }
@@ -94,6 +136,8 @@ export function createBrowserPage(session, host) {
       rawNodes += response.nodes?.length || 0;
       if (!liveTarget(target)) continue;
       const raw = new Map((response.nodes || []).map(node => [node.nodeId, node]));
+      const media = await discoverVisualImages(target, response.nodes || []);
+      if (!liveTarget(target)) continue;
       const keyOf = axId => `${target.sessionId || "root"}:${target.frameId}:${axId}`;
       const identify = axId => { const key = keyOf(axId), oldId = identifiers.get(key), oldEntry = index.get(oldId), current = raw.get(axId); if (!oldId || !oldEntry || oldEntry.backendNodeId !== current.backendDOMNodeId || nodeSignature(oldEntry.raw) !== nodeSignature(current)) identifiers.set(key, `n_${version}_${++counter}`); return identifiers.get(key); };
       const visiting = new Set();
@@ -105,16 +149,29 @@ export function createBrowserPage(session, host) {
         // Hide only our own marked overlay, not arbitrary generic page wrappers.
         if (name === "ResearchTube automation controls") return [];
         const ignored = rawNode.ignored || role === "InlineTextBox" || ["none", "generic"].includes(role) && !name && !description && !rawNode.value?.value;
-        const id = ignored ? null : identify(axId);
+        const visual = media.get(rawNode.backendDOMNodeId);
+        const id = ignored && !visual ? null : identify(axId);
         const childIds = (rawNode.childIds || []).flatMap(child => walk(child, id || parentId));
         if (!id) return childIds;
         const previous = index.get(id);
-        const entry = { id, parentId, childIds, raw: rawNode, role, name, description, text: role === "StaticText" ? name : "", value: protectedNode(rawNode) ? null : rawNode.value?.value == null ? null : axValue(rawNode.value), target, backendNodeId: rawNode.backendDOMNodeId, resources: previous?.resources || [] };
+        const entry = { id, parentId, childIds, raw: rawNode, role: ignored && visual ? "image" : role, name, description, text: role === "StaticText" ? name : "", value: protectedNode(rawNode) ? null : rawNode.value?.value == null ? null : axValue(rawNode.value), target, backendNodeId: rawNode.backendDOMNodeId, visualMedia: Boolean(visual), domOnly: false, resources: previous?.visualMedia && !visual ? [] : previous?.resources || [] };
         next.set(id, entry);
         return [id];
       };
       const rawRoots = (response.nodes || []).filter(node => !node.parentId || !raw.has(node.parentId));
       for (const root of rawRoots) nextRoots.push(...walk(root.nodeId, null));
+      const represented = new Set([...next.values()].filter(entry => entry.target === target).map(entry => entry.backendNodeId));
+      const parent = [...next.values()].find(entry => entry.target === target && entry.role === "RootWebArea");
+      for (const backendNodeId of media.keys()) {
+        if (represented.has(backendNodeId)) continue;
+        const key = keyOf(`dom-image:${backendNodeId}`);
+        const oldId = identifiers.get(key);
+        const id = oldId && index.has(oldId) ? oldId : `n_${version}_${++counter}`;
+        identifiers.set(key, id);
+        const rawNode = { role: { value: "image" }, name: { value: "" } };
+        next.set(id, { id, parentId: parent?.id || null, childIds: [], raw: rawNode, role: "image", name: "", description: "", text: "", value: null, target, backendNodeId, visualMedia: true, domOnly: true, resources: index.get(id)?.resources || [] });
+        if (parent) parent.childIds.push(id); else nextRoots.push(id);
+      }
     }
     await host.check(session, false);
     if (session.pageVersion !== version) throw browserError("PAGE_CHANGED", "The page navigated while observing. Request a fresh observation.");
@@ -129,6 +186,26 @@ export function createBrowserPage(session, host) {
     return metadata();
   }
   const refresh = () => host.trace ? host.trace.span("page.axRefresh", refreshNative) : refreshNative();
+  async function discoverVisualImages(target, nodes) {
+    const documentNode = nodes.find(node => axValue(node.role) === "RootWebArea" && node.backendDOMNodeId);
+    if (!documentNode) return new Map();
+    const group = `researchtube-images-${target.frameId}-${++counter}`;
+    const found = new Map();
+    try {
+      const resolved = await command("DOM.resolveNode", { backendNodeId: documentNode.backendDOMNodeId, objectGroup: group }, target);
+      if (!resolved.object?.objectId) return found;
+      const result = await command("Runtime.callFunctionOn", { objectId: resolved.object.objectId, functionDeclaration: visibleBrowserImages.toString(), arguments: [{ value: 1000 }, { value: 20000 }], objectGroup: group, returnByValue: false, silent: true }, target);
+      if (result.exceptionDetails) throw browserError("BROWSER_UNAVAILABLE", "Visible page images could not be inspected. Observe again after page loading.");
+      if (!result.result?.objectId) return found;
+      const properties = await command("Runtime.getProperties", { objectId: result.result.objectId, ownProperties: true }, target);
+      for (const property of (properties.result || []).filter(item => /^\d+$/.test(item.name) && item.value?.objectId).slice(0, 1000)) {
+        if (!liveTarget(target)) break;
+        const described = await command("DOM.describeNode", { objectId: property.value.objectId, depth: 0 }, target);
+        if (described.node?.backendNodeId) found.set(described.node.backendNodeId, true);
+      }
+      return found;
+    } finally { await command("Runtime.releaseObjectGroup", { objectGroup: group }, target).catch(() => {}); }
+  }
   async function requireNode(id, requireDom = true) {
     await host.check(session, false);
     if (!String(id).startsWith(`n_${session.pageVersion}_`) || indexedVersion !== session.pageVersion) throw browserError("PAGE_CHANGED", "This node belongs to an earlier page. Observe the current page first.");
@@ -136,10 +213,16 @@ export function createBrowserPage(session, host) {
     if (!entry) throw browserError("STALE_NODE", "This browser node is no longer in the live tree. Re-observe its parent.");
     if (!entry.backendNodeId && !requireDom) return entry;
     if (!entry.backendNodeId) throw browserError("STALE_NODE", "This AX node has no actionable DOM backing; expand its parent or use its accessible text.");
+    if (entry.visualMedia) {
+      let visible = false;
+      try { visible = await withElement(entry, visibleBrowserImages, [1000, 20000, true]); } catch {}
+      if (!visible || index.get(id) !== entry || !liveTarget(entry.target)) throw browserError("STALE_NODE", "The image is no longer visible in the selected frame. Observe again.");
+      if (entry.domOnly) return entry;
+    }
     let result;
     try { result = await command("Accessibility.getPartialAXTree", { backendNodeId: entry.backendNodeId, fetchRelatives: false }, entry.target); }
     catch { throw browserError("STALE_NODE", "The underlying DOM node disappeared. Re-observe the page."); }
-    const current = result.nodes?.find(node => node.backendDOMNodeId === entry.backendNodeId && !node.ignored);
+    const current = result.nodes?.find(node => node.backendDOMNodeId === entry.backendNodeId && (!node.ignored || entry.visualMedia));
     if (index.get(id) !== entry || !liveTarget(entry.target)) throw browserError("STALE_NODE", "The selected frame changed during validation. Observe that frame again.");
     if (!current || nodeSignature(current) !== nodeSignature(entry.raw)) throw browserError("STALE_NODE", "The element changed after observation. Re-observe before acting.");
     return entry;
@@ -203,7 +286,7 @@ export function createBrowserPage(session, host) {
     return { current, changes, entries: [...added, ...updated].map(id => index.get(id)) };
   }
   async function enrichMedia(entries) {
-    for (const entry of entries) if (RESOURCE_ROLES.has(entry.role)) await enrich(entry).catch(error => { if (error.code === "STALE_NODE") { for (const item of entry.resources) resources.delete(item.resourceId); entry.resources = []; } });
+    for (const entry of entries) if (RESOURCE_ROLES.has(entry.role) || entry.visualMedia) await enrich(entry).catch(error => { if (error.code === "STALE_NODE") { for (const item of entry.resources) resources.delete(item.resourceId); entry.resources = []; } });
   }
   function serialize(entries, input = {}, changes) {
     const offset = input.offset ?? 0, maxNodes = Math.min(input.maxNodes ?? limits.maxNodes, limits.maxNodes), maxChars = Math.min(input.maxChars ?? limits.maxChars, limits.maxChars);
@@ -323,7 +406,7 @@ export function createBrowserPage(session, host) {
       await refresh();
       // Bound DOM work too: inspect new media and previously referenced media,
       // rather than synchronously enriching thousands of off-page images.
-      const media = [...index.values()].filter(entry => RESOURCE_ROLES.has(entry.role) && (entry.resources.length || !reported.nodes.has(entry.id)));
+      const media = [...index.values()].filter(entry => (RESOURCE_ROLES.has(entry.role) || entry.visualMedia) && (entry.resources.length || !reported.nodes.has(entry.id)));
       await enrichMedia(media.slice(0, limits.maxNodes)); await host.check(session, false);
       if (indexedVersion !== session.pageVersion) throw browserError("PAGE_CHANGED", "The page navigated during the post-action read.");
       const delta = difference(reported);
