@@ -63,6 +63,8 @@ const startupPrompt=f.events.find(event=>event[0]==='prompt')[2];
 for(const name of ['site_read','site_interact','site_get_files']) assert.ok(startupPrompt.includes(name));
 assert.doesNotMatch(startupPrompt,/browser_/);
 assert.match(startupPrompt,/in my language/);
+assert.match(startupPrompt,/Download and attach relevant photos and other media to this chat for analysis/);
+assert.match(startupPrompt,/site_get_files \(addToChat: true; resourceIds for batches\)/);
 assert.match(sessionId,/^bas_[A-Za-z0-9_-]{10}$/);checkSchema('site_session_status',started.session);
 assert.deepEqual(f.events.filter(e=>['duplicate','restore','createChat'].includes(e[0])).map(e=>e[0]),['duplicate','restore','createChat']);
 assert.deepEqual(f.events.find(e=>e[0]==='group'),['group',[21,22],'RT · Site']);
