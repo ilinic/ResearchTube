@@ -150,7 +150,8 @@ assert.match(queued.task.taskId, /^tsk_[A-Za-z0-9_-]{10}$/);
 assert.equal(queued.task.status, "queued");
 assert.equal(queued.task.progressPercent, 0);
 assert.equal(queued.task.composerPolicy, "requireEmpty");
-assert.ok(!("target" in queued.task) && !("tabId" in queued.task), "private target identity must not reach MCP");
+assert.equal(queued.task.tabId, null, "unbound task has no chat context yet");
+assert.ok(!("target" in queued.task) && !("chatPath" in queued.task), "private target details must not reach MCP");
 assert.equal((await context.mediaToChatCancel(queued.task.taskId)).cancelled, true);
 
 context.resolveLibraryStoreFiles = async (files, endpoint) => {

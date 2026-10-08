@@ -15,7 +15,7 @@ export function browserStudyGroupTitle(source) {
 }
 function isImage(bytes) {
   const ascii = new TextDecoder().decode(bytes.slice(0, 4096));
-  return bytes[0] === 137 && ascii.slice(1, 4) === "PNG" || bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255 || /^(GIF87a|GIF89a)/.test(ascii) || ascii.startsWith("RIFF") && ascii.slice(8, 12) === "WEBP" || ascii.slice(4, 8) === "ftyp" && /avif|avis/.test(ascii.slice(8, 40)) || /^\s*(?:<\?xml[^>]*>\s*)?(?:<!DOCTYPE\s+svg[^>]*>\s*)?<svg(?:\s|>)/.test(ascii);
+  return bytes[0] === 137 && ascii.slice(1, 4) === "PNG" || bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255 || /^(GIF87a|GIF89a)/.test(ascii) || ascii.startsWith("RIFF") && ascii.slice(8, 12) === "WEBP" || ascii.slice(4, 8) === "ftyp" && /^(avif|avis)$/.test(ascii.slice(8, 12)) || /^\s*(?:<\?xml[^>]*>\s*)?(?:<!DOCTYPE\s+svg[^>]*>\s*)?<svg(?:\s|>)/.test(ascii);
 }
 
 // Wait for the usable document, not all images, ads and background requests.
@@ -220,7 +220,7 @@ export function createBrowserAgent(host) {
       await check(session);
       checkStarting();
       await notify(session, "waitingForChat");
-      const prompt = `@ResearchTube Study this site and explain what is useful here in my language. Download and attach relevant photos and other media to this chat for analysis using site_get_files (addToChat: true; resourceIds for batches). Use sessionId: ${session.sessionId} for site tools and tabId: ${chat.id} for async tasks.`;
+      const prompt = `@ResearchTube Study this site and explain what is useful here in my language. Download and attach relevant images with site_get_images and documents/audio/video with site_get_files (addToChat: true; resourceIds for batches). Use sessionId: ${session.sessionId} for site tools and tabId: ${chat.id} for async tasks.`;
       checkStarting();
       session.chatPath = await host.startChat(chat.id, prompt, checkStarting, phase => notify(session, phase), session.trace);
       if (!session.chatPath) throw browserError("BROWSER_CHAT_NOT_FOUND", "The dedicated ChatGPT conversation could not be confirmed. The session stopped without choosing another tab.");
@@ -351,7 +351,7 @@ export function createBrowserAgent(host) {
     // unrelated page content or redirecting the selected resource.
     await session.page.requireNode(item.entry.id);
   }
-  async function runResource(task, session, items, addToChat) {
+  async function runResource(task, session, items, addToChat, toolName) {
     try {
       checkTask(task, session); task.status = "working"; progress(task, "extracting", 10);
       await waitRunning(task, session);
@@ -361,6 +361,7 @@ export function createBrowserAgent(host) {
         await waitRunning(task, session);
         if (item.pageVersion !== session.pageVersion) throw browserError("PAGE_CHANGED", "The page navigated before extraction finished. No resource was attached.");
         const result = await session.trace.span("resource.extract", () => extract(item, task, session, maximum), { taskId: task.taskId, resourceNumber: index + 1 });
+        if ((toolName === "site_get_images") !== isImage(result.bytes)) throw browserError("BROWSER_RESOURCE_TYPE_MISMATCH", `${toolName} received a different file type. No mismatched file was saved or attached.`);
         task.sizeBytes = (task.sizeBytes || 0) + result.bytes.length;
         session.trace.event("resource.extracted", { taskId: task.taskId, resourceNumber: index + 1, bytes: result.bytes.length, extraction: result.extraction });
         checkTask(task, session); await check(session, false);
@@ -419,7 +420,7 @@ export function createBrowserAgent(host) {
     if (name === "site_get_node") return session.page.getNode(input.nodeId);
     if (name === "site_get_text") return session.page.getText(input.nodeId, input.offset, input.limit);
     if (name === "site_interact") return session.page.act(input);
-    if (name === "site_get_files") {
+    if (["site_get_images", "site_get_files"].includes(name)) {
       if (input.tabId !== undefined && input.tabId !== session.chatTabId) throw browserError("BROWSER_INVALID", "tabId must be this session’s ChatGPT tab.");
       if (session.state === "paused") await check(session, true);
       const resourceIds = input.resourceIds ? [...input.resourceIds] : [input.resourceId];
@@ -427,20 +428,24 @@ export function createBrowserAgent(host) {
       if (!Number.isSafeInteger(maximumCount) || maximumCount < 1) throw browserError("BROWSER_INVALID", "The configured resource batch maximum is invalid.");
       if (resourceIds.length > maximumCount) throw browserError("BROWSER_INVALID", `Requested ${resourceIds.length} resources; the configured mediaToChatMaxFiles maximum is ${maximumCount}. No resources were saved or attached.`);
       const items = resourceIds.map(id => session.page.getResource(id));
+      const imageOnly = name === "site_get_images";
+      if (items.some(item => imageOnly ? item.kind !== "image" : !["document", "audio", "video"].includes(item.kind))) {
+        throw browserError("BROWSER_RESOURCE_TYPE_MISMATCH", imageOnly ? "site_get_images accepts only observed images. Use site_get_files for documents, audio or video. No task was created." : "site_get_files accepts only observed documents, audio or video. Use site_get_images for images. No task was created.");
+      }
       const task = { taskId: uniqueId("tsk", tasks), tabId: input.tabId ?? session.chatTabId, sessionId: session.sessionId, resourceId: input.resourceId || null, resourceIds, files: [], status: "queued", phase: "queued", progressPercent: 0, pollIntervalMs: 1000, createdAt: timestamp(), updatedAt: timestamp(), workspacePath: null, mimeType: null, extraction: null, submittedFiles: [], submittedAt: null, error: null, cancelRequested: false, sendCommitted: false };
       task.trace = session.trace; task.startedMonotonic = session.trace.enabled ? session.trace.now() : 0;
       task.finishPhase = session.trace.begin("resource.queue", { taskId: task.taskId });
       tasks.set(task.taskId, task);
       const initial = publicTask(task);
       // Return the immediate task record before extraction can publish progress.
-      host.schedule(() => runResource(task, session, items, input.addToChat !== false));
+      host.schedule(() => runResource(task, session, items, input.addToChat !== false, name));
       return initial;
     }
     throw browserError("BROWSER_INVALID", "Unknown browser tool.");
   }
   async function execute(name, argumentsValue) {
     const session = sessions.get(argumentsValue?.sessionId);
-    const pageCall = ["site_read", "site_get_children", "site_get_node", "site_get_text", "site_interact", "site_get_files"].includes(name);
+    const pageCall = ["site_read", "site_get_children", "site_get_node", "site_get_text", "site_interact", "site_get_images", "site_get_files"].includes(name);
     if (!session?.trace.enabled || !pageCall) return executeNative(name, argumentsValue);
     if (session.lastPageCallEnd !== null) session.trace.event("tool.gap", { method: name, gapMs: session.trace.now() - session.lastPageCallEnd });
     try {

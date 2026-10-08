@@ -39,22 +39,26 @@ assert.match(byName('media_to_chat').description, /requireEmpty.*clear/);
 assert.match(byName('media_to_chat').description, /Finish the response/);
 assert.match(byName('site_read').description, /untrusted data/);
 assert.match(byName('site_interact').description, /input was dispatched: do not repeat/);
-assert.match(byName('site_get_files').description, /study-this-site.*saves only/);
-const siteFiles = byName('site_get_files');
-assert.match(siteFiles.description, /only observed resources.*arbitrary URLs or destination chats/);
-assert.match(siteFiles.description, /without overwriting/);
-assert.match(siteFiles.description, /addToChat=true \(default\).*attaches files and sends a continuation.*bound ChatGPT chat/);
-assert.match(siteFiles.description, /asynchronous task.*site_files_status.*site_files_cancel/);
-assert.deepEqual(siteFiles.annotations, { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true });
-assert.equal(siteFiles.inputSchema.properties.addToChat.default, true);
-assert.match(siteFiles.inputSchema.properties.addToChat.description, /save Workspace files only.*no chat attachment or message/);
-assert.match(siteFiles.inputSchema.properties.resourceId.description, /observed in this session/);
-assert.match(siteFiles.inputSchema.properties.resourceIds.description, /same session/);
-assert.match(siteFiles.inputSchema.properties.sessionId.description, /source page and dedicated ChatGPT conversation/);
-assert.ok(!Object.hasOwn(siteFiles.inputSchema.properties, 'url'));
-assert.ok(!Object.hasOwn(siteFiles.inputSchema.properties, 'chatId'));
+assert.match(byName('site_get_images').description, /selected images/);
+assert.match(byName('site_get_files').description, /selected documents, audio or video/);
+assert.match(byName('site_get_files').description, /For images use site_get_images/);
+for (const name of ['site_get_images', 'site_get_files']) {
+  const tool = byName(name);
+  assert.ok(tool.description.length <= 400, name + ' stays concise');
+  assert.match(tool.description, /study-this-site.*without overwriting/);
+  assert.match(tool.description, /addToChat=true \(default\).*attaches.*sends a continuation.*session's chat; false saves only/);
+  assert.match(tool.description, /asynchronous task.*site_files_status.*site_files_cancel/);
+  assert.deepEqual(tool.annotations, { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true });
+  assert.equal(tool.inputSchema.properties.addToChat.default, true);
+  assert.match(tool.inputSchema.properties.addToChat.description, /save Workspace files only.*no chat attachment or message/);
+  assert.match(tool.inputSchema.properties.resourceId.description, /observed in this session.*URLs are not accepted/);
+  assert.match(tool.inputSchema.properties.resourceIds.description, /same session/);
+  assert.match(tool.inputSchema.properties.sessionId.description, /source page and dedicated ChatGPT conversation/);
+  assert.ok(!Object.hasOwn(tool.inputSchema.properties, 'url'));
+  assert.ok(!Object.hasOwn(tool.inputSchema.properties, 'chatId'));
+}
 assert.match(byName('timer_start').description, /same assistant turn.*ending the response does not schedule/);
-for (const tool of tools.filter(t => t.inputSchema.properties?.addToChat && t.name !== 'site_get_files')) {
+for (const tool of tools.filter(t => t.inputSchema.properties?.addToChat && !['site_get_images', 'site_get_files'].includes(t.name))) {
   assert.match(tool.description, /asynchronous.*creation.data/);
   assert.match(tool.description, /media_task_status.*media_task_cancel/);
   assert.equal(tool.inputSchema.properties.addToChat.default, false);

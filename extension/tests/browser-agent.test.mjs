@@ -10,12 +10,21 @@ const attr=value=>({value});
 const ax=(nodeId,role,name,childIds=[],backendDOMNodeId=Number(nodeId)+100)=>({nodeId,role:attr(role),name:attr(name),childIds,backendDOMNodeId,ignored:false});
 const initialTree=[ax('1','RootWebArea','Site',['2']),ax('2','generic','',['3','4','5','6','7']),ax('3','heading','Article',['8']),ax('4','image','Diagram'),ax('5','textbox','Search'),ax('6','combobox','Choice'),ax('7','button','Open'),ax('8','StaticText','Detailed content',['9']),ax('9','InlineTextBox','Detailed content')];
 for(const raw of initialTree)for(const child of raw.childIds)initialTree.find(node=>node.nodeId===child).parentId=raw.nodeId;
-function fixture({multipleImages=false}={}){
+function fixture({multipleImages=false,nonImages=false}={}){
  let nextTab=20,tree=structuredClone(initialTree),clock=1_700_000_000_000;
  if(multipleImages){
   tree.find(node=>node.nodeId==='2').childIds.push('10','11');
   for(const id of ['10','11'])tree.push({...ax(id,'image','Additional diagram'),parentId:'2'});
  }
+ if(nonImages){
+  tree.find(node=>node.nodeId==='2').childIds.push('12','13','14');
+  for(const [id,role] of [['12','link'],['13','audio'],['14','video']])tree.push({...ax(id,role,'Download '+role),parentId:'2'});
+ }
+ const media = {
+  document: {mimeType:'application/pdf',ext:'pdf',bytes:Buffer.from('%PDF-1.7\nexample')},
+  audio: {mimeType:'audio/mpeg',ext:'mp3',bytes:Buffer.from('ID3example')},
+  video: {mimeType:'video/mp4',ext:'mp4',bytes:Buffer.from([0,0,0,20,102,116,121,112,105,115,111,109])}
+ };
  const tabs=new Map([[10,{id:10,url:'https://site.test/article?token=PRIVATE',title:'Site',active:true,index:3,windowId:2}]]);
  const events=[],scheduled=[],uploads=[],saved=[],logs=[],domValues=new Map();let closed=false,failOriginal=false,tooLarge=false,onAttach=null,onSave=null;
  const host={now:()=>clock,sleep:async()=>{clock+=500;await new Promise(resolve=>setImmediate(resolve));},getTab:async id=>{if(!tabs.has(id))throw Error('closed');return tabs.get(id);},
@@ -25,7 +34,7 @@ function fixture({multipleImages=false}={}){
  startChat:async(id,prompt)=>{events.push(['prompt',id,prompt]);tabs.get(id).url='https://chatgpt.com/c/study'+id;return '/c/study'+id;},
  shouldGroupTabs:async()=>true,groupTabs:async(ids,title)=>events.push(['group',ids,title]),
  updateStatus:async(ids,status)=>events.push(['toolbar',ids,structuredClone(status)]),resourceLimit:async()=>1024,resourceCountLimit:async()=>5,historyLimit:()=>2,schedule:work=>scheduled.push(work),log:(label,value)=>logs.push({label,value}),
- saveResource:async(taskId,bytes,mimeType,resourceId)=>{saved.push({taskId,bytes,mimeType,resourceId});await onSave?.();return {workspacePath:`study-this-site/${resourceId.replace(/^r_/,"res_")} [${taskId}].png`,mimeType:'image/png',sizeBytes:bytes.length};},
+ saveResource:async(taskId,bytes,mimeType,resourceId)=>{saved.push({taskId,bytes,mimeType,resourceId});await onSave?.();return {workspacePath:`study-this-site/${resourceId.replace(/^r_/,"res_")} [${taskId}].${Object.values(media).find(item=>item.mimeType===mimeType)?.ext || 'png'}`,mimeType,sizeBytes:bytes.length};},
  resolveFiles:async paths=>paths.map(path=>'/PRIVATE/'+path),
  attachFiles:async(files,options)=>{uploads.push({files,options});options.checkCancelled();await options.onPhase('composerAccepted');await onAttach?.(options);await options.beforeSend();options.checkCancelled();options.onSendCommit();},
  command:async(tabId,method,params={},childSessionId)=>{events.push([method,tabId,params,childSessionId]);if(closed)throw Error('detached');
@@ -37,6 +46,10 @@ function fixture({multipleImages=false}={}){
   if(method==='DOM.resolveNode')return {object:{objectId:String(params.backendNodeId)}};
   if(method==='Runtime.callFunctionOn'){
    const id=Number(params.objectId),args=params.arguments.map(arg=>arg.value);
+   if(nonImages && params.functionDeclaration.includes('function inspectBrowserElement') && [112,113,114].includes(id)){
+    const kind=id===112?'document':id===113?'audio':'video';
+    return {result:{value:{tag:id===112?'a':kind,attributes:[],bounds:{x:10,y:20,width:50,height:40},resources:[{kind,url:'https://cdn.test/'+kind+'?signature=PRIVATE',rendering:null}],editable:false,password:false}}};
+   }
    if(params.functionDeclaration.includes('function inspectBrowserElement'))return {result:{value:{tag:[104,110,111].includes(id)?'img':id===105?'input':id===106?'select':'div',attributes:[],bounds:{x:10,y:20,width:50,height:40},resources:[104,110,111].includes(id)?[{kind:'image',url:'https://cdn.test/image.png?signature=PRIVATE',rendering:null}]:[],editable:id===105,password:false}}};
    if(params.functionDeclaration.includes('elementFromPoint'))return {result:{value:true}};
    if(params.functionDeclaration.includes('this.options'))return {result:{value:args[0]==='a'}};
@@ -47,6 +60,11 @@ function fixture({multipleImages=false}={}){
   if(method==='Input.insertText'){domValues.set(host.focus,params.text);return {};}
   if(method==='DOM.getBoxModel')return {model:{content:[10,20,60,20,60,60,10,60]}};
   if(method==='Page.getLayoutMetrics')return {cssVisualViewport:{pageX:0,pageY:0,clientWidth:800,clientHeight:600}};
+  if(nonImages && method==='Network.loadNetworkResource'){
+   const kind=Object.keys(media).find(kind=>params.url==='https://cdn.test/'+kind+'?signature=PRIVATE');
+   if(kind)return {resource:{success:true,stream:kind,headers:{'Content-Type':media[kind].mimeType}}};
+  }
+  if(nonImages && method==='IO.read' && media[params.handle])return {data:media[params.handle].bytes.toString('base64'),base64Encoded:true,eof:true};
   if(method==='Network.loadNetworkResource'){if(failOriginal)throw Error('CORS');return {resource:{success:true,stream:'stream',headers:{'Content-Type':'image/png'}}};}
   if(method==='IO.read')return {data:Buffer.from(tooLarge?new Uint8Array(1025):[137,80,78,71,13,10,26,10]).toString('base64'),base64Encoded:true,eof:true};
   if(method==='Page.getResourceContent')throw Error('cache missing');
@@ -60,10 +78,11 @@ function fixture({multipleImages=false}={}){
 }
 const f=fixture();const started=await f.agent.start(10),sessionId=started.session.sessionId;
 const startupPrompt=f.events.find(event=>event[0]==='prompt')[2];
+for(const name of ['site_get_images','site_get_files']) assert.ok(startupPrompt.includes(name));
 assert.match(startupPrompt,/Use sessionId: bas_[A-Za-z0-9_-]{10} for site tools and tabId: 22 for async tasks\./);
 assert.doesNotMatch(startupPrompt,/browser_/);
 assert.match(startupPrompt,/in my language/);
-assert.match(startupPrompt,/Download and attach relevant photos and other media to this chat for analysis/);
+assert.match(startupPrompt,/Download and attach relevant images with site_get_images and documents\/audio\/video with site_get_files/);
 assert.match(startupPrompt,/site_get_files \(addToChat: true; resourceIds for batches\)/);
 assert.match(sessionId,/^bas_[A-Za-z0-9_-]{10}$/);checkSchema('site_session_status',started.session);
 assert.deepEqual(f.events.filter(e=>['duplicate','restore','createChat'].includes(e[0])).map(e=>e[0]),['duplicate','restore','createChat']);
@@ -87,12 +106,12 @@ await f.run('site_interact',{sessionId,action:'type',nodeId:byRole('textbox').no
 await f.run('site_interact',{sessionId,action:'select',nodeId:byRole('combobox').nodeId,value:'a'});
 const inputEvents=f.events.filter(event=>event[0]==='Input.dispatchKeyEvent');assert.ok(inputEvents.some(event=>event[2].code==='KeyA'&&event[2].windowsVirtualKeyCode===65&&event[2].modifiers===2));
 await f.run('site_session_pause',{sessionId});await f.run('site_read',{sessionId});await assert.rejects(f.run('site_interact',{sessionId,action:'click',nodeId:byRole('button').nodeId}),{code:'BROWSER_SESSION_PAUSED'});await f.run('site_session_resume',{sessionId});
-const queued=await f.run('site_get_files',{sessionId,resourceId});assert.equal(queued.status,'queued');assert.match(queued.taskId,/^tsk_[A-Za-z0-9_-]{10}$/);await f.scheduled.shift()();
+const queued=await f.run('site_get_images',{sessionId,resourceId});assert.equal(queued.status,'queued');assert.match(queued.taskId,/^tsk_[A-Za-z0-9_-]{10}$/);await f.scheduled.shift()();
 const finished=await f.run('site_files_status',{sessionId,taskId:queued.taskId});assert.equal(finished.status,'completed');assert.equal(finished.extraction,'original');assert.equal(finished.progressPercent,100);assert.equal(finished.submittedFiles.length,1);
 assert.equal(f.uploads[0].options.target.tabId,22);assert.equal(f.uploads[0].options.target.chatPath,'/c/study22');assert.match(f.uploads[0].options.continuation,new RegExp(resourceId));assert.ok(!JSON.stringify(finished).includes('PRIVATE'));
 assert.equal((await f.run('site_files_cancel',{sessionId,taskId:queued.taskId})).cancelled,false);
-const cancellation=await f.run('site_get_files',{sessionId,resourceId});assert.equal((await f.run('site_files_cancel',{sessionId,taskId:cancellation.taskId})).cancelled,true);await f.scheduled.shift()();assert.equal((await f.run('site_files_status',{sessionId,taskId:cancellation.taskId})).status,'cancelled');assert.equal(f.saved.length,1,'queued cancellation creates nothing');
-f.setOriginalFailure();const fallback=await f.run('site_get_files',{sessionId,resourceId,addToChat:false});await f.scheduled.shift()();assert.equal((await f.run('site_files_status',{sessionId,taskId:fallback.taskId})).extraction,'element-screenshot');assert.equal(f.uploads.length,1);
+const cancellation=await f.run('site_get_images',{sessionId,resourceId});assert.equal((await f.run('site_files_cancel',{sessionId,taskId:cancellation.taskId})).cancelled,true);await f.scheduled.shift()();assert.equal((await f.run('site_files_status',{sessionId,taskId:cancellation.taskId})).status,'cancelled');assert.equal(f.saved.length,1,'queued cancellation creates nothing');
+f.setOriginalFailure();const fallback=await f.run('site_get_images',{sessionId,resourceId,addToChat:false});await f.scheduled.shift()();assert.equal((await f.run('site_files_status',{sessionId,taskId:fallback.taskId})).extraction,'element-screenshot');assert.equal(f.uploads.length,1);
 const screenshot=f.events.find(event=>event[0]==='Page.captureScreenshot');assert.equal(screenshot[2].captureBeyondViewport,false);assert.ok(screenshot[2].clip);
 await f.agent.onEvent({tabId:21},'Page.frameNavigated',{frame:{id:'main',url:'https://site.test/next'}});f.tabs.get(21).url='https://site.test/next';
 await assert.rejects(f.run('site_get_node',{sessionId,nodeId:byRole('image').nodeId}),{code:'PAGE_CHANGED'});
@@ -101,10 +120,10 @@ await f.agent.onEvent({tabId:21},'Target.attachedToTarget',{sessionId:'child',ta
 await f.agent.onRemoved(10);assert.equal((await f.run('site_session_status',{sessionId})).state,'running','closing original source leaves duplicated session running');
 await f.run('site_session_stop',{sessionId});assert.equal(f.tabs.size,3,'Stop never closes tabs');await assert.rejects(f.run('site_read',{sessionId}),{code:'BROWSER_SESSION_STOPPED'});
 const g=fixture();const sid=(await g.agent.start(10)).session.sessionId;const image=(await g.run('site_read',{sessionId:sid,mode:'full'})).nodes.find(node=>node.role==='image');
-g.setTooLarge();const large=await g.run('site_get_files',{sessionId:sid,resourceId:image.resources[0].resourceId});await g.scheduled.shift()();assert.equal((await g.run('site_files_status',{sessionId:sid,taskId:large.taskId})).error.code,'BROWSER_RESOURCE_TOO_LARGE');assert.ok(g.events.some(event=>event[0]==='IO.close'));
+g.setTooLarge();const large=await g.run('site_get_images',{sessionId:sid,resourceId:image.resources[0].resourceId});await g.scheduled.shift()();assert.equal((await g.run('site_files_status',{sessionId:sid,taskId:large.taskId})).error.code,'BROWSER_RESOURCE_TOO_LARGE');assert.ok(g.events.some(event=>event[0]==='IO.close'));
 g.tabs.delete(22);await g.agent.onRemoved(22);assert.equal((await g.run('site_session_status',{sessionId:sid})).stopReason.code,'TAB_CLOSED');assert.equal(g.uploads.length,0);
 const h=fixture();const hsid=(await h.agent.start(10)).session.sessionId;const himage=(await h.run('site_read',{sessionId:hsid,mode:'full'})).nodes.find(node=>node.role==='image');
-const htask=await h.run('site_get_files',{sessionId:hsid,resourceId:himage.resources[0].resourceId});h.onAttach(async()=>{await h.run('site_files_cancel',{sessionId:hsid,taskId:htask.taskId});});await h.scheduled.shift()();const hc=await h.run('site_files_status',{sessionId:hsid,taskId:htask.taskId});assert.equal(hc.status,'cancelled');assert.ok(hc.workspacePath);assert.equal(hc.submittedAt,null,'cancellation preserves saved file and avoids Send');
+const htask=await h.run('site_get_images',{sessionId:hsid,resourceId:himage.resources[0].resourceId});h.onAttach(async()=>{await h.run('site_files_cancel',{sessionId:hsid,taskId:htask.taskId});});await h.scheduled.shift()();const hc=await h.run('site_files_status',{sessionId:hsid,taskId:htask.taskId});assert.equal(hc.status,'cancelled');assert.ok(hc.workspacePath);assert.equal(hc.submittedAt,null,'cancellation preserves saved file and avoids Send');
 const changed=structuredClone(initialTree);changed.find(node=>node.nodeId==='7').name.value='Different action';h.setTree(changed);const oldButton=(await h.run('site_read',{sessionId:hsid})).nodes.find(node=>node.role==='button');changed.find(node=>node.nodeId==='7').name.value='Repurposed action';await assert.rejects(h.run('site_interact',{sessionId:hsid,action:'click',nodeId:oldButton.nodeId}),{code:'STALE_NODE'});const newButton=(await h.run('site_read',{sessionId:hsid})).nodes.find(node=>node.role==='button');assert.notEqual(newButton.nodeId,oldButton.nodeId);
 
 // Closure is a normal terminal state for either owned tab, including the
@@ -112,7 +131,7 @@ const changed=structuredClone(initialTree);changed.find(node=>node.nodeId==='7')
 for(const tabId of [21,22]) {
  const closed=fixture();const closedId=(await closed.agent.start(10)).session.sessionId;
  const img=(await closed.run('site_read',{sessionId:closedId})).nodes.find(n=>n.role==='image');
- const task=await closed.run('site_get_files',{sessionId:closedId,resourceId:img.resources[0].resourceId});
+ const task=await closed.run('site_get_images',{sessionId:closedId,resourceId:img.resources[0].resourceId});
  closed.tabs.delete(tabId);
  if(tabId===21)await closed.agent.onDetached({tabId},'target_closed');
  await closed.agent.onRemoved(tabId);
@@ -176,7 +195,7 @@ assert.equal(provisional.logs.filter(e=>e.label==='waiting for saved conversatio
 assert.equal(provisional.logs.find(e=>e.label==='conversation confirmed').value.chatPath,savedPath);
 await provisional.agent.onUpdated(22,{url:'https://chatgpt.com'+temporaryPath});
 const provisionalImage=(await provisional.run('site_read',{sessionId:provisionalId})).nodes.find(node=>node.role==='image');
-await provisional.run('site_get_files',{sessionId:provisionalId,resourceId:provisionalImage.resources[0].resourceId});
+await provisional.run('site_get_images',{sessionId:provisionalId,resourceId:provisionalImage.resources[0].resourceId});
 await provisional.scheduled.shift()();
 assert.equal(provisional.uploads[0].options.target.chatPath,savedPath);
 assert.equal(provisional.uploads[0].options.target.tabId,22);
@@ -214,7 +233,7 @@ assert.equal(closedStartupResult.session.stopReason.code,'TAB_CLOSED');assert.ok
 assert.ok(!startupClosed.logs.some(e=>e.label==='startup failed'));
 const savedClosed=fixture();const savedClosedId=(await savedClosed.agent.start(10)).session.sessionId;
 const savedImage=(await savedClosed.run('site_read',{sessionId:savedClosedId})).nodes.find(n=>n.role==='image');
-const savedTask=await savedClosed.run('site_get_files',{sessionId:savedClosedId,resourceId:savedImage.resources[0].resourceId});
+const savedTask=await savedClosed.run('site_get_images',{sessionId:savedClosedId,resourceId:savedImage.resources[0].resourceId});
 savedClosed.onSave(async()=>{savedClosed.tabs.delete(21);await savedClosed.agent.onRemoved(21);});
 await savedClosed.scheduled.shift()();const savedCancelled=await savedClosed.run('site_files_status',{sessionId:savedClosedId,taskId:savedTask.taskId});
 assert.equal(savedCancelled.status,'cancelled');assert.ok(savedCancelled.workspacePath);assert.equal(savedClosed.saved.length,1);assert.equal(savedClosed.uploads.length,0);
@@ -235,7 +254,7 @@ await switched.agent.onUpdated(81,{url:'https://chatgpt.com/c/another-chat'});
 const switchedObservation=await switched.run('site_read',{sessionId:switchedId});
 assert.ok(switched.events.filter(e=>e[0]==='Accessibility.getFullAXTree').every(e=>e[1]===21));
 const switchedImage=switchedObservation.nodes.find(node=>node.role==='image');
-const switchedTask=await switched.run('site_get_files',{sessionId:switchedId,resourceId:switchedImage.resources[0].resourceId});
+const switchedTask=await switched.run('site_get_images',{sessionId:switchedId,resourceId:switchedImage.resources[0].resourceId});
 await switched.scheduled.shift()();assert.equal(switched.uploads[0].options.target.tabId,22);assert.equal(switched.uploads[0].options.target.chatPath,'/c/study22');
 assert.equal(switched.tabs.get(81).active,true,'automation does not activate its tabs');
 assert.equal((await switched.run('site_session_status',{sessionId:switchedId})).state,'running');
@@ -248,7 +267,7 @@ assert.equal((await route.run('site_session_status',{sessionId:routeId})).state,
 assert.equal(route.agent.localStatus(22).state,'running');
 assert.ok(route.logs.some(e=>e.label==='outdated conversation event ignored'));
 const routeImage=(await route.run('site_read',{sessionId:routeId})).nodes.find(node=>node.role==='image');
-const routeTask=await route.run('site_get_files',{sessionId:routeId,resourceId:routeImage.resources[0].resourceId});await route.scheduled.shift()();
+const routeTask=await route.run('site_get_images',{sessionId:routeId,resourceId:routeImage.resources[0].resourceId});await route.scheduled.shift()();
 assert.equal(route.uploads[0].options.target.tabId,22);assert.equal(route.uploads[0].options.target.chatPath,'/c/study22','stale events never change the delivery destination');
 route.tabs.get(22).url='https://chatgpt.com/c/unrelated';
 // Even an event still reporting the bound chat must not mask live navigation.
@@ -284,7 +303,7 @@ console.log('Browser Agent: schemas, AX hierarchy, private resources, CDP input,
  assert.ok(detailed.logs.some(row=>row.value.stage==='page.axRefresh' && row.value.event==='cdp' && row.value.method==='Accessibility.getFullAXTree'));
  detailed.host.studyOptions=async()=>({groupTabs:true,detailedLogging:false});
  const resourceId=observation.nodes.find(node=>node.role==='image').resources[0].resourceId;
- const task=await detailed.run('site_get_files',{sessionId:sid,resourceId});
+ const task=await detailed.run('site_get_images',{sessionId:sid,resourceId});
  await detailed.scheduled.shift()();
  const done=await detailed.run('site_files_status',{sessionId:sid,taskId:task.taskId});
  assert.equal(done.status,'completed'); assert.equal(detailed.uploads[0].options.target.tabId,22);
@@ -305,7 +324,7 @@ console.log('Browser detailed diagnostics: startup, AX/resource counts, delivery
 const batch=fixture({multipleImages:true});const batchSid=(await batch.agent.start(10)).session.sessionId;
 const batchIds=(await batch.run('site_read',{sessionId:batchSid,mode:'full'})).nodes.filter(n=>n.role==='image').map(n=>n.resources[0].resourceId).reverse();
 assert.equal(batchIds.length,3);
-const batchTask=await batch.run('site_get_files',{sessionId:batchSid,resourceIds:batchIds});
+const batchTask=await batch.run('site_get_images',{sessionId:batchSid,resourceIds:batchIds});
 assert.equal(batchTask.status,'queued');assert.equal(batch.saved.length,0);assert.equal(batch.uploads.length,0);
 batch.onAttach(async()=>assert.equal(batch.saved.length,3,'every resource is saved before attachment'));
 await batch.scheduled.shift()();
@@ -323,20 +342,78 @@ assert.deepEqual(batchResult.submittedFiles,batchResult.files.map(f=>f.workspace
 assert.equal(batch.uploads[0].options.target.tabId,22);
 for(const id of batchIds)assert.ok(batch.uploads[0].options.continuation.includes(id));
 assert.ok(!JSON.stringify(batchResult).includes('PRIVATE'));
-const resourceInput=definitions.find(d=>d.name==='site_get_files').inputSchema;
+const resourceInput=definitions.find(d=>d.name==='site_get_images').inputSchema;
 assertSchema(resourceInput,{sessionId:batchSid,resourceIds:batchIds});
 assertSchema(resourceInput,{sessionId:batchSid,resourceId:batchIds[0]});
-for(const args of [{},{resourceId:batchIds[0],resourceIds:batchIds},{resourceIds:[]},{resourceIds:[batchIds[0],batchIds[0]]},{resourceIds:['bad']},{resourceIds:null}])assert.throws(()=>validateBrowserInput('site_get_files',{sessionId:batchSid,...args}),{code:'BROWSER_INVALID'});
+for(const args of [{},{resourceId:batchIds[0],resourceIds:batchIds},{resourceIds:[]},{resourceIds:[batchIds[0],batchIds[0]]},{resourceIds:['bad']},{resourceIds:null}])assert.throws(()=>validateBrowserInput('site_get_images',{sessionId:batchSid,...args}),{code:'BROWSER_INVALID'});
 const batchBefore=batch.saved.length;batch.host.resourceCountLimit=async()=>2;
-await assert.rejects(batch.run('site_get_files',{sessionId:batchSid,resourceIds:batchIds}),error=>error.code==='BROWSER_INVALID'&&error.message.includes('maximum is 2'));
+await assert.rejects(batch.run('site_get_images',{sessionId:batchSid,resourceIds:batchIds}),error=>error.code==='BROWSER_INVALID'&&error.message.includes('maximum is 2'));
 assert.equal(batch.saved.length,batchBefore);assert.equal(batch.scheduled.length,0);
+
+// The two tools enforce their scopes before creating jobs or fetching bytes.
+const typed=fixture({nonImages:true});const typedSid=(await typed.agent.start(10)).session.sessionId;
+const typedNodes=(await typed.run('site_read',{sessionId:typedSid})).nodes;
+const typedImage=typedNodes.find(n=>n.role==='image').resources[0].resourceId;
+const otherIds=typedNodes.flatMap(n=>n.resources).filter(r=>r.kind!=='image').map(r=>r.resourceId);
+assert.equal(otherIds.length,3);
+const beforeTypeCheck=typed.events.length;
+for(const [name,id] of [['site_get_images',typedImage],['site_get_files',otherIds[0]]])await assert.rejects(typed.run(name,{sessionId:typedSid,tabId:81,resourceId:id}),{code:'BROWSER_INVALID'});
+for(const args of [{resourceId:otherIds[0]},{resourceIds:[typedImage,otherIds[0]]}]){
+ await assert.rejects(typed.run('site_get_images',{sessionId:typedSid,...args}),{code:'BROWSER_RESOURCE_TYPE_MISMATCH'});
+}
+await assert.rejects(typed.run('site_get_files',{sessionId:typedSid,resourceId:typedImage}),{code:'BROWSER_RESOURCE_TYPE_MISMATCH'});
+await assert.rejects(typed.run('site_get_files',{sessionId:typedSid,resourceIds:[otherIds[0],typedImage]}),{code:'BROWSER_RESOURCE_TYPE_MISMATCH'});
+assert.equal(typed.scheduled.length,0);assert.equal(typed.saved.length,0);assert.equal(typed.uploads.length,0);
+assert.ok(!typed.events.slice(beforeTypeCheck).some(row=>row[0]==='Network.loadNetworkResource'),'wrong kinds do not fetch bytes');
+for(const name of ['site_get_images','site_get_files']){
+ const schema=definitions.find(d=>d.name===name).inputSchema;
+ assertSchema(schema,{sessionId:typedSid,resourceIds:[typedImage]});
+ for(const args of [{},{resourceId:typedImage,resourceIds:[typedImage]},{resourceIds:[]},{resourceIds:[typedImage,typedImage]},{resourceIds:null}])assert.throws(()=>validateBrowserInput(name,{sessionId:typedSid,...args}),{code:'BROWSER_INVALID'});
+}
+const otherTask=await typed.run('site_get_files',{sessionId:typedSid,resourceIds:otherIds,addToChat:true,tabId:22});
+assert.equal(otherTask.status,'queued');assert.equal(otherTask.tabId,22);assert.match(otherTask.taskId,/^tsk_[A-Za-z0-9_-]{10}$/);
+await typed.scheduled.shift()();
+const otherResult=await typed.run('site_files_status',{sessionId:typedSid,taskId:otherTask.taskId});
+assert.equal(otherResult.status,'completed');assert.equal(typed.uploads.length,1);
+assert.deepEqual(otherResult.files.map(f=>f.mimeType),['application/pdf','audio/mpeg','video/mp4']);
+assert.deepEqual(otherResult.files.map(f=>f.extraction),['original','original','original']);
+assert.equal(otherResult.submittedFiles.length,3);assert.ok(!JSON.stringify(otherResult).includes('PRIVATE'));
+const saveOnly=await typed.run('site_get_files',{sessionId:typedSid,resourceId:otherIds[0],addToChat:false});
+await typed.scheduled.shift()();assert.equal((await typed.run('site_files_status',{sessionId:typedSid,taskId:saveOnly.taskId})).status,'completed');assert.equal(typed.uploads.length,1);
+const cancelledOther=await typed.run('site_get_files',{sessionId:typedSid,resourceId:otherIds[1]});
+assert.equal((await typed.run('site_files_cancel',{sessionId:typedSid,taskId:cancelledOther.taskId})).cancelled,true);
+await typed.scheduled.shift()();assert.equal((await typed.run('site_files_status',{sessionId:typedSid,taskId:cancelledOther.taskId})).status,'cancelled');
+// A download link that actually returns an image must not broaden site_get_files.
+const swapped=fixture({nonImages:true});const swappedSid=(await swapped.agent.start(10)).session.sessionId;
+const swappedDoc=(await swapped.run('site_read',{sessionId:swappedSid})).nodes.flatMap(n=>n.resources).find(r=>r.kind==='document');
+const originalCommand=swapped.host.command;
+swapped.host.command=async(id,method,params,...rest)=>method==='Network.loadNetworkResource'?{resource:{success:true,stream:'changed',headers:{'Content-Type':'image/png'}}}:method==='IO.read'?{data:Buffer.from([137,80,78,71,13,10,26,10]).toString('base64'),base64Encoded:true,eof:true}:originalCommand(id,method,params,...rest);
+const changedTask=await swapped.run('site_get_files',{sessionId:swappedSid,resourceId:swappedDoc.resourceId});
+await swapped.scheduled.shift()();
+const changedResult=await swapped.run('site_files_status',{sessionId:swappedSid,taskId:changedTask.taskId});
+assert.equal(changedResult.status,'failed');assert.equal(changedResult.error.code,'BROWSER_RESOURCE_TYPE_MISMATCH');assert.equal(swapped.saved.length,0);assert.equal(swapped.uploads.length,0);
+// Blob image elements can yield non-image bytes; refuse them before saving.
+const blobImage=fixture();const blobCommand=blobImage.host.command;
+blobImage.host.command=async(id,method,params,...rest)=>{
+ if(method==='Runtime.callFunctionOn' && params.functionDeclaration.includes('FileReader'))return {result:{value:{url:'data:application/pdf;base64,'+Buffer.from('%PDF-1.7').toString('base64'),mimeType:'application/pdf'}}};
+ const result=await blobCommand(id,method,params,...rest);
+ if(method==='Runtime.callFunctionOn' && params.functionDeclaration.includes('function inspectBrowserElement') && params.objectId==='104')result.result.value.resources[0].url='blob:https://site.test/image';
+ return result;
+};
+const blobSid=(await blobImage.agent.start(10)).session.sessionId;
+const blobId=(await blobImage.run('site_read',{sessionId:blobSid})).nodes.find(n=>n.role==='image').resources[0].resourceId;
+const blobTask=await blobImage.run('site_get_images',{sessionId:blobSid,resourceId:blobId});
+await blobImage.scheduled.shift()();
+const blobResult=await blobImage.run('site_files_status',{sessionId:blobSid,taskId:blobTask.taskId});
+assert.equal(blobResult.status,'failed');assert.equal(blobResult.error.code,'BROWSER_RESOURCE_TYPE_MISMATCH');assert.equal(blobImage.saved.length,0);assert.equal(blobImage.uploads.length,0);
+console.log('Site downloads: image/non-image scopes, mixed-batch rejection before jobs, byte-type validation, PDF/audio/video delivery, save-only and shared cancellation: ok');
 
 // A save failure or cancellation midway leaves published files in status and
 // does not upload a partial batch, delete files or clear the Composer.
 for(const outcome of ['failed','cancelled']){
  const partial=fixture({multipleImages:true});const sid=(await partial.agent.start(10)).session.sessionId;
  const ids=(await partial.run('site_read',{sessionId:sid,mode:'full'})).nodes.filter(n=>n.role==='image').map(n=>n.resources[0].resourceId);
- const task=await partial.run('site_get_files',{sessionId:sid,resourceIds:ids});
+ const task=await partial.run('site_get_images',{sessionId:sid,resourceIds:ids});
  if(outcome==='failed'){
   const save=partial.host.saveResource;let saves=0;
   partial.host.saveResource=async(...args)=>{if(++saves===2)throw Object.assign(Error('save unavailable'),{code:'BROWSER_RESOURCE_UNAVAILABLE'});return save(...args);};
@@ -352,7 +429,7 @@ console.log('Browser resource batches: saved before one upload, ordered files, c
 
 const navigatedBatch=fixture({multipleImages:true});const nsid=(await navigatedBatch.agent.start(10)).session.sessionId;
 const nids=(await navigatedBatch.run('site_read',{sessionId:nsid,mode:'full'})).nodes.filter(n=>n.role==='image').map(n=>n.resources[0].resourceId);
-const ntask=await navigatedBatch.run('site_get_files',{sessionId:nsid,resourceIds:nids});
+const ntask=await navigatedBatch.run('site_get_images',{sessionId:nsid,resourceIds:nids});
 navigatedBatch.onSave(async()=>{if(navigatedBatch.saved.length===3){navigatedBatch.tabs.get(21).url='https://site.test/next';await navigatedBatch.agent.onEvent({tabId:21},'Page.frameNavigated',{frame:{id:'main',url:'https://site.test/next'}});}});
 await navigatedBatch.scheduled.shift()();
 const nstatus=await navigatedBatch.run('site_files_status',{sessionId:nsid,taskId:ntask.taskId});
@@ -374,7 +451,7 @@ console.log('Browser batches: navigation during final save preserves files and s
  const childRoot=before.roots[1];
  const mainRoot=before.roots[0];
  assert.ok(childImage && childRoot);
- const mainTask=await scoped.run('site_get_files',{sessionId:sid,resourceId:mainImage.resources[0].resourceId});
+ const mainTask=await scoped.run('site_get_images',{sessionId:sid,resourceId:mainImage.resources[0].resourceId});
  scoped.onAttach(async()=>{await scoped.agent.onEvent({tabId:21,sessionId:'child'},'Page.frameNavigated',{frame:{id:'childFrame',url:'https://ad.test/reloaded'}});});
  await scoped.scheduled.shift()();
  assert.equal((await scoped.run('site_files_status',{sessionId:sid,taskId:mainTask.taskId})).status,'completed');
@@ -385,7 +462,7 @@ console.log('Browser batches: navigation during final save preserves files and s
  assert.equal(after.roots[0],mainRoot);
  assert.notEqual(after.roots[1],childRoot);
  const newChildImage=after.nodes.filter(node=>node.role==='image')[1];
- const childTask=await scoped.run('site_get_files',{sessionId:sid,resourceId:newChildImage.resources[0].resourceId});
+ const childTask=await scoped.run('site_get_images',{sessionId:sid,resourceId:newChildImage.resources[0].resourceId});
  await scoped.scheduled.shift()();
  const failed=await scoped.run('site_files_status',{sessionId:sid,taskId:childTask.taskId});
  assert.equal(failed.status,'failed');assert.equal(failed.error.code,'STALE_NODE');

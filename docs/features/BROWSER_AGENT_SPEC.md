@@ -319,6 +319,7 @@ site_read
 site_get_children
 site_get_node
 site_get_text
+site_get_images
 site_get_files
 site_interact
 ```
@@ -700,9 +701,9 @@ Purpose: return deferred full text for a long text-bearing node.
 }
 ```
 
-### 14.4 `site_get_files`
+### 14.4 `site_get_images` and `site_get_files`
 
-Purpose: resolve a page resource without automatically embedding all of its bytes in the MCP response.
+Purpose: download observed images (`site_get_images`) or documents/audio/video (`site_get_files`) without embedding bytes in the MCP response. Validate all selected kinds before creating a task and downloaded image/non-image bytes before saving.
 
 ```ts
 {
@@ -710,7 +711,7 @@ Purpose: resolve a page resource without automatically embedding all of its byte
 }
 ```
 
-For image resources, the result may start the attachment/continuation workflow rather than return base64 to the model.
+Both return a standard task and use `site_files_status` / `site_files_cancel`. By default they save then attach and send a continuation to the dedicated conversation; `addToChat:false` saves only. Images retain labelled screenshot fallbacks; other files require original bytes.
 
 ### 14.5 `site_interact`
 

@@ -53,7 +53,7 @@ assert.equal((await w.call('site_session_status',{sessionId:'bas_abcdefghij',tab
 assert.equal(browserCalls.length,1);
 
 // The complete renamed public catalog dispatches through the shipped worker.
-assert.equal(BROWSER_TOOL_NAMES.length,12);
+assert.equal(BROWSER_TOOL_NAMES.length,13);
 assert.ok(definitions.every(tool=>!tool.name.startsWith('browser_')));
 for(const name of BROWSER_TOOL_NAMES) {
  const properties=definitions.find(tool=>tool.name===name).inputSchema.properties;
@@ -78,6 +78,13 @@ for(const [oldName,newName] of Object.entries(LEGACY_SITE_TOOL_NAMES)) {
  assert.equal(Object.hasOwn(preferences.storage.mcpToolPreferences.enabledByName,oldName),false);
 }
 assert.equal(preferences.storage.mcpToolPreferences.enabledByName.media_probe,false);
+assert.equal(preferences.storage.mcpToolPreferences.enabledByName.site_get_images,preferences.storage.mcpToolPreferences.enabledByName.site_get_files);
+const explicitImages=worker({mcpToolPreferences:{enabledByName:{site_get_files:false,site_get_images:true}}});
+await explicitImages.context.mcpToolSettingsCatalog();
+assert.equal(explicitImages.storage.mcpToolPreferences.enabledByName.site_get_images,true,'explicit image choice wins');
+const disabledImages=worker({mcpToolPreferences:{enabledByName:{site_get_files:false}}});
+await disabledImages.context.mcpToolSettingsCatalog();
+assert.equal(disabledImages.storage.mcpToolPreferences.enabledByName.site_get_images,false,'existing download disable applies to the split image tool');
 const saved=JSON.stringify(preferences.storage);
 await preferences.context.mcpToolPreferences();
 assert.equal(JSON.stringify(preferences.storage),saved,'migration is idempotent');

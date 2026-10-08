@@ -161,7 +161,7 @@ const worker = new Function("chrome", "setTimeout", "clearTimeout", "console", b
 const tools = worker.publicMcpTools();
 const launchNames = ["youtube_download", "youtube_storyboard_download", "media_capture_frame", "visual_map_create", "media_clip",
  "camera_record_video", "camera_record_audio", "system_speech_speak", "media_capture_screen", "media_image_crop", "camera_capture_frame",
- "clipboard_get", "media_to_chat", "library_store_start", "timer_start", "site_get_files"];
+ "clipboard_get", "media_to_chat", "library_store_start", "timer_start", "site_get_images", "site_get_files"];
 for (const name of launchNames) {
  const tool = tools.find(t => t.name === name);
  assert.ok(tool, name); assert.equal(tool.inputSchema.properties.tabId.type, "integer", name);
