@@ -30,6 +30,7 @@ ResearchTube uses an OpenAI Secure MCP Tunnel for the private ChatGPT connection
 
 | Goal | Document |
 | --- | --- |
+| Get user help in ChatGPT | [User help](docs/HELP.md) (also available from popup **Help**) |
 | Install ResearchTube | [Installation](docs/INSTALLATION.md) |
 | Fix a problem with help from ChatGPT | [Troubleshooting](docs/TROUBLESHOOTING.md) |
 | See a guided demonstration | [Demo playbook](docs/DEMO.md) |
@@ -88,7 +89,7 @@ The exact non-destructive sequence is documented in [docs/DEMO.md](docs/DEMO.md)
 - The Agent binds only to `127.0.0.1`.
 - Built-in Workspace paths are logical POSIX paths; host paths never enter normal MCP results.
 - Built-in filesystem tools reject traversal, absolute paths, redirects and silent overwrites.
-- External modules, if added in the future, are trusted local programs and are not covered by the built-in Workspace sandbox.
+- Developer-defined Custom Tools are trusted local programs and are not covered by the built-in Workspace sandbox.
 
 See [Architecture](docs/ARCHITECTURE.md) for the complete trust-boundary model.
 

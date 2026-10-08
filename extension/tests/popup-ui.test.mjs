@@ -13,7 +13,7 @@ assert.match(html, /Turn YouTube into Answers/);
 assert.match(html, /id="describe-video" hidden>Describe this video/);
 assert.match(html, /Study this site/);
 assert.match(script, /type: "study-site", tabId: tab.id/);
-assert.match(html, /<nav><button id="settings"[^>]*>Settings<\/button><button id="support"[^>]*><span class="support-heart" aria-hidden="true">♥<\/span> Support<\/button><\/nav>/, "Support must appear to the right of Settings on the same row");
+assert.match(html, /<nav><button id="settings"[^>]*>Settings<\/button><button id="help" class="link">Help<\/button><button id="support"[^>]*><span class="support-heart" aria-hidden="true">♥<\/span> Support<\/button><\/nav>/, "Help must appear between Settings and Support on the same row with the same link style");
 assert.match(html, /<dt>Extension<\/dt><dd id="extension-status">/);
 assert.match(html, /<dt>OpenAI Tunnel<\/dt>/);
 assert.match(html, /<dt>YouTube<\/dt>/);
@@ -43,6 +43,8 @@ assert.match(background, /support: "https:\/\/ko-fi\.com\/ilinic"/, "Support mus
 assert.match(html, /<header>[\s\S]*?<\/header>\s*<hr class="section-divider">\s*<section class="quick-actions">/, "a divider must separate the header from the quick actions");
 assert.match(html, /<\/dl>\s*<hr class="section-divider">\s*<nav>/, "a divider must separate the status details from Settings");
 assert.match(css, /\.section-divider\{[^}]*border-top:1px solid var\(--border\)/, "popup dividers must use the standard border color");
+assert.match(css, /nav\{[^}]*grid-template-columns:repeat\(3,1fr\)/, "footer must have three equal columns");
+assert.match(css, /#help\{justify-self:center\}/, "Help must be centered in the popup");
 assert.match(css, /\.support-heart\{[^}]*color:var\(--heart\)/, "Support heart must use its dedicated red color");
 assert.doesNotMatch(script, /widget-image-delivery|save-widget-image-delivery/);
 assert.doesNotMatch(script, /cdp-attach-image|filePath/);
@@ -155,6 +157,8 @@ for (const [url, video] of actionCases) {
   assert.equal(action.type, video ? "describe-youtube-video" : "study-site", url);
   if (video) assert.equal(action.tab.url, url);
   else assert.equal(action.tabId, tab.id);
+  getControl("help").listeners.click();
+  assert.deepEqual(JSON.parse(JSON.stringify(sent.at(-1))), { type: "open-help" }, "Help sends no source page, task/session or configuration data");
 }
 console.log("popup contextual filled actions: watch/Shorts describe only; other pages study only: ok");
 

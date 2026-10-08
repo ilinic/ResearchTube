@@ -6,13 +6,14 @@ This directory is the canonical documentation set for ResearchTube. Source code 
 
 ### I want to use ResearchTube
 
-1. [Installation](INSTALLATION.md)
-2. [Guided demo](DEMO.md)
-3. [Tool reference](TOOLS.md)
+1. [User help](HELP.md): one starting guide for setup, use and common problems. Popup **Help** opens it in a new ChatGPT help conversation.
+2. [Installation](INSTALLATION.md)
+3. [Guided demo](DEMO.md)
+4. [Tool reference](TOOLS.md)
 
 ### Something is not working
 
-1. Give the public URL of [Troubleshooting](TROUBLESHOOTING.md) to the assisting chat.
+1. Start with popup **Help** or give the public URL of [User help](HELP.md) to the assisting chat; follow its links to the relevant [Troubleshooting](TROUBLESHOOTING.md) section.
 2. Use [Error reference](ERRORS.md) for a returned error code.
 3. Collect only the bounded diagnostic information requested by those documents.
 
@@ -27,6 +28,7 @@ This directory is the canonical documentation set for ResearchTube. Source code 
 
 | Document | Purpose |
 | --- | --- |
+| [User help](HELP.md) | Self-contained user/ChatGPT entry guide: setup, tools, Chrome switches and common failures |
 | [Architecture](ARCHITECTURE.md) | Components, boundaries, data flows, task lifecycle and security model |
 | [Development](DEVELOPMENT.md) | Adding tools, changing contracts, testing, versions and releases |
 | [Tools](TOOLS.md) | Public MCP inventory and operational behavior |
@@ -42,6 +44,10 @@ This directory is the canonical documentation set for ResearchTube. Source code 
 - [Text to Speech](features/TEXT_TO_SPEECH.md)
 - [Media clips](features/MEDIA_CLIP.md)
 - [Artifact tasks and automatic chat delivery](features/ARTIFACT_TASKS.md)
+- [Real timers](features/TIMERS.md)
+- [Browser Agent](features/BROWSER_AGENT.md)
+- [Task chat context and Composer recovery](features/TASK_CHAT.md)
+- [Custom Tools](features/CUSTOM_TOOLS.md)
 
 ## Documentation rules
 
@@ -51,9 +57,4 @@ This directory is the canonical documentation set for ResearchTube. Source code 
 - Use logical Workspace paths in examples; never publish a developer's physical path.
 - Keep user instructions executable by the user or ChatGPT. Do not tell a chat to reload software, inspect a local console or edit files as if it could do those actions itself.
 - Update this index when adding, moving or removing a document.
-
-- [Real timers](features/TIMERS.md): duration/deadline tasks, system or internet time, clock warnings and history retention.
-
-- [Browser Agent](features/BROWSER_AGENT.md): Study this site, live page trees, actions, resources and exact session routing.
-
-- [Task chat context and Composer recovery](features/TASK_CHAT.md): optional tabId, idle-only completion messages and configurable automatic Send.
+- Keep `HELP.md` aligned when user setup, capabilities or common failure recovery changes. Feature guides and source schemas remain authoritative for detail; the help prompt points to the live `main` guide.

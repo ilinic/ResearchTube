@@ -1,6 +1,6 @@
 # MCP tool reference
 
-This is a behavioral index, not a duplicate of the JSON Schemas. Exact schemas and defaults are authoritative in `extension/background.js` and `extension/storyboards.js`.
+This is a behavioral index, not a duplicate of the JSON Schemas. Exact schemas and defaults are authoritative in the owning Extension modules: `background.js`, `browser-tools.js`, `storyboards.js`, `timers.js` and `artifact-tools.js`. Custom tools come from their package manifests. See [Development](DEVELOPMENT.md) for ownership.
 
 ## Artifact tasks and paths
 
@@ -223,7 +223,7 @@ Shared Composer file delivery uses `composerMediaRetryCount.value` (15) and `com
 
 The Extension continues scheduled extraction and delivery after the tool returns and the assistant response ends. Ending the response lets ChatGPT enable Send; it does not stop the background task. Browser resource tasks expose ordered `resourceIds` and `files` in status; singular `workspacePath`, `mimeType` and `extraction` remain available for one resource and are null for multiple resources. The batch count uses `limits.mediaToChatMaxFiles` (5 by default). If extraction/save fails partway, already saved paths remain in `files`; no partial batch is automatically sent.
 
-Study this site and Describe this video explicitly clear restored text and attachments in their own newly created ChatGPT tab before inserting the initial prompt. Existing user conversations are not cleared by these shortcuts. Later user edits still stop further submission.
+Help, Study this site and Describe this video explicitly clear restored text and attachments in their own newly created ChatGPT tab before inserting the initial prompt. Existing user conversations are not cleared by these shortcuts. Later user edits still stop further submission.
 
 
 Chat delivery verifies only the number of visible Composer attachments, with the shared configurable 15/2 retry defaults. File names and identities are not compared; same-count replacement is allowed. User text edits, cancellation and target changes still stop Send and preserve the remaining Composer contents.

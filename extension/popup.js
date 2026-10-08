@@ -91,5 +91,11 @@ $("describe-video").addEventListener("click", async () => {
   window.close();
 });
 $("settings").addEventListener("click", () => chrome.runtime.openOptionsPage());
+$("help").addEventListener("click", () => {
+  // The worker owns startup after this popup closes, including with no Agent
+  // or tunnel configured: help must be available during initial installation.
+  void call({ type: "open-help" }).catch(error => console.info("[ResearchTube] Help request failed", error));
+  window.close();
+});
 $("support").addEventListener("click", () => call({ type: "open-external", target: "support" }));
 load();

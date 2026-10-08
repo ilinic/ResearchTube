@@ -8,7 +8,7 @@ This guide installs the Chrome Extension, Local Agent and private ChatGPT MCP co
 - Python 3.10 or later for the Local Agent.
 - Node.js is required only for development, not for a prebuilt release.
 - An OpenAI Platform organisation with Secure MCP Tunnel access.
-- ChatGPT access to Developer Mode and private MCP apps/connectors.
+- ChatGPT Plus or a higher supported plan with access to Developer Mode and private MCP connections. This installation path assumes those controls are available; account/workspace policy also applies.
 
 Optional local components enable additional tools:
 
@@ -86,13 +86,17 @@ Do not use an organisation-owner, administrator or unrestricted key. The key is 
 
 ## 6. Add ResearchTube to ChatGPT
 
-1. Enable ChatGPT Developer Mode if it is not already enabled.
-2. Open the area used to add private apps/connectors/plugins.
-3. Add the Secure MCP Tunnel using the same Tunnel ID.
-4. Name the app **ResearchTube**.
+1. Enable ChatGPT Developer Mode in Settings (current interfaces: **Security and login**; older interfaces: **Apps/Connectors → Advanced settings**). This is separate from Chrome's Developer mode.
+2. Open [ChatGPT Plugins](https://chatgpt.com/plugins), select **+ → Add custom MCP server** (older labels: Create app/connector).
+3. Choose **Tunnel** under Connection and select/paste the same Tunnel ID.
+4. Name it **ResearchTube**. Where server authentication is requested, choose **No authentication**; the restricted runtime key belongs only in Extension Settings. Review and create/install the connection.
 5. Open a new conversation and select or mention ResearchTube.
 
-ChatGPT's interface labels can change. The essential operation is adding the private MCP connection backed by the configured Tunnel ID.
+ChatGPT's interface labels can change. The essential operation is adding the private MCP connection backed by the configured Tunnel ID. See [User help](HELP.md#4-create-the-researchtube-connection-in-chatgpt) for missing controls/workspace association and links to current official OpenAI instructions. ResearchTube itself implements the tunnel connection; no separate OpenAI `tunnel-client` or cloudflared installation is needed for this route.
+
+## Optional Chrome launch flag
+
+`--silent-debugger-extension-api` hides Chrome's debugger banner; it is not required for the tunnel or Agent connection. See [where to put the Chrome flag](HELP.md#where-to-put-the-chrome-flag) for Windows shortcut Target instructions, full Chrome restart and Agent status refresh.
 
 ## 7. Verify the installation
 

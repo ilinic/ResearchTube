@@ -1,5 +1,7 @@
 # ResearchTube troubleshooting
 
+Start with popup **Help** or [User help](HELP.md) for a single setup/use entry guide. If Help opens a chat without its initial prompt, sign in, wait for a normal Composer and retry; see [Help recovery](HELP.md#common-problems-start-here). The public guide can also be pasted into an ordinary chat while MCP is disconnected.
+
 ## Instructions for an assisting chat
 
 You are helping a ResearchTube user diagnose a local installation. Follow this document in order. Do not guess, do not ask for secrets, and do not recommend reinstalling everything before collecting the bounded status relevant to the symptom. Distinguish actions you can perform through ResearchTube tools from actions the user must perform in Chrome, Settings or the local Agent console.
@@ -80,6 +82,10 @@ Check that the user can create files in the extracted `agent/` directory and tha
 | `NETWORK_ERROR` | The Extension could not reach OpenAI | Check connectivity, proxy/VPN and retry |
 
 The API key belongs only in ResearchTube Settings. Diagnostic exports intentionally omit it and the Tunnel ID.
+
+## Optional Chrome debugging-banner flag
+
+See [Chrome shortcut instructions](HELP.md#where-to-put-the-chrome-flag). Append `--silent-debugger-extension-api` after the executable path's closing quote in Windows shortcut **Properties → Shortcut → Target**. Fully exit Chrome, relaunch from that shortcut and restart the Agent to refresh the saved diagnostic. Disabled/Mixed does not by itself indicate a tunnel failure. This is not a `chrome://flags` setting.
 
 ## Local component failures
 

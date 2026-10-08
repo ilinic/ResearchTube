@@ -2514,12 +2514,14 @@ function normalizeStoryboardResult(name, data) {
 
 // background.js
 var CONTROL_PLANE_BASE_URL = "https://api.openai.com";
+var RESEARCHTUBE_HELP_GUIDE_URL = "https://github.com/ilinic/ResearchTube/blob/main/docs/HELP.md";
+var RESEARCHTUBE_HELP_PROMPT = `Read ${RESEARCHTUBE_HELP_GUIDE_URL} and use it to answer my ResearchTube setup, usage and troubleshooting questions in my language. Ask what I need help with.`;
 var EXTERNAL_URLS = Object.freeze({
   tunnels: "https://platform.openai.com/settings/organization/tunnels",
   apiKeys: "https://platform.openai.com/settings/organization/api-keys",
   chatgpt: "https://chatgpt.com/plugins",
   chatgptNewChat: "https://chatgpt.com/",
-  chatgptSettings: "https://chatgpt.com/#settings/Connectors",
+  chatgptSettings: "https://chatgpt.com/#settings",
   support: "https://ko-fi.com/ilinic"
 });
 var DEFAULTS = {
@@ -2623,7 +2625,7 @@ var MCP_TOOL_SETTINGS = Object.freeze({
   custom_tool_status: { group: "custom" },
   custom_tool_cancel: { group: "custom" }
 });
-var EXTENSION_VERSION = "2.2.99";
+var EXTENSION_VERSION = "2.2.100";
 globalThis.addEventListener?.("fetch", createMediaStreamHandler({
   extensionUrl: chrome.runtime.getURL("/"),
   getClient: (id) => globalThis.clients.get(id),
@@ -4789,6 +4791,32 @@ Study this video and explain it in my language. Use tabId: ${chatTab.id} for asy
     if (attached) await cdpDetach(chatTab.id);
   }
 }
+async function openResearchTubeHelp() {
+  const created = await chrome.tabs.create({ url: EXTERNAL_URLS.chatgptNewChat, active: true });
+  if (!created?.id) throw cdpError("Chrome could not open the ChatGPT help tab.");
+  const chatTab = await waitForChatGPTTab(created.id);
+  const target = { tabId: chatTab.id, chatPath: "/", newChat: true };
+  let attached = false;
+  try {
+    await cdpAttach(chatTab.id);
+    attached = true;
+    await cdpCommand(chatTab.id, "Runtime.enable");
+    await cdpPrepareBackgroundChat(chatTab.id);
+    await cdpWaitForTextComposer(chatTab.id);
+    await requireCurrentChatTarget(target);
+    await prepareCurrentChatComposer(target, "clear");
+    await cdpSetComposerText(chatTab.id, RESEARCHTUBE_HELP_PROMPT);
+    await cdpSendComposerText(chatTab.id, RESEARCHTUBE_HELP_PROMPT, async () => {
+      await requireCurrentChatTarget(target);
+      const matches2 = (await cdpEvaluate(chatTab.id, cdpComposerTextExpression(RESEARCHTUBE_HELP_PROMPT)))?.value;
+      if (!matches2) throw localAgentError("MEDIA_TO_CHAT_TARGET_CHANGED", "The help prompt changed before Send. It was preserved.");
+    });
+    cdpLog("Sent ResearchTube help prompt", { tabId: chatTab.id });
+    return { ok: true, chatTabId: chatTab.id };
+  } finally {
+    if (attached) await cdpDetach(chatTab.id);
+  }
+}
 function cdpAttachmentStateExpression(fileNames) {
   return `(() => {
     const resolveChatComposer = ${resolveChatComposer.toString()};
@@ -6546,6 +6574,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return false;
     }
     chrome.tabs.create({ url, active: true }).then(() => sendResponse({ ok: true })).catch((error3) => sendResponse({ ok: false, error: safeErrorMessage(error3) }));
+    return true;
+  }
+  if (message?.type === "open-help") {
+    if (sender.id !== chrome.runtime.id || sender.tab || sender.url !== chrome.runtime.getURL("popup.html")) {
+      sendResponse({ ok: false, error: "Help must be opened from the ResearchTube popup." });
+      return false;
+    }
+    openResearchTubeHelp().then(sendResponse).catch((error3) => {
+      cdpErrorLog("ResearchTube help startup failed", error3);
+      sendResponse({ ok: false, error: safeErrorMessage(error3) });
+    });
     return true;
   }
   if (message?.type === "study-site") {

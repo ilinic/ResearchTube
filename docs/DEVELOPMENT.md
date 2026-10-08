@@ -27,6 +27,9 @@ npm ci --prefix extension
 | ChatGPT media overlay | `extension/chatgpt-image-viewer-bridge.js`, `extension/chatgpt-capture-frame-bridge.js`, `extension/media-viewer.html`, `extension/media-viewer.js`, `extension/media-stream.js` |
 | ChatGPT Composer inspection and upload editing guard | `extension/chat-composer.js` |
 | Settings and popup | `extension/settings.*`, `extension/popup.*` |
+| Browser Agent contracts and page operations | `extension/browser-tools.js`, `extension/browser-agent.js`, `extension/browser-page.js`, `extension/browser-observation-options.js` |
+| Artifact workflow/public contracts | `extension/artifact-tasks.js`, `extension/artifact-tools.js` |
+| Custom Tools | `agent/custom_tools.py`, package manifests/implementations under `agent/custom-tools/` |
 | Local Agent | `agent/researchtube_agent.py` |
 | Timer behavior and task retention | `agent/timers.py`, `agent/task_history.py`, `extension/timers.js`, `extension/task-history.js` |
 | Storyboard Agent behavior | `agent/storyboards.py` |
@@ -229,3 +232,9 @@ Browser resource batches resolve all IDs before creating a task, enforce the exi
 ## Optional task chat context
 
 See [Task chat context and automatic Send](features/TASK_CHAT.md). Startup prompts provide ChatGPT tabId once. Asynchronous launches accept it optionally; public workflow completion notifies only idle ChatGPT. The independent Composer watchdog shares the existing Send controller and configurable stability timeout. Task IDs remain unchanged.
+
+## Popup Help and user documentation
+
+`docs/HELP.md` is the user/assisting-chat entry guide. Keep setup and recovery there aligned with Installation, Tools, Troubleshooting and feature guides; exact schemas remain in code. Check current official OpenAI instructions when changing external setup. `AGENTS.md`, Architecture and this document remain the coding-agent entry path.
+
+Popup Help sends only `open-help` to the worker, which validates the popup sender, creates an active new ChatGPT tab and inserts/sends the fixed `RESEARCHTUBE_HELP_PROMPT` linking to the live `main` guide. No MCP connection, browser session, current-site data or Local Agent readiness is required. Reuse existing bounded Composer/CDP preparation, prompt verification and Send acknowledgement. Guard the exact new chat and draft before Send, release the debugger on success/failure, and never fall back to another chat. Help owns only startup, not an ongoing Composer watchdog. Run `extension/tests/popup-help.test.mjs` for source/shipped-worker startup, edit/navigation guards, sender validation and failure cleanup, plus popup UI and documentation tests.

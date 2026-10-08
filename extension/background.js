@@ -11,12 +11,14 @@ import { createMediaStreamHandler } from "./media-stream.js";
 import { resolveChatComposer, chatComposerPageExpression, inspectChatComposer, clickChatComposerAttachmentRemoval, resetChatComposerFileInputs, installChatComposerGuard, readChatComposerGuard, disposeChatComposerGuard, authorizeChatComposerText } from "./chat-composer.js";
 import { STORYBOARD_TOOL_NAMES, storyboardDefinitions, validateStoryboardInput, normalizeStoryboardResult } from "./storyboards.js";
 const CONTROL_PLANE_BASE_URL = "https://api.openai.com";
+const RESEARCHTUBE_HELP_GUIDE_URL = "https://github.com/ilinic/ResearchTube/blob/main/docs/HELP.md";
+const RESEARCHTUBE_HELP_PROMPT = `Read ${RESEARCHTUBE_HELP_GUIDE_URL} and use it to answer my ResearchTube setup, usage and troubleshooting questions in my language. Ask what I need help with.`;
 const EXTERNAL_URLS = Object.freeze({
   tunnels: "https://platform.openai.com/settings/organization/tunnels",
   apiKeys: "https://platform.openai.com/settings/organization/api-keys",
   chatgpt: "https://chatgpt.com/plugins",
   chatgptNewChat: "https://chatgpt.com/",
-  chatgptSettings: "https://chatgpt.com/#settings/Connectors",
+  chatgptSettings: "https://chatgpt.com/#settings",
   support: "https://ko-fi.com/ilinic"
 });
 const DEFAULTS = {
@@ -69,7 +71,7 @@ const MCP_TOOL_SETTINGS = Object.freeze({
   library_store_start: { group: "library" }, library_store_status: { group: "library" }, library_store_cancel: { group: "library" }, online_share_start: { group: "online" }, online_share_status: { group: "online" }, online_share_stop: { group: "online" },
   custom_tool_status: { group: "custom" }, custom_tool_cancel: { group: "custom" }
 });
-const EXTENSION_VERSION = "2.2.99";
+const EXTENSION_VERSION = "2.2.100";
 // Chrome dispatches this for requests made by our Extension-owned viewer.
 // Packaged assets and unrelated requests fall through without interception.
 globalThis.addEventListener?.("fetch", createMediaStreamHandler({
@@ -2097,6 +2099,33 @@ async function describeYouTubeVideoInChatGPT(sourceTab) {
   }
 }
 
+async function openResearchTubeHelp() {
+  // Help is an ordinary new chat, independent of ResearchTube MCP/Agent setup.
+  const created = await chrome.tabs.create({ url: EXTERNAL_URLS.chatgptNewChat, active: true });
+  if (!created?.id) throw cdpError("Chrome could not open the ChatGPT help tab.");
+  const chatTab = await waitForChatGPTTab(created.id);
+  const target = { tabId: chatTab.id, chatPath: "/", newChat: true };
+  let attached = false;
+  try {
+    await cdpAttach(chatTab.id); attached = true;
+    await cdpCommand(chatTab.id, "Runtime.enable");
+    await cdpPrepareBackgroundChat(chatTab.id);
+    await cdpWaitForTextComposer(chatTab.id);
+    await requireCurrentChatTarget(target);
+    await prepareCurrentChatComposer(target, "clear");
+    await cdpSetComposerText(chatTab.id, RESEARCHTUBE_HELP_PROMPT);
+    await cdpSendComposerText(chatTab.id, RESEARCHTUBE_HELP_PROMPT, async () => {
+      await requireCurrentChatTarget(target);
+      const matches = (await cdpEvaluate(chatTab.id, cdpComposerTextExpression(RESEARCHTUBE_HELP_PROMPT)))?.value;
+      if (!matches) throw localAgentError("MEDIA_TO_CHAT_TARGET_CHANGED", "The help prompt changed before Send. It was preserved.");
+    });
+    cdpLog("Sent ResearchTube help prompt", { tabId: chatTab.id });
+    return { ok: true, chatTabId: chatTab.id };
+  } finally {
+    if (attached) await cdpDetach(chatTab.id);
+  }
+}
+
 function cdpAttachmentStateExpression(fileNames) {
   return `(() => {
     const resolveChatComposer = ${resolveChatComposer.toString()};
@@ -3802,6 +3831,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return false;
     }
     chrome.tabs.create({ url, active: true }).then(() => sendResponse({ ok: true })).catch((error) => sendResponse({ ok: false, error: safeErrorMessage(error) }));
+    return true;
+  }
+  if (message?.type === "open-help") {
+    if (sender.id !== chrome.runtime.id || sender.tab || sender.url !== chrome.runtime.getURL("popup.html")) {
+      sendResponse({ ok: false, error: "Help must be opened from the ResearchTube popup." }); return false;
+    }
+    openResearchTubeHelp().then(sendResponse).catch(error => {
+      cdpErrorLog("ResearchTube help startup failed", error);
+      sendResponse({ ok: false, error: safeErrorMessage(error) });
+    });
     return true;
   }
   if (message?.type === "study-site") {

@@ -81,4 +81,5 @@ For media changes, also perform a small real-FFmpeg integration test where avail
 - Do not commit, push, publish, open a pull request or modify remote state unless the user explicitly asks.
 - Do not add installation steps or permissions that are not required by the implemented behavior.
 - Keep the root README concise; put durable detail in `docs/`.
+- Keep `docs/HELP.md` and its linked references aligned when user setup, available capabilities or common recovery steps change. Help is the user/assisting-chat entry point; development agents still start with this file, Architecture and Development.
 - Do not duplicate complete JSON schemas in prose. Code is authoritative; documentation explains stable behavior and invariants.
