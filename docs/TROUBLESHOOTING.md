@@ -257,6 +257,10 @@ Use the creation tool's taskId with media_task_status. If creation completed and
 
 For tab grouping, edit `browserStudyGroupTabs.value` in `agent-config.json` (`true` by default). The next study launch reads it. The two new tabs share a short blue RT group; the source tab is unaffected. Collapse/expand the group by clicking its title. Closing either study tab is normal completion and leaves the other tab and group intact.
 
+### OpenAI refuses a site file tool call before execution
+
+`This tool call was blocked by OpenAI because we couldn't determine the safety status of the request` is a client-side refusal, not a ResearchTube task error. A call rejected before Extension execution does not create a task ID to poll. Record the original refusal, tool name and supplied arguments. Do not report that files were retrieved or assume the refusal identifies a particular unsafe resource. The `site_get_files` metadata describes its observed-resource restriction, new Workspace files and default attachment/Send to the session's dedicated chat; `addToChat:false` genuinely saves only. Renaming tools or clarifying metadata does not guarantee approval. Refresh the MCP catalog after metadata changes and verify the actual client result separately.
+
 ### Slow Study this site
 
 If ChatGPT still calls former `browser_*` tools after an upgrade, reload the Extension, then use ResearchTube → Manage → Refresh in ChatGPT. The catalog now exposes `site_read`, `site_interact`, `site_get_files` and the related `site_*` tools. Existing availability preferences are migrated. Start a new study session to receive a prompt with the new names, or discover the refreshed tools in an existing conversation.

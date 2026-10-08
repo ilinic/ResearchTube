@@ -42,6 +42,8 @@ Pause blocks new mutating actions and resource requests; observation remains ava
 
 ## Resources and real visual input
 
+`site_get_files` accepts only current resource identifiers discovered in the supplied session. It cannot accept an arbitrary source URL or a caller-selected destination chat. The session fixes both the controlled source page and dedicated ChatGPT conversation. Files are saved as new Workspace artifacts without overwriting existing files. The default `addToChat:true` also attaches them and sends a continuation message to that conversation; `false` saves only. Its MCP description and parameter descriptions expose these effects explicitly. The tool remains a state-changing, non-idempotent, open-world operation with a potentially irreversible Send; it is not annotated as read-only.
+
 `site_get_files` returns a standard `tsk_…` task immediately. Poll `site_files_status` at its `pollIntervalMs`; `site_files_cancel` is available before Send commits. Provide exactly one `resourceId` or an ordered, nonempty array `resourceIds` with distinct identifiers. Selected resources belong to exactly one session and page version. A batch is bounded by `limits.mediaToChatMaxFiles` (default 5) and saves every resource before one Composer upload and one continuation message. Status exposes `resourceIds` and ordered `files`; saved files remain listed if later extraction fails or cancellation stops the batch.
 
 The extraction order is:
