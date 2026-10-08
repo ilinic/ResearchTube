@@ -78,12 +78,11 @@ function fixture({multipleImages=false,nonImages=false}={}){
 }
 const f=fixture();const started=await f.agent.start(10),sessionId=started.session.sessionId;
 const startupPrompt=f.events.find(event=>event[0]==='prompt')[2];
-for(const name of ['site_get_images','site_get_files']) assert.ok(startupPrompt.includes(name));
+assert.equal(startupPrompt,`@ResearchTube Study this site and explain what is useful here in my language. Use sessionId: ${sessionId} for site tools and tabId: 22 for async tasks.`);
 assert.match(startupPrompt,/Use sessionId: bas_[A-Za-z0-9_-]{10} for site tools and tabId: 22 for async tasks\./);
 assert.doesNotMatch(startupPrompt,/browser_/);
 assert.match(startupPrompt,/in my language/);
-assert.match(startupPrompt,/Download and attach relevant images with site_get_images and documents\/audio\/video with site_get_files/);
-assert.match(startupPrompt,/site_get_files \(addToChat: true; resourceIds for batches\)/);
+assert.doesNotMatch(startupPrompt,/site_get_images|site_get_files|addToChat|resourceIds/);
 assert.match(sessionId,/^bas_[A-Za-z0-9_-]{10}$/);checkSchema('site_session_status',started.session);
 assert.deepEqual(f.events.filter(e=>['duplicate','restore','createChat'].includes(e[0])).map(e=>e[0]),['duplicate','restore','createChat']);
 assert.deepEqual(f.events.find(e=>e[0]==='group'),['group',[21,22],'RT · Site']);
