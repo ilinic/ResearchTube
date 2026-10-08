@@ -233,6 +233,14 @@ Browser resource batches resolve all IDs before creating a task, enforce the exi
 
 See [Task chat context and automatic Send](features/TASK_CHAT.md). Startup prompts provide ChatGPT tabId once. Asynchronous launches accept it optionally; public workflow completion notifies only idle ChatGPT. The independent Composer watchdog shares the existing Send controller and configurable stability timeout. Task IDs remain unchanged.
 
+## Saved tunnel connection state
+
+Settings sends both current field values to `save-connection` before `test-connection`. Explicit empty values clear stored credentials; omitted fields preserve them for internal metadata updates. The password input loads the saved key directly from local Extension storage. Keep the key out of public status, MCP results and logs. Failed validation/transport must not undo saved values or require nonempty credentials to save.
+
+Credential changes invalidate prior test/poll results, reset onboarding completion, abort the old long poll and stop its scheduled retry. Serialize configuration/outcome writes and guard outcomes and command dispatch by the connection revision so a delayed old request cannot restore state or process commands under replaced credentials. Successful manual tests mark onboarding complete without a second configuration save.
+
+`tunnelConnectionState` derives readiness from current credentials and the latest durable tunnel outcome; mere credential presence means unchecked, not ready. Use it for popup and badge state; retain capture activity badge precedence. Background recovery can supersede a failed manual test. Popup storage notifications reread public state without contacting the Agent, and newer reads supersede stale responses. Run `extension/tests/connection-state.test.mjs` for explicit clears, source/shipped-worker outcomes, aborted/stale polls, credential replacement and Settings/popup behavior. Also verify the actual Chrome UI after reloading the Extension.
+
 ## Popup Help and user documentation
 
 `docs/HELP.md` is the user/assisting-chat entry guide. Keep setup and recovery there aligned with Installation, Tools, Troubleshooting and feature guides; exact schemas remain in code. Check current official OpenAI instructions when changing external setup. `AGENTS.md`, Architecture and this document remain the coding-agent entry path.

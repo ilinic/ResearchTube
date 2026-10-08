@@ -82,6 +82,8 @@ Use the official OpenAI Platform tunnel page opened by ResearchTube Settings.
 5. Paste the Tunnel ID and key into ResearchTube Settings.
 6. Select **Save and test connection**.
 
+The button saves both fields before testing, including empty values. The saved key is displayed masked in its password field. To remove the connection, clear both fields and save; a missing-settings test result is expected and the popup shows **Not configured**. A failed test never restores the previous values. See [User help](HELP.md#3-set-up-the-openai-connection) for testing the initial setup state.
+
 Do not use an organisation-owner, administrator or unrestricted key. The key is stored in local Chrome extension storage and is sent only to OpenAI's tunnel control plane.
 
 ## 6. Add ResearchTube to ChatGPT

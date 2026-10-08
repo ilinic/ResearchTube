@@ -65,13 +65,14 @@ const popupContext = {
   window: { close() {}, addEventListener() {} },
   setTimeout: (callback) => { scheduled.push(callback); return scheduled.length; },
   chrome: {
+    storage: { onChanged: { addListener() {} } },
     tabs: { query: async () => [] },
     runtime: {
       openOptionsPage() {},
       sendMessage: (message) => {
         messages.push(message);
         if (message.type === "status") return Promise.resolve({
-          configured: true, tunnelId: "tunnel_test", extensionVersion: "2.2.52",
+          configured: true, connection: { state: "ready", errorCode: null }, tunnelId: "tunnel_test", extensionVersion: "2.2.52",
           requiredAgentInterfaceVersion: 73, agentPort: 17844, youtubeSearch: {},
         });
         assert.equal(message.type, "agent-status");
@@ -136,6 +137,7 @@ for (const [url, video] of actionCases) {
     document: { getElementById: getControl }, URL, console,
     window: { close() {} },
     chrome: {
+      storage: { onChanged: { addListener() {} } },
       tabs: { query: async () => [tab] },
       runtime: {
         openOptionsPage() {},

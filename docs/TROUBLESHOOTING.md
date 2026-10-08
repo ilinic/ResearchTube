@@ -83,6 +83,10 @@ Check that the user can create files in the extracted `agent/` directory and tha
 
 The API key belongs only in ResearchTube Settings. Diagnostic exports intentionally omit it and the Tunnel ID.
 
+**Save and test connection** saves the current Tunnel ID and key before testing; a failed test leaves those saved values in place. The masked key field contains the saved key, so clearing it and saving removes the key. Clear both fields and save to reproduce an unconfigured installation for Help testing. The missing-settings result is expected; no tunnel request is made with incomplete settings. Agent configuration, Workspace files and tool preferences remain available.
+
+The popup reads the same saved connection state as the toolbar badge and updates while open. It shows missing settings, **Not tested**, the latest connection error, or a green tunnel ID after a successful request. A successful background poll recovers a previous error. When credentials change, the old poll is aborted and its delayed result cannot restore the previous status. If values still appear stale, reload the updated unpacked Extension in `chrome://extensions`, then reopen Settings and the popup.
+
 ## Optional Chrome debugging-banner flag
 
 See [Chrome shortcut instructions](HELP.md#where-to-put-the-chrome-flag). Append `--silent-debugger-extension-api` after the executable path's closing quote in Windows shortcut **Properties → Shortcut → Target**. Fully exit Chrome, relaunch from that shortcut and restart the Agent to refresh the saved diagnostic. Disabled/Mixed does not by itself indicate a tunnel failure. This is not a `chrome://flags` setting.

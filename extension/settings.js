@@ -80,7 +80,20 @@ function renderMcpTools(result) {
   }
 }
 async function loadMcpToolSettings() { renderMcpTools(await call({ type: "get-mcp-tool-settings" })); }
-async function saveAndTest() { $("test-connection").disabled = true; $("test-connection").textContent = "Testing…"; const saved = await call({ type: "save-connection", payload: { tunnelId: $("tunnel-id").value, apiKey: $("api-key").value } }); const result = saved.ok ? await call({ type: "test-connection" }) : saved; renderResult(result); if (result.ok) { await call({ type: "save-connection", payload: { tunnelId: $("tunnel-id").value, onboardingCompleted: true } }); $("api-key").value = ""; $("api-key").placeholder = "••••••••••••••••"; } $("test-connection").disabled = false; $("test-connection").textContent = "Save and test connection"; }
+async function saveAndTest() {
+  const button = $("test-connection");
+  button.disabled = true; button.textContent = "Saving…";
+  try {
+    const saved = await call({ type: "save-connection", payload: { tunnelId: $("tunnel-id").value, apiKey: $("api-key").value } });
+    if (!saved?.ok) { renderResult({ ...saved, message: saved?.error || "Could not save connection settings." }); return; }
+    button.textContent = "Testing…";
+    renderResult(await call({ type: "test-connection" }));
+  } catch {
+    renderResult({ ok: false, message: "Could not save or test connection settings. Try again." });
+  } finally {
+    button.disabled = false; button.textContent = "Save and test connection";
+  }
+}
 $("test-connection").addEventListener("click", saveAndTest);
 $("test-agent").addEventListener("click", testAgentConnection);
 document.querySelectorAll("[data-open]").forEach((link) => link.addEventListener("click", (event) => { event.preventDefault(); call({ type: "open-external", target: link.dataset.open }); }));
@@ -90,5 +103,13 @@ $("copy-silent-automation-flag").addEventListener("click", async () => { await n
 $("copy-prompt").addEventListener("click", async () => { await navigator.clipboard.writeText($("example-prompt").textContent.trim()); $("copy-prompt").textContent = "Copied"; setTimeout(() => { $("copy-prompt").textContent = "Copy example prompt"; }, 1400); });
 $("copy-diagnostics").addEventListener("click", async () => { const button = $("copy-diagnostics"); const result = await call({ type: "get-diagnostics" }); if (!result?.ok) { $("diagnostics-summary").textContent = "Could not export diagnostics."; return; } await navigator.clipboard.writeText(result.text); button.textContent = "Copied"; setTimeout(() => { button.textContent = "Copy diagnostics log"; }, 1400); });
 $("clear-diagnostics").addEventListener("click", async () => { const result = await call({ type: "clear-diagnostics" }); if (result?.ok) { $("diagnostics-summary").textContent = "No diagnostic events captured yet."; } else { $("diagnostics-summary").textContent = "Could not clear diagnostics."; } });
-async function init() { const state = await call({ type: "status" }); $("tunnel-id").value = state.tunnelId || ""; $("agent-port").value = state.agentPort || 17843; if (state.apiKeyPresent) $("api-key").placeholder = "••••••••••••••••"; await refreshDiagnostics(); await loadMcpToolSettings(); }
+async function init() {
+  // Only this local Extension settings page reads the stored secret. Public
+  // status/MCP responses still contain only apiKeyPresent, never the key.
+  const [state, local] = await Promise.all([call({ type: "status", includeAgent: false }), chrome.storage.local.get({ runtimeApiKey: "" })]);
+  $("tunnel-id").value = state.tunnelId || "";
+  $("api-key").value = local.runtimeApiKey || "";
+  $("agent-port").value = state.agentPort || 17843;
+  await refreshDiagnostics(); await loadMcpToolSettings();
+}
 init();

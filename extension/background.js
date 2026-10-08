@@ -26,6 +26,7 @@ const DEFAULTS = {
   runtimeApiKey: "",
   onboardingCompleted: false,
   lastConnectionTest: null,
+  lastTunnelConnection: null,
   agentPort: 17843,
   youtubeSearchCooldownUntil: 0,
   youtubeSearchCooldownLevel: 0
@@ -71,7 +72,7 @@ const MCP_TOOL_SETTINGS = Object.freeze({
   library_store_start: { group: "library" }, library_store_status: { group: "library" }, library_store_cancel: { group: "library" }, online_share_start: { group: "online" }, online_share_status: { group: "online" }, online_share_stop: { group: "online" },
   custom_tool_status: { group: "custom" }, custom_tool_cancel: { group: "custom" }
 });
-const EXTENSION_VERSION = "2.2.100";
+const EXTENSION_VERSION = "2.2.101";
 // Chrome dispatches this for requests made by our Extension-owned viewer.
 // Packaged assets and unrelated requests fall through without interception.
 globalThis.addEventListener?.("fetch", createMediaStreamHandler({
@@ -136,6 +137,10 @@ let cameraRecordingBadgeVisible = false;
 let cameraRecordingBadgeTimer = null;
 
 let polling = false;
+let connectionRevision = 0;
+let connectionUpdateTail = Promise.resolve();
+let currentPollRevision = -1;
+let tunnelPollController = null;
 let currentPollPromise = null;
 let pollLoopScheduled = false;
 let pollLoopTimer = null;
@@ -3789,11 +3794,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
   if (message?.type === "clear-api-key") {
-    chrome.storage.local.remove(["runtimeApiKey"]).then(async () => {
-      await chrome.storage.local.set({ lastConnectionTest: null });
-      await refreshActionBadge();
-      sendResponse({ ok: true });
-    }).catch((error) => sendResponse({ ok: false, error: safeErrorMessage(error) }));
+    saveConnection({ apiKey: "" }).then(sendResponse).catch((error) => sendResponse({ ok: false, error: safeErrorMessage(error) }));
     return true;
   }
   if (message?.type === "test-connection") {
@@ -3905,6 +3906,7 @@ async function getPublicConnectionState({ includeAgent = true } = {}) {
     polling,
     lastStatus: config.lastStatus || "",
     lastConnectionTest: config.lastConnectionTest || null,
+    connection: tunnelConnectionState(config),
     agentPort,
     agent,
     extensionVersion: EXTENSION_VERSION,
@@ -5982,18 +5984,58 @@ async function copyCaptureFramePath(path) {
   return { path: logicalPath, action: "copiedPath" };
 }
 
-async function saveConnection(payload = {}) {
-  const tunnelId = String(payload.tunnelId ?? "").trim();
-  const apiKey = typeof payload.apiKey === "string" ? payload.apiKey.trim() : "";
-  if (!tunnelId) return { ok: false, errorCode: "TUNNEL_ID_MISSING", message: "Enter your Tunnel ID." };
+function updateConnection(callback) {
+  const result = connectionUpdateTail.then(callback);
+  connectionUpdateTail = result.catch(() => {});
+  return result;
+}
 
-  const changes = { tunnelId, lastConnectionTest: null };
-  if (apiKey) changes.runtimeApiKey = apiKey;
-  if (payload.onboardingCompleted === true) changes.onboardingCompleted = true;
-  await chrome.storage.local.set(changes);
-  await refreshActionBadge();
-  void startPolling();
-  return { ok: true, apiKeyPresent: Boolean(apiKey || (await getConfig()).runtimeApiKey) };
+function saveConnection(payload = {}) {
+  return updateConnection(async () => {
+    const config = await getConfig();
+    const changes = {};
+    // Explicit empty fields clear credentials. Omitted fields preserve them for
+    // internal metadata-only updates; Settings always supplies both fields.
+    if (Object.hasOwn(payload, "tunnelId")) changes.tunnelId = String(payload.tunnelId ?? "").trim();
+    if (Object.hasOwn(payload, "apiKey")) changes.runtimeApiKey = String(payload.apiKey ?? "").trim();
+    const changed = Object.entries(changes).some(([name, value]) => config[name] !== value);
+    if (changed) {
+      connectionRevision++;
+      tunnelPollController?.abort();
+      if (pollLoopTimer !== null) clearTimeout(pollLoopTimer);
+      pollLoopTimer = null; pollLoopScheduled = false;
+      Object.assign(changes, { lastConnectionTest: null, lastTunnelConnection: null, lastStatus: "", onboardingCompleted: false });
+    }
+    if (Object.hasOwn(payload, "onboardingCompleted")) changes.onboardingCompleted = payload.onboardingCompleted === true;
+    await chrome.storage.local.set(changes);
+    await refreshActionBadge();
+    const saved = await getConfig();
+    if (saved.tunnelId && saved.runtimeApiKey) void startPolling();
+    return { ok: true, apiKeyPresent: Boolean(saved.runtimeApiKey) };
+  });
+}
+
+function tunnelConnectionState(config) {
+  if (!config.tunnelId || !config.runtimeApiKey) return {
+    state: "not-configured",
+    errorCode: !config.tunnelId && !config.runtimeApiKey ? "NOT_CONFIGURED" : !config.tunnelId ? "TUNNEL_ID_MISSING" : "API_KEY_MISSING"
+  };
+  const latest = config.lastTunnelConnection || config.lastConnectionTest;
+  if (!latest) return { state: "unchecked", errorCode: null };
+  return { state: latest.success ? "ready" : "error", errorCode: latest.errorCode || null };
+}
+
+function recordTunnelConnection(revision, result, lastStatus, manual = false) {
+  return updateConnection(async () => {
+    if (revision !== connectionRevision) return false;
+    const outcome = { success: result.ok, timestamp: new Date().toISOString(), stage: result.ok ? "tunnel" : result.errorCode, errorCode: result.errorCode || null, message: result.message || null };
+    const changes = { lastTunnelConnection: outcome };
+    if (lastStatus !== undefined) changes.lastStatus = lastStatus;
+    if (manual) { changes.lastConnectionTest = outcome; if (result.ok) changes.onboardingCompleted = true; }
+    await chrome.storage.local.set(changes);
+    await refreshActionBadge();
+    return true;
+  });
 }
 
 function startPolling() {
@@ -6022,25 +6064,38 @@ function schedulePollLoop(delayMs) {
 }
 
 async function pollOnce() {
-  if (currentPollPromise) return currentPollPromise;
-  currentPollPromise = pollOnceInternal();
+  await connectionUpdateTail;
+  if (currentPollPromise) {
+    if (currentPollRevision === connectionRevision) return currentPollPromise;
+    const old = currentPollPromise;
+    await old.catch(() => {});
+    if (currentPollPromise === old) currentPollPromise = null;
+    return pollOnce();
+  }
+  const revision = connectionRevision;
+  const promise = pollOnceInternal(revision);
+  currentPollPromise = promise; currentPollRevision = revision;
   try {
-    return await currentPollPromise;
+    return await promise;
   } finally {
-    currentPollPromise = null;
+    if (currentPollPromise === promise) currentPollPromise = null;
   }
 }
 
-async function pollOnceInternal() {
+async function pollOnceInternal(revision = connectionRevision) {
   const config = await getConfig();
+  if (revision !== connectionRevision) return { ok: false, reason: "connection-changed" };
   if (!config.tunnelId || !config.runtimeApiKey) {
     return { ok: false, reason: "not-configured" };
   }
 
   polling = true;
+  const controller = new AbortController();
+  tunnelPollController = controller;
   try {
     const url = `${CONTROL_PLANE_BASE_URL}/v1/tunnels/${encodeURIComponent(config.tunnelId)}/poll?limit=1&timeout_ms=15000`;
     const response = await fetch(url, {
+      signal: controller.signal,
       headers: {
         "Authorization": `Bearer ${config.runtimeApiKey}`,
         "Accept": "application/json",
@@ -6050,35 +6105,37 @@ async function pollOnceInternal() {
         "X-Tunnel-MCP-Server-Info": JSON.stringify({ version: 1, channels: [{ name: "main" }] })
       }
     });
+    if (revision !== connectionRevision) return { ok: false, reason: "connection-changed" };
     if (response.status === 204) {
-      await chrome.storage.local.set({ lastStatus: "poll: 204 (no command)" });
-      await refreshActionBadge();
+      await recordTunnelConnection(revision, { ok: true }, "poll: 204 (no command)");
       return { ok: true, empty: true };
     }
     if (!response.ok) throw createTunnelHttpError(response.status);
 
     const envelope = await response.json();
+    if (revision !== connectionRevision) return { ok: false, reason: "connection-changed" };
     const commands = Array.isArray(envelope?.commands) ? envelope.commands : [];
     if (!commands.length) {
-      await chrome.storage.local.set({ lastStatus: "poll: 200 (no command)" });
-      await refreshActionBadge();
+      await recordTunnelConnection(revision, { ok: true }, "poll: 200 (no command)");
       return { ok: true, empty: true };
     }
     for (const command of commands) {
+      if (revision !== connectionRevision) return { ok: false, reason: "connection-changed" };
       if (command.command_type !== "jsonrpc") continue;
       const result = await handleMcpRequest(command.jsonrpc);
+      if (revision !== connectionRevision) return { ok: false, reason: "connection-changed" };
       await postResponse(config, command, result);
     }
-    await chrome.storage.local.set({ lastStatus: `handled ${commands.length} command(s)` });
-    await refreshActionBadge();
+    await recordTunnelConnection(revision, { ok: true }, `handled ${commands.length} command(s)`);
     return { ok: true, handled: commands.length };
   } catch (error) {
+    if (revision !== connectionRevision) return { ok: false, reason: "connection-changed" };
     consoleAction("ResearchTube:", error);
-    await chrome.storage.local.set({ lastStatus: `error: ${String(error)}` });
-    await setActionBadge("connection-error");
+    await recordTunnelConnection(revision, connectionFailureFromPoll({ error: String(error) }), `error: ${safeErrorMessage(error)}`);
     return { ok: false, error: String(error) };
   } finally {
     polling = false;
+    if (tunnelPollController === controller) tunnelPollController = null;
   }
 }
 
@@ -6212,13 +6269,18 @@ function updateCameraRecordingBadge(task) {
 async function refreshActionBadge() {
   if (cameraRecordingBadgeKind) return paintCameraRecordingBadge();
   const config = await getConfig();
+  const connection = tunnelConnectionState(config);
+  if (connection.state === "error") return setActionBadge("connection-error");
+  if (connection.state !== "ready") return setActionBadge("setup");
   if (Number(config.youtubeSearchCooldownUntil || 0) > Date.now()) {
     return setActionBadge("youtube-rate-limited");
   }
-  return setActionBadge(config.tunnelId && config.runtimeApiKey ? "ready" : "setup");
+  return setActionBadge("ready");
 }
 
 async function testConnection() {
+  await connectionUpdateTail;
+  const revision = connectionRevision;
   await setActionBadge("working");
   const config = await getConfig();
   let result;
@@ -6232,17 +6294,7 @@ async function testConnection() {
       ? { ok: true, stages: { apiKey: true, tunnel: true }, message: "Connection successful." }
       : connectionFailureFromPoll(pollResult);
   }
-  await chrome.storage.local.set({
-    lastConnectionTest: {
-      success: result.ok,
-      timestamp: new Date().toISOString(),
-      stage: result.ok ? "tunnel" : result.errorCode,
-      errorCode: result.errorCode || null,
-      message: result.message || null
-    }
-  });
-  if (result.ok) await refreshActionBadge();
-  else await setActionBadge("connection-error");
+  if (!await recordTunnelConnection(revision, result, undefined, true)) return connectionFailure("CONNECTION_CHANGED", "Connection settings changed during the test. Test the saved settings again.");
   return result;
 }
 

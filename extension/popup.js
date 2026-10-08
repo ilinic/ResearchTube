@@ -2,6 +2,22 @@ const $ = (id) => document.getElementById(id);
 async function call(message) { return chrome.runtime.sendMessage(message); }
 function shortTunnel(id) { return id && id.length > 14 ? `${id.slice(0, 9)}…${id.slice(-4)}` : id || "Not configured"; }
 function version(value) { return value ? `v${String(value).replace(/^v/i, "")}` : "v—"; }
+let connectionReadRevision = 0;
+function renderConnectionStatus(state) {
+  const errorLabels = {
+    NOT_CONFIGURED: "Not configured", API_KEY_MISSING: "API key missing", TUNNEL_ID_MISSING: "Tunnel ID missing",
+    API_KEY_INVALID: "API key rejected", TUNNEL_PERMISSION_DENIED: "Access denied", TUNNEL_NOT_FOUND: "Tunnel not found", NETWORK_ERROR: "Network error"
+  };
+  const connection = state.connection || (state.configured ? { state: "unchecked" } : { state: "not-configured", errorCode: "NOT_CONFIGURED" });
+  const element = $("tunnel-status");
+  element.textContent = connection.state === "ready" ? shortTunnel(state.tunnelId) : connection.state === "unchecked" ? "Not tested" : errorLabels[connection.errorCode] || "Connection failed";
+  element.className = connection.state === "ready" ? "good" : connection.state === "unchecked" || connection.errorCode === "NOT_CONFIGURED" ? "warn" : "bad";
+}
+async function loadConnectionStatus() {
+  const revision = ++connectionReadRevision;
+  const state = await call({ type: "status", includeAgent: false });
+  if (revision === connectionReadRevision) renderConnectionStatus(state);
+}
 function agentSummary(agent, port) {
   if (!agent?.available) return { text: `Unavailable · ${port}`, className: "bad" };
   if (agent.error === "AGENT_INTERFACE_INCOMPATIBLE") return { text: "Version mismatch", className: "bad" };
@@ -50,19 +66,18 @@ async function load() {
   $("chrome-automation-status").textContent = "Checking…";
   // Local popup state and actions render independently of Agent availability.
   const activeTabPromise = chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  const connectionRevision = ++connectionReadRevision;
   const statePromise = call({ type: "status", includeAgent: false });
   const activeTabs = await activeTabPromise;
   activeYouTubeVideoTab = currentYouTubeVideoTab(activeTabs);
   $("describe-video").hidden = !activeYouTubeVideoTab;
   $("chatgpt").hidden = Boolean(activeYouTubeVideoTab);
   const state = await statePromise;
-  const configured = state.configured;
   const youtubeSearch = state.youtubeSearch;
   const searchLimited = Boolean(youtubeSearch?.rateLimited);
   $("extension-status").textContent = version(state.extensionVersion);
   $("extension-status").className = "good";
-  $("tunnel-status").textContent = shortTunnel(state.tunnelId);
-  $("tunnel-status").className = configured ? "good" : "bad";
+  if (connectionRevision === connectionReadRevision) renderConnectionStatus(state);
   $("youtube-status").textContent = searchLimited ? `Search paused — retry in ${youtubeSearch.retryAfterSeconds}s` : "Ready";
   $("youtube-status").className = searchLimited ? "warn" : "good";
   $("interface-version").textContent = version(state.requiredAgentInterfaceVersion);
@@ -98,4 +113,9 @@ $("help").addEventListener("click", () => {
   window.close();
 });
 $("support").addEventListener("click", () => call({ type: "open-external", target: "support" }));
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === "local" && ["tunnelId", "runtimeApiKey", "lastConnectionTest", "lastTunnelConnection"].some(name => Object.hasOwn(changes, name))) {
+    void loadConnectionStatus().catch(() => {});
+  }
+});
 load();

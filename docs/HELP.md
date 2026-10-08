@@ -48,6 +48,12 @@ Windows-only operations include the built-in clipboard, desktop capture and Wind
 
 ResearchTube's Extension performs the tunnel connection itself. You do not need to install/run a separate `tunnel-client`, expose the Agent on the internet, forward router ports or set up cloudflared for this connection. See [installation](INSTALLATION.md) and OpenAI's [Secure MCP Tunnel guide](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels).
 
+**Save and test connection** first saves both fields exactly as entered, trimming surrounding whitespace, then tests those saved values. An unsuccessful test does not undo the save. The saved key appears masked in the password field; clearing the field and saving removes the key. Clearing the Tunnel ID and saving removes the ID.
+
+To test first-time setup or Help, clear **both** fields and click **Save and test connection**. A missing-settings result is expected: the values are already cleared, and the popup shows **Not configured**. Help still works. This resets the tunnel connection without removing the Local Agent, Workspace or tool preferences. Restore your ID and key in Settings when finished.
+
+The popup's tunnel row updates when saved settings or connection results change. **API key missing** and **Tunnel ID missing** identify incomplete settings; **Not tested** means both values are present but no connection has been confirmed. Green means the latest tunnel request succeeded. A rejected key, unavailable tunnel or network failure appears as an error instead of retaining a green ID. Editing fields takes effect when you save.
+
 ### 4. Create the ResearchTube connection in ChatGPT
 
 1. In ChatGPT **Settings**, enable **Developer Mode**. Current interfaces may place it under **Security and login**; older interfaces use **Apps/Connectors → Advanced settings**. Use the setting for custom MCP connections, not the separate Browser/CDP developer controls.
