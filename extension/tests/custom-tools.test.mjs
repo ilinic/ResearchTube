@@ -8,7 +8,8 @@ const root = path.resolve(new URL('../..', import.meta.url).pathname);
 const background = fs.readFileSync(path.join(root, 'extension', 'background.js'), 'utf8');
 const manifest = JSON.parse(fs.readFileSync(path.join(root, 'agent', 'custom-tools', 'custom-toolset', 'manifest.json'), 'utf8'));
 
-assert.equal(manifest.groupTitle, 'Custom Toolset');
+assert.equal(manifest.groupTitle, 'Custom Toolset Example Group');
+assert.deepEqual(manifest.tools.map(tool => tool.title), ['Count Words Example', 'Wait Asynchronous Task Example']);
 assert.deepEqual(manifest.tools.map(tool => tool.name), ['count_words', 'wait_seconds']);
 assert.equal(manifest.tools[0].execution, 'sync');
 assert.equal(manifest.tools[1].execution, 'task');
@@ -87,4 +88,5 @@ assert.deepEqual(container.children.slice(-6).map(section=>section.children[0].t
 const exampleGroup=container.children.find(section=>section.children[0].textContent===manifest.groupTitle);
 assert.equal(exampleGroup.children[1].children[0].checked,false);
 assert.deepEqual(exampleGroup.children.slice(1).map(row=>row.children[1].children[0].children[1].textContent),['count_words','wait_seconds']);
+assert.deepEqual(exampleGroup.children.slice(1).map(row=>row.children[1].children[0].children[0].textContent),['Count Words Example','Wait Asynchronous Task Example']);
 console.log('Custom task IDs: standard start/status/cancel/HTTP validation; Settings lifecycle then manifest groups with preserved preferences: ok');

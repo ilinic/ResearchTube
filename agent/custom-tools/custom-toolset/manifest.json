@@ -1,14 +1,14 @@
 {
   "manifestVersion": 1,
   "id": "example.custom-toolset",
-  "version": "1.0.0",
-  "groupTitle": "Custom Toolset",
+  "version": "1.0.1",
+  "groupTitle": "Custom Toolset Example Group",
   "description": "Small examples showing synchronous and asynchronous custom tools.",
   "tools": [
     {
       "name": "count_words",
-      "title": "Count words",
-      "description": "Count the words in supplied text.",
+      "title": "Count Words Example",
+      "description": "Synchronous example: count the words in supplied text.",
       "entryPoint": "tools.py:count_words",
       "execution": "sync",
       "inputSchema": {
@@ -34,8 +34,8 @@
     },
     {
       "name": "wait_seconds",
-      "title": "Wait",
-      "description": "Wait for the requested number of seconds and report progress.",
+      "title": "Wait Asynchronous Task Example",
+      "description": "Asynchronous example: wait for the requested number of seconds and report progress.",
       "entryPoint": "tools.py:wait_seconds",
       "execution": "task",
       "inputSchema": {

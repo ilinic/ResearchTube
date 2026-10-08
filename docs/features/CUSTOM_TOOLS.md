@@ -29,13 +29,13 @@ different functions in the same Python file or at separate files.
 {
   "manifestVersion": 1,
   "id": "example.custom-toolset",
-  "version": "1.0.0",
-  "groupTitle": "Custom Toolset",
+  "version": "1.0.1",
+  "groupTitle": "Custom Toolset Example Group",
   "tools": [
     {
       "name": "count_words",
-      "title": "Count words",
-      "description": "Count the words in supplied text.",
+      "title": "Count Words Example",
+      "description": "Synchronous example: count the words in supplied text.",
       "entryPoint": "tools.py:count_words",
       "execution": "sync",
       "inputSchema": {"type": "object"}
@@ -59,8 +59,9 @@ Sync tools log their name and outcome without percentages; their context's
 progress callback has no effect. Input/result payloads and progress messages
 are not printed.
 
-The bundled `custom-toolset` demonstrates both modes. `count_words` is a
-small synchronous operation. `wait_seconds` is an asynchronous example that
+The bundled `custom-toolset` appears as **Custom Toolset Example Group**.
+**Count Words Example** (`count_words`) is a small synchronous operation.
+**Wait Asynchronous Task Example** (`wait_seconds`) is an asynchronous example that
 waits for one to sixty seconds, publishes progress and responds to
 cancellation. It does not require an external service or Workspace file.
 
