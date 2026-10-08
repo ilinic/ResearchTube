@@ -78,7 +78,7 @@ function fixture({multipleImages=false,nonImages=false}={}){
 }
 const f=fixture();const started=await f.agent.start(10),sessionId=started.session.sessionId;
 const startupPrompt=f.events.find(event=>event[0]==='prompt')[2];
-assert.equal(startupPrompt,`@ResearchTube Study this site and explain what is useful here in my language. Use sessionId: ${sessionId} for site tools and tabId: 22 for async tasks.`);
+assert.equal(startupPrompt,`@ResearchTube Study this site's text and images. Download and inspect relevant images when available, then explain what is useful here in my language. Use sessionId: ${sessionId} for site tools and tabId: 22 for async tasks.`);
 assert.match(startupPrompt,/Use sessionId: bas_[A-Za-z0-9_-]{10} for site tools and tabId: 22 for async tasks\./);
 assert.doesNotMatch(startupPrompt,/browser_/);
 assert.match(startupPrompt,/in my language/);

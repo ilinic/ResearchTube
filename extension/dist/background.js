@@ -1233,7 +1233,7 @@ function createBrowserAgent(host) {
       await check(session2);
       checkStarting();
       await notify(session2, "waitingForChat");
-      const prompt = `@ResearchTube Study this site and explain what is useful here in my language. Use sessionId: ${session2.sessionId} for site tools and tabId: ${chat.id} for async tasks.`;
+      const prompt = `@ResearchTube Study this site's text and images. Download and inspect relevant images when available, then explain what is useful here in my language. Use sessionId: ${session2.sessionId} for site tools and tabId: ${chat.id} for async tasks.`;
       checkStarting();
       session2.chatPath = await host.startChat(chat.id, prompt, checkStarting, (phase) => notify(session2, phase), session2.trace);
       if (!session2.chatPath) throw browserError("BROWSER_CHAT_NOT_FOUND", "The dedicated ChatGPT conversation could not be confirmed. The session stopped without choosing another tab.");
@@ -2530,7 +2530,7 @@ var MCP_TOOL_SETTINGS = Object.freeze({
   custom_tool_status: { group: "custom" },
   custom_tool_cancel: { group: "custom" }
 });
-var EXTENSION_VERSION = "2.2.97";
+var EXTENSION_VERSION = "2.2.98";
 globalThis.addEventListener?.("fetch", createMediaStreamHandler({
   extensionUrl: chrome.runtime.getURL("/"),
   getClient: (id) => globalThis.clients.get(id),

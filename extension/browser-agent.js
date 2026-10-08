@@ -219,7 +219,7 @@ export function createBrowserAgent(host) {
       await check(session);
       checkStarting();
       await notify(session, "waitingForChat");
-      const prompt = `@ResearchTube Study this site and explain what is useful here in my language. Use sessionId: ${session.sessionId} for site tools and tabId: ${chat.id} for async tasks.`;
+      const prompt = `@ResearchTube Study this site's text and images. Download and inspect relevant images when available, then explain what is useful here in my language. Use sessionId: ${session.sessionId} for site tools and tabId: ${chat.id} for async tasks.`;
       checkStarting();
       session.chatPath = await host.startChat(chat.id, prompt, checkStarting, phase => notify(session, phase), session.trace);
       if (!session.chatPath) throw browserError("BROWSER_CHAT_NOT_FOUND", "The dedicated ChatGPT conversation could not be confirmed. The session stopped without choosing another tab.");
