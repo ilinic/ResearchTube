@@ -28,7 +28,7 @@ Check in this order:
 
 1. The unpacked Chrome extension is enabled and has no error in `chrome://extensions`.
 2. ResearchTube Settings reports a successful tunnel connection.
-3. ChatGPT Developer Mode/private MCP apps are available for the account/workspace.
+3. **Add custom MCP server** is available in ChatGPT Plugins for the account/workspace. If missing, check plan/workspace permissions and whether your interface still requires Developer Mode in ChatGPT Settings.
 4. The ChatGPT ResearchTube connection uses the same Tunnel ID configured in the Extension.
 5. Use the ResearchTube app management **Refresh** action after an Extension update.
 6. Start a new conversation and explicitly select or mention `@ResearchTube`.

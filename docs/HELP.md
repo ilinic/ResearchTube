@@ -26,7 +26,7 @@ Browser-based YouTube research works with the Agent stopped. Local media require
 ### 1. Check requirements
 
 - Chrome/Chromium on Windows, macOS or Linux; **Study this site** needs Chrome 125 or newer for nested iframe support.
-- This private-connection setup assumes **ChatGPT Plus or higher**, with access to private MCP connections and **Developer Mode**. Account/workspace permissions also matter; a subscription alone does not guarantee that the controls are available.
+- This private-connection setup assumes **ChatGPT Plus or higher**, with access to private MCP connections. Account/workspace permissions also matter; a subscription alone does not guarantee that the controls are available.
 - An OpenAI Platform account/organization allowed to create/use Secure MCP Tunnels. ChatGPT subscription settings and Platform tunnel permissions are separate.
 - Python 3.10 or newer for source-mode Agent on Linux/macOS or Windows. The Windows archive includes an EXE with Python inside; every platform archive includes matching runtime tools. Node.js is needed for development, not a prebuilt release.
 
@@ -38,7 +38,7 @@ Download the matching platform archive under **Assets** on [GitHub Releases](htt
 
 1. Download the [ResearchTube release](https://github.com/ilinic/ResearchTube/releases) for your platform and extract it to a permanent folder. Keep the `extension/`, `agent/` and `docs/` directories. Do not run from inside the ZIP or delete/move that folder afterwards.
 2. Open `chrome://extensions` in Chrome's address bar.
-3. Turn on Chrome's **Developer mode** at the top of that page. This is different from ChatGPT Developer Mode.
+3. Turn on Chrome's **Developer mode** at the top of that page.
 4. Click **Load unpacked** and select the `extension/` folder, not the release root.
 5. Pin ResearchTube using Chrome's Extensions menu. Open its popup, then **Settings**.
 
@@ -58,13 +58,12 @@ The popup's tunnel row updates when saved settings or connection results change.
 
 ### 4. Create the ResearchTube connection in ChatGPT
 
-1. In ChatGPT **Settings**, enable **Developer Mode**. Current interfaces may place it under **Security and login**; older interfaces use **Apps/Connectors → Advanced settings**. Use the setting for custom MCP connections, not the separate Browser/CDP developer controls.
-2. Open [ChatGPT Plugins](https://chatgpt.com/plugins). Choose **+ → Add custom MCP server** (older interfaces may say **Create app/connector**).
-3. Name it **ResearchTube** and choose **Tunnel** under **Connection**. Select/paste the same tunnel identifier used in Extension Settings.
-4. ResearchTube's tunnel runtime key belongs in the Extension, not this form. Where server authentication is requested, use **No authentication**: ResearchTube does not provide a separate OAuth login. Review the connection notice and create/install the private connection.
-5. Start a new chat, type `@`, and select **ResearchTube**, or enable it in the chat's tools menu. Try a simple request such as `@ResearchTube Search YouTube for recent videos about quantum computing and summarize their main ideas.`
+1. Open [ChatGPT Plugins](https://chatgpt.com/plugins). Choose **+ → Add custom MCP server** (older interfaces may say **Create app/connector**).
+2. Name it **ResearchTube** and choose **Tunnel** under **Connection**. Select/paste the same tunnel identifier used in Extension Settings.
+3. ResearchTube's tunnel runtime key belongs in the Extension, not this form. Where server authentication is requested, use **No authentication**: ResearchTube does not provide a separate OAuth login. Review the connection notice and create/install the private connection.
+4. Start a new chat, type `@`, and select **ResearchTube**, or enable it in the chat's tools menu. Try a simple request such as `@ResearchTube Search YouTube for recent videos about quantum computing and summarize their main ideas.`
 
-If Developer Mode, **Tunnel**, or creation controls are missing, check your plan, signed-in account and workspace policies first. If a tunnel is missing from the selector, check its workspace association and your **Read + Use** permissions. Do not substitute a public URL or paste the runtime key into chat. Interface labels change; consult OpenAI's [connection guide](https://developers.openai.com/apps-sdk/deploy/connect-chatgpt/) and [Developer Mode example](https://developers.openai.com/cookbook/examples/partners/aws/chatgpt_agents_sdk_aws_agentcore_cookbook/notebooks/chatgpt_agents_sdk_aws_agentcore_cookbook) when labels differ.
+If **Add custom MCP server** is missing, check your plan, signed-in account and workspace permissions. Some interfaces still require enabling **Developer Mode** in ChatGPT Settings before showing this control. If a tunnel is missing from the selector, check its workspace association and your **Read + Use** permissions. Do not substitute a public URL or paste the runtime key into chat. Interface labels change; consult OpenAI's [connection guide](https://developers.openai.com/apps-sdk/deploy/connect-chatgpt/) when labels differ.
 
 ### 5. Start the Local Agent when needed
 
@@ -128,7 +127,7 @@ On a YouTube video or Short, the popup offers **Describe this video**. On other 
 | Symptom | First checks / action |
 | --- | --- |
 | Extension missing | `chrome://extensions`: enabled, correct `extension/` folder, no load errors. Keep the extracted installation folder. |
-| ResearchTube absent from ChatGPT | Test tunnel in Settings; verify ChatGPT Developer Mode/permissions, correct workspace and same tunnel; create/install the private connection and select it in a new chat. |
+| ResearchTube absent from ChatGPT | Test tunnel in Settings; verify permission to add custom MCP servers, correct workspace and same tunnel; create/install the private connection and select it in a new chat. |
 | Tunnel test fails | `API_KEY_INVALID`: check/create the restricted key in Settings. `TUNNEL_PERMISSION_DENIED`: check runtime Read + Use. `TUNNEL_NOT_FOUND`: verify ID and organization. `NETWORK_ERROR`: check connectivity/proxy. |
 | Agent unavailable | Start its Windows EXE or Python script, answer the Workspace prompt if shown, keep the console open, match the port, then Test connection. Do not open its port publicly. |
 | Version mismatch | Use compatible components from the release; reload Extension, restart changed Agent, refresh ChatGPT catalog. Version numbers need not be equal; interfaces must match. |

@@ -15,7 +15,12 @@ assert.match(guide,/guide\.open = true/);
 assert.match(guide,/scrollIntoView/);
 assert.match(style,/\.setup-image img/);
 const paths=[...settings.matchAll(/src="(images\/setup-[^"]+\.png)"/g)].map(x=>x[1]);
-assert.equal(paths.length,5);
+assert.equal(paths.length,4);
+assert.deepEqual([...settings.matchAll(/<h3>Step (\d+) —/g)].map(x=>Number(x[1])),[1,2,3,4,5]);
+assert.doesNotMatch(settings,/<h3>[^<]*Developer Mode/);
+assert.doesNotMatch(settings,/setup-04-developer-mode\.png/);
+assert.match(settings,/<h3>Step 4 — Add ResearchTube as a custom MCP plugin<\/h3>/);
+assert.match(settings,/<h3>Step 5 — Verify the connection<\/h3>/);
 for (const path of paths) {const img=await readFile(root(path));assert.equal(img.subarray(0,8).toString("hex"),"89504e470d0a1a0a");}
 
 assert.equal(JSON.parse(await readFile(root("manifest.json"),"utf8")).options_page,"settings.html");

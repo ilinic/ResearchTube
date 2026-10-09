@@ -8,7 +8,7 @@ This guide installs the Chrome Extension, Local Agent and private ChatGPT MCP co
 - Python 3.10 or later on Linux/macOS, or when launching the Agent from source on Windows. The release's Windows EXE includes Python and needs no separate interpreter.
 - Node.js is required only for development, not for a prebuilt release.
 - An OpenAI Platform organisation with Secure MCP Tunnel access.
-- ChatGPT Plus or a higher supported plan with access to Developer Mode and private MCP connections. This installation path assumes those controls are available; account/workspace policy also applies.
+- ChatGPT Plus or a higher supported plan with access to private MCP connections. This installation path assumes those controls are available; account/workspace policy also applies.
 
 The platform archive includes all runtime tools:
 
@@ -99,13 +99,12 @@ Do not use an organisation-owner, administrator or unrestricted key. The key is 
 
 ## 6. Add ResearchTube to ChatGPT
 
-1. Enable ChatGPT Developer Mode in Settings (current interfaces: **Security and login**; older interfaces: **Apps/Connectors → Advanced settings**). This is separate from Chrome's Developer mode.
-2. Open [ChatGPT Plugins](https://chatgpt.com/plugins), select **+ → Add custom MCP server** (older labels: Create app/connector).
-3. Choose **Tunnel** under Connection and select/paste the same Tunnel ID.
-4. Name it **ResearchTube**. Where server authentication is requested, choose **No authentication**; the restricted runtime key belongs only in Extension Settings. Review and create/install the connection.
-5. Open a new conversation and select or mention ResearchTube.
+1. Open [ChatGPT Plugins](https://chatgpt.com/plugins), select **+ → Add custom MCP server** (older labels: Create app/connector).
+2. Choose **Tunnel** under Connection and select/paste the same Tunnel ID.
+3. Name it **ResearchTube**. Where server authentication is requested, choose **No authentication**; the restricted runtime key belongs only in Extension Settings. Review and create/install the connection.
+4. Open a new conversation and select or mention ResearchTube.
 
-ChatGPT's interface labels can change. The essential operation is adding the private MCP connection backed by the configured Tunnel ID. See [User help](HELP.md#4-create-the-researchtube-connection-in-chatgpt) for missing controls/workspace association and links to current official OpenAI instructions. ResearchTube itself implements the tunnel connection; no separate OpenAI `tunnel-client` or cloudflared installation is needed for this route.
+If **Add custom MCP server** is missing, check your plan and workspace permissions; some interfaces still require enabling **Developer Mode** in ChatGPT Settings. ChatGPT's interface labels can change. The essential operation is adding the private MCP connection backed by the configured Tunnel ID. See [User help](HELP.md#4-create-the-researchtube-connection-in-chatgpt) for missing controls/workspace association and links to current official OpenAI instructions. ResearchTube itself implements the tunnel connection; no separate OpenAI `tunnel-client` or cloudflared installation is needed for this route.
 
 ## Optional Chrome launch flag
 
