@@ -32,7 +32,8 @@ def main():
         result = subprocess.run([str(matches[0]), *arguments], capture_output=True, text=True, timeout=45)
         if result.returncode:
             raise RuntimeError(f'{key} --version failed: {result.stderr[-1000:]}')
-        print(f"{key} {manifest['tools'][key]['version']}: OK")
+        version_key = 'ffmpeg' if key == 'ffprobe' else key
+        print(f"{key} {manifest['tools'][version_key]['version']}: OK")
 
 
 if __name__ == '__main__':
