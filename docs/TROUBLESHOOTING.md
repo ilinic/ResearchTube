@@ -68,7 +68,7 @@ The Extension and Agent come from different incompatible releases. Record both i
 
 ### Workspace unavailable
 
-Check that the user can create files in the extracted `agent/` directory and that `agent/workspace/` is not redirected through a symlink or unsupported reparse point. Do not delete the Workspace. Preserve and back up existing user media.
+Check `workspacePath.value` in `agent/agent-config.json` and whether the user can create files in that directory. The default `workspace` is relative to the Agent script's folder; an absolute path can select another drive. Restart the Agent after editing. Empty/non-text/invalid path settings report `CONFIG_INVALID` and stop startup without falling back. An inaccessible directory reports Workspace unavailable. The actual root appears only in the local startup console. Changing the setting does not move files: preserve the old Workspace and copy/move its contents while the Agent is stopped if needed. Child symlinks or unsupported reparse points remain prohibited. Do not delete user media.
 
 ## Tunnel connection failures
 

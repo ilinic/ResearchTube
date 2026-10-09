@@ -55,7 +55,7 @@ Workspace + ffmpeg + ffprobe + yt-dlp + optional cloudflared
 
 - `extension/` is the unpacked Manifest V3 Chrome extension and MCP server.
 - `agent/` is the Python 3.10+ loopback Local Agent.
-- `agent/workspace/` contains the user's logical ResearchTube Workspace.
+- `agent/workspace/` is the default Workspace; `workspacePath` in `agent/agent-config.json` can select another directory.
 - `docs/` contains the public user, troubleshooting and development documentation.
 
 The Extension can still perform browser-based public YouTube research while the Agent is stopped. Downloads, Workspace operations and local media processing require the Agent.

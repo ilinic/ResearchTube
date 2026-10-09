@@ -184,6 +184,10 @@ Package the repository with generated bundles and the bundled Workspace demo, ex
 
 Do not commit, push or publish unless the user explicitly requests it.
 
+## Workspace configuration
+
+`workspacePath` in the single `agent-config.json` uses the same `value`/`comment` layout as other settings. `configured_workspace_path()` validates and resolves it from `ROOT`, not the process working directory; native absolute paths are allowed in this trusted local configuration only. Missing settings retain the legacy `workspace` default. Invalid values fail startup with `CONFIG_INVALID`, without creating a fallback Workspace. `serve()` sets `WORKSPACE_PATH` before health initialization or server binding and freezes it for that run; do not reload the root for each operation or expose it through public HTTP/MCP status. Existing resolver/media/share routes must continue using that root and validating logical paths. Changing config requires restart and does not move/delete existing files. Test configuration compatibility, real loopback file creation under the chosen root, run stability after edits, restart selection, traversal rejection and public path exclusion.
+
 ## Task history and developer configuration
 
 Use `TaskHistory(configured_task_history_limit)` for Agent task registries; bind a runner immediately after registration so done callbacks can prune terminal records after actual final publication. Keep failed/cancelled records as well as completed ones. Never evict queued/working records or remove Workspace files as part of history maintenance. Browser task Maps are pruned before persistence and status/cancellation access. Test small configured limits and active-runner publication races.

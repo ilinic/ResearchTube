@@ -45,11 +45,17 @@ Or run it from the `agent/` directory:
 python researchtube_agent.py
 ```
 
-The Agent reads `agent/agent-config.json`, binds to `127.0.0.1` and normally uses port `17843`. It creates or opens `agent/workspace/`.
+The Agent reads `agent/agent-config.json`, binds to `127.0.0.1` and normally uses port `17843`. It creates or opens the directory selected by `workspacePath`, defaulting to `agent/workspace/`.
 
 The Agent starts listening and prints its version/interface and Workspace summary before its background diagnostics finish. Component results appear in the console as each one-time startup check completes; health initially reports `checking` for unfinished checks. Repeated status requests read the saved startup snapshot. Restart the Agent after changing tools or Chrome launch flags to refresh it. Physical paths appear only in this local console.
 
 In Extension Settings, select **Test connection** in the Local Agent section. A successful result should show compatible Extension/Agent interface versions and component statuses.
+
+### Choose the Workspace directory
+
+Edit `workspacePath.value` in `agent/agent-config.json`. The default `workspace` means a folder beside `researchtube_agent.py`, independent of the terminal's working directory. An absolute path selects another location; on Windows, for example, `"value": "D:/ResearchTubeWorkspace"`. Forward slashes avoid JSON backslash escaping. The configured value must be nonempty text.
+
+Restart the Agent after changing it. A missing directory is created when accessible. Existing files remain in the old location; copy/move them yourself while the Agent is stopped if you want them in the new Workspace. Tools continue using logical paths such as `downloads/video.mp4`.
 
 ## 4. Install optional media components
 
@@ -125,7 +131,7 @@ After replacing Extension files:
 3. use ChatGPT's ResearchTube app management **Refresh** action so the current MCP tool schema is loaded;
 4. verify with `system_agent_status`.
 
-Never replace `agent/workspace/` with an empty release directory when it already contains user data. Back it up before moving installations.
+Never replace an existing Workspace with an empty release directory. Preserve the configured Workspace and `agent-config.json`, and back them up before moving installations. Relative paths follow the Agent directory; absolute paths keep pointing to their chosen location.
 
 ## Next steps
 

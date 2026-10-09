@@ -3,6 +3,10 @@
     "value": 17843,
     "comment": "Loopback HTTP port for the Local Agent (1–65535). Match the port in Extension Settings. Restart the Agent after changing it."
   },
+  "workspacePath": {
+    "value": "workspace",
+    "comment": "Local Workspace directory. Relative paths are resolved from the folder containing researchtube_agent.py; absolute paths select another location. On Windows use forward slashes (for example D:/ResearchTubeWorkspace) or escaped backslashes in JSON. Restart the Agent after changing this value. Existing files are not moved automatically."
+  },
   "visualMapTimestampFont": {
     "value": "DejaVuSans.ttf",
     "comment": "Font filename from agent/tools/fonts used for timestamp overlays. Use a filename, not a host path."

@@ -70,7 +70,7 @@ The Agent console may show physical installation paths for the local user. Norma
 
 ## Workspace model
 
-`agent/workspace/` is the physical root, but MCP uses only logical POSIX-style paths such as `downloads/example.mp4`.
+`workspacePath` in `agent/agent-config.json` selects the physical root. It defaults to `workspace`, resolved relative to the directory containing `researchtube_agent.py`; an absolute local path selects another location. The root is resolved once before startup health/server initialization and stays fixed until restart. Missing settings in older configurations retain the default; invalid values stop startup rather than silently selecting a different folder. Existing files are not migrated. MCP uses only logical POSIX-style paths such as `downloads/example.mp4`, never the configured physical path.
 
 `WorkspacePathResolver` rejects:
 

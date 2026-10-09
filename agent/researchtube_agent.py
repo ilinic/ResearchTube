@@ -41,7 +41,7 @@ except ImportError:
     from task_history import TaskHistory
     from browser_resources import save_browser_resource
 
-AGENT_VERSION = "2.2.68"
+AGENT_VERSION = "2.2.69"
 INTERFACE_VERSION = 78
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
@@ -269,6 +269,18 @@ def configured_port() -> int:
     except AgentApiError:
         pass
     return DEFAULT_PORT
+
+
+def configured_workspace_path() -> Path:
+    """Resolve the trusted local setting once per run, before Workspace I/O."""
+    value = read_agent_config().get("workspacePath", "workspace")
+    if not isinstance(value, str) or not value.strip() or "\0" in value:
+        raise AgentApiError("CONFIG_INVALID", "workspacePath must be a non-empty directory path.")
+    try:
+        path = Path(value.strip())
+        return (path if path.is_absolute() else ROOT / path).resolve()
+    except (OSError, ValueError, RuntimeError) as error:
+        raise AgentApiError("CONFIG_INVALID", "workspacePath could not be resolved.") from error
 
 
 def configured_tool_limits() -> dict[str, int]:
@@ -6131,6 +6143,10 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
 
 
 async def serve(port: int) -> None:
+    global WORKSPACE_PATH
+    # Freeze the root for this run: live edits must not redirect active tasks,
+    # media viewers or shares into a different directory mid-operation.
+    WORKSPACE_PATH = configured_workspace_path()
     initial_health = initialize_health_snapshot()
     server = await asyncio.start_server(handle_client, host="127.0.0.1", port=port)
     log_startup_health(initial_health, port)
@@ -6170,6 +6186,9 @@ def main() -> int:
         asyncio.run(serve(args.port if args.port is not None else configured_port()))
     except KeyboardInterrupt:
         return 0
+    except AgentApiError as error:
+        log(f"ResearchTube Local Agent could not start: {error.code}: {error.message}", error=True)
+        return 1
     except OSError as error:
         log(f"ResearchTube Local Agent could not start: {error}", error=True)
         return 1

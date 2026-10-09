@@ -45,6 +45,37 @@ class AgentConfigTests(unittest.TestCase):
         self.write(self.original)
         self.assertEqual(agent.configured_tool_limits()['mediaClipMaxSegments'], 7)
 
+    def test_workspace_default_relative_and_absolute_paths(self):
+        self.assertEqual(self.original['workspacePath']['value'], 'workspace')
+        with patch.object(agent, 'ROOT', Path(self.folder.name)):
+            self.write({})
+            self.assertEqual(agent.configured_workspace_path(), Path(self.folder.name) / 'workspace')
+            self.write({'workspacePath': {'value': 'media/Workspace with spaces'}})
+            self.assertEqual(agent.configured_workspace_path(), Path(self.folder.name) / 'media/Workspace with spaces')
+            absolute = Path(self.folder.name) / 'separate location'
+            self.write({'workspacePath': {'value': str(absolute)}})
+            self.assertEqual(agent.configured_workspace_path(), absolute)
+            self.assertFalse(absolute.exists(), 'resolving config does not create or move files')
+
+    def test_invalid_workspace_paths_do_not_fall_back(self):
+        for value in ['', ' \t ', '\0bad', None, True, 12, [], {}]:
+            with self.subTest(value=value):
+                self.write({'workspacePath': {'value': value}})
+                with self.assertRaises(agent.AgentApiError) as raised:
+                    agent.configured_workspace_path()
+                self.assertEqual(raised.exception.code, 'CONFIG_INVALID')
+                self.assertIn('workspacePath', raised.exception.message)
+
+    def test_invalid_workspace_config_stops_startup_before_binding(self):
+        self.write({'workspacePath': {'value': ''}})
+        with patch.object(agent, 'parse_args', return_value=type('Args', (), {'port': 17843})()), \
+             patch.object(agent, 'clear_console'), patch.object(agent, 'log') as logged, \
+             patch.object(agent.asyncio, 'start_server') as bind:
+            self.assertEqual(agent.main(), 1)
+            bind.assert_not_called()
+            self.assertIn('CONFIG_INVALID', logged.call_args.args[0])
+            self.assertIn('workspacePath', logged.call_args.args[0])
+
     def test_invalid_structure_reports_setting_name(self):
         cases = [([], 'object'), ({'port': 17843}, 'port'),
                  ({'port': {'comment': 'Missing value'}}, 'port'),

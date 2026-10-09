@@ -17,7 +17,7 @@ ResearchTube connects ChatGPT to public YouTube research, local media tools and 
 | Chrome Extension | Publishes the MCP tools, runs the private OpenAI tunnel connection, reads YouTube and controls browser tasks | Keep Chrome open and the Extension enabled when using tools |
 | OpenAI Secure MCP Tunnel | Connects ChatGPT to the Extension without opening an inbound port | Required for ChatGPT to call ResearchTube tools |
 | Local Agent | Python process serving local media tools and Workspace on `127.0.0.1`, normally port `17843` | Required for downloads, local files/media and other Agent-backed operations |
-| Workspace | Files under `agent/workspace/` in your installation | Use logical paths such as `downloads/example.mp4` in chat |
+| Workspace | Local files in the configured directory, default `agent/workspace/` | Use logical paths such as `downloads/example.mp4` in chat |
 
 Browser-based YouTube research works with the Agent stopped. Local media requires it. Reading this Help guide needs neither. OpenAI Secure MCP Tunnel and optional cloudflared online sharing are different features; cloudflared is not needed to connect ResearchTube to ChatGPT.
 
@@ -75,6 +75,8 @@ python agent/researchtube_agent.py
 On Windows, `py agent/researchtube_agent.py` is an alternative if the Python launcher is installed. Keep the console open. In Extension **Settings → Local Agent**, select **Test connection**. The default port is `17843`; the Agent configuration and Extension must use the same port. Implementation versions may differ; **interface versions must match**.
 
 The Agent checks components once at startup. `Checking…` means a startup check is still running. Restart it after changing components or Chrome launch flags; pressing Test connection reads the saved status and does not repeat the checks.
+
+To choose where files are stored, edit `workspacePath.value` in `agent/agent-config.json`. The default `workspace` is relative to the Agent script's folder. An absolute path such as `D:/ResearchTubeWorkspace` on Windows selects another location; use forward slashes in JSON or escape backslashes. Restart the Agent to apply it. It creates a missing accessible folder but does not move existing files. Preserve the old folder, or copy/move its files while the Agent is stopped. Chat tools still use logical paths, and do not need your computer's physical path. See [Workspace directory setup](INSTALLATION.md#choose-the-workspace-directory).
 
 | Component | Enables |
 | --- | --- |
@@ -143,7 +145,7 @@ For precise steps and error meanings use [Troubleshooting](TROUBLESHOOTING.md) a
 
 ## Update without losing files
 
-Preserve/back up `agent/workspace/` when replacing or moving installations. Reload the unpacked Extension in `chrome://extensions`, restart the Agent if its files changed, then **Refresh** ResearchTube in ChatGPT's plugin/app management and start a new chat. Reloading Chrome's Extension alone does not refresh ChatGPT's catalog.
+Preserve/back up your configured Workspace (default `agent/workspace/`) and `agent-config.json` when replacing or moving installations. Reload the unpacked Extension in `chrome://extensions`, restart the Agent if its files changed, then **Refresh** ResearchTube in ChatGPT's plugin/app management and start a new chat. Reloading Chrome's Extension alone does not refresh ChatGPT's catalog.
 
 Developer-owned [Custom Tools](features/CUSTOM_TOOLS.md) are loaded at Agent startup. After package changes, restart the Agent and refresh the ChatGPT catalog. They are trusted local programs with your OS permissions; the bundled examples create no Workspace files.
 
