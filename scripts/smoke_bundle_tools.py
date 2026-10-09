@@ -20,7 +20,8 @@ def main():
     parser.add_argument('--tools-root', type=Path, default=Path(__file__).resolve().parents[1] / 'agent/tools')
     args = parser.parse_args()
     manifest = json.loads((args.tools_root / 'tools-manifest.json').read_text(encoding='utf-8'))
-    if manifest.get('platform') != args.platform or set(manifest.get('tools', {})) != set(TOOLS):
+    expected_manifest_tools = set(TOOLS) - {'ffprobe'}
+    if manifest.get('platform') != args.platform or set(manifest.get('tools', {})) != expected_manifest_tools:
         raise ValueError('Tool manifest is incomplete or targets another platform.')
     suffix = '.exe' if args.platform.startswith('windows-') else ''
     for key, (directory, arguments) in TOOLS.items():
