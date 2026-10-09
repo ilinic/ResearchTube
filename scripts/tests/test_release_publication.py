@@ -107,8 +107,34 @@ class ReleaseTests(unittest.TestCase):
             gh.assert_not_called()
 
     def test_only_404_is_treated_as_missing_release(self):
-        with patch('scripts.publish_release.subprocess.run', return_value=subprocess.CompletedProcess([], 1, '', 'HTTP 404')):
+        with patch('scripts.publish_release.subprocess.run', side_effect=[
+            subprocess.CompletedProcess([], 1, '', 'HTTP 404'),
+            subprocess.CompletedProcess([], 0, '[[]]', '')]):
             self.assertIsNone(find_release('owner/repo', 'tag'))
         with patch('scripts.publish_release.subprocess.run', return_value=subprocess.CompletedProcess([], 1, '', 'HTTP 403')):
             with self.assertRaisesRegex(RuntimeError, '403'):
                 find_release('owner/repo', 'tag')
+
+    def test_draft_lookup_uses_paginated_release_collection(self):
+        draft = {**self.draft(), 'tag_name': 'tag'}
+        with patch('scripts.publish_release.subprocess.run', side_effect=[
+            subprocess.CompletedProcess([], 1, '', 'HTTP 404'),
+            subprocess.CompletedProcess([], 0, json.dumps([[], [draft]]), '')]) as run:
+            self.assertEqual(find_release('owner/repo', 'tag'), draft)
+        self.assertIn('--paginate', run.call_args.args[0])
+
+    def test_empty_old_draft_is_retargeted_to_corrected_build(self):
+        draft = {**self.draft(), 'target_commitish': 'b' * 40}
+        with patch('scripts.publish_release.find_release', return_value=draft), \
+             patch('scripts.publish_release.gh', side_effect=self.record):
+            publish(self.archive, 'owner/repo', self.commit, self.root)
+        self.assertEqual([call[1] for call in self.calls], ['edit', 'upload', 'upload', 'edit'])
+        self.assertEqual(self.calls[0][self.calls[0].index('--target') + 1], self.commit)
+
+    def test_old_draft_with_assets_is_not_retargeted(self):
+        draft = {**self.draft(), 'target_commitish': 'b' * 40, 'assets': [{'name': 'ResearchTube.zip'}]}
+        with patch('scripts.publish_release.find_release', return_value=draft), \
+             patch('scripts.publish_release.gh') as gh:
+            with self.assertRaisesRegex(ValueError, 'another commit'):
+                publish(self.archive, 'owner/repo', self.commit, self.root)
+            gh.assert_not_called()

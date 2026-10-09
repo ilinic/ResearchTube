@@ -26,7 +26,9 @@ def find_release(repo, tag):
                             capture_output=True, text=True, timeout=60)
     if result.returncode:
         if 'HTTP 404' in result.stderr:
-            return None
+            # Draft releases do not resolve through the by-tag endpoint.
+            pages = json.loads(gh('api', f'repos/{repo}/releases?per_page=100', '--paginate', '--slurp'))
+            return next((release for page in pages for release in page if release['tag_name'] == tag), None)
         raise RuntimeError(result.stderr.strip() or 'Could not read GitHub Releases.')
     return json.loads(result.stdout)
 
@@ -45,7 +47,8 @@ def publish(archive, repo, commit, root=ROOT):
         # Published version pairs remain historical records; never replace them.
         print('Already published: ' + release['html_url'])
         return release['html_url']
-    if release is not None and release['target_commitish'] != commit:
+    retarget = release is not None and release['target_commitish'] != commit
+    if retarget and release['assets']:
         raise ValueError('An existing draft for this version pair targets another commit.')
 
     with tempfile.TemporaryDirectory(prefix='researchtube-release-') as folder:
@@ -74,6 +77,11 @@ def publish(archive, repo, commit, root=ROOT):
             release = find_release(repo, tag)
             if release is None:
                 raise RuntimeError('The release draft was not created.')
+        elif retarget:
+            # An empty unpublished draft can follow a corrected build. Never
+            # retarget a draft that already contains another build's assets.
+            gh('release', 'edit', tag, '--repo', repo, '--target', commit,
+               '--title', title, '--notes-file', str(notes))
         for asset in (archive, checksum):
             previous = next((item for item in release['assets'] if item['name'] == asset.name), None)
             if previous:
