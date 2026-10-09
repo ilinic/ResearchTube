@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
-const [manifestText, packageText, lockText, source, bundle, agent] = await Promise.all([
+const [manifestText, packageText, lockText, source, bundle, agent, widget] = await Promise.all([
   readFile(new URL("../manifest.json", import.meta.url), "utf8"),
   readFile(new URL("../package.json", import.meta.url), "utf8"),
   readFile(new URL("../package-lock.json", import.meta.url), "utf8"),
   readFile(new URL("../background.js", import.meta.url), "utf8"),
   readFile(new URL("../dist/background.js", import.meta.url), "utf8"),
-  readFile(new URL("../../agent/researchtube_agent.py", import.meta.url), "utf8")
+  readFile(new URL("../../agent/researchtube_agent.py", import.meta.url), "utf8"),
+  readFile(new URL("../ui/capture-frame-widget-v30.html", import.meta.url), "utf8")
 ]);
 const manifest = JSON.parse(manifestText);
 const sourceExtension = source.match(/const EXTENSION_VERSION = "([^"]+)";/)?.[1];
@@ -20,6 +21,8 @@ const agentInterface = Number(agent.match(/INTERFACE_VERSION = (\d+)/)?.[1]);
 assert.ok(sourceExtension && bundleExtension && agentVersion, "release versions must be declared");
 assert.equal(manifest.version, sourceExtension, "manifest and source extension version must match");
 assert.equal(bundleExtension, sourceExtension, "generated service-worker bundle and source extension version must match");
+assert.equal(widget.match(/const WIDGET_VERSION = "([^"]+)";/)?.[1], sourceExtension, "media widget and Extension version must match");
+assert.equal(widget.match(/data-researchtube-media-widget="([^"]+)"/)?.[1], sourceExtension, "media widget marker and Extension version must match");
 const packageVersion = JSON.parse(packageText).version;
 const lock = JSON.parse(lockText);
 assert.equal(packageVersion, sourceExtension, "package and source Extension version must match");

@@ -113,7 +113,7 @@ function ui(script, sendMessage, storage = {}) {
     return elements.get(id);
   };
   const context = { document: { getElementById: element, querySelectorAll: () => [], createElement: () => element(Symbol()) },
-    console, URL, window: { close() {} }, setTimeout, navigator: { clipboard: { writeText: async () => {} } },
+    console, URL, window: { close() {}, addEventListener() {}, location: { hash: "" } }, setTimeout, navigator: { clipboard: { writeText: async () => {} } },
     chrome: { tabs: { query: async () => [] }, runtime: { sendMessage, openOptionsPage() {} },
       storage: { local: { get: async () => storage }, onChanged: { addListener: listener => { storageListener = listener; } } } } };
   vm.runInNewContext(script, context);
