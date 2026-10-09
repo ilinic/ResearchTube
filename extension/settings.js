@@ -112,4 +112,13 @@ async function init() {
   $("agent-port").value = state.agentPort || 17843;
   await refreshDiagnostics(); await loadMcpToolSettings();
 }
+function openSetupGuideFromHash() {
+  if (window.location.hash !== "#setup-guide") return;
+  const guide = $("setup-guide");
+  guide.open = true;
+  // Expand first, then scroll to the new element height.
+  requestAnimationFrame(() => requestAnimationFrame(() => guide.scrollIntoView({ block: "start", behavior: "instant" })));
+}
+window.addEventListener("hashchange", openSetupGuideFromHash);
+openSetupGuideFromHash();
 init();

@@ -108,7 +108,7 @@ $("describe-video").addEventListener("click", async () => {
   window.close();
 });
 $("settings").addEventListener("click", () => chrome.runtime.openOptionsPage());
-$("tunnel-help").addEventListener("click", () => chrome.tabs.create({ url: chrome.runtime.getURL("onboarding.html") + "#setup-guide" }));
+$("tunnel-help").addEventListener("click", () => chrome.tabs.create({ url: chrome.runtime.getURL("settings.html") + "#setup-guide" }));
 $("help").addEventListener("click", () => {
   // The worker owns startup after this popup closes, including with no Agent
   // or tunnel configured: help must be available during initial installation.

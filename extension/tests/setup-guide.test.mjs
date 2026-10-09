@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import {readFile} from "node:fs/promises";
+import {existsSync} from "node:fs";
 const root = p => new URL("../" + p, import.meta.url);
 const [popup, script, settings, guide, style] = await Promise.all(
-  ["popup.html","popup.js","onboarding.html","onboarding.js","onboarding.css"].map(p => readFile(root(p),"utf8")));
+  ["popup.html","popup.js","settings.html","settings.js","settings.css"].map(p => readFile(root(p),"utf8")));
 assert.match(popup,/id="tunnel-help"[^>]*hidden>Help/);
 assert.match(script,/notConfigured = !state\.configured/);
 assert.match(script,/\$\("tunnel-help"\)\.hidden = connection\.state === "ready"/);
 assert.match(script,/tunnel-status-value/);
-assert.match(script,/getURL\("onboarding.html"\) \+ "#setup-guide"/);
+assert.match(script,/getURL\("settings.html"\) \+ "#setup-guide"/);
 assert.match(settings,/<details id="setup-guide" class="setup-guide">/);
 assert.doesNotMatch(settings,/<details id="setup-guide"[^>]*open\b/);
 assert.match(guide,/guide\.open = true/);
@@ -16,6 +17,24 @@ assert.match(style,/\.setup-image img/);
 const paths=[...settings.matchAll(/src="(images\/setup-[^"]+\.png)"/g)].map(x=>x[1]);
 assert.equal(paths.length,5);
 for (const path of paths) {const img=await readFile(root(path));assert.equal(img.subarray(0,8).toString("hex"),"89504e470d0a1a0a");}
+
+assert.equal(JSON.parse(await readFile(root("manifest.json"),"utf8")).options_page,"settings.html");
+for (const path of ["onboarding.html","onboarding.css","onboarding.js"]) {
+  assert.equal(existsSync(root(path)),false,`obsolete ${path} must be removed`);
+}
+assert.equal((settings.match(/<details\b/g)||[]).length,1,"only the setup guide should collapse");
+assert.match(settings,/<p class="field-help setup-requirements"><strong>Requirements:<\/strong> The latest version of Google Chrome and a paid ChatGPT subscription\. ResearchTube is tested with ChatGPT Plus\.<\/p>/);
+assert.match(style,/\.setup-guide-body > \.setup-requirements \{ color: #fff; \}/);
+const guideSource=guide.slice(guide.indexOf("function openSetupGuideFromHash() {"),guide.indexOf('window.addEventListener("hashchange", openSetupGuideFromHash)'));
+const openGuide=new Function("window","document","requestAnimationFrame",'const $=id=>document.getElementById(id);\n'+guideSource+"openSetupGuideFromHash();");
+for (const hash of ["","#setup-guide"]) {
+  let scrolled=0;
+  const element={open:false,scrollIntoView(){scrolled++;}};
+  openGuide({location:{hash}},{getElementById(id){assert.equal(id,"setup-guide");return element;}},callback=>callback());
+  assert.equal(element.open,hash==="#setup-guide");
+  assert.equal(scrolled,hash==="#setup-guide"?1:0);
+}
+
 console.log("Setup guide: ok");
 
 /* Exercise the popup status renderer with representative connection states. */
