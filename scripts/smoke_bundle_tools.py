@@ -9,7 +9,7 @@ TOOLS = {
     'yt-dlp': ('yt-dlp', ('--version',)),
     'deno': ('deno', ('--version',)),
     'ffmpeg': ('ffmpeg', ('-version',)),
-    'ffprobe': ('ffprobe', ('-version',)),
+    'ffprobe': ('ffmpeg', ('-version',)),
     'cloudflared': ('cloudflared', ('--version',)),
 }
 
