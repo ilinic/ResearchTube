@@ -118,7 +118,9 @@ async def stream_bytes(stream, DataReader) -> bytes:
         loaded = int(await reader.load_async(size))
         if loaded != size:
             raise RuntimeError("SPEECH_FILE_FAILED: Windows returned a truncated speech stream.")
-        return bytes(reader.read_bytes(size))
+        value = bytearray(size)
+        reader.read_bytes(value)
+        return bytes(value)
     finally:
         reader.close()
 

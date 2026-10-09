@@ -8,11 +8,15 @@ root = Path(SPECPATH)
 hidden = []
 data = []
 if sys.platform == "win32":
-    for module in ["winrt.system", "winrt.windows.foundation", "winrt.windows.foundation.collections", "winrt.windows.media.playback",
-                   "winrt.windows.media.speechsynthesis", "winrt.windows.storage.streams"]:
+    projections = ["winrt.system", "winrt.windows.foundation", "winrt.windows.foundation.collections",
+                   "winrt.windows.media.playback", "winrt.windows.media.speechsynthesis",
+                   "winrt.windows.storage", "winrt.windows.storage.streams"]
+    for module in projections:
         if importlib.util.find_spec(module) is None:
             raise RuntimeError("Install agent/requirements-build.txt before building: " + module)
-    hidden = collect_submodules("winrt", on_error="raise")
+    # pkgutil recursion does not discover the windows/* namespace parents.
+    # Include projection wrappers as well as their native modules explicitly.
+    hidden = sorted(set(projections + collect_submodules("winrt", on_error="raise")))
     data = collect_data_files("winrt")
 
 a = Analysis([str(root / "researchtube_agent.py")], pathex=[str(root)],

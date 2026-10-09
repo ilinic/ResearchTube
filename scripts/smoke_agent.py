@@ -1,5 +1,6 @@
 """Run real source/frozen Agent startup, Workspace, Custom Tools and speech."""
 import argparse
+import base64
 import json
 from pathlib import Path
 import socket
@@ -30,7 +31,18 @@ def check_agent(agent_dir, executable=None, windows_speech=False):
         if result.returncode:
             raise RuntimeError('Speech helper failed: ' + result.stderr.decode(errors='replace'))
         assert json.loads(result.stdout)['voices'], 'Windows did not expose any speech voices'
-    with tempfile.TemporaryDirectory(prefix='researchtube-cwd-') as cwd:
+        with tempfile.TemporaryDirectory(prefix='researchtube-speech-') as folder:
+            wav = Path(folder) / 'helper.wav'
+            encoded = lambda value: base64.b64encode(value.encode('utf-8')).decode('ascii')
+            result = subprocess.run(helper + ['--action', 'speak', '--text-base64', encoded('ResearchTube test.'),
+                                    '--output-path-base64', encoded(str(wav)), '--play-through-speakers', 'false'],
+                                    capture_output=True, timeout=30)
+            if result.returncode:
+                raise RuntimeError('Speech helper synthesis failed: ' + result.stderr.decode(errors='replace'))
+            assert wav.read_bytes()[:4] == b'RIFF'
+    # Runner cleanup removes disposable folders if a just-killed diagnostic
+    # still holds a Windows directory handle; do not obscure the real failure.
+    with tempfile.TemporaryDirectory(prefix='researchtube-cwd-', ignore_cleanup_errors=True) as cwd:
         for attempt in range(2):
             with socket.socket() as probe:
                 probe.bind(('127.0.0.1', 0))
