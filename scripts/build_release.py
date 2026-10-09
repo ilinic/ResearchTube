@@ -14,14 +14,16 @@ SKIP = {'.git', '__pycache__', 'node_modules', '.venv', 'venv'}
 
 def release_files(root):
     # Explicit roots exclude legacy nested checkouts and user-created Workspace.
-    roots = [root / 'docs', root / 'extension', root / 'agent/tools', root / 'agent/custom-tools',
+    roots = [root / 'docs', root / 'icons', root / 'extension', root / 'agent/tools', root / 'agent/custom-tools',
              root / 'agent/workspace/demo']
-    files = [root / 'README.md']
+    files = [root / 'README.md', root / 'AGENTS.md']
     files += [p for p in (root / 'agent').iterdir() if p.is_file() and (p.suffix in {'.py', '.json', '.txt'} or p.name == 'README.md')]
     for directory in roots:
         if directory.exists():
             files.extend(p for p in directory.rglob('*') if p.is_file())
     for path in sorted(set(files)):
+        if not path.is_file():
+            continue
         rel = path.relative_to(root)
         if any(part in SKIP for part in rel.parts) or path.is_symlink() or path.suffix in {'.pyc', '.pyo', '.log', '.zip'}:
             # The bundled IANA database is a runtime ZIP, not a prior release.

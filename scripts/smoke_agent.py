@@ -7,7 +7,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 import zipfile
 
@@ -24,6 +24,12 @@ def check_agent(agent_dir, executable=None, windows_speech=False):
     sentinel = workspace / 'preserve.txt'
     sentinel.write_text('keep', encoding='utf-8')
     command = [str(executable)] if executable else [sys.executable, str(agent_dir / 'researchtube_agent.py')]
+    if windows_speech:
+        helper = [str(executable), '--windows-speech-helper'] if executable else [sys.executable, str(agent_dir / 'tools/windows-speech/researchtube_speech.py')]
+        result = subprocess.run(helper + ['--action', 'list-voices'], capture_output=True, timeout=30)
+        if result.returncode:
+            raise RuntimeError('Speech helper failed: ' + result.stderr.decode(errors='replace'))
+        assert json.loads(result.stdout)['voices'], 'Windows did not expose any speech voices'
     with tempfile.TemporaryDirectory(prefix='researchtube-cwd-') as cwd:
         for attempt in range(2):
             with socket.socket() as probe:
@@ -40,9 +46,12 @@ def check_agent(agent_dir, executable=None, windows_speech=False):
 
                     def request(path, body=None, timeout=2):
                         payload = json.dumps(body).encode() if body is not None else None
-                        with urlopen(Request(f'http://127.0.0.1:{port}' + path, data=payload,
-                                             headers={'Content-Type': 'application/json'}), timeout=timeout) as response:
-                            return json.load(response)
+                        try:
+                            with urlopen(Request(f'http://127.0.0.1:{port}' + path, data=payload,
+                                                 headers={'Content-Type': 'application/json'}), timeout=timeout) as response:
+                                return json.load(response)
+                        except HTTPError as error:
+                            raise RuntimeError(path + ': ' + error.read().decode(errors='replace')) from error
 
                     deadline = time.monotonic() + 60
                     while True:
@@ -81,7 +90,13 @@ def check_agent(agent_dir, executable=None, windows_speech=False):
                     prompts = log.read().decode(errors='replace').count('Workspace folder [')
                     assert prompts == (1 if attempt == 0 else 0), prompts
                 finally:
-                    process.terminate()
+                    if sys.platform == 'win32':
+                        # Kill only this test's process tree, including diagnostics
+                        # and a one-file bootloader child that can hold cwd open.
+                        subprocess.run(['taskkill', '/PID', str(process.pid), '/T', '/F'],
+                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+                    else:
+                        process.terminate()
                     try:
                         process.wait(timeout=10)
                     except subprocess.TimeoutExpired:
