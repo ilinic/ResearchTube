@@ -8,7 +8,7 @@ root = Path(SPECPATH)
 hidden = []
 data = []
 if sys.platform == "win32":
-    for module in ["winrt.system", "winrt.windows.foundation", "winrt.windows.media.playback",
+    for module in ["winrt.system", "winrt.windows.foundation", "winrt.windows.foundation.collections", "winrt.windows.media.playback",
                    "winrt.windows.media.speechsynthesis", "winrt.windows.storage.streams"]:
         if importlib.util.find_spec(module) is None:
             raise RuntimeError("Install agent/requirements-build.txt before building: " + module)

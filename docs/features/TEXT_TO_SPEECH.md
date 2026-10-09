@@ -35,6 +35,8 @@ ResearchTube does not use `chrome.tabCapture`, does not require an `activeTab` r
 
 Windows speech uses voices exposed by Windows Media Speech Synthesis. Public `voiceId` values are opaque ResearchTube identifiers and never reveal registry paths. File output is WAV and filenames include the selected public voice name.
 
+The Windows EXE includes the WinRT dependencies and starts a separate copy of itself in speech-helper mode. Python mode uses the helper wrapper and requires `python -m pip install -r agent/requirements-windows.txt`; this includes the collection projection needed to enumerate voices. Both modes use the same `agent/windows_speech.py` implementation and external Workspace configuration.
+
 ## Output modes
 
 Exactly one mode is selected:
@@ -51,6 +53,6 @@ When no output path is supplied for a file-producing mode, ResearchTube writes a
 
 The start tool returns immediately. Status exposes engine, output mode, phase, progress, public voice/format metadata and the logical output path after completion. Cancellation stops active local synthesis or browser collection, stops confirmed Translate playback and removes the playback observer and focus emulation while retaining the Google Translate tab.
 
-The primary implementation is in `extension/background.js`, `agent/researchtube_agent.py` and `agent/tools/windows-speech/`.
+The primary implementation is in `extension/background.js`, `agent/researchtube_agent.py` and `agent/windows_speech.py`; `agent/tools/windows-speech/` retains the Python entry wrapper.
 
 The common task and service widget identify speech as a speech operation, including speakers-only requests with `files: []`. Task status exposes the native phase and message, such as opening Google Translate, preparing speech or playing speech; it never claims Workspace file creation for speakers-only output.
