@@ -38,27 +38,27 @@
         <div class="setup-step">
           <h3>Step 1 — Create an OpenAI Tunnel</h3>
           <p>Open <a href="#" data-open="tunnels">OpenAI Platform → Tunnels <svg class="external-link-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7M21 3l-9 9M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg></a>. Create a new tunnel or select an existing one. Use the Platform organization and ChatGPT workspace that should access it. Copy the <code>tunnel_…</code> ID. Creating a tunnel requires <strong>Tunnels: Read + Manage</strong> permission.</p>
-          <figure class="setup-image"><img src="images/setup-01-tunnel.png" width="640" height="360" loading="lazy" alt="Placeholder: Create a tunnel and copy its Tunnel ID"><figcaption>Screenshot 1 — Create a tunnel and copy its Tunnel ID. Replace this placeholder with a screenshot.</figcaption></figure>
+          <figure class="setup-image"><img src="images/setup-01-tunnel.png" loading="lazy" alt="Placeholder: Create a tunnel and copy its Tunnel ID"><figcaption>Screenshot 1 — Create a tunnel and copy its Tunnel ID. Replace this placeholder with a screenshot.</figcaption></figure>
         </div>
         <div class="setup-step">
           <h3>Step 2 — Create a restricted API key</h3>
           <p>Open <a href="#" data-open="apiKeys">OpenAI Platform → API Keys <svg class="external-link-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7M21 3l-9 9M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg></a>, create a <strong>Restricted</strong> key, and grant <strong>Tunnels: Read + Use</strong>. Copy the key when it appears. Never disclose it in a ChatGPT message, screenshot, or support request.</p>
-          <figure class="setup-image"><img src="images/setup-02-api-key.png" width="640" height="360" loading="lazy" alt="Placeholder: Set restricted key permissions to Tunnels Read + Use"><figcaption>Screenshot 2 — Set restricted key permissions to Tunnels Read + Use. Replace this placeholder with a screenshot.</figcaption></figure>
+          <figure class="setup-image"><img src="images/setup-02-api-key.png" loading="lazy" alt="Placeholder: Set restricted key permissions to Tunnels Read + Use"><figcaption>Screenshot 2 — Set restricted key permissions to Tunnels Read + Use. Replace this placeholder with a screenshot.</figcaption></figure>
         </div>
         <div class="setup-step">
           <h3>Step 3 — Connect ResearchTube to the tunnel</h3>
           <p>In <strong>1. Set up OpenAI connection</strong> above, enter your API key and Tunnel ID, then click <strong>Save and test connection</strong>. Look for <strong>Connection successful</strong>. The API key stays in ResearchTube; do not enter it again in ChatGPT.</p>
-          <figure class="setup-image"><img src="images/setup-03-researchtube.png" width="640" height="360" loading="lazy" alt="Placeholder: Enter both values in ResearchTube Settings"><figcaption>Screenshot 3 — Enter both values in ResearchTube Settings. Replace this placeholder with a screenshot.</figcaption></figure>
+          <figure class="setup-image"><img src="images/setup-03-researchtube.png" loading="lazy" alt="Placeholder: Enter both values in ResearchTube Settings"><figcaption>Screenshot 3 — Enter both values in ResearchTube Settings. Replace this placeholder with a screenshot.</figcaption></figure>
         </div>
         <div class="setup-step">
           <h3>Step 4 — Enable ChatGPT Developer Mode</h3>
           <p>Open <a href="#" data-open="chatgpt">ChatGPT <svg class="external-link-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7M21 3l-9 9M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg></a>. Find <strong>Developer Mode</strong> under <strong>Settings → Apps → Advanced Settings</strong> (the location may vary). Enable it if your plan/workspace allows. In managed workspaces, an administrator may need to grant access.</p>
-          <figure class="setup-image"><img src="images/setup-04-developer-mode.png" width="640" height="360" loading="lazy" alt="Placeholder: Enable Developer Mode in ChatGPT settings"><figcaption>Screenshot 4 — Enable Developer Mode in ChatGPT settings. Replace this placeholder with a screenshot.</figcaption></figure>
+          <figure class="setup-image"><img src="images/setup-04-developer-mode.png" loading="lazy" alt="Placeholder: Enable Developer Mode in ChatGPT settings"><figcaption>Screenshot 4 — Enable Developer Mode in ChatGPT settings. Replace this placeholder with a screenshot.</figcaption></figure>
         </div>
         <div class="setup-step">
           <h3>Step 5 — Add ResearchTube as a custom MCP plugin</h3>
           <p>Visit <a href="#" data-open="chatgpt">ChatGPT Plugins <svg class="external-link-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7M21 3l-9 9M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg></a>, click <strong>+</strong> → <strong>Add custom MCP server</strong>. Name it <strong>ResearchTube</strong><button id="copy-app-name" class="copy-inline" type="button">Copy name</button>. Under <strong>Connection</strong>, choose <strong>Tunnel</strong> and select or paste your Tunnel ID. Review any permissions/security prompts and create the plugin. ResearchTube must be connected while ChatGPT discovers tools.</p>
-          <figure class="setup-image"><img src="images/setup-05-chatgpt-plugin.png" width="640" height="360" loading="lazy" alt="Placeholder: Choose Tunnel when adding a custom MCP server"><figcaption>Screenshot 5 — Choose Tunnel when adding a custom MCP server. Replace this placeholder with a screenshot.</figcaption></figure>
+          <figure class="setup-image"><img src="images/setup-05-chatgpt-plugin.png" loading="lazy" alt="Placeholder: Choose Tunnel when adding a custom MCP server"><figcaption>Screenshot 5 — Choose Tunnel when adding a custom MCP server. Replace this placeholder with a screenshot.</figcaption></figure>
         </div>
         <div class="setup-step">
           <h3>Step 6 — Verify the connection</h3>
