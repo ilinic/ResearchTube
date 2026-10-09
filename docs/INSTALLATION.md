@@ -101,7 +101,7 @@ Do not use an organisation-owner, administrator or unrestricted key. The key is 
 
 1. Open [ChatGPT Plugins](https://chatgpt.com/plugins), select **+ → Add custom MCP server** (older labels: Create app/connector).
 2. Choose **Tunnel** under Connection and select/paste the same Tunnel ID.
-3. Name it **ResearchTube**. Where server authentication is requested, choose **No authentication**; the restricted runtime key belongs only in Extension Settings. Review and create/install the connection.
+3. Name it **ResearchTube** and upload `icons/researchtube-64.png` from the extracted ResearchTube folder as the plugin icon. Where server authentication is requested, choose **No authentication**; the restricted runtime key belongs only in Extension Settings. Review and create/install the connection.
 4. Open a new conversation and select or mention ResearchTube.
 
 If **Add custom MCP server** is missing, check your plan and workspace permissions; some interfaces still require enabling **Developer Mode** in ChatGPT Settings. ChatGPT's interface labels can change. The essential operation is adding the private MCP connection backed by the configured Tunnel ID. See [User help](HELP.md#4-create-the-researchtube-connection-in-chatgpt) for missing controls/workspace association and links to current official OpenAI instructions. ResearchTube itself implements the tunnel connection; no separate OpenAI `tunnel-client` or cloudflared installation is needed for this route.

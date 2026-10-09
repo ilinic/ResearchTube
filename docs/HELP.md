@@ -59,7 +59,7 @@ The popup's tunnel row updates when saved settings or connection results change.
 ### 4. Create the ResearchTube connection in ChatGPT
 
 1. Open [ChatGPT Plugins](https://chatgpt.com/plugins). Choose **+ → Add custom MCP server** (older interfaces may say **Create app/connector**).
-2. Name it **ResearchTube** and choose **Tunnel** under **Connection**. Select/paste the same tunnel identifier used in Extension Settings.
+2. Name it **ResearchTube** and upload `icons/researchtube-64.png` from the extracted ResearchTube folder as the plugin icon. Choose **Tunnel** under **Connection**. Select/paste the same tunnel identifier used in Extension Settings.
 3. ResearchTube's tunnel runtime key belongs in the Extension, not this form. Where server authentication is requested, use **No authentication**: ResearchTube does not provide a separate OAuth login. Review the connection notice and create/install the private connection.
 4. Start a new chat, type `@`, and select **ResearchTube**, or enable it in the chat's tools menu. Try a simple request such as `@ResearchTube Search YouTube for recent videos about quantum computing and summarize their main ideas.`
 
