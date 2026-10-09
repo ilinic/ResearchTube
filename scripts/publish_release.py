@@ -58,9 +58,11 @@ def publish(archive, repo, commit, root=ROOT):
         checksum.write_text(digest + '  ResearchTube.zip\n', encoding='utf-8')
         notes = directory / 'notes.md'
         phase = 'Pre-release for testing.' if metadata['prerelease'] else 'Stable release.'
-        notes.write_text(f"{phase}\n\nExtension: {metadata['extensionVersion']}\nAgent: {metadata['agentVersion']}\n\n"
-                         'Download **ResearchTube.zip** from Assets and extract the complete archive. '
-                         'It includes the Windows Agent EXE, Python sources for Windows/Linux/macOS, '
+        download = f'https://github.com/{repo}/releases/download/{tag}/ResearchTube.zip'
+        notes.write_text(f"**[Download ResearchTube.zip]({download})**\n\n"
+                         f"{phase}\n\nExtension: {metadata['extensionVersion']}\nAgent: {metadata['agentVersion']}\n\n"
+                         'Extract the complete archive. '
+                         'It includes the Agent (Windows EXE and Python launch mode for Linux/macOS), '
                          'the Chrome Extension, documentation and demo.\n\n'
                          'Windows: open `agent/ResearchTubeAgent.exe`. '
                          'Linux/macOS: run `python3 agent/researchtube_agent.py`. '
