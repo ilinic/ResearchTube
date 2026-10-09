@@ -130,7 +130,9 @@ def main():
                 archive.extractall(folder)
             agent = Path(folder) / 'ResearchTube/agent'
             check_agent(agent, windows_speech=args.windows_speech)
-            check_agent(agent, agent / 'ResearchTubeAgent.exe', args.windows_speech)
+            executable = agent / 'ResearchTubeAgent.exe'
+            if executable.is_file():
+                check_agent(agent, executable, args.windows_speech)
     elif args.agent_dir:
         check_agent(args.agent_dir.resolve(), args.frozen.resolve() if args.frozen else None, args.windows_speech)
     else:

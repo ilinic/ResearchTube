@@ -28,7 +28,7 @@ ResearchTube uses an OpenAI Secure MCP Tunnel for the private ChatGPT connection
 
 ## Start here
 
-[Download ResearchTube](https://github.com/ilinic/ResearchTube/releases): choose **ResearchTube.zip** under **Assets**. Release titles show the Extension and Agent versions; preliminary builds are marked **Pre-release**.
+[Download ResearchTube](https://github.com/ilinic/ResearchTube/releases): choose the archive matching your operating system and processor under **Assets** (Windows x64, Linux x64, macOS Apple silicon or macOS Intel). Release titles show the Extension and Agent versions; preliminary builds are marked **Pre-release**.
 
 | Goal | Document |
 | --- | --- |
@@ -52,11 +52,11 @@ Chrome Extension
   ↕ 127.0.0.1
 Local Agent
   ↕
-Workspace + ffmpeg + ffprobe + yt-dlp + optional cloudflared
+Workspace + ffmpeg/ffprobe + yt-dlp + Deno + cloudflared (included in platform archives)
 ```
 
 - `extension/` is the unpacked Manifest V3 Chrome extension and MCP server.
-- `agent/` is the loopback Local Agent: Windows EXE in the shared release ZIP, or Python 3.10+ source on Windows, Linux and macOS.
+- `agent/` is the loopback Local Agent: Windows EXE in the Windows archive, or Python 3.10+ source in each platform archive.
 - `agent/workspace/` is the default Workspace; `workspacePath` in `agent/agent-config.json` can select another directory.
 - `docs/` contains the public user, troubleshooting and development documentation.
 

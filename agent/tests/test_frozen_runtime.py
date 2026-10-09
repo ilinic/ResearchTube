@@ -63,6 +63,7 @@ class FrozenRuntimeTests(unittest.TestCase):
             executable = root / 'built.exe'
             executable.write_bytes(b'MZfixture')
             output = package_release(root, executable, root / 'out/release.zip')
+            source_output = package_release(root, None, root / 'out/linux.zip', 'linux-x64')
             with zipfile.ZipFile(output) as archive:
                 names = archive.namelist()
                 self.assertIn('ResearchTube/agent/ResearchTubeAgent.exe', names)
@@ -75,6 +76,11 @@ class FrozenRuntimeTests(unittest.TestCase):
                 self.assertIn('ResearchTube/agent/tools/yt-dlp/yt-dlp-plugins/bgutil-ytdlp-pot-provider.zip', names)
                 self.assertFalse(any('secret' in name or '__pycache__' in name or 'node_modules' in name or '/agent/agent/' in name for name in names))
                 self.assertEqual(json.loads(archive.read('ResearchTube/agent/agent-config.json'))['workspacePath']['value'], '')
+                self.assertIsNone(archive.testzip())
+            with zipfile.ZipFile(source_output) as archive:
+                names = archive.namelist()
+                self.assertNotIn('ResearchTube/agent/ResearchTubeAgent.exe', names)
+                self.assertEqual(json.loads(archive.read('ResearchTube/release-info.json'))['platform'], 'linux-x64')
                 self.assertIsNone(archive.testzip())
             self.assertEqual(json.loads((root / 'agent/agent-config.json').read_text())['workspacePath']['value'], 'PRIVATE')
             with self.assertRaises(FileExistsError):

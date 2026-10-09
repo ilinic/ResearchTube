@@ -1,6256 +1,850 @@
-#!/usr/bin/env python3
-"""ResearchTube Local Agent â€” Iteration 2 download Task service.
-
-The Agent is a loopback-only HTTP service. Browser code owns the public MCP
-contract; this process owns executable discovery, workspace sandboxing, and
-independent yt-dlp subprocesses.
-"""
-
-from __future__ import annotations
-
-import argparse
-import asyncio
-import base64
-import ctypes
-from html import escape
-import json
-import math
-import mimetypes
-import os
-import platform
-import re
-import secrets
-import shutil
-import struct
-import string
-import sys
-import tempfile
-import time
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, Callable
-from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs, quote, unquote, urlparse
-from urllib.request import Request, urlopen
-
-try:
-    from .runtime_paths import installation_root
-    from .task_history import TaskHistory
-    from .browser_resources import save_browser_resource
-except ImportError:
-    from runtime_paths import installation_root
-    from task_history import TaskHistory
-    from browser_resources import save_browser_resource
-
-AGENT_VERSION = "2.2.71"
-INTERFACE_VERSION = 78
-DEFAULT_PORT = 17843
-MAX_REQUEST_BODY_BYTES = 64 * 1024
-MAX_GOOGLE_TRANSLATE_AUDIO_BYTES = 16 * 1024 * 1024
-TASK_POLL_INTERVAL_MS = 1_000
-SPEECH_MAX_TEXT_BYTES = 60 * 1024
-TASK_HEARTBEAT_SECONDS = 5
-MAX_DIAGNOSTIC_LINES = 20
-MAX_DIAGNOSTIC_LINE_LENGTH = 240
-MAX_TASK_EVENTS = 250
-MAX_TASK_EVENT_MESSAGE_LENGTH = 240
-YTDLP_FORMATS_TIMEOUT_SECONDS = 30
-ROOT = installation_root(__file__)
-CONFIG_PATH = ROOT / "agent-config.json"
-WORKSPACE_PATH = ROOT / "workspace"
-TOOLS_PATH = ROOT / "tools"
-WINDOWS_SPEECH_SCRIPT_PATH = TOOLS_PATH / "windows-speech" / "researchtube_speech.py"
-FONTS_PATH = TOOLS_PATH / "fonts"
-YOUTUBE_POT_PROVIDER_PATH = TOOLS_PATH / "youtube-pot-provider"
-YOUTUBE_POT_PROVIDER_SERVER_PATH = YOUTUBE_POT_PROVIDER_PATH / "server"
-YOUTUBE_POT_PLUGIN_PATH = TOOLS_PATH / "yt-dlp" / "yt-dlp-plugins" / "bgutil-ytdlp-pot-provider.zip"
-YOUTUBE_POT_PROVIDER_READY_PATH = YOUTUBE_POT_PROVIDER_PATH / ".researchtube-provider-ready.json"
-DEFAULT_DOWNLOAD_DIRECTORY = "downloads"
-MAX_LOGICAL_PATH_LENGTH = 1_024
-MAX_LOGICAL_COMPONENT_LENGTH = 240
-MAX_WORKSPACE_LIST_ENTRIES = 500
-MAX_PUBLIC_SHARE_DIRECTORY_ENTRIES = 500
-MEDIA_PROBE_TIMEOUT_SECONDS = 15
-CAPTURE_FRAME_TIMEOUT_SECONDS = 60
-CAMERA_CAPTURE_TIMEOUT_SECONDS = 20
-CAMERA_AUTO_TARGET_FPS = (60.0, 30.0)
-CAMERA_MIN_ADVERTISED_FPS = 25.0
-CAMERA_MAX_ADVERTISED_FPS = 120.0
-CAMERA_TARGET_FPS_TOLERANCE = 1.0
-VISUAL_MAP_TIMEOUT_SECONDS = 180
-VISUAL_MAP_MAX_TOTAL_FRAMES = 120
-VISUAL_MAP_MAX_GRID_SIDE = 20
-VISUAL_MAP_MAX_CELLS = 120
-DEFAULT_VISUAL_MAP_MAX_DIMENSION = 4096
-DEFAULT_TIMESTAMP_FONT_SIZE_PX = 24
-DEFAULT_VISUAL_MAP_TIMESTAMP_FONT = "DejaVuSans.ttf"
-DEFAULT_VISUAL_MAP_SCENE_DETECT_THRESHOLD = 10.0
-VISUAL_MAP_SCENE_MIN_DISTANCE_SECONDS = 2.0
-YOUTUBE_CAPTURE_FRAME_TIMEOUT_SECONDS = 90
-YOUTUBE_CAPTURE_PRE_ROLL_SECONDS = 12.0
-YOUTUBE_CAPTURE_POST_ROLL_SECONDS = 3.0
-YOUTUBE_CAPTURE_SECTION_MERGE_GAP_SECONDS = 10.0
-YOUTUBE_CAPTURE_MAX_SECTION_SECONDS = 60.0
-YOUTUBE_CAPTURE_SECTION_DELAY_SECONDS = 2.0
-YOUTUBE_CAPTURE_SECTION_RETRY_DELAYS_SECONDS = (3.0, 6.0)
-YOUTUBE_CAPTURE_FILE_PROGRESS_INTERVAL_SECONDS = 0.5
-DEFAULT_TOOL_LIMITS = {
-    "mediaCaptureFrameMaxFrames": 20,
-    "mediaClipMaxSegments": 20,
-    "cameraRecordAudioMaxMinutes": 10,
-    "cameraRecordVideoMaxMinutes": 1,
-    "libraryStoreMaxFiles": 5,
-    "libraryStoreMaxFileSizeMiB": 20,
-    "mediaToChatMaxFiles": 5,
-    "mediaToChatMaxFileSizeMiB": 20,
-    "completedTaskHistoryLimit": 2000,
-}
-TOOL_LIMIT_CEILINGS = {
-    "mediaCaptureFrameMaxFrames": 100,
-    "mediaClipMaxSegments": 100,
-    "cameraRecordAudioMaxMinutes": 1440,
-    "cameraRecordVideoMaxMinutes": 1440,
-    "libraryStoreMaxFiles": 100,
-    "libraryStoreMaxFileSizeMiB": 512,
-    "mediaToChatMaxFiles": 100,
-    "mediaToChatMaxFileSizeMiB": 512,
-    "completedTaskHistoryLimit": 100_000,
-}
-DEFAULT_MEDIA_CLIP_DIRECTORY = "clips"
-DEBUG_BANNER_SWITCH = "--silent-debugger-extension-api"
-MAX_CLIPBOARD_TEXT_BYTES = 2 * 1024 * 1024
-MAX_CLIPBOARD_IMAGE_FILE_BYTES = 20 * 1024 * 1024
-MAX_CLIPBOARD_IMAGE_PIXELS = 50_000_000
-MAX_CLIPBOARD_IMAGE_DIB_BYTES = 200 * 1024 * 1024
-CLIPBOARD_OPEN_ATTEMPTS = 4
-MEDIA_PROBE_SECTIONS = {
-    "format": ("-show_format", "format"),
-    "streams": ("-show_streams", "streams"),
-    "chapters": ("-show_chapters", "chapters"),
-    "programs": ("-show_programs", "programs"),
-}
-WINDOWS_INVALID_FILENAME_CHARACTERS = frozenset('<>:"|?*')
-WINDOWS_RESERVED_BASENAMES = frozenset({
-    "CON", "PRN", "AUX", "NUL", *(f"COM{index}" for index in range(1, 10)), *(f"LPT{index}" for index in range(1, 10)),
-})
-class AgentApiError(Exception):
-    def __init__(self, code: str, message: str, detail: str | None = None) -> None:
-        super().__init__(message)
-        self.code, self.message, self.detail = code, message, detail
-
-
-try:
-    from .custom_tools import CustomToolRegistry
-except ImportError:  # Direct python researchtube_agent.py launch.
-    from custom_tools import CustomToolRegistry
-
-
-CUSTOM_TOOLS = CustomToolRegistry(ROOT / "custom-tools", AgentApiError, lambda: configured_task_history_limit(), logger=lambda message: log(message))
-
-
-@dataclass(frozen=True)
-class CameraMode:
-    width: int
-    height: int
-    fps: float | None = None
-
-
-@dataclass
-class CameraDevice:
-    """An Agent-only camera record. native_identity is never serialized or logged."""
-    camera_id: str
-    name: str
-    backend: str
-    native_identity: str
-    audio_identity: str | None
-    modes: tuple[CameraMode, ...]
-    selected_mode: CameraMode | None
-
-
-CAMERA_DEVICES_BY_NATIVE: dict[tuple[str, str], CameraDevice] = {}
-
-
-def executable_names(name: str) -> tuple[str, ...]:
-    return (f"{name}.exe", name) if os.name == "nt" else (name, f"{name}.exe")
-
-
-COMPONENTS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
-    "ytDlp": (executable_names("yt-dlp"), ("--version",)),
-    "deno": (executable_names("deno"), ("--version",)),
-    "ffmpeg": (executable_names("ffmpeg"), ("-version",)),
-    "ffprobe": (executable_names("ffprobe"), ("-version",)),
-    "cloudflared": (executable_names("cloudflared"), ("--version",)),
-}
-COMPONENT_LABELS = {"ytDlp": "yt-dlp", "deno": "Deno", "ffmpeg": "ffmpeg", "ffprobe": "ffprobe", "cloudflared": "cloudflared", "youtubePoTokenProvider": "YouTube PO-token provider"}
-COMPONENT_TOOL_DIRECTORIES = {"ytDlp": "yt-dlp", "deno": "deno", "ffmpeg": "ffmpeg", "ffprobe": "ffmpeg", "cloudflared": "cloudflared"}
-PUBLIC_TUNNEL_URL: str | None = None
-PUBLIC_TUNNEL_PROCESS: asyncio.subprocess.Process | None = None
-PUBLIC_TUNNEL_READY = asyncio.Event()
-PUBLIC_TUNNEL_WATCHERS: list[asyncio.Task[None]] = []
-PUBLIC_SHARE_SERVER: asyncio.AbstractServer | None = None
-PUBLIC_SHARE_FOLDER: ResolvedWorkspacePath | None = None
-PUBLIC_SHARE_FILE: ResolvedWorkspacePath | None = None
-PUBLIC_SHARE_FILE_TYPES: tuple[str, ...] = ()
-PUBLIC_SHARE_EXTERNAL_PROBE: dict[str, Any] = {"state": "not_requested", "provider": "wsrv.nl", "probePath": None, "httpStatus": None, "contentType": None}
-PUBLIC_SHARE_LOCK = asyncio.Lock()
-PUBLIC_SHARE_FILE_TYPE_SUFFIXES: dict[str, frozenset[str]] = {
-    "images": frozenset({".avif", ".bmp", ".gif", ".jpeg", ".jpg", ".png", ".svg", ".webp"}),
-    "audio": frozenset({".aac", ".flac", ".m4a", ".mp3", ".ogg", ".opus", ".wav", ".weba"}),
-    "video": frozenset({".avi", ".m4v", ".mkv", ".mov", ".mp4", ".mpeg", ".mpg", ".webm"}),
-    "documents": frozenset({".csv", ".html", ".htm", ".json", ".md", ".pdf", ".rtf", ".text", ".txt", ".xml"}),
-    "archives": frozenset({".7z", ".bz2", ".gz", ".rar", ".tar", ".xz", ".zip"}),
-}
-PUBLIC_SHARE_FILE_TYPE_NAMES = frozenset((*PUBLIC_SHARE_FILE_TYPE_SUFFIXES, "other", "all"))
-
-
-@dataclass(frozen=True)
-class ComponentDiscovery:
-    source: str | None
-    executable: str | None
-    error: str | None = None
-
-
-def log(message: str, *, error: bool = False, color: str | None = None) -> None:
-    prefix = datetime.now().strftime("[%H:%M:%S]")
-    stream = sys.stderr if error else sys.stdout
-    line = f"{prefix} {'ERROR ' if error else ''}{message}"
-    # Keep redirected logs plain, while making the first interactive startup
-    # line easy to spot in the Agent console.
-    if color == "red" and stream.isatty():
-        line = f"\x1b[31m{line}\x1b[0m"
-    print(line, file=stream, flush=True)
-
-
-def clear_console() -> None:
-    """Clear an interactive terminal before the Agent prints its startup health."""
-    if not sys.stdout.isatty():
-        return
-    try:
-        os.system("cls" if os.name == "nt" else "clear")
-    except OSError:
-        pass
-
-
-def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-
-
-def read_agent_config() -> dict[str, Any]:
-    """Unwrap editable value/comment entries at the single configuration boundary."""
-    try:
-        document = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise AgentApiError("CONFIG_INVALID", "agent-config.json could not be read as JSON.") from error
-    if not isinstance(document, dict):
-        raise AgentApiError("CONFIG_INVALID", "agent-config.json must contain an object.")
-
-    def setting(entry: Any, name: str) -> Any:
-        if not isinstance(entry, dict) or "value" not in entry or set(entry) - {"value", "comment"}:
-            raise AgentApiError("CONFIG_INVALID", f"{name} must be an object containing value and an optional comment.")
-        if "comment" in entry and not isinstance(entry["comment"], str):
-            raise AgentApiError("CONFIG_INVALID", f"{name}.comment must be text.")
-        return entry["value"]
-
-    result = {}
-    for name, entry in document.items():
-        if name == "limits":
-            if not isinstance(entry, dict):
-                raise AgentApiError("CONFIG_INVALID", "limits in agent-config.json must be an object.")
-            result[name] = {key: setting(value, f"limits.{key}") for key, value in entry.items()}
-        else:
-            result[name] = setting(entry, name)
-    return result
-
-
-def configured_port() -> int:
-    try:
-        port = read_agent_config().get("port")
-        if isinstance(port, int) and not isinstance(port, bool) and 1 <= port <= 65535:
-            return port
-    except AgentApiError:
-        pass
-    return DEFAULT_PORT
-
-
-def configured_workspace_path() -> Path:
-    """Resolve the trusted local setting once per run, before Workspace I/O."""
-    value = read_agent_config().get("workspacePath", "workspace")
-    if not isinstance(value, str) or not value.strip() or "\0" in value:
-        raise AgentApiError("CONFIG_INVALID", "workspacePath must be a non-empty directory path.")
-    try:
-        path = Path(value.strip())
-        return (path if path.is_absolute() else ROOT / path).resolve()
-    except (OSError, ValueError, RuntimeError) as error:
-        raise AgentApiError("CONFIG_INVALID", "workspacePath could not be resolved.") from error
-
-
-def startup_workspace_path() -> Path:
-    """Ask only for an explicitly unset root and persist the choice locally."""
-    config = read_agent_config()
-    value = config.get("workspacePath", "workspace")
-    if not isinstance(value, str):
-        raise AgentApiError("CONFIG_INVALID", "workspacePath must be text.")
-    if value.strip():
-        return configured_workspace_path()
-    default = (ROOT / "workspace").resolve()
-    try:
-        chosen = input(f"Workspace folder [{default}]: ").strip() or "workspace"
-    except (EOFError, KeyboardInterrupt) as error:
-        raise AgentApiError("WORKSPACE_SETUP_REQUIRED", "Set workspacePath in agent-config.json or start the Agent in an interactive terminal.") from error
-    if "\0" in chosen:
-        raise AgentApiError("CONFIG_INVALID", "workspacePath must be a valid directory path.")
-    path = Path(chosen)
-    path = (path if path.is_absolute() else ROOT / path).resolve()
-    path.mkdir(parents=True, exist_ok=True)
-    document = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-    entry = document.get("workspacePath", {})
-    document["workspacePath"] = {**entry, "value": chosen}
-    # Replace only the configuration after writing a complete JSON document.
-    temporary = None
-    try:
-        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=CONFIG_PATH.parent, prefix=".agent-config-", suffix=".tmp", delete=False) as stream:
-            temporary = Path(stream.name)
-            json.dump(document, stream, ensure_ascii=False, indent=2)
-            stream.write("\n")
-        temporary.replace(CONFIG_PATH)
-    finally:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
-    return path
-
-
-def configured_tool_limits() -> dict[str, int]:
-    """Read the single user config on demand, so edits apply to the next call."""
-    config = read_agent_config()
-    values = config.get("limits", {})
-    if not isinstance(values, dict):
-        raise AgentApiError("CONFIG_INVALID", "limits in agent-config.json must be an object.")
-    result = dict(DEFAULT_TOOL_LIMITS)
-    for name, value in values.items():
-        if name not in result:
-            raise AgentApiError("CONFIG_INVALID", f"limits.{name} is not a supported setting.")
-        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= TOOL_LIMIT_CEILINGS[name]:
-            raise AgentApiError("CONFIG_INVALID", f"limits.{name} must be an integer from 1 to {TOOL_LIMIT_CEILINGS[name]}.")
-        result[name] = value
-    return result
-
-
-def configured_task_history_limit() -> int:
-    # Cleanup must remain bounded even while a user is editing invalid JSON.
-    try:
-        return configured_tool_limits()["completedTaskHistoryLimit"]
-    except AgentApiError:
-        return DEFAULT_TOOL_LIMITS["completedTaskHistoryLimit"]
-
-
-def configured_new_tools_default() -> bool:
-    value = read_agent_config().get("newToolsEnabledByDefault", True)
-    if not isinstance(value, bool):
-        raise AgentApiError("CONFIG_INVALID", "newToolsEnabledByDefault must be a boolean.")
-    return value
-
-
-def configured_composer_auto_send_timeout() -> int:
-    value = read_agent_config().get("composerAutoSendTimeoutSeconds", 20)
-    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 3600:
-        raise AgentApiError("CONFIG_INVALID", "composerAutoSendTimeoutSeconds must be an integer from 1 to 3600.")
-    return value
-
-
-def configured_composer_media_retry() -> dict[str, int]:
-    config = read_agent_config()
-    result = {}
-    for name, default, maximum in [("composerMediaRetryCount", 15, 300), ("composerMediaRetryIntervalSeconds", 2, 60)]:
-        value = config.get(name, default)
-        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= maximum:
-            raise AgentApiError("CONFIG_INVALID", f"{name} must be an integer from 1 to {maximum}.")
-        result["retryCount" if name == "composerMediaRetryCount" else "retryIntervalSeconds"] = value
-    return result
-
-
-def configured_browser_study_detailed_logging() -> bool:
-    value = read_agent_config().get("browserStudyDetailedLogging", True)
-    if not isinstance(value, bool):
-        raise AgentApiError("CONFIG_INVALID", "browserStudyDetailedLogging must be a boolean.")
-    return value
-
-
-def configured_browser_study_group_tabs() -> bool:
-    value = read_agent_config().get("browserStudyGroupTabs", True)
-    if not isinstance(value, bool):
-        raise AgentApiError("CONFIG_INVALID", "browserStudyGroupTabs must be a boolean.")
-    return value
-
-
-def configured_browser_study_observation() -> dict[str, int]:
-    config = read_agent_config()
-    result = {}
-    for name, output, default, minimum, maximum in [
-        ("browserStudyMaxNodes", "maxNodes", 200, 1, 1000),
-        ("browserStudyMaxChars", "maxChars", 48000, 1000, 100000),
-    ]:
-        value = config.get(name, default)
-        if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
-            raise AgentApiError("CONFIG_INVALID", f"{name} must be an integer from {minimum} to {maximum}.")
-        result[output] = value
-    return result
-
-
-def configured_media_widget_handshake_timeout() -> int:
-    value = read_agent_config().get("mediaWidgetHandshakeTimeoutSeconds", 10)
-    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 300:
-        raise AgentApiError("CONFIG_INVALID", "mediaWidgetHandshakeTimeoutSeconds must be an integer from 1 to 300.")
-    return value
-
-
-def configured_visual_map_timestamp_font() -> str:
-    """Return the configured font filename, never a path outside tools/fonts."""
-    try:
-        value = read_agent_config().get("visualMapTimestampFont", DEFAULT_VISUAL_MAP_TIMESTAMP_FONT)
-    except AgentApiError:
-        return DEFAULT_VISUAL_MAP_TIMESTAMP_FONT
-    if not isinstance(value, str) or not value or "/" in value or "\\" in value or Path(value).name != value or Path(value).suffix.lower() not in {".ttf", ".otf"}:
-        raise AgentApiError("VISUAL_MAP_TIMESTAMP_FONT_INVALID", "visualMapTimestampFont must be a .ttf or .otf filename from tools/fonts.")
-    return value
-
-
-def workspace_health() -> dict[str, str | int | None]:
-    try:
-        WORKSPACE_PATH.mkdir(parents=True, exist_ok=True)
-        return {"status": "available", "availableBytes": shutil.disk_usage(WORKSPACE_PATH).free}
-    except OSError as error:
-        log(f"workspace health check failed at {WORKSPACE_PATH}: {error.__class__.__name__}", error=True)
-        return {"status": "error", "availableBytes": None}
-
-
-def local_executable(path: Path, root: Path) -> Path | None:
-    """Accept a file only when it stays inside the designated Agent directory."""
-    try:
-        resolved = path.resolve(strict=True)
-        resolved.relative_to(root.resolve())
-        return resolved if resolved.is_file() else None
-    except (OSError, ValueError):
-        return None
-
-
-def unique_local_matches(paths: list[Path], root: Path) -> list[Path]:
-    matches: dict[str, Path] = {}
-    for path in paths:
-        resolved = local_executable(path, root)
-        if resolved is not None:
-            matches[str(resolved)] = resolved
-    return [matches[key] for key in sorted(matches)]
-
-
-def find_component(name: str, candidates: tuple[str, ...]) -> ComponentDiscovery:
-    """Resolve the known local tools layout before PATH.
-
-    Supplied archives may keep their own top-level directories. Search only the
-    designated component directory under tools/, recursively. This supports
-    ordinary extracted archives without ever searching the user's disk. Each
-    resolved file is also checked to remain inside tools/; symlinks cannot turn
-    the bounded traversal into a path escape.
-    """
-    tool_directory = TOOLS_PATH / COMPONENT_TOOL_DIRECTORIES[name]
-    direct_paths = [tool_directory / candidate for candidate in candidates]
-    bin_paths = [tool_directory / "bin" / candidate for candidate in candidates]
-    package_paths: list[Path] = []
-    try:
-        packages = sorted(item for item in tool_directory.iterdir() if item.is_dir() and not item.is_symlink())
-    except OSError:
-        packages = []
-    for package in packages:
-        package_paths.extend(package / candidate for candidate in candidates)
-        package_paths.extend(package / "bin" / candidate for candidate in candidates)
-
-    recursive_paths: list[Path] = []
-    try:
-        for candidate in candidates:
-            recursive_paths.extend(tool_directory.rglob(candidate))
-    except OSError:
-        pass
-
-    for paths in (direct_paths, bin_paths, package_paths, recursive_paths):
-        matches = unique_local_matches(paths, TOOLS_PATH)
-        if len(matches) == 1:
-            return ComponentDiscovery("local", str(matches[0]))
-        if len(matches) > 1:
-            return ComponentDiscovery(
-                "local", None,
-                f"Multiple {COMPONENT_LABELS[name]} executables were found in the local tools folder. Keep one package there.",
-            )
-
-    for candidate in candidates:
-        resolved = shutil.which(candidate)
-        if resolved:
-            return ComponentDiscovery("path", str(Path(resolved).resolve()))
-    return ComponentDiscovery(None, None)
-
-
-def resolve_deno_runtime() -> str | None:
-    """Return one explicitly configured local/PATH Deno executable, if any.
-
-    Deno is optional for the Agent itself. When present, yt-dlp receives the
-    resolved executable explicitly rather than relying on its own process PATH.
-    An ambiguous local tools folder is a configuration error, never a reason to
-    choose an arbitrary executable.
-    """
-    discovery = find_component("deno", COMPONENTS["deno"][0])
-    if discovery.error:
-        raise AgentApiError("DENO_DISCOVERY_ERROR", "Deno discovery is ambiguous.", discovery.error)
-    return discovery.executable
-
-
-def yt_dlp_js_runtime_arguments(deno_executable: str | None) -> list[str]:
-    """Build deterministic yt-dlp JS-runtime arguments for resolved Deno."""
-    if not deno_executable:
-        return []
-    # Select the resolved local Deno even if another runtime is present on PATH.
-    return ["--no-js-runtimes", "--js-runtimes", f"deno:{deno_executable}"]
-
-
-def youtube_pot_provider_status(deno_executable: str | None = None) -> dict[str, str]:
-    """Describe the mandatory local BgUtils provider without exposing paths."""
-    if not YOUTUBE_POT_PLUGIN_PATH.is_file():
-        return {"state": "notInstalled", "provider": "bgutil"}
-    if not YOUTUBE_POT_PROVIDER_SERVER_PATH.is_dir():
-        return {"state": "incomplete", "provider": "bgutil"}
-    if not YOUTUBE_POT_PROVIDER_READY_PATH.is_file():
-        return {"state": "notReady", "provider": "bgutil"}
-    if deno_executable is None:
-        try:
-            deno_executable = resolve_deno_runtime()
-        except AgentApiError:
-            deno_executable = None
-    if not deno_executable:
-        return {"state": "runtimeMissing", "provider": "bgutil"}
-    return {"state": "ready", "provider": "bgutil"}
-
-
-async def youtube_pot_provider_health() -> tuple[str, dict[str, str | None]]:
-    """Expose the installed provider as a first-class mandatory Agent tool."""
-    state = await asyncio.to_thread(youtube_pot_provider_status)
-    base = {"source": "local", "privatePath": str(YOUTUBE_POT_PROVIDER_PATH)}
-    if state["state"] == "ready":
-        try:
-            marker = json.loads(YOUTUBE_POT_PROVIDER_READY_PATH.read_text(encoding="utf-8"))
-            version = marker.get("version") if isinstance(marker, dict) else None
-        except (OSError, json.JSONDecodeError):
-            version = None
-        return "youtubePoTokenProvider", {"status": "available", "version": version if isinstance(version, str) else "bgutil", **base, "message": None}
-    if state["state"] == "notInstalled":
-        return "youtubePoTokenProvider", {"status": "missing", "version": None, **base, "message": "Run install-youtube-po-token-provider.ps1."}
-    messages = {
-        "incomplete": "Provider files are incomplete. Run install-youtube-po-token-provider.ps1 again.",
-        "notReady": "Provider dependencies are not approved. Re-run install-youtube-po-token-provider.ps1.",
-        "runtimeMissing": "Deno is required by the YouTube PO-token provider.",
-    }
-    return "youtubePoTokenProvider", {"status": "error", "version": None, **base, "message": messages.get(state["state"], "Provider is unavailable.")}
-
-
-def yt_dlp_youtube_arguments(deno_executable: str | None) -> list[str]:
-    """Use the same runtime/client/provider setup for every YouTube call."""
-    arguments = yt_dlp_js_runtime_arguments(deno_executable)
-    provider = youtube_pot_provider_status(deno_executable)
-    if provider["state"] != "ready":
-        raise AgentApiError("YOUTUBE_POT_PROVIDER_NOT_AVAILABLE", "The mandatory YouTube PO-token provider is not ready. Run install-youtube-po-token-provider.ps1 and restart the Local Agent.")
-    if provider["state"] == "ready":
-        # Keep yt-dlp's normal client selection. Forcing mweb makes the token
-        # path work on some videos but can remove high-resolution DASH formats,
-        # which defeats ResearchTube's exact stream selection. The provider
-        # hooks into whichever normal YouTube client yt-dlp selects.
-        arguments.extend([
-            "--extractor-args",
-            f"youtube-bgutilscript:server_home={YOUTUBE_POT_PROVIDER_SERVER_PATH}",
-        ])
-    return arguments
-
-
-async def health_process_output(command: tuple[str, ...], timeout: float) -> tuple[bytes, bytes]:
-    """Bound one startup probe and reap its process on timeout or shutdown."""
-    process = await asyncio.create_subprocess_exec(
-        *command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-    )
-    try:
-        output = await asyncio.wait_for(process.communicate(), timeout=timeout)
-        if process.returncode != 0:
-            raise OSError("Diagnostic subprocess returned a non-zero exit code.")
-        return output
-    finally:
-        if process.returncode is None:
-            try:
-                process.kill()
-            except ProcessLookupError:
-                pass
-            await process.wait()
-
-
-async def component_health(name: str, definition: tuple[tuple[str, ...], tuple[str, ...]]) -> tuple[str, dict[str, str | None]]:
-    candidates, version_args = definition
-    discovery = await asyncio.to_thread(find_component, name, candidates)
-    if discovery.error:
-        return name, {"status": "error", "version": None, "source": discovery.source, "privatePath": None, "message": discovery.error}
-    if not discovery.executable:
-        return name, {"status": "missing", "version": None, "source": None, "privatePath": None, "message": None}
-    try:
-        stdout, stderr = await health_process_output((discovery.executable, *version_args), 3)
-        output = (stdout or stderr).decode("utf-8", errors="replace").strip().splitlines()
-        return name, {"status": "available", "version": output[0] if output else None, "source": discovery.source, "privatePath": discovery.executable, "message": None}
-    except (OSError, asyncio.TimeoutError):
-        return name, {"status": "error", "version": None, "source": discovery.source, "privatePath": discovery.executable, "message": "Version probe could not be completed."}
-
-
-# Startup diagnostics are collected once. Request handlers only read these
-# snapshots; no subprocess, filesystem probe or refresh runs on /health.
-HEALTH_SNAPSHOT: dict[str, Any] | None = None
-PUBLIC_HEALTH_SNAPSHOT: dict[str, Any] | None = None
-
-
-def initialize_health_snapshot() -> dict[str, Any]:
-    global HEALTH_SNAPSHOT, PUBLIC_HEALTH_SNAPSHOT
-    snapshot = {
-        "status": "ok", "agentVersion": AGENT_VERSION, "interfaceVersion": INTERFACE_VERSION,
-        "platform": public_platform_metadata(), "workspace": workspace_health(),
-        "components": {
-            name: {"status": "checking", "version": None, "source": None,
-                   "privatePath": None, "message": "Startup diagnostic is checking this component."}
-            for name in (*COMPONENTS, "youtubePoTokenProvider")
-        },
-        "chromeAutomation": {
-            "state": "checking", "chromeRunning": None, "browserInstances": 0,
-            "message": "Chrome launch flags are being checked once at Agent startup.",
-        },
-    }
-    HEALTH_SNAPSHOT = snapshot
-    PUBLIC_HEALTH_SNAPSHOT = public_health_document(snapshot)
-    return snapshot
-
-
-async def health_snapshot() -> dict[str, Any]:
-    if HEALTH_SNAPSHOT is None:
-        raise RuntimeError("Agent startup health has not been initialized.")
-    return HEALTH_SNAPSHOT
-
-
-def cached_public_health() -> dict[str, Any]:
-    if PUBLIC_HEALTH_SNAPSHOT is None:
-        raise RuntimeError("Agent startup health has not been initialized.")
-    return PUBLIC_HEALTH_SNAPSHOT
-
-
-async def collect_startup_health(snapshot: dict[str, Any]) -> None:
-    """Finish tool diagnostics/logs before the one low-priority Chrome probe."""
-    def publish() -> None:
-        global PUBLIC_HEALTH_SNAPSHOT
-        if HEALTH_SNAPSHOT is snapshot:
-            PUBLIC_HEALTH_SNAPSHOT = public_health_document(snapshot)
-
-    async def collect_component(name: str) -> None:
-        try:
-            _name, result = await (youtube_pot_provider_health() if name == "youtubePoTokenProvider"
-                                   else component_health(name, COMPONENTS[name]))
-        except Exception:
-            result = {"status": "error", "version": None, "source": None,
-                      "privatePath": None, "message": "Startup component diagnostic failed."}
-        snapshot["components"][name] = result
-        publish()
-        log_component_health(name, result)
-
-    async def collect_chrome() -> None:
-        try:
-            result = await chrome_automation_status()
-        except Exception:
-            result = {"state": "unknown", "chromeRunning": None, "browserInstances": 0,
-                      "message": "Chrome startup switches could not be checked."}
-        snapshot["chromeAutomation"] = result
-        publish()
-
-    await asyncio.gather(*(collect_component(name) for name in snapshot["components"]))
-    log("Startup checks completed. Waiting for Extension requests.")
-    # The loopback server is already serving. Yield after the last startup log
-    # before spawning the unrelated Windows/PowerShell Chrome process check.
-    await asyncio.sleep(0)
-    await collect_chrome()
-
-
-def public_platform_metadata() -> dict[str, str]:
-    """Return portable OS facts without host, user, path, or network identity."""
-    return {
-        "operatingSystem": platform.system() or "Unknown",
-        "release": platform.release() or "Unknown",
-        "version": platform.version() or "Unknown",
-        "architecture": platform.machine() or "Unknown",
-    }
-
-
-def debug_banner_unknown(message: str, *, chrome_running: bool | None = None) -> dict[str, Any]:
-    """Return a privacy-preserving result when Chrome launch flags are unavailable."""
-    return {
-        "chromeRunning": chrome_running,
-        "browserInstances": 0,
-        "configuration": "unknown",
-        "requiredSwitch": DEBUG_BANNER_SWITCH,
-        "message": message,
-    }
-
-
-def summarize_debug_banner_process_report(report: Any) -> dict[str, Any]:
-    """Validate the deliberately aggregate-only Windows process query result."""
-    if not isinstance(report, dict):
-        return debug_banner_unknown("Chrome process information could not be read.")
-    chrome_running = report.get("chromeRunning")
-    browser_instances = report.get("browserInstances")
-    enabled_instances = report.get("enabledInstances")
-    if not isinstance(chrome_running, bool) or not isinstance(browser_instances, int) or isinstance(browser_instances, bool) \
-            or not isinstance(enabled_instances, int) or isinstance(enabled_instances, bool) \
-            or browser_instances < 0 or enabled_instances < 0 or enabled_instances > browser_instances:
-        return debug_banner_unknown("Chrome process information could not be read.")
-    if not chrome_running:
-        return debug_banner_unknown("Chrome is not currently running.", chrome_running=False)
-    if browser_instances == 0:
-        return debug_banner_unknown("Chrome is running, but its browser instances could not be identified.", chrome_running=True)
-    if enabled_instances == browser_instances:
-        configuration = "banner_suppressed"
-        message = f"All running Chrome browser instances use {DEBUG_BANNER_SWITCH}. ResearchTube debugger operations should not show the Chrome debugging banner."
-    elif enabled_instances == 0:
-        configuration = "banner_enabled"
-        message = f"Chrome is running without {DEBUG_BANNER_SWITCH}. ResearchTube debugger operations may show the Chrome debugging banner."
-    else:
-        configuration = "mixed"
-        message = f"Some running Chrome browser instances use {DEBUG_BANNER_SWITCH} and some do not. The Chrome debugging banner may appear depending on the instance used by ResearchTube."
-    return {
-        "chromeRunning": True,
-        "browserInstances": browser_instances,
-        "configuration": configuration,
-        "requiredSwitch": DEBUG_BANNER_SWITCH,
-        "message": message,
-    }
-
-
-async def debug_banner_status() -> dict[str, Any]:
-    """Inspect only aggregate Chrome launch-flag state for the current request.
-
-    The PowerShell side deliberately emits counts only. Raw command lines, PIDs,
-    profiles and paths never cross into the Agent result or its loopback API.
-    """
-    if os.name != "nt":
-        return debug_banner_unknown("Chrome startup switches can be checked by this ResearchTube Agent only on Windows.")
-    script = r'''
-$ErrorActionPreference = 'Stop'
-$chrome = @(Get-CimInstance -ClassName Win32_Process -Filter "Name = 'chrome.exe'")
-$browser = @($chrome | Where-Object {
-  $commandLine = [string]$_.CommandLine
-  $commandLine -notmatch '(?i)(?:^|\s)--type(?:=|\s)'
-})
-$enabled = @($browser | Where-Object {
-  ([string]$_.CommandLine) -match '(?i)(?:^|\s)--silent-debugger-extension-api(?:\s|$)'
-})
-[pscustomobject]@{
-  chromeRunning = ($chrome.Count -gt 0)
-  browserInstances = $browser.Count
-  enabledInstances = $enabled.Count
-} | ConvertTo-Json -Compress
-'''
-    try:
-        stdout, _stderr = await health_process_output(
-            ("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script), 5,
-        )
-        report = json.loads(stdout.decode("utf-8-sig", errors="replace"))
-        return summarize_debug_banner_process_report(report)
-    except (OSError, asyncio.TimeoutError, json.JSONDecodeError):
-        return debug_banner_unknown("Chrome process information could not be read.")
-
-
-async def chrome_automation_status() -> dict[str, Any]:
-    """Expose the aggregate automation-switch state as part of Agent health."""
-    report = await debug_banner_status()
-    configuration = report["configuration"]
-    state = {
-        "banner_suppressed": "enabled",
-        "banner_enabled": "disabled",
-        "mixed": "mixed",
-        "unknown": "unknown",
-    }[configuration]
-    return {
-        "state": state,
-        "chromeRunning": report["chromeRunning"],
-        "browserInstances": report["browserInstances"],
-        "message": report["message"],
-    }
-
-
-def public_health_document(snapshot: dict[str, Any]) -> dict[str, Any]:
-    """Remove host paths before the loopback HTTP/MCP boundary."""
-    components = {
-        name: {
-            "status": component["status"], "version": component["version"],
-            "source": component["source"], "message": component["message"],
-        }
-        for name, component in snapshot["components"].items()
-    }
-    return {
-        "status": snapshot["status"], "agentVersion": snapshot["agentVersion"], "interfaceVersion": snapshot["interfaceVersion"],
-        "platform": snapshot["platform"],
-        "workspace": {
-            "status": snapshot["workspace"]["status"],
-            "availableBytes": snapshot["workspace"]["availableBytes"],
-        },
-        "components": components,
-        "chromeAutomation": snapshot.get("chromeAutomation", {"state": "unknown", "chromeRunning": None, "browserInstances": 0, "message": "Chrome automation status was not included in this health snapshot."}),
-    }
-
-
-def log_startup_health(health: dict[str, Any], port: int) -> None:
-    log(f"ResearchTube Agent {AGENT_VERSION} started", color="red")
-    log(f"Agent interface version: {health['interfaceVersion']} â€” it must match the ResearchTube Extension interface version.")
-    platform_metadata = health["platform"]
-    log(f"Platform: {platform_metadata['operatingSystem']} {platform_metadata['release']} ({platform_metadata['architecture']})")
-    log(f"Listening on 127.0.0.1:{port}")
-    log(f"Workspace: {WORKSPACE_PATH} ({health['workspace']['status']})")
-    for name, component in health["components"].items():
-        if component["status"] != "checking":
-            log_component_health(name, component)
-
-
-def log_component_health(name: str, component: dict[str, Any]) -> None:
-    label = COMPONENT_LABELS[name]
-    if component["status"] == "available":
-        origin = "PATH" if component["source"] == "path" else "local"
-        log(f"{label}: {component['version'] or 'available'} ({origin}: {component['privatePath']})")
-    elif component["status"] == "missing":
-        log(f"{label}: missing")
-    else:
-        log(f"{label}: {component['message'] or 'version probe failed'} ({component['source']}: {component['privatePath']})", error=True)
-
-
-def path_is_within(path: Path, parent: Path) -> bool:
-    try:
-        path.relative_to(parent)
-        return True
-    except ValueError:
-        return False
-
-
-def validate_video_id(value: Any) -> str:
-    """Accept only the stable public video identifier at the Agent boundary."""
-    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_-]{6,}", value):
-        raise AgentApiError("INVALID_VIDEO_ID", "videoId must be one public YouTube video ID.")
-    return value
-
-
-@dataclass(frozen=True)
-class DownloadSelection:
-    """A deliberately small, safe subset of yt-dlp's format-selector syntax.
-
-    The Agent never accepts an arbitrary yt-dlp selector or command-line
-    fragment. Exact numeric IDs are expected to come from the Local Agent's
-    youtube_download_get_formats workflow, not the advisory YouTube snapshot.
-    """
-
-    combined: str | None = None
-    video: str | None = None
-    audio: str | None = None
-
-    @property
-    def requires_merge(self) -> bool:
-        return self.video is not None and self.audio is not None
-
-    def format_selector(self) -> str:
-        if self.combined is not None:
-            return "best" if self.combined == "best" else self.combined
-        parts: list[str] = []
-        if self.video is not None:
-            parts.append("bestvideo" if self.video == "best" else self.video)
-        if self.audio is not None:
-            parts.append("bestaudio" if self.audio == "best" else self.audio)
-        return "+".join(parts)
-
-
-def parse_format_selection(value: Any) -> DownloadSelection:
-    if not isinstance(value, dict):
-        raise AgentApiError("FORMAT_SELECTION_INVALID", "formatSelection must describe one combined track or video and/or audio tracks.")
-    unknown = set(value) - {"combined", "video", "audio"}
-    if unknown:
-        raise AgentApiError("FORMAT_SELECTION_INVALID", "formatSelection contains an unsupported field.")
-
-    def parse_value(name: str) -> str | None:
-        candidate = value.get(name)
-        if candidate is None:
-            return None
-        if not isinstance(candidate, str) or not re.fullmatch(r"(?:best|[0-9]+)", candidate):
-            raise AgentApiError("FORMAT_SELECTION_INVALID", f"formatSelection.{name} must be 'best', a numeric YouTube formatId, or null.")
-        return candidate
-
-    selection = DownloadSelection(parse_value("combined"), parse_value("video"), parse_value("audio"))
-    if selection.combined is not None and (selection.video is not None or selection.audio is not None):
-        raise AgentApiError("FORMAT_SELECTION_INVALID", "Select either one combined track or video/audio tracks; do not mix them.")
-    if selection.combined is None and selection.video is None and selection.audio is None:
-        raise AgentApiError("FORMAT_SELECTION_INVALID", "Select a combined, video, or audio track.")
-    return selection
-
-
-@dataclass(frozen=True)
-class DownloadRange:
-    start_seconds: float
-    end_seconds: float
-
-    def filename_tag(self) -> str:
-        return f"partial_{self.start_seconds:.3f}_{self.end_seconds:.3f}"
-
-
-def parse_download_range(payload: dict[str, Any]) -> DownloadRange | None:
-    start = payload.get("startSeconds")
-    end = payload.get("endSeconds")
-    if start is None and end is None:
-        return None
-    if start is None or end is None:
-        raise AgentApiError("DOWNLOAD_RANGE_INVALID", "startSeconds and endSeconds must be supplied together.")
-    if isinstance(start, bool) or not isinstance(start, (int, float)) or not math.isfinite(start) or start < 0:
-        raise AgentApiError("DOWNLOAD_RANGE_INVALID", "startSeconds must be a finite non-negative number.")
-    if isinstance(end, bool) or not isinstance(end, (int, float)) or not math.isfinite(end) or end < 0:
-        raise AgentApiError("DOWNLOAD_RANGE_INVALID", "endSeconds must be a finite non-negative number.")
-    if end <= start:
-        raise AgentApiError("DOWNLOAD_RANGE_INVALID", "endSeconds must be greater than startSeconds.")
-    return DownloadRange(float(start), float(end))
-
-
-def nullable_nonnegative_number(value: Any) -> float | int | None:
-    """Return one finite non-negative JSON number, otherwise None."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
-        return None
-    return value
-
-
-def nullable_nonnegative_integer(value: Any) -> int | None:
-    number = nullable_nonnegative_number(value)
-    return int(number) if number is not None and float(number).is_integer() else None
-
-
-def normalize_yt_dlp_format(format_data: Any) -> dict[str, Any] | None:
-    """Publish a non-sensitive, selectable yt-dlp format record.
-
-    The source document contains signed media URLs and other ephemeral player
-    details.  This projection intentionally keeps only stable technical
-    properties and the exact format ID accepted by the same local yt-dlp.
-    """
-    if not isinstance(format_data, dict):
-        return None
-    format_id = format_data.get("format_id")
-    if not isinstance(format_id, str) or not re.fullmatch(r"[0-9]+", format_id):
-        return None
-    video_codec = format_data.get("vcodec")
-    audio_codec = format_data.get("acodec")
-    has_video = isinstance(video_codec, str) and video_codec != "none"
-    has_audio = isinstance(audio_codec, str) and audio_codec != "none"
-    if not has_video and not has_audio:
-        return None
-    kind = "combined" if has_video and has_audio else "video" if has_video else "audio"
-    size = nullable_nonnegative_integer(format_data.get("filesize"))
-    if size is None:
-        size = nullable_nonnegative_integer(format_data.get("filesize_approx"))
-    bitrate_kbps = nullable_nonnegative_number(format_data.get("tbr"))
-    if bitrate_kbps is None:
-        bitrate_kbps = nullable_nonnegative_number(format_data.get("vbr" if has_video else "abr"))
-    quality = format_data.get("format_note")
-    if not isinstance(quality, str) or not quality:
-        quality = format_data.get("resolution") if has_video else None
-    return {
-        "formatId": format_id,
-        "kind": kind,
-        "container": format_data.get("ext") if isinstance(format_data.get("ext"), str) else None,
-        "videoCodec": video_codec if has_video else None,
-        "audioCodec": audio_codec if has_audio else None,
-        "width": nullable_nonnegative_integer(format_data.get("width")) if has_video else None,
-        "height": nullable_nonnegative_integer(format_data.get("height")) if has_video else None,
-        "fps": nullable_nonnegative_number(format_data.get("fps")) if has_video else None,
-        "bitrateBps": int(bitrate_kbps * 1000) if bitrate_kbps is not None else None,
-        "audioSampleRateHz": nullable_nonnegative_integer(format_data.get("asr")) if has_audio else None,
-        "audioChannels": nullable_nonnegative_integer(format_data.get("audio_channels")) if has_audio else None,
-        "qualityLabel": quality,
-        "sizeBytes": size,
-    }
-
-
-def normalize_yt_dlp_formats(document: Any) -> dict[str, Any]:
-    grouped: dict[str, Any] = {
-        "available": False, "source": "unavailable",
-        "message": "yt-dlp did not expose downloadable media formats for this video.",
-        "combined": [], "video": [], "audio": [],
-    }
-    formats = document.get("formats") if isinstance(document, dict) else None
-    if not isinstance(formats, list):
-        return grouped
-    seen: set[str] = set()
-    for raw_format in formats:
-        item = normalize_yt_dlp_format(raw_format)
-        if item is None or item["formatId"] in seen:
-            continue
-        seen.add(item["formatId"])
-        grouped[item["kind"]].append(item)
-    for entries in (grouped["combined"], grouped["video"], grouped["audio"]):
-        entries.sort(key=lambda item: (item["height"] or 0, item["fps"] or 0, item["bitrateBps"] or 0, item["formatId"]))
-    if seen:
-        grouped["available"] = True
-        grouped["source"] = "ytDlp"
-        grouped["message"] = None
-    return grouped
-
-
-async def youtube_download_formats(payload: Any) -> dict[str, Any]:
-    """Read formats from the exact local yt-dlp installation used for downloads."""
-    if not isinstance(payload, dict):
-        raise AgentApiError("INVALID_REQUEST", "youtube_download_get_formats requires a JSON object.")
-    video_id = validate_video_id(payload.get("videoId"))
-    yt_dlp = find_component("ytDlp", COMPONENTS["ytDlp"][0])
-    if yt_dlp.error:
-        raise AgentApiError("YTDLP_DISCOVERY_ERROR", "yt-dlp discovery is ambiguous.", yt_dlp.error)
-    if not yt_dlp.executable:
-        raise AgentApiError("YTDLP_NOT_AVAILABLE", "yt-dlp is not available. Place it in tools/yt-dlp or install it on PATH.")
-    deno_executable = resolve_deno_runtime()
-    command = [
-        yt_dlp.executable, *yt_dlp_youtube_arguments(deno_executable),
-        "--no-playlist", "--skip-download", "--no-warnings", "--dump-single-json",
-        f"https://www.youtube.com/watch?v={video_id}",
-    ]
-    try:
-        process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-        stdout, _stderr = await asyncio.wait_for(process.communicate(), timeout=YTDLP_FORMATS_TIMEOUT_SECONDS)
-    except asyncio.TimeoutError:
-        process.kill()
-        await process.communicate()
-        return {"videoId": video_id, "downloadFormats": normalize_yt_dlp_formats(None)}
-    except OSError as error:
-        log(f"yt-dlp format discovery could not start: {error.__class__.__name__}", error=True)
-        return {"videoId": video_id, "downloadFormats": normalize_yt_dlp_formats(None)}
-    if process.returncode != 0:
-        log(f"yt-dlp format discovery for {video_id} exited {process.returncode}", error=True)
-        return {"videoId": video_id, "downloadFormats": normalize_yt_dlp_formats(None)}
-    try:
-        document = json.loads(stdout.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        log(f"yt-dlp format discovery for {video_id} returned invalid JSON", error=True)
-        return {"videoId": video_id, "downloadFormats": normalize_yt_dlp_formats(None)}
-    return {"videoId": video_id, "downloadFormats": normalize_yt_dlp_formats(document)}
-
-
-@dataclass(frozen=True)
-class ResolvedWorkspacePath:
-    logical_path: str
-    physical_path: Path
-
-
-class WorkspacePathResolver:
-    """One logical POSIX path gate for built-in workspace operations.
-
-    It deliberately rejects rather than normalizes foreign or traversal syntax.
-    Physical paths are created only after logical validation and resolved
-    containment checks against the workspace root.
-    """
-
-    def __init__(self) -> None:
-        try:
-            WORKSPACE_PATH.mkdir(parents=True, exist_ok=True)
-            self.root = WORKSPACE_PATH.resolve(strict=True)
-        except OSError as error:
-            log(f"workspace resolver could not initialize at {WORKSPACE_PATH}: {error.__class__.__name__}", error=True)
-            raise AgentApiError("WORKSPACE_UNAVAILABLE", "The Agent workspace is unavailable.") from error
-
-    @staticmethod
-    def logical_parts(value: Any, *, field_name: str, error_code: str, allow_root: bool = False) -> tuple[tuple[str, ...], str]:
-        if allow_root and value == "":
-            return (), ""
-        if not isinstance(value, str) or not value or value != value.strip():
-            raise AgentApiError(error_code, f"{field_name} must be a non-empty logical workspace-relative path.")
-        if len(value) > MAX_LOGICAL_PATH_LENGTH or "\x00" in value or "\\" in value or value.startswith("/") or re.match(r"^[A-Za-z]:", value):
-            raise AgentApiError(error_code, f"{field_name} must use a safe POSIX-style workspace-relative path.")
-        parts = value.split("/")
-        if any(not part or part in {".", ".."} for part in parts):
-            raise AgentApiError(error_code, f"{field_name} contains an invalid workspace path component.")
-        for part in parts:
-            reserved_basename = part.split(".", 1)[0].upper()
-            if (
-                len(part) > MAX_LOGICAL_COMPONENT_LENGTH
-                or any(character in WINDOWS_INVALID_FILENAME_CHARACTERS for character in part)
-                or part[-1] in {".", " "}
-                or reserved_basename in WINDOWS_RESERVED_BASENAMES
-            ):
-                raise AgentApiError(error_code, f"{field_name} contains a non-portable workspace path component.")
-        return tuple(parts), "/".join(parts)
-
-    def resolve_destination(self, value: Any, *, field_name: str, error_code: str, allow_root: bool = False) -> ResolvedWorkspacePath:
-        parts, logical_path = self.logical_parts(value, field_name=field_name, error_code=error_code, allow_root=allow_root)
-        candidate = self.root.joinpath(*parts)
-        # Do not let built-in tools traverse a symbolic link or Windows
-        # junction even when its current target happens to be inside workspace.
-        # This also prevents delete/move from unexpectedly operating on the
-        # target rather than the link itself.
-        component = self.root
-        for part in parts:
-            component = component / part
-            is_junction = getattr(component, "is_junction", lambda: False)
-            if component.is_symlink() or is_junction():
-                raise AgentApiError(error_code, f"{field_name} cannot traverse a workspace filesystem redirect.")
-        try:
-            resolved_candidate = candidate.resolve(strict=False)
-        except OSError as error:
-            log(f"workspace resolver could not resolve a candidate: {error.__class__.__name__}", error=True)
-            raise AgentApiError("WORKSPACE_UNAVAILABLE", "The Agent workspace is unavailable.") from error
-        if not path_is_within(resolved_candidate, self.root):
-            raise AgentApiError(error_code, f"{field_name} must stay inside the ResearchTube workspace.")
-        return ResolvedWorkspacePath(logical_path, resolved_candidate)
-
-    def resolve_existing(self, value: Any, *, field_name: str, expected_type: str | None = None, allow_root: bool = False) -> ResolvedWorkspacePath:
-        resolved = self.resolve_destination(
-            value, field_name=field_name, error_code="WORKSPACE_PATH_INVALID", allow_root=allow_root,
-        )
-        try:
-            physical_path = resolved.physical_path.resolve(strict=True)
-        except FileNotFoundError as error:
-            code = "DIRECTORY_NOT_FOUND" if expected_type == "directory" else "FILE_NOT_FOUND" if expected_type == "file" else "WORKSPACE_NOT_FOUND"
-            raise AgentApiError(code, f"The requested workspace {expected_type or 'path'} does not exist.") from error
-        except OSError as error:
-            raise AgentApiError("WORKSPACE_UNAVAILABLE", "The Agent workspace is unavailable.") from error
-        if not path_is_within(physical_path, self.root):
-            raise AgentApiError("WORKSPACE_PATH_OUTSIDE_SANDBOX", f"{field_name} must stay inside the ResearchTube workspace.")
-        if expected_type == "file" and not physical_path.is_file():
-            raise AgentApiError("FILE_NOT_FOUND", "The requested workspace file does not exist.")
-        if expected_type == "directory" and not physical_path.is_dir():
-            raise AgentApiError("DIRECTORY_NOT_FOUND", "The requested workspace directory does not exist.")
-        return ResolvedWorkspacePath(resolved.logical_path, physical_path)
-
-    def logical_existing_file(self, physical_path: Path, *, error_code: str) -> str:
-        try:
-            resolved = physical_path.resolve(strict=True)
-        except OSError as error:
-            raise AgentApiError(error_code, "The expected workspace output file is unavailable.") from error
-        if not path_is_within(resolved, self.root) or not resolved.is_file():
-            raise AgentApiError(error_code, "The expected workspace output file is unavailable.")
-        relative = resolved.relative_to(self.root).as_posix()
-        self.logical_parts(relative, field_name="workspace output", error_code=error_code)
-        return relative
-
-
-def resolve_output_directory(value: Any) -> tuple[Path, str]:
-    resolver = WorkspacePathResolver()
-    resolved = resolver.resolve_destination(
-        DEFAULT_DOWNLOAD_DIRECTORY if value is None else value,
-        field_name="outputDir", error_code="OUTPUT_DIR_INVALID",
-    )
-    return resolved.physical_path, resolved.logical_path
-
-
-def workspace_object_type(path: Path) -> str:
-    if path.is_file():
-        return "file"
-    if path.is_dir():
-        return "directory"
-    return "other"
-
-
-def workspace_modified_at(path: Path) -> str:
-    return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-
-
-def workspace_list(payload: Any) -> dict[str, Any]:
-    if not isinstance(payload, dict):
-        raise AgentApiError("INVALID_REQUEST", "workspace_list requires a JSON object.")
-    path = payload.get("path", "")
-    limit, extensions = payload.get("limit", 100), payload.get("extensions")
-    if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= MAX_WORKSPACE_LIST_ENTRIES:
-        raise AgentApiError("INVALID_REQUEST", f"limit must be an integer from 1 to {MAX_WORKSPACE_LIST_ENTRIES}.")
-    if extensions is not None and (not isinstance(extensions, list) or not extensions or any(not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9]{1,16}", value) for value in extensions)):
-        raise AgentApiError("INVALID_REQUEST", "extensions must be a non-empty array of extension names without dots.")
-    extension_filter = {value.casefold() for value in extensions} if extensions is not None else None
-    directory = WorkspacePathResolver().resolve_existing(path, field_name="path", expected_type="directory", allow_root=True)
-    try:
-        children = sorted(directory.physical_path.iterdir(), key=lambda item: (item.name.casefold(), item.name))
-    except OSError as error:
-        raise AgentApiError("PERMISSION_DENIED", "The workspace directory could not be listed.") from error
-    entries: list[dict[str, Any]] = []
-    for child in children:
-        # Never follow a redirect while producing directory metadata.
-        if child.is_symlink() or getattr(child, "is_junction", lambda: False)():
-            entry_type, size = "other", None
-        else:
-            entry_type = workspace_object_type(child)
-            try:
-                size = child.stat().st_size if entry_type == "file" else None
-            except OSError:
-                entry_type, size = "other", None
-        if extension_filter is not None and (entry_type != "file" or child.suffix.removeprefix(".").casefold() not in extension_filter):
-            continue
-        logical_path = f"{directory.logical_path}/{child.name}" if directory.logical_path else child.name
-        entries.append({"name": child.name, "path": logical_path, "type": entry_type, "size": size})
-        if len(entries) >= limit:
-            break
-    log(f"workspace_list path={directory.logical_path or '<root>'} -> ok")
-    return {"path": directory.logical_path, "entries": entries, "returned": len(entries), "limit": limit, "extensions": sorted(extension_filter) if extension_filter is not None else None}
-
-
-def workspace_stat(payload: Any) -> dict[str, Any]:
-    if not isinstance(payload, dict):
-        raise AgentApiError("INVALID_REQUEST", "workspace_stat requires a JSON object.")
-    item = WorkspacePathResolver().resolve_existing(payload.get("path"), field_name="path")
-    item_type = workspace_object_type(item.physical_path)
-    if item_type == "other":
-        raise AgentApiError("WORKSPACE_NOT_FOUND", "The requested workspace path is not a regular file or directory.")
-    try:
-        size = item.physical_path.stat().st_size if item_type == "file" else None
-        modified_at = workspace_modified_at(item.physical_path)
-    except OSError as error:
-        raise AgentApiError("PERMISSION_DENIED", "The requested workspace path could not be inspected.") from error
-    log(f"workspace_stat path={item.logical_path} -> ok")
-    return {"path": item.logical_path, "type": item_type, "size": size, "modifiedAt": modified_at}
-
-
-def workspace_mkdir(payload: Any) -> dict[str, Any]:
-    if not isinstance(payload, dict):
-        raise AgentApiError("INVALID_REQUEST", "workspace_mkdir requires a JSON object.")
-    directory = WorkspacePathResolver().resolve_destination(payload.get("path"), field_name="path", error_code="WORKSPACE_PATH_INVALID")
-    try:
-        already_exists = directory.physical_path.exists()
-        if already_exists and not directory.physical_path.is_dir():
-            raise AgentApiError("DESTINATION_EXISTS", "A non-directory workspace object already exists at path.")
-        directory.physical_path.mkdir(parents=True, exist_ok=True)
-    except AgentApiError:
-        raise
-    except PermissionError as error:
-        raise AgentApiError("PERMISSION_DENIED", "The workspace directory could not be created.") from error
-    except OSError as error:
-        raise AgentApiError("WORKSPACE_OPERATION_FAILED", "The workspace directory could not be created.") from error
-    log(f"workspace_mkdir path={directory.logical_path} -> ok")
-    return {"path": directory.logical_path, "type": "directory", "created": not already_exists}
-
-
-def workspace_move(payload: Any) -> dict[str, Any]:
-    if not isinstance(payload, dict):
-        raise AgentApiError("INVALID_REQUEST", "workspace_move requires a JSON object.")
-    resolver = WorkspacePathResolver()
-    source = resolver.resolve_existing(payload.get("source"), field_name="source")
-    source_type = workspace_object_type(source.physical_path)
-    if source_type == "other":
-        raise AgentApiError("WORKSPACE_NOT_FOUND", "source is not a regular file or directory.")
-    destination = resolver.resolve_destination(payload.get("destination"), field_name="destination", error_code="WORKSPACE_PATH_INVALID")
-    if destination.physical_path.exists() or destination.physical_path.is_symlink():
-        raise AgentApiError("DESTINATION_EXISTS", "destination already exists; workspace_move never overwrites files.")
-    if not destination.physical_path.parent.is_dir():
-        raise AgentApiError("DIRECTORY_NOT_FOUND", "The destination parent directory does not exist.")
-    try:
-        source.physical_path.rename(destination.physical_path)
-    except PermissionError as error:
-        raise AgentApiError("PERMISSION_DENIED", "The workspace item could not be moved.") from error
-    except OSError as error:
-        raise AgentApiError("WORKSPACE_OPERATION_FAILED", "The workspace item could not be moved.") from error
-    log(f"workspace_move {source.logical_path} -> {destination.logical_path} -> ok")
-    return {"source": source.logical_path, "destination": destination.logical_path, "type": source_type}
-
-
-def workspace_delete(payload: Any) -> dict[str, Any]:
-    if not isinstance(payload, dict):
-        raise AgentApiError("INVALID_REQUEST", "workspace_delete requires a JSON object.")
-    item = WorkspacePathResolver().resolve_existing(payload.get("path"), field_name="path")
-    item_type = workspace_object_type(item.physical_path)
-    try:
-        if item_type == "file":
-            item.physical_path.unlink()
-        elif item_type == "directory":
-            item.physical_path.rmdir()
-        else:
-            raise AgentApiError("WORKSPACE_NOT_FOUND", "The requested workspace path is not a regular file or directory.")
-    except AgentApiError:
-        raise
-    except OSError as error:
-        if item_type == "directory" and item.physical_path.exists():
-            raise AgentApiError("DIRECTORY_NOT_EMPTY", "workspace_delete only removes empty directories.") from error
-        raise AgentApiError("PERMISSION_DENIED", "The workspace item could not be deleted.") from error
-    log(f"workspace_delete path={item.logical_path} -> ok")
-    return {"path": item.logical_path, "type": item_type, "deleted": True}
-
-
-def ffprobe_integer(value: Any) -> int | None:
-    try:
-        number = int(value)
-    except (TypeError, ValueError):
-        return None
-    return number if number >= 0 else None
-
-
-def finite_number(value: Any, *, field_name: str, minimum: float | None = None, maximum: float | None = None) -> float:
-    """Validate a JSON number without accepting booleans or NaN/Infinity."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
-        raise AgentApiError("CAPTURE_FRAME_INVALID", f"{field_name} must be a finite number.")
-    number = float(value)
-    if minimum is not None and number < minimum or maximum is not None and number > maximum:
-        raise AgentApiError("CAPTURE_FRAME_INVALID", f"{field_name} is outside its supported range.")
-    return number
-
-
-def nonnegative_integer(value: Any, *, field_name: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise AgentApiError("CAPTURE_FRAME_INVALID", f"{field_name} must be a non-negative integer.")
-    return value
-
-
-def positive_integer(value: Any, *, field_name: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        raise AgentApiError("CAPTURE_FRAME_INVALID", f"{field_name} must be a positive integer.")
-    return value
-
-
-def capture_object(value: Any, *, field_name: str, allowed: set[str]) -> dict[str, Any]:
-    if value is None:
-        return {}
-    if not isinstance(value, dict) or set(value) - allowed:
-        raise AgentApiError("CAPTURE_FRAME_INVALID", f"{field_name} contains an unsupported field.")
-    return value
-
-
-def capture_crop(value: Any) -> dict[str, int] | None:
-    if value is None:
-        return None
-    item = capture_object(value, field_name="crop", allowed={"x", "y", "width", "height"})
-    if set(item) != {"x", "y", "width", "height"}:
-        raise AgentApiError("CAPTURE_FRAME_INVALID", "crop requires x, y, width, and height.")
-    return {
-        "x": nonnegative_integer(item["x"], field_name="crop.x"),
-        "y": nonnegative_integer(item["y"], field_name="crop.y"),
-        "width": positive_integer(item["width"], field_name="crop.width"),
-        "height": positive_integer(item["height"], field_name="crop.height"),
-    }
-
-
-def capture_hex_color(value: Any) -> str:
-    if not isinstance(value, str) or not re.fullmatch(r"#[0-9A-Fa-f]{6}(?:[0-9A-Fa-f]{2})?", value):
-        raise AgentApiError("CAPTURE_FRAME_INVALID", "resize.padColor must be #RRGGBB or #RRGGBBAA.")
-    # ffmpeg accepts this unambiguously in a filter expression.
-    return f"0x{value[1:]}"
-
-
-def capture_resize(value: Any) -> dict[str, Any] | None:
-    if value is None:
-        return None
-    item = capture_object(value, field_name="resize", allowed={"width", "height", "mode", "anchor", "padColor"})
-    width = item.get("width")
-    height = item.get("height")
-    if width is None and height is None:
-        raise AgentApiError("CAPTURE_FRAME_INVALID", "resize requires width, height, or both.")
-    if width is not None:
-        width = positive_integer(width, field_name="resize.width")
-    if height is not None:
-        height = positive_integer(height, field_name="resize.height")
-    mode = item.get("mode", "contain")
-    if mode not in {"contain", "cover", "stretch"}:
-        raise AgentApiError("CAPTURE_FRAME_INVALID", "resize.mode must be contain, cover, or stretch.")
-    anchor_item = capture_object(item.get("anchor"), field_name="resize.anchor", allowed={"x", "y"})
-    if anchor_item and set(anchor_item) != {"x", "y"}:
-        raise AgentApiError("CAPTURE_FRAME_INVALID", "resize.anchor requires x and y.")
-    anchor = {
-        "x": finite_number(anchor_item.get("x", 0.5), field_name="resize.anchor.x", minimum=0, maximum=1),
-        "y": finite_number(anchor_item.get("y", 0.5), field_name="resize.anchor.y", minimum=0, maximum=1),
-    }
-    return {
-        "width": width, "height": height, "mode": mode, "anchor": anchor,
-        "padColor": capture_hex_color(item.get("padColor", "#000000")),
-    }
-
-
-def capture_image(value: Any) -> dict[str, Any]:
-    item = capture_object(value, field_name="image", allowed={"format", "quality", "compressionLevel"})
-    image_format = item.get("format", "png")
-    if image_format not in {"png", "jpeg", "webp"}:
-        raise AgentApiError("CAPTURE_FRAME_INVALID", "image.format must be png, jpeg, or webp.")
-    quality = item.get("quality")
-    compression = item.get("compressionLevel")
-    if quality is not None:
-        quality = positive_integer(quality, field_name="image.quality")
-        if quality > 100:
-            raise AgentApiError("CAPTURE_FRAME_INVALID", "image.quality must be from 1 to 100.")
-    if compression is not None:
-        compression = nonnegative_integer(compression, field_name="image.compressionLevel")
-        if compression > 9:
-            raise AgentApiError("CAPTURE_FRAME_INVALID", "image.compressionLevel must be from 0 to 9.")
-    if image_format == "png" and quality is not None:
-        raise AgentApiError("CAPTURE_FRAME_INVALID", "image.quality is available only for jpeg and webp output.")
-    if image_format != "png" and compression is not None:
-        raise AgentApiError("CAPTURE_FRAME_INVALID", "image.compressionLevel is available only for png output.")
-    return {
-        "format": image_format,
-        "quality": quality if quality is not None else (90 if image_format in {"jpeg", "webp"} else None),
-        "compressionLevel": compression if compression is not None else (6 if image_format == "png" else None),
-    }
-
-
-def screen_capture_image(value: Any) -> dict[str, Any]:
-    item = capture_object(value, field_name="image", allowed={"format", "quality"})
-    image_format = item.get("format", "png")
-    if image_format not in {"png", "jpeg", "webp"}:
-        raise AgentApiError("SCREEN_CAPTURE_INVALID", "image.format must be png, jpeg, or webp.")
-    quality = item.get("quality")
-    if quality is not None:
-        quality = positive_integer(quality, field_name="image.quality")
-        if quality > 100:
-            raise AgentApiError("SCREEN_CAPTURE_INVALID", "image.quality must be from 1 to 100.")
-    if image_format == "png" and quality is not None:
-        raise AgentApiError("SCREEN_CAPTURE_INVALID", "image.quality is available only for jpeg and webp output.")
-    return {"format": image_format, "quality": quality if quality is not None else (90 if image_format in {"jpeg", "webp"} else None)}
-
-
-def screen_capture_default_workspace_path(image_format: str, region: dict[str, int] | None = None) -> str:
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    capture_id = secrets.token_urlsafe(8)
-    region_tag = "" if region is None else f"_x{region['x']}_y{region['y']}_w{region['width']}_h{region['height']}"
-    return f"screenshots/screenshot_{timestamp}{region_tag}_{capture_id}.{image_format}"
-
-
-def screen_capture_options(payload: Any) -> dict[str, Any]:
-    if not isinstance(payload, dict) or set(payload) - {"outputPath", "image", "region"}:
-        raise AgentApiError("SCREEN_CAPTURE_INVALID", "capture_screen requires only documented fields.")
-    image = screen_capture_image(payload.get("image"))
-    region = payload.get("region")
-    if region is not None:
-        if not isinstance(region, dict) or set(region) != {"x", "y", "width", "height"}:
-            raise AgentApiError("SCREEN_CAPTURE_INVALID", "region requires x, y, width, and height.")
-        if isinstance(region["x"], bool) or not isinstance(region["x"], int) or isinstance(region["y"], bool) or not isinstance(region["y"], int):
-            raise AgentApiError("SCREEN_CAPTURE_INVALID", "region.x and region.y must be integers.")
-        if isinstance(region["width"], bool) or not isinstance(region["width"], int) or region["width"] < 1 or isinstance(region["height"], bool) or not isinstance(region["height"], int) or region["height"] < 1:
-            raise AgentApiError("SCREEN_CAPTURE_INVALID", "region.width and region.height must be positive integers.")
-    output_path = payload.get("outputPath")
-    if output_path is not None and (not isinstance(output_path, str) or not output_path):
-        raise AgentApiError("SCREEN_CAPTURE_INVALID", "outputPath must be a non-empty logical workspace path.")
-    path = output_path or screen_capture_default_workspace_path(image["format"], region)
-    suffix = Path(path).suffix.lower()
-    allowed_suffixes = {"png": {".png"}, "jpeg": {".jpg", ".jpeg"}, "webp": {".webp"}}
-    if suffix not in allowed_suffixes[image["format"]]:
-        raise AgentApiError("SCREEN_CAPTURE_INVALID", f"outputPath extension must match image.format {image['format']}.")
-    return {"image": image, "outputPath": path, "region": region}
-
-
-def screen_capture_region(options: dict[str, Any], virtual_desktop: dict[str, int]) -> dict[str, int]:
-    """Resolve an optional global desktop rectangle and reject out-of-bounds input."""
-    region = options["region"]
-    if region is None:
-        return {"x": virtual_desktop["left"], "y": virtual_desktop["top"], "width": virtual_desktop["width"], "height": virtual_desktop["height"]}
-    left, top = virtual_desktop["left"], virtual_desktop["top"]
-    right, bottom = left + virtual_desktop["width"], top + virtual_desktop["height"]
-    if region["x"] < left or region["y"] < top or region["x"] + region["width"] > right or region["y"] + region["height"] > bottom:
-        raise AgentApiError("SCREEN_CAPTURE_INVALID", "region must lie completely inside the current virtual desktop.")
-    return dict(region)
-
-
-def capture_default_workspace_path(source_path: str, timestamp_seconds: float, image_format: str) -> str:
-    """Name an automatically created capture as a normal workspace artifact.
-
-    Use the source filename's human-readable title and stable yt ID when
-    available.  The download task ID is intentionally not propagated: it
-    identifies one download operation, whereas a capture needs to identify
-    the video it depicts.  Its own random capture ID prevents collisions.
-    """
-    source_stem = Path(source_path).stem.strip()
-    match = re.search(r"\s+\[yt_([A-Za-z0-9_-]+)\]", source_stem)
-    partial_match = re.search(r"\s+\[(partial_\d+(?:\.\d+)?_\d+(?:\.\d+)?)\]", source_stem)
-    title = source_stem[:match.start()].strip() if match else source_stem
-    title = title or "ResearchTube frame"
-    video_part = f" [yt_{match.group(1)}]" if match else ""
-    partial_part = f" [{partial_match.group(1)}]" if partial_match else ""
-    timestamp_part = f"{timestamp_seconds:.3f}".replace("-", "_")
-    # Six bytes encode to a compact, fixed eight-character URL-safe ID.
-    capture_id = secrets.token_urlsafe(6)
-    return f"captures/{title}{video_part}{partial_part} [t_{timestamp_part}] [cap_{capture_id}].{image_format}"
-
-
-def capture_output_path(value: Any, source_path: str, timestamp_seconds: float, image_format: str) -> dict[str, Any]:
-    if value is not None and (not isinstance(value, str) or not value):
-        raise AgentApiError("CAPTURE_FRAME_INVALID", "outputPath must be a non-empty logical workspace path.")
-    return {
-        "path": value or capture_default_workspace_path(source_path, timestamp_seconds, image_format),
-        "provided": value is not None,
-    }
-
-
-def capture_frame_options(payload: Any) -> dict[str, Any]:
-    if not isinstance(payload, dict) or set(payload) - {"path", "youtube", "timestampSeconds", "videoStreamIndex", "seekMode", "applyDisplayRotation", "crop", "resize", "image", "outputPath"}:
-        raise AgentApiError("CAPTURE_FRAME_INVALID", "capture_frame requires only documented fields.")
-    path = payload.get("path")
-    youtube_value = payload.get("youtube")
-    if (path is None) == (youtube_value is None):
-        raise AgentApiError("CAPTURE_FRAME_INVALID", "capture_frame requires exactly one source: path or youtube.")
-    youtube: dict[str, str] | None = None
-    if youtube_value is not None:
-        youtube_item = capture_object(youtube_value, field_name="youtube", allowed={"videoId", "formatId"})
-        if set(youtube_item) != {"videoId", "formatId"}:
-            raise AgentApiError("CAPTURE_FRAME_INVALID", "youtube requires videoId and formatId.")
-        youtube = {
-            "videoId": validate_video_id(youtube_item["videoId"]),
-            "formatId": parse_format_selection({"video": youtube_item["formatId"]}).video or "",
-        }
-        if not re.fullmatch(r"[0-9]+", youtube["formatId"]):
-            raise AgentApiError("CAPTURE_FRAME_INVALID", "youtube.formatId must be a numeric ID returned by youtube_download_get_formats.")
-    timestamp = finite_number(payload.get("timestampSeconds"), field_name="timestampSeconds", minimum=0)
-    stream_index = payload.get("videoStreamIndex")
-    if stream_index is not None:
-        stream_index = nonnegative_integer(stream_index, field_name="videoStreamIndex")
-    seek_mode = payload.get("seekMode", "accurate")
-    if seek_mode not in {"accurate", "fast"}:
-        raise AgentApiError("CAPTURE_FRAME_INVALID", "seekMode must be accurate or fast.")
-    rotation = payload.get("applyDisplayRotation", True)
-    if not isinstance(rotation, bool):
-        raise AgentApiError("CAPTURE_FRAME_INVALID", "applyDisplayRotation must be a boolean.")
-    image = capture_image(payload.get("image"))
-    return {
-        "path": path, "youtube": youtube, "timestampSeconds": timestamp, "videoStreamIndex": stream_index, "seekMode": seek_mode,
-        "applyDisplayRotation": rotation, "crop": capture_crop(payload.get("crop")), "resize": capture_resize(payload.get("resize")),
-        "image": image, "outputPath": capture_output_path(payload.get("outputPath"), path if isinstance(path, str) else "", timestamp, image["format"]),
-    }
-
-
-def capture_frames_options(payload: Any) -> dict[str, Any]:
-    allowed = {"path", "youtube", "timestampsSeconds", "videoStreamIndex", "seekMode", "applyDisplayRotation", "crop", "resize", "image"}
-    if not isinstance(payload, dict) or set(payload) - allowed:
-        raise AgentApiError("CAPTURE_FRAME_INVALID", "media_capture_frame requires only documented fields.")
-    path, youtube_value = payload.get("path"), payload.get("youtube")
-    if (path is None) == (youtube_value is None):
-        raise AgentApiError("CAPTURE_FRAME_INVALID", "media_capture_frame requires exactly one source: path or youtube.")
-    timestamps_value = payload.get("timestampsSeconds")
-    maximum = configured_tool_limits()["mediaCaptureFrameMaxFrames"]
-    if not isinstance(timestamps_value, list) or not 1 <= len(timestamps_value) <= maximum:
-        raise AgentApiError("CAPTURE_FRAME_INVALID", f"timestampsSeconds must contain from 1 to {maximum} timestamps (configured maximum).")
-    timestamps = [finite_number(value, field_name="timestampsSeconds", minimum=0) for value in timestamps_value]
-    if len(set(timestamps)) != len(timestamps):
-        raise AgentApiError("CAPTURE_FRAME_INVALID", "timestampsSeconds must not contain duplicates.")
-    single_payload = {key: value for key, value in payload.items() if key != "timestampsSeconds"}
-    first = capture_frame_options({**single_payload, "timestampSeconds": timestamps[0]})
-    return {**first, "timestampsSeconds": sorted(timestamps)}
-
-
-def image_crop_default_workspace_path(source_path: str, crop: dict[str, int], image_format: str) -> str:
-    source_stem = Path(source_path).stem.strip() or "ResearchTube image"
-    # Leave enough room for the crop provenance and unique ID under the
-    # portable 240-character workspace path-component limit.
-    source_stem = source_stem[:150].rstrip() or "ResearchTube image"
-    crop_tag = f"crop_{crop['x']}_{crop['y']}_{crop['width']}_{crop['height']}"
-    return f"crops/{source_stem} [{crop_tag}] [img_{secrets.token_urlsafe(8)}].{image_format}"
-
-
-def image_crop_options(payload: Any) -> dict[str, Any]:
-    if not isinstance(payload, dict) or set(payload) - {"path", "crop", "image", "outputPath"}:
-        raise AgentApiError("IMAGE_CROP_INVALID", "image_crop requires only documented fields.")
-    path = payload.get("path")
-    if not isinstance(path, str) or not path:
-        raise AgentApiError("IMAGE_CROP_INVALID", "path must be a non-empty logical workspace image path.")
-    crop = capture_crop(payload.get("crop"))
-    if crop is None:
-        raise AgentApiError("IMAGE_CROP_INVALID", "crop requires x, y, width, and height.")
-    try:
-        image = capture_image(payload.get("image"))
-    except AgentApiError as error:
-        raise AgentApiError("IMAGE_CROP_INVALID", error.message) from error
-    output_path = payload.get("outputPath")
-    if output_path is not None and (not isinstance(output_path, str) or not output_path):
-        raise AgentApiError("IMAGE_CROP_INVALID", "outputPath must be a non-empty logical workspace path.")
-    path = output_path or image_crop_default_workspace_path(path, crop, image["format"])
-    suffix = Path(path).suffix.lower()
-    allowed_suffixes = {"png": {".png"}, "jpeg": {".jpg", ".jpeg"}, "webp": {".webp"}}
-    if suffix not in allowed_suffixes[image["format"]]:
-        raise AgentApiError("IMAGE_CROP_INVALID", f"outputPath extension must match image.format {image['format']}.")
-    return {"path": payload["path"], "crop": crop, "image": image, "outputPath": path}
-
-
-def media_clip_options(payload: Any) -> dict[str, Any]:
-    if not isinstance(payload, dict) or set(payload) - {
-        "path", "outputKind", "segments", "cutMode", "includeAudio",
-        "videoStreamIndex", "audioStreamIndex", "outputDir",
-    }:
-        raise AgentApiError("MEDIA_CLIP_INVALID", "media_clip accepts only documented fields.")
-    path = payload.get("path")
-    if not isinstance(path, str) or not path.strip():
-        raise AgentApiError("MEDIA_CLIP_INVALID", "path must be a non-empty logical workspace media path.")
-    output_kind = payload.get("outputKind")
-    if output_kind not in {"video", "audio"}:
-        raise AgentApiError("MEDIA_CLIP_INVALID", "outputKind must be video or audio.")
-    cut_mode = payload.get("cutMode", "copy")
-    if cut_mode not in {"copy", "accurate"}:
-        raise AgentApiError("MEDIA_CLIP_INVALID", "cutMode must be copy or accurate.")
-    include_audio = payload.get("includeAudio", True)
-    if not isinstance(include_audio, bool):
-        raise AgentApiError("MEDIA_CLIP_INVALID", "includeAudio must be a boolean.")
-    if output_kind == "audio" and "includeAudio" in payload:
-        raise AgentApiError("MEDIA_CLIP_INVALID", "includeAudio is available only for video output.")
-
-    def stream_index(name: str) -> int | None:
-        value = payload.get(name)
-        if value is None:
-            return None
-        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-            raise AgentApiError("MEDIA_CLIP_INVALID", f"{name} must be a non-negative ffprobe stream index.")
-        return value
-
-    video_stream_index = stream_index("videoStreamIndex")
-    audio_stream_index = stream_index("audioStreamIndex")
-    if output_kind == "audio" and video_stream_index is not None:
-        raise AgentApiError("MEDIA_CLIP_INVALID", "videoStreamIndex is available only for video output.")
-    if output_kind == "video" and not include_audio and audio_stream_index is not None:
-        raise AgentApiError("MEDIA_CLIP_INVALID", "audioStreamIndex requires includeAudio=true.")
-
-    raw_segments = payload.get("segments")
-    segments: list[dict[str, float]] | None = None
-    if raw_segments is not None:
-        maximum = configured_tool_limits()["mediaClipMaxSegments"]
-        if not isinstance(raw_segments, list) or not 1 <= len(raw_segments) <= maximum:
-            raise AgentApiError("MEDIA_CLIP_INVALID", f"segments must contain from 1 to {maximum} intervals (configured maximum).")
-        segments = []
-        seen: set[tuple[float, float]] = set()
-        for index, segment in enumerate(raw_segments):
-            if not isinstance(segment, dict) or set(segment) != {"startSeconds", "endSeconds"}:
-                raise AgentApiError("MEDIA_CLIP_INVALID", f"segments[{index}] must contain only startSeconds and endSeconds.")
-            start, end = segment.get("startSeconds"), segment.get("endSeconds")
-            if isinstance(start, bool) or not isinstance(start, (int, float)) or not math.isfinite(start) or start < 0:
-                raise AgentApiError("MEDIA_CLIP_INVALID", f"segments[{index}].startSeconds must be a finite non-negative number.")
-            if isinstance(end, bool) or not isinstance(end, (int, float)) or not math.isfinite(end) or end <= start:
-                raise AgentApiError("MEDIA_CLIP_INVALID", f"segments[{index}].endSeconds must be a finite number greater than startSeconds.")
-            pair = (float(start), float(end))
-            if pair in seen:
-                raise AgentApiError("MEDIA_CLIP_INVALID", "segments must not contain duplicate intervals.")
-            seen.add(pair)
-            segments.append({"startSeconds": pair[0], "endSeconds": pair[1]})
-
-    output_dir_value = payload.get("outputDir", DEFAULT_MEDIA_CLIP_DIRECTORY)
-    output_dir = WorkspacePathResolver().resolve_destination(
-        output_dir_value, field_name="outputDir", error_code="MEDIA_CLIP_INVALID",
-    )
-    return {
-        "path": path.strip(), "outputKind": output_kind, "segments": segments,
-        "cutMode": cut_mode, "includeAudio": include_audio,
-        "videoStreamIndex": video_stream_index, "audioStreamIndex": audio_stream_index,
-        "outputDir": output_dir.logical_path,
-    }
-
-
-def visual_map_options(payload: Any) -> dict[str, Any]:
-    allowed = {"workspacePath", "columns", "rows", "maxTotalFrames", "selection", "sceneDetectThreshold", "startSeconds", "endSeconds", "maxMapDimension", "frameTimestampPosition"}
-    if not isinstance(payload, dict) or set(payload) - allowed:
-        raise AgentApiError("VISUAL_MAP_INVALID", "visual_map_create requires only documented fields.")
-    path = payload.get("workspacePath")
-    if not isinstance(path, str) or not path:
-        raise AgentApiError("VISUAL_MAP_INVALID", "workspacePath must be a non-empty logical workspace video path.")
-    columns = nonnegative_integer(payload.get("columns"), field_name="columns")
-    rows = nonnegative_integer(payload.get("rows"), field_name="rows")
-    max_total_frames = nonnegative_integer(payload.get("maxTotalFrames"), field_name="maxTotalFrames")
-    if columns < 1 or rows < 1 or max_total_frames < 1:
-        raise AgentApiError("VISUAL_MAP_INVALID", "columns, rows, and maxTotalFrames must be positive integers.")
-    if columns > VISUAL_MAP_MAX_GRID_SIDE or rows > VISUAL_MAP_MAX_GRID_SIDE or columns * rows > VISUAL_MAP_MAX_CELLS:
-        raise AgentApiError("VISUAL_MAP_INVALID", "The visual-map grid is too large.")
-    if max_total_frames > VISUAL_MAP_MAX_TOTAL_FRAMES:
-        raise AgentApiError("VISUAL_MAP_INVALID", f"maxTotalFrames must not exceed {VISUAL_MAP_MAX_TOTAL_FRAMES}.")
-    selection = payload.get("selection", "uniform")
-    if selection not in {"uniform", "sceneDetect", "hybrid"}:
-        raise AgentApiError("VISUAL_MAP_INVALID", "selection must be uniform, sceneDetect, or hybrid.")
-    threshold = payload.get("sceneDetectThreshold", DEFAULT_VISUAL_MAP_SCENE_DETECT_THRESHOLD)
-    if not isinstance(threshold, (int, float)) or isinstance(threshold, bool) or not math.isfinite(threshold) or threshold < 0 or threshold > 100:
-        raise AgentApiError("VISUAL_MAP_INVALID", "sceneDetectThreshold must be a finite number from 0 to 100.")
-    if selection not in {"sceneDetect", "hybrid"} and "sceneDetectThreshold" in payload:
-        raise AgentApiError("VISUAL_MAP_INVALID", "sceneDetectThreshold is available only when selection is sceneDetect or hybrid.")
-    start, end = payload.get("startSeconds", 0), payload.get("endSeconds")
-    if not isinstance(start, (int, float)) or isinstance(start, bool) or not math.isfinite(start) or start < 0:
-        raise AgentApiError("VISUAL_MAP_INVALID", "startSeconds must be a finite number greater than or equal to zero.")
-    if end is not None and (not isinstance(end, (int, float)) or isinstance(end, bool) or not math.isfinite(end)):
-        raise AgentApiError("VISUAL_MAP_INVALID", "endSeconds must be a finite number.")
-    maximum = payload.get("maxMapDimension", DEFAULT_VISUAL_MAP_MAX_DIMENSION)
-    if not isinstance(maximum, int) or isinstance(maximum, bool) or maximum < 1:
-        raise AgentApiError("VISUAL_MAP_INVALID", "maxMapDimension must be a positive integer.")
-    timestamp_position = payload.get("frameTimestampPosition", "bottomRight")
-    if timestamp_position not in {"none", "topLeft", "topRight", "bottomLeft", "bottomRight"}:
-        raise AgentApiError("VISUAL_MAP_INVALID", "frameTimestampPosition is invalid.")
-    return {"workspacePath": path, "columns": columns, "rows": rows, "maxTotalFrames": max_total_frames, "selection": selection, "sceneDetectThreshold": float(threshold) if selection in {"sceneDetect", "hybrid"} else None, "startSeconds": float(start), "endSeconds": None if end is None else float(end), "maxMapDimension": maximum, "frameTimestampPosition": timestamp_position}
-
-
-def uniform_visual_map_timestamps(start: float, end: float, count: int) -> list[float]:
-    if count == 1:
-        return [start]
-    step = (end - start) / (count - 1)
-    return [start + index * step for index in range(count - 1)] + [end]
-
-
-@dataclass(frozen=True)
-class VisualMapSceneCandidate:
-    timestamp_seconds: float
-    delta: float
-
-
-def visual_map_scene_candidates(metadata: bytes, start: float, end: float) -> list[VisualMapSceneCandidate]:
-    """Parse native scdet metadata without exposing FFmpeg process output."""
-    candidates: list[VisualMapSceneCandidate] = []
-    timestamp: float | None = None
-    score: float | None = None
-
-    def append_candidate() -> None:
-        nonlocal timestamp, score
-        if timestamp is not None and score is not None and start <= timestamp <= end:
-            candidates.append(VisualMapSceneCandidate(timestamp, score))
-        timestamp, score = None, None
-
-    for raw_line in metadata.decode("utf-8", "replace").splitlines():
-        if raw_line.startswith("frame:"):
-            append_candidate()
-            continue
-        time_match = re.fullmatch(r"lavfi\.scd\.time=([-+]?\d+(?:\.\d+)?)", raw_line.strip())
-        if time_match:
-            try:
-                value = float(time_match.group(1))
-            except ValueError:
-                timestamp = None
-            else:
-                timestamp = value if math.isfinite(value) else None
-            continue
-        score_match = re.fullmatch(r"lavfi\.scd\.score=([-+]?\d+(?:\.\d+)?)", raw_line.strip())
-        if score_match:
-            try:
-                value = float(score_match.group(1))
-            except ValueError:
-                continue
-            score = value if math.isfinite(value) and value > 0 else None
-    append_candidate()
-    return candidates
-
-
-def select_visual_map_scene_candidates(candidates: list[VisualMapSceneCandidate], maximum: int) -> list[VisualMapSceneCandidate]:
-    """Keep the strongest scene changes at least two seconds apart, then order them chronologically."""
-    strongest_first = sorted(candidates, key=lambda candidate: (-candidate.delta, candidate.timestamp_seconds))
-    spaced: list[VisualMapSceneCandidate] = []
-    for candidate in strongest_first:
-        if all(abs(candidate.timestamp_seconds - kept.timestamp_seconds) >= VISUAL_MAP_SCENE_MIN_DISTANCE_SECONDS for kept in spaced):
-            spaced.append(candidate)
-    return sorted(spaced[:maximum], key=lambda candidate: candidate.timestamp_seconds)
-
-
-def hybrid_visual_map_timestamps(candidates: list[VisualMapSceneCandidate], start: float, end: float, count: int) -> list[float]:
-    """Pick one strongest detected scene per equal interval, or its midpoint if empty."""
-    interval = (end - start) / count
-    timestamps: list[float] = []
-    for index in range(count):
-        left = start + interval * index
-        right = end if index == count - 1 else start + interval * (index + 1)
-        in_interval = [candidate for candidate in candidates if left <= candidate.timestamp_seconds and (candidate.timestamp_seconds < right or index == count - 1)]
-        if in_interval:
-            strongest = min(in_interval, key=lambda candidate: (-candidate.delta, candidate.timestamp_seconds))
-            timestamps.append(strongest.timestamp_seconds)
-        else:
-            timestamps.append((left + right) / 2)
-    return sorted(timestamps)
-
-
-def visual_map_timestamp_label(value: float) -> str:
-    seconds = max(0, int(round(value)))
-    if seconds < 60:
-        return f"0:{seconds:02d}"
-    minutes, remainder = divmod(seconds, 60)
-    if minutes < 60:
-        return f"{minutes}:{remainder:02d}"
-    hours, minutes = divmod(minutes, 60)
-    return f"{hours}:{minutes:02d}:{remainder:02d}"
-
-
-def visual_map_thumbnail_size(width: int, height: int, columns: int, rows: int, maximum: int) -> tuple[int, int]:
-    scale = min(1.0, maximum / (width * columns), maximum / (height * rows))
-    return max(1, int(width * scale)), max(1, int(height * scale))
-
-
-def visual_map_default_path(source_path: str, map_number: int, map_id: str) -> str:
-    stem = safe_capture_title(Path(source_path).stem)[:180].rstrip() or "Visual map"
-    return f"visual-maps/{stem} [vismap_{map_id}_{map_number:03d}].png"
-
-
-def video_frame_rate(stream: dict[str, Any]) -> float | None:
-    """Read ffprobe's rational rate when it is usable for endpoint sampling."""
-    for name in ("avg_frame_rate", "r_frame_rate"):
-        value = stream.get(name)
-        if not isinstance(value, str) or "/" not in value:
-            continue
-        try:
-            numerator, denominator = value.split("/", 1)
-            rate = float(numerator) / float(denominator)
-        except (TypeError, ValueError, ZeroDivisionError):
-            continue
-        if math.isfinite(rate) and rate > 0:
-            return rate
-    return None
-
-
-def visual_map_extract_timestamp(requested: float, video_duration: float, frame_rate: float | None) -> float:
-    """Keep an endpoint request within the range where a decoded video frame exists."""
-    frame_interval = 1.0 / frame_rate if frame_rate else min(1.0, video_duration / 2)
-    # stream.duration is normally the end immediately after the final frame.
-    # Leave a small fraction of a frame as well: decimal rounding in ffprobe
-    # can otherwise make select=gte(t, ...) miss that final frame by <1 Î¼s.
-    final_sample = max(0.0, video_duration - frame_interval * 1.01)
-    return min(requested, final_sample)
-
-
-async def ffprobe_streams_for_file(physical_path: Path, executable: str) -> list[dict[str, Any]]:
-    command = [executable, "-v", "error", "-show_streams", "-of", "json", str(physical_path)]
-    try:
-        process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-        stdout, _stderr = await asyncio.wait_for(process.communicate(), timeout=MEDIA_PROBE_TIMEOUT_SECONDS)
-    except asyncio.TimeoutError as error:
-        process.kill()
-        await process.communicate()
-        raise AgentApiError("CAPTURE_FRAME_FAILED", "ffprobe timed out while reading video streams.") from error
-    except OSError as error:
-        raise AgentApiError("CAPTURE_FRAME_FAILED", "ffprobe could not be started.") from error
-    if process.returncode != 0:
-        raise AgentApiError("CAPTURE_FRAME_FAILED", "ffprobe could not inspect video streams.")
-    try:
-        result = json.loads(stdout.decode("utf-8"))
-        streams = result.get("streams")
-    except (UnicodeDecodeError, json.JSONDecodeError, AttributeError) as error:
-        raise AgentApiError("CAPTURE_FRAME_FAILED", "ffprobe returned invalid video stream metadata.") from error
-    if not isinstance(streams, list):
-        raise AgentApiError("CAPTURE_FRAME_FAILED", "ffprobe returned invalid video stream metadata.")
-    return [stream for stream in streams if isinstance(stream, dict)]
-
-
-async def ffprobe_streams(item: ResolvedWorkspacePath, executable: str) -> list[dict[str, Any]]:
-    return await ffprobe_streams_for_file(item.physical_path, executable)
-
-
-def video_stream_rotation(stream: dict[str, Any]) -> float:
-    candidates: list[Any] = [stream.get("tags", {}).get("rotate") if isinstance(stream.get("tags"), dict) else None]
-    side_data = stream.get("side_data_list")
-    if isinstance(side_data, list):
-        candidates.extend(item.get("rotation") for item in side_data if isinstance(item, dict))
-    for value in candidates:
-        try:
-            rotation = float(value)
-        except (TypeError, ValueError):
-            continue
-        if math.isfinite(rotation):
-            normalized = rotation % 360
-            return 0.0 if math.isclose(normalized, 0.0, abs_tol=0.001) else normalized
-    return 0.0
-
-
-def capture_filter(options: dict[str, Any]) -> str:
-    filters: list[str] = []
-    if options["seekMode"] == "accurate":
-        # Unlike output-side -ss, select gives us both a deterministic frame
-        # (the first decoded PTS at or after the request) and a truthful PTS
-        # in the following showinfo filter.
-        filters.append(f"select=gte(t\\,{options['timestampSeconds']:.9f})")
-    crop = options["crop"]
-    if crop is not None:
-        filters.append(f"crop={crop['width']}:{crop['height']}:{crop['x']}:{crop['y']}")
-    resize = options["resize"]
-    if resize is not None:
-        width, height = resize["width"], resize["height"]
-        if width is None:
-            filters.append(f"scale=-2:{height}")
-        elif height is None:
-            filters.append(f"scale={width}:-2")
-        elif resize["mode"] == "stretch":
-            filters.append(f"scale={width}:{height}")
-        elif resize["mode"] == "contain":
-            x, y = resize["anchor"]["x"], resize["anchor"]["y"]
-            filters.extend([
-                f"scale={width}:{height}:force_original_aspect_ratio=decrease",
-                f"pad={width}:{height}:(ow-iw)*{x:.8f}:(oh-ih)*{y:.8f}:color={resize['padColor']}",
-            ])
-        else:
-            x, y = resize["anchor"]["x"], resize["anchor"]["y"]
-            filters.extend([
-                f"scale={width}:{height}:force_original_aspect_ratio=increase",
-                f"crop={width}:{height}:(iw-ow)*{x:.8f}:(ih-oh)*{y:.8f}",
-            ])
-    # showinfo reports the decoded frame PTS to stderr, without adding any pixels.
-    filters.append("showinfo")
-    return ",".join(filters)
-
-
-def capture_encoder_arguments(image: dict[str, Any]) -> tuple[list[str], str]:
-    image_format = image["format"]
-    if image_format == "png":
-        return ["-c:v", "png", "-compression_level", str(image["compressionLevel"])], "image/png"
-    if image_format == "jpeg":
-        # ffmpeg's mjpeg qscale is inverse: 2 is highest quality and 31 lowest.
-        qscale = round(31 - ((image["quality"] - 1) * 29 / 99))
-        return ["-c:v", "mjpeg", "-q:v", str(max(2, min(31, qscale)))], "image/jpeg"
-    return ["-c:v", "libwebp", "-q:v", str(image["quality"])], "image/webp"
-
-
-def macos_virtual_desktop() -> tuple[list[dict[str, int]], dict[str, int]]:
-    """Return active macOS displays and the CoreGraphics virtual-desktop bounds."""
-    if platform.system() != "Darwin":
-        raise AgentApiError("SCREEN_CAPTURE_UNAVAILABLE", "capture_screen is unavailable on this operating system.")
-    class CGPoint(ctypes.Structure):
-        _fields_ = [("x", ctypes.c_double), ("y", ctypes.c_double)]
-    class CGSize(ctypes.Structure):
-        _fields_ = [("width", ctypes.c_double), ("height", ctypes.c_double)]
-    class CGRect(ctypes.Structure):
-        _fields_ = [("origin", CGPoint), ("size", CGSize)]
-    try:
-        core_graphics = ctypes.CDLL("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics")
-        active = (ctypes.c_uint32 * 32)()
-        count = ctypes.c_uint32()
-        core_graphics.CGGetActiveDisplayList.argtypes = [ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.c_uint32)]
-        core_graphics.CGGetActiveDisplayList.restype = ctypes.c_int32
-        core_graphics.CGDisplayBounds.argtypes = [ctypes.c_uint32]
-        core_graphics.CGDisplayBounds.restype = CGRect
-        if core_graphics.CGGetActiveDisplayList(32, active, ctypes.byref(count)) != 0 or count.value < 1:
-            raise OSError("no active displays")
-        displays = []
-        for index in range(count.value):
-            bounds = core_graphics.CGDisplayBounds(active[index])
-            displays.append({"index": index, "left": round(bounds.origin.x), "top": round(bounds.origin.y), "width": round(bounds.size.width), "height": round(bounds.size.height)})
-    except (AttributeError, OSError) as error:
-        raise AgentApiError("SCREEN_CAPTURE_UNAVAILABLE", "macOS could not read the virtual desktop geometry.") from error
-    left = min(item["left"] for item in displays)
-    top = min(item["top"] for item in displays)
-    right = max(item["left"] + item["width"] for item in displays)
-    bottom = max(item["top"] + item["height"] for item in displays)
-    if right <= left or bottom <= top:
-        raise AgentApiError("SCREEN_CAPTURE_UNAVAILABLE", "macOS reported no usable virtual desktop.")
-    return displays, {"left": left, "top": top, "width": right - left, "height": bottom - top}
-
-
-async def capture_screen_macos(payload: Any) -> dict[str, Any]:
-    """Capture macOS active displays solely with FFmpeg avfoundation and xstack."""
-    options = screen_capture_options(payload)
-    displays, virtual_desktop = macos_virtual_desktop()
-    region = screen_capture_region(options, virtual_desktop)
-    ffmpeg = find_component("ffmpeg", COMPONENTS["ffmpeg"][0])
-    ffprobe = find_component("ffprobe", COMPONENTS["ffprobe"][0])
-    if ffmpeg.error or ffprobe.error:
-        raise AgentApiError("FFMPEG_DISCOVERY_ERROR", "ffmpeg or ffprobe discovery is ambiguous.", ffmpeg.error or ffprobe.error)
-    if not ffmpeg.executable or not ffprobe.executable:
-        raise AgentApiError("FFMPEG_NOT_AVAILABLE", "ffmpeg and ffprobe are required for macOS screen capture. Extract them under tools/ffmpeg or install them on PATH.")
-    resolver = WorkspacePathResolver()
-    destination_path: Path | None = None
-    try:
-        destination = resolver.resolve_destination(options["outputPath"], field_name="outputPath", error_code="WORKSPACE_PATH_INVALID")
-        destination.physical_path.parent.mkdir(parents=True, exist_ok=True)
-        destination = resolver.resolve_destination(destination.logical_path, field_name="outputPath", error_code="WORKSPACE_PATH_INVALID")
-        if destination.physical_path.exists() or destination.physical_path.is_symlink():
-            raise AgentApiError("SCREEN_CAPTURE_DESTINATION_EXISTS", "outputPath already exists; capture_screen never overwrites a workspace file.")
-        destination_path = destination.physical_path
-        command = [ffmpeg.executable, "-hide_banner", "-nostdin", "-v", "error"]
-        for display in displays:
-            command.extend(["-f", "avfoundation", "-framerate", "1", "-i", f"Capture screen {display['index']}:none"])
-        filters = []
-        labels = []
-        for display in displays:
-            label = f"d{display['index']}"
-            filters.append(f"[{display['index']}:v]scale={display['width']}:{display['height']}[{label}]")
-            labels.append(f"[{label}]")
-        layout = "|".join(f"{display['left'] - virtual_desktop['left']}_{display['top'] - virtual_desktop['top']}" for display in displays)
-        filters.append(f"{''.join(labels)}xstack=inputs={len(displays)}:layout={layout}:fill=black[out]")
-        output_label = "out"
-        if options["region"] is not None:
-            filters.append(f"[out]crop={region['width']}:{region['height']}:{region['x'] - virtual_desktop['left']}:{region['y'] - virtual_desktop['top']}[region]")
-            output_label = "region"
-        encoder_args, mime_type = capture_encoder_arguments({**options["image"], "compressionLevel": 6 if options["image"]["format"] == "png" else None})
-        command.extend(["-filter_complex", ";".join(filters), "-map", f"[{output_label}]", "-frames:v", "1", *encoder_args, "-y", str(destination_path)])
-        try:
-            process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
-            await asyncio.wait_for(process.communicate(), timeout=CAPTURE_FRAME_TIMEOUT_SECONDS)
-        except asyncio.TimeoutError as error:
-            process.kill()
-            await process.communicate()
-            raise AgentApiError("SCREEN_CAPTURE_FAILED", "FFmpeg timed out while capturing the macOS virtual desktop.") from error
-        except OSError as error:
-            raise AgentApiError("SCREEN_CAPTURE_UNAVAILABLE", "FFmpeg could not start macOS desktop capture.") from error
-        if process.returncode != 0 or not destination_path.is_file():
-            raise AgentApiError("SCREEN_CAPTURE_FAILED", "FFmpeg could not capture the macOS virtual desktop. Its build must support avfoundation and macOS screen recording must be permitted.")
-        output_streams = await ffprobe_streams_for_file(destination_path, ffprobe.executable)
-        stream = next((item for item in output_streams if item.get("codec_type") == "video"), None)
-        width = stream.get("width") if isinstance(stream, dict) else None
-        height = stream.get("height") if isinstance(stream, dict) else None
-        if width != region["width"] or height != region["height"]:
-            raise AgentApiError("SCREEN_CAPTURE_FAILED", "FFmpeg did not produce the requested macOS screen-capture dimensions.")
-        result = {"workspacePath": destination.logical_path, "format": options["image"]["format"], "mimeType": mime_type, "width": width, "height": height, "imageSizeBytes": destination_path.stat().st_size, "monitorCount": len(displays), "virtualDesktop": virtual_desktop, "region": region}
-        log(f"capture_screen monitors={len(displays)} {width}x{height} -> {destination.logical_path}")
-        return result
-    except AgentApiError:
-        if destination_path is not None:
-            try:
-                destination_path.unlink(missing_ok=True)
-            except OSError:
-                pass
-        raise
-
-
-async def x11_virtual_desktop() -> tuple[dict[str, int], int]:
-    """Read X11 root-display geometry and monitor count without capturing pixels."""
-    if not os.environ.get("DISPLAY") or os.environ.get("XDG_SESSION_TYPE", "").lower() == "wayland":
-        raise AgentApiError("SCREEN_CAPTURE_UNAVAILABLE", "capture_screen on Linux requires an X11 DISPLAY. Wayland capture is not implemented.")
-    xrandr = shutil.which("xrandr")
-    if not xrandr:
-        raise AgentApiError("SCREEN_CAPTURE_UNAVAILABLE", "Linux/X11 screen capture requires xrandr to report the virtual desktop and monitor count.")
-    try:
-        process = await asyncio.create_subprocess_exec(xrandr, "--query", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-        stdout, _stderr = await asyncio.wait_for(process.communicate(), timeout=MEDIA_PROBE_TIMEOUT_SECONDS)
-    except asyncio.TimeoutError as error:
-        process.kill()
-        await process.communicate()
-        raise AgentApiError("SCREEN_CAPTURE_UNAVAILABLE", "xrandr timed out while reading the X11 virtual desktop.") from error
-    except OSError as error:
-        raise AgentApiError("SCREEN_CAPTURE_UNAVAILABLE", "xrandr could not start for Linux/X11 screen capture.") from error
-    if process.returncode != 0:
-        raise AgentApiError("SCREEN_CAPTURE_UNAVAILABLE", "xrandr could not read the X11 virtual desktop.")
-    try:
-        text = stdout.decode("utf-8", "replace")
-        match = re.search(r"^Screen\s+\d+:.*?\bcurrent\s+(\d+)\s+x\s+(\d+)\b", text, re.MULTILINE)
-        monitor_count = len(re.findall(r"^\S+\s+connected(?:\s|$)", text, re.MULTILINE))
-        if match is None:
-            raise ValueError("missing X11 screen geometry")
-        width, height = int(match.group(1)), int(match.group(2))
-    except (AttributeError, ValueError) as error:
-        raise AgentApiError("SCREEN_CAPTURE_UNAVAILABLE", "xrandr returned invalid X11 virtual-desktop geometry.") from error
-    if width < 1 or height < 1 or monitor_count < 1:
-        raise AgentApiError("SCREEN_CAPTURE_UNAVAILABLE", "xrandr reported no usable X11 virtual desktop.")
-    # X11's root-window coordinates begin at 0,0; monitor layouts are within it.
-    return {"left": 0, "top": 0, "width": width, "height": height}, monitor_count
-
-
-async def capture_screen_x11(payload: Any) -> dict[str, Any]:
-    """Capture exactly one Linux/X11 virtual-desktop image through FFmpeg x11grab."""
-    options = screen_capture_options(payload)
-    virtual_desktop, monitor_count = await x11_virtual_desktop()
-    region = screen_capture_region(options, virtual_desktop)
-    ffmpeg = find_component("ffmpeg", COMPONENTS["ffmpeg"][0])
-    ffprobe = find_component("ffprobe", COMPONENTS["ffprobe"][0])
-    if ffmpeg.error:
-        raise AgentApiError("FFMPEG_DISCOVERY_ERROR", "ffmpeg discovery is ambiguous.", ffmpeg.error)
-    if ffprobe.error:
-        raise AgentApiError("FFPROBE_DISCOVERY_ERROR", "ffprobe discovery is ambiguous.", ffprobe.error)
-    if not ffmpeg.executable:
-        raise AgentApiError("FFMPEG_NOT_AVAILABLE", "ffmpeg is required for Linux/X11 screen capture. Extract it under tools/ffmpeg or install it on PATH.")
-    if not ffprobe.executable:
-        raise AgentApiError("FFPROBE_NOT_AVAILABLE", "ffprobe is required to verify Linux/X11 screen capture dimensions. Extract it under tools/ffmpeg or install it on PATH.")
-    resolver = WorkspacePathResolver()
-    destination_path: Path | None = None
-    try:
-        destination = resolver.resolve_destination(options["outputPath"], field_name="outputPath", error_code="WORKSPACE_PATH_INVALID")
-        destination.physical_path.parent.mkdir(parents=True, exist_ok=True)
-        destination = resolver.resolve_destination(destination.logical_path, field_name="outputPath", error_code="WORKSPACE_PATH_INVALID")
-        if destination.physical_path.exists() or destination.physical_path.is_symlink():
-            raise AgentApiError("SCREEN_CAPTURE_DESTINATION_EXISTS", "outputPath already exists; capture_screen never overwrites a workspace file.")
-        destination_path = destination.physical_path
-        encoder_args, mime_type = capture_encoder_arguments({**options["image"], "compressionLevel": 6 if options["image"]["format"] == "png" else None})
-        command = [
-            ffmpeg.executable, "-hide_banner", "-nostdin", "-v", "error", "-f", "x11grab", "-framerate", "1",
-            "-video_size", f"{region['width']}x{region['height']}", "-i", f"{os.environ['DISPLAY']}+{region['x']},{region['y']}",
-            "-map", "0:v:0", "-an", "-frames:v", "1", *encoder_args, "-y", str(destination_path),
-        ]
-        try:
-            process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
-            await asyncio.wait_for(process.communicate(), timeout=CAPTURE_FRAME_TIMEOUT_SECONDS)
-        except asyncio.TimeoutError as error:
-            process.kill()
-            await process.communicate()
-            raise AgentApiError("SCREEN_CAPTURE_FAILED", "FFmpeg timed out while capturing the Linux/X11 virtual desktop.") from error
-        except OSError as error:
-            raise AgentApiError("SCREEN_CAPTURE_UNAVAILABLE", "FFmpeg could not start Linux/X11 desktop capture.") from error
-        if process.returncode != 0 or not destination_path.is_file():
-            raise AgentApiError("SCREEN_CAPTURE_FAILED", "FFmpeg could not capture the Linux/X11 virtual desktop. Its build must support x11grab.")
-        output_streams = await ffprobe_streams_for_file(destination_path, ffprobe.executable)
-        output_stream = next((stream for stream in output_streams if stream.get("codec_type") == "video"), None)
-        width = output_stream.get("width") if isinstance(output_stream, dict) else None
-        height = output_stream.get("height") if isinstance(output_stream, dict) else None
-        if width != region["width"] or height != region["height"]:
-            raise AgentApiError("SCREEN_CAPTURE_FAILED", "FFmpeg did not produce the requested Linux/X11 screen-capture dimensions.")
-        result = {"workspacePath": destination.logical_path, "format": options["image"]["format"], "mimeType": mime_type, "width": width, "height": height, "imageSizeBytes": destination_path.stat().st_size, "monitorCount": monitor_count, "virtualDesktop": virtual_desktop, "region": region}
-        log(f"capture_screen monitors={monitor_count} {width}x{height} -> {destination.logical_path}")
-        return result
-    except AgentApiError:
-        if destination_path is not None:
-            try:
-                destination_path.unlink(missing_ok=True)
-            except OSError:
-                pass
-        raise
-
-
-def windows_virtual_desktop() -> tuple[dict[str, int], int]:
-    """Return the real Windows virtual-desktop rectangle and monitor count.
-
-    This does not capture any pixels. FFmpeg's gdigrab remains the only
-    Windows capture implementation; the small WinAPI query merely preserves
-    truthful geometry and monitor-count metadata in the MCP result.
-    """
-    try:
-        user32 = ctypes.WinDLL("user32", use_last_error=True)
-        # Avoid DPI-scaled virtual-screen metrics in a high-DPI process. It is
-        # harmless when awareness was already set by the host application.
-        try:
-            user32.SetProcessDPIAware()
-        except AttributeError:
-            pass
-        get_system_metrics = user32.GetSystemMetrics
-        get_system_metrics.argtypes = [ctypes.c_int]
-        get_system_metrics.restype = ctypes.c_int
-        bounds = {
-            "left": get_system_metrics(76), "top": get_system_metrics(77),
-            "width": get_system_metrics(78), "height": get_system_metrics(79),
-        }
-        monitor_count = get_system_metrics(80)
-    except (AttributeError, OSError) as error:
-        raise AgentApiError("SCREEN_CAPTURE_UNAVAILABLE", "Windows could not read the virtual desktop geometry.") from error
-    if bounds["width"] < 1 or bounds["height"] < 1 or monitor_count < 1:
-        raise AgentApiError("SCREEN_CAPTURE_UNAVAILABLE", "Windows reported no usable virtual desktop.")
-    return bounds, monitor_count
-
-
-async def capture_screen_windows(payload: Any) -> dict[str, Any]:
-    """Capture exactly one Windows virtual-desktop image through FFmpeg gdigrab."""
-    options = screen_capture_options(payload)
-    virtual_desktop, monitor_count = windows_virtual_desktop()
-    region = screen_capture_region(options, virtual_desktop)
-    ffmpeg = find_component("ffmpeg", COMPONENTS["ffmpeg"][0])
-    ffprobe = find_component("ffprobe", COMPONENTS["ffprobe"][0])
-    if ffmpeg.error:
-        raise AgentApiError("FFMPEG_DISCOVERY_ERROR", "ffmpeg discovery is ambiguous.", ffmpeg.error)
-    if ffprobe.error:
-        raise AgentApiError("FFPROBE_DISCOVERY_ERROR", "ffprobe discovery is ambiguous.", ffprobe.error)
-    if not ffmpeg.executable:
-        raise AgentApiError("FFMPEG_NOT_AVAILABLE", "ffmpeg is required for Windows screen capture. Extract it under tools/ffmpeg or install it on PATH.")
-    if not ffprobe.executable:
-        raise AgentApiError("FFPROBE_NOT_AVAILABLE", "ffprobe is required to verify Windows screen capture dimensions. Extract it under tools/ffmpeg or install it on PATH.")
-    resolver = WorkspacePathResolver()
-    destination_path: Path | None = None
-    try:
-        destination = resolver.resolve_destination(options["outputPath"], field_name="outputPath", error_code="WORKSPACE_PATH_INVALID")
-        destination.physical_path.parent.mkdir(parents=True, exist_ok=True)
-        destination = resolver.resolve_destination(destination.logical_path, field_name="outputPath", error_code="WORKSPACE_PATH_INVALID")
-        if destination.physical_path.exists() or destination.physical_path.is_symlink():
-            raise AgentApiError("SCREEN_CAPTURE_DESTINATION_EXISTS", "outputPath already exists; capture_screen never overwrites a workspace file.")
-        destination_path = destination.physical_path
-        encoder_args, mime_type = capture_encoder_arguments({**options["image"], "compressionLevel": 6 if options["image"]["format"] == "png" else None})
-        command = [
-            ffmpeg.executable, "-hide_banner", "-nostdin", "-v", "error",
-            "-f", "gdigrab", "-offset_x", str(region["x"]), "-offset_y", str(region["y"]),
-            "-video_size", f"{region['width']}x{region['height']}", "-framerate", "1", "-i", "desktop",
-            "-map", "0:v:0", "-an", "-frames:v", "1", *encoder_args, "-y", str(destination_path),
-        ]
-        try:
-            process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
-            await asyncio.wait_for(process.communicate(), timeout=CAPTURE_FRAME_TIMEOUT_SECONDS)
-        except asyncio.TimeoutError as error:
-            process.kill()
-            await process.communicate()
-            raise AgentApiError("SCREEN_CAPTURE_FAILED", "FFmpeg timed out while capturing the Windows virtual desktop.") from error
-        except OSError as error:
-            raise AgentApiError("SCREEN_CAPTURE_UNAVAILABLE", "FFmpeg could not start Windows desktop capture.") from error
-        if process.returncode != 0 or not destination_path.is_file():
-            raise AgentApiError("SCREEN_CAPTURE_FAILED", "FFmpeg could not capture the Windows virtual desktop. Its build must support gdigrab.")
-        output_streams = await ffprobe_streams_for_file(destination_path, ffprobe.executable)
-        output_stream = next((stream for stream in output_streams if stream.get("codec_type") == "video"), None)
-        width = output_stream.get("width") if isinstance(output_stream, dict) else None
-        height = output_stream.get("height") if isinstance(output_stream, dict) else None
-        if width != region["width"] or height != region["height"]:
-            raise AgentApiError("SCREEN_CAPTURE_FAILED", "FFmpeg did not produce the requested screen-capture dimensions.")
-        result = {"workspacePath": destination.logical_path, "format": options["image"]["format"], "mimeType": mime_type, "width": width, "height": height, "imageSizeBytes": destination_path.stat().st_size, "monitorCount": monitor_count, "virtualDesktop": virtual_desktop, "region": region}
-        log(f"capture_screen monitors={monitor_count} {width}x{height} -> {destination.logical_path}")
-        return result
-    except AgentApiError:
-        if destination_path is not None:
-            try:
-                destination_path.unlink(missing_ok=True)
-            except OSError:
-                pass
-        raise
-
-
-async def capture_screen(payload: Any) -> dict[str, Any]:
-    """Capture exactly one virtual-desktop image on the current platform."""
-    if os.name == "nt":
-        return await capture_screen_windows(payload)
-    if platform.system() == "Linux":
-        return await capture_screen_x11(payload)
-    return await capture_screen_macos(payload)
-
-
-def showinfo_timestamp(stderr: bytes) -> float | None:
-    matches = re.findall(rb"pts_time:([+-]?(?:\d+(?:\.\d*)?|\.\d+))", stderr)
-    if not matches:
-        return None
-    try:
-        # The filter graph can process a few extra frames before ffmpeg stops
-        # the single-image output. The first showinfo entry is the frame that
-        # the select filter admitted to the encoder.
-        result = float(matches[0])
-    except ValueError:
-        return None
-    return result if math.isfinite(result) else None
-
-
-async def visual_map_video_metadata(item: ResolvedWorkspacePath, executable: str) -> tuple[float, int, int, int, float | None]:
-    command = [executable, "-v", "error", "-show_entries", "format=duration:stream=index,codec_type,width,height,duration,avg_frame_rate,r_frame_rate:stream_side_data=rotation", "-of", "json", str(item.physical_path)]
-    try:
-        process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-        stdout, _stderr = await asyncio.wait_for(process.communicate(), timeout=MEDIA_PROBE_TIMEOUT_SECONDS)
-    except (asyncio.TimeoutError, OSError) as error:
-        raise AgentApiError("VISUAL_MAP_FAILED", "ffprobe could not inspect the workspace video.") from error
-    if process.returncode != 0:
-        raise AgentApiError("VISUAL_MAP_FAILED", "ffprobe could not inspect the workspace video.")
-    try:
-        document = json.loads(stdout.decode("utf-8"))
-        container_duration = float(document["format"]["duration"])
-        stream = next(value for value in document["streams"] if value.get("codec_type") == "video" and isinstance(value.get("width"), int) and isinstance(value.get("height"), int))
-        width, height, index = stream["width"], stream["height"], stream["index"]
-    except (KeyError, TypeError, ValueError, StopIteration, UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise AgentApiError("VISUAL_MAP_FAILED", "ffprobe did not report a usable video duration and stream dimensions.") from error
-    stream_duration = stream.get("duration")
-    try:
-        duration = float(stream_duration) if stream_duration is not None else container_duration
-    except (TypeError, ValueError):
-        duration = container_duration
-    if not math.isfinite(container_duration) or container_duration <= 0 or not math.isfinite(duration) or duration <= 0 or width < 1 or height < 1 or not isinstance(index, int):
-        raise AgentApiError("VISUAL_MAP_FAILED", "ffprobe did not report usable video metadata.")
-    if not math.isclose(video_stream_rotation(stream) % 180, 0.0, abs_tol=0.001):
-        width, height = height, width
-    return duration, width, height, index, video_frame_rate(stream)
-
-
-def visual_map_label_filter(label: str, position: str, height: int) -> str:
-    if position == "none":
-        return ""
-    font_size = max(1, min(DEFAULT_TIMESTAMP_FONT_SIZE_PX, math.floor(height * 0.15)))
-    padding = max(1, round(font_size * 0.30))
-    x = str(padding) if position.endswith("Left") else f"w-text_w-{padding}"
-    y = str(padding) if position.startswith("top") else f"h-text_h-{padding}"
-    font_file = visual_map_font_file()
-    if font_file is None:
-        raise AgentApiError("VISUAL_MAP_TIMESTAMP_FONT_UNAVAILABLE", "The configured visual-map timestamp font is unavailable in tools/fonts. Add the font there, choose its filename in agent-config.json, or use frameTimestampPosition=none.")
-    escaped_font = ffmpeg_filter_value(font_file.as_posix())
-    escaped_label = ffmpeg_filter_value(label)
-    return f"drawtext=fontfile='{escaped_font}':text='{escaped_label}':x={x}:y={y}:fontsize={font_size}:fontcolor=white:box=1:boxcolor=black@0.65:boxborderw={padding}"
-
-
-def ffmpeg_filter_value(value: str) -> str:
-    """Escape one literal FFmpeg filter option value without exposing paths."""
-    return value.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
-
-
-def visual_map_font_file() -> Path | None:
-    """Resolve the selected bundled font; no operating-system font paths are used."""
-    candidate = FONTS_PATH / configured_visual_map_timestamp_font()
-    return local_executable(candidate, FONTS_PATH)
-
-
-async def run_visual_map_ffmpeg(command: list[str], timeout: float) -> tuple[int, bytes]:
-    """Run one visual-map FFmpeg command without emitting diagnostic output."""
-    process: asyncio.subprocess.Process | None = None
-    try:
-        process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
-        _stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
-    except asyncio.TimeoutError:
-        if process is not None and process.returncode is None:
-            process.kill()
-            await process.communicate()
-        raise
-    except asyncio.CancelledError:
-        if process is not None and process.returncode is None:
-            process.kill()
-            await process.communicate()
-        raise
-    except OSError:
-        raise
-    return process.returncode, stderr
-
-
-def visual_map_scene_detect_filter(start: float, end: float, threshold: float) -> str:
-    """Use FFmpeg's native scdet percentage threshold, passing only detected frames."""
-    return f"trim=start={start:.9f}:end={end:.9f},scdet=threshold={threshold:.6f}:sc_pass=1,metadata=print:file=-:direct=1"
-
-
-async def detect_visual_map_scenes(source: ResolvedWorkspacePath, executable: str, stream_index: int, start: float, end: float, threshold: float) -> list[VisualMapSceneCandidate]:
-    """Ask FFmpeg scdet for scene-change timestamps and scores in the requested range."""
-    filters = visual_map_scene_detect_filter(start, end, threshold)
-    command = [executable, "-hide_banner", "-nostdin", "-v", "error", "-i", str(source.physical_path), "-map", f"0:{stream_index}", "-an", "-vf", filters, "-f", "null", "-"]
-    process: asyncio.subprocess.Process | None = None
-    try:
-        process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-        stdout, _stderr = await asyncio.wait_for(process.communicate(), timeout=VISUAL_MAP_TIMEOUT_SECONDS)
-    except asyncio.TimeoutError as error:
-        if process is not None and process.returncode is None:
-            process.kill()
-            await process.communicate()
-        raise AgentApiError("VISUAL_MAP_FAILED", "ffmpeg scene detection timed out.") from error
-    except asyncio.CancelledError:
-        if process is not None and process.returncode is None:
-            process.kill()
-            await process.communicate()
-        raise
-    except OSError as error:
-        raise AgentApiError("VISUAL_MAP_FAILED", "ffmpeg scene detection could not be started.") from error
-    if process.returncode != 0:
-        raise AgentApiError("VISUAL_MAP_FAILED", "ffmpeg scene detection failed.")
-    return visual_map_scene_candidates(stdout, start, end)
-
-
-VisualMapProgressReporter = Callable[[str, float, str, int, int, int, int], None]
-
-
-async def media_create_visual_map(payload: Any, progress: VisualMapProgressReporter | None = None) -> dict[str, Any]:
-    def report(phase: str, percentage: float, message: str, completed_frames: int, total_frames: int, completed_maps: int, total_maps: int) -> None:
-        if progress is not None:
-            progress(phase, percentage, message, completed_frames, total_frames, completed_maps, total_maps)
-
-    options = visual_map_options(payload)
-    resolver = WorkspacePathResolver()
-    source = resolver.resolve_existing(options["workspacePath"], field_name="workspacePath", expected_type="file")
-    ffmpeg = find_component("ffmpeg", COMPONENTS["ffmpeg"][0])
-    ffprobe = find_component("ffprobe", COMPONENTS["ffprobe"][0])
-    if ffmpeg.error or ffprobe.error:
-        raise AgentApiError("FFMPEG_DISCOVERY_ERROR", "ffmpeg or ffprobe discovery is ambiguous.", ffmpeg.error or ffprobe.error)
-    if not ffmpeg.executable or not ffprobe.executable:
-        raise AgentApiError("FFMPEG_NOT_AVAILABLE", "ffmpeg and ffprobe are required to create a visual map.")
-    duration, source_width, source_height, stream_index, frame_rate = await visual_map_video_metadata(source, ffprobe.executable)
-    start = options["startSeconds"]
-    end = duration if options["endSeconds"] is None else options["endSeconds"]
-    if end is None or end > duration or start >= end:
-        raise AgentApiError("VISUAL_MAP_INVALID", "The requested range must be within the video and have startSeconds less than endSeconds.")
-    if options["selection"] == "uniform":
-        timestamps = uniform_visual_map_timestamps(start, end, options["maxTotalFrames"])
-    else:
-        report("detectingScenes", 2.0, "Detecting scene changes.", 0, 0, 0, 0)
-        candidates = await detect_visual_map_scenes(source, ffmpeg.executable, stream_index, start, end, options["sceneDetectThreshold"])
-        if options["selection"] == "sceneDetect":
-            timestamps = [candidate.timestamp_seconds for candidate in select_visual_map_scene_candidates(candidates, options["maxTotalFrames"])]
-            if not timestamps:
-                raise AgentApiError("VISUAL_MAP_NO_SCENES", "No scene changes exceeded the FFmpeg scene-detection threshold in the requested range.")
-        else:
-            timestamps = hybrid_visual_map_timestamps(candidates, start, end, options["maxTotalFrames"])
-    thumbnail_width, thumbnail_height = visual_map_thumbnail_size(source_width, source_height, options["columns"], options["rows"], options["maxMapDimension"])
-    temporary_directory = resolver.resolve_destination(f".researchtube-visual-map-tmp/{secrets.token_urlsafe(8)}", field_name="temporary directory", error_code="WORKSPACE_PATH_INVALID")
-    temporary_directory.physical_path.mkdir(parents=True, exist_ok=True)
-    frames: list[tuple[float, Path]] = []
-    output_paths: list[Path] = []
-    map_id = secrets.token_urlsafe(5)
-    try:
-        report("extractingFrames", 5.0, "Extracting video frames.", 0, len(timestamps), 0, 0)
-        seen_decoded: set[float] = set()
-        for frame_number, timestamp in enumerate(timestamps):
-            frame_path = temporary_directory.physical_path / f"frame-{frame_number:03d}.png"
-            final_full_range_frame = options["selection"] == "uniform" and options["endSeconds"] is None and len(timestamps) > 1 and frame_number == len(timestamps) - 1
-            extraction_timestamp = visual_map_extract_timestamp(timestamp, duration, frame_rate)
-            filters = (["reverse"] if final_full_range_frame else [f"select=gte(t\\,{extraction_timestamp:.9f})"])
-            filters.extend([f"scale={thumbnail_width}:{thumbnail_height}:force_original_aspect_ratio=decrease", f"pad={thumbnail_width}:{thumbnail_height}:(ow-iw)/2:(oh-ih):color=black"])
-            label_filter = visual_map_label_filter(visual_map_timestamp_label(timestamp), options["frameTimestampPosition"], thumbnail_height)
-            if label_filter:
-                filters.append(label_filter)
-            filters.append("showinfo")
-            command = [ffmpeg.executable, "-hide_banner", "-nostdin", "-v", "info"]
-            command.extend(["-sseof", "-1"] if final_full_range_frame else [])
-            command.extend(["-i", str(source.physical_path), "-map", f"0:{stream_index}", "-an", "-frames:v", "1", "-vf", ",".join(filters), "-c:v", "png", "-compression_level", "6", "-y", str(frame_path)])
-            try:
-                returncode, stderr = await run_visual_map_ffmpeg(command, CAPTURE_FRAME_TIMEOUT_SECONDS)
-            except (asyncio.TimeoutError, OSError) as error:
-                raise AgentApiError("VISUAL_MAP_FAILED", "ffmpeg could not extract a visual-map frame.") from error
-            if returncode != 0 or not frame_path.is_file():
-                raise AgentApiError("VISUAL_MAP_FAILED", "ffmpeg could not extract a visual-map frame.")
-            # reverse starts its output timestamp sequence at zero. The final
-            # full-range frame must therefore keep its nominal endpoint for
-            # duplicate detection instead of being confused with frame zero.
-            decoded_timestamp = None if final_full_range_frame else showinfo_timestamp(stderr)
-            decoded = round(decoded_timestamp if decoded_timestamp is not None else timestamp, 6)
-            if decoded in seen_decoded:
-                frame_path.unlink(missing_ok=True)
-                report("extractingFrames", 5.0 + 75.0 * (frame_number + 1) / len(timestamps), "Extracting video frames.", frame_number + 1, len(timestamps), 0, 0)
-                continue
-            seen_decoded.add(decoded)
-            frames.append((timestamp, frame_path))
-            report("extractingFrames", 5.0 + 75.0 * (frame_number + 1) / len(timestamps), "Extracting video frames.", frame_number + 1, len(timestamps), 0, 0)
-        if not frames:
-            raise AgentApiError("VISUAL_MAP_FAILED", "The requested range did not produce a frame.")
-        capacity = options["columns"] * options["rows"]
-        total_maps = math.ceil(len(frames) / capacity)
-        report("assemblingMaps", 80.0, "Assembling visual maps.", len(frames), len(timestamps), 0, total_maps)
-        maps: list[dict[str, Any]] = []
-        for map_number, offset in enumerate(range(0, len(frames), capacity), start=1):
-            group = frames[offset:offset + capacity]
-            destination = resolver.resolve_destination(visual_map_default_path(source.logical_path, map_number, map_id), field_name="visual map output", error_code="WORKSPACE_PATH_INVALID")
-            destination.physical_path.parent.mkdir(parents=True, exist_ok=True)
-            destination = resolver.resolve_destination(destination.logical_path, field_name="visual map output", error_code="WORKSPACE_PATH_INVALID")
-            if destination.physical_path.exists() or destination.physical_path.is_symlink():
-                raise AgentApiError("VISUAL_MAP_DESTINATION_EXISTS", "A visual-map output path already exists; this tool never overwrites a workspace file.")
-            output_paths.append(destination.physical_path)
-            command = [ffmpeg.executable, "-hide_banner", "-nostdin", "-v", "error"]
-            for _timestamp, frame_path in group:
-                command.extend(["-loop", "1", "-i", str(frame_path)])
-            for _ in range(capacity - len(group)):
-                command.extend(["-f", "lavfi", "-i", f"color=c=black@0.0:s={thumbnail_width}x{thumbnail_height}:r=1"])
-            labels = "".join(f"[{index}:v]" for index in range(capacity))
-            layout = "|".join(f"{(index % options['columns']) * thumbnail_width}_{(index // options['columns']) * thumbnail_height}" for index in range(capacity))
-            command.extend(["-filter_complex", f"{labels}xstack=inputs={capacity}:layout={layout}:fill=black@0.0,format=rgba[out]", "-map", "[out]", "-frames:v", "1", "-c:v", "png", "-compression_level", "6", "-y", str(destination.physical_path)])
-            try:
-                returncode, _stderr = await run_visual_map_ffmpeg(command, VISUAL_MAP_TIMEOUT_SECONDS)
-            except (asyncio.TimeoutError, OSError) as error:
-                raise AgentApiError("VISUAL_MAP_FAILED", "ffmpeg could not assemble a visual map.") from error
-            if returncode != 0 or not destination.physical_path.is_file():
-                raise AgentApiError("VISUAL_MAP_FAILED", "ffmpeg could not assemble a visual map.")
-            maps.append({"workspacePath": destination.logical_path, "frameCount": len(group), "timestampsSeconds": [timestamp for timestamp, _frame in group]})
-            report("assemblingMaps", 80.0 + 20.0 * map_number / total_maps, "Assembling visual maps.", len(frames), len(timestamps), map_number, total_maps)
-        result = {"sourcePath": source.logical_path, "selection": options["selection"], "sceneDetectThreshold": options["sceneDetectThreshold"], "range": {"startSeconds": start, "endSeconds": end}, "columns": options["columns"], "rows": options["rows"], "mapCapacity": capacity, "maxTotalFrames": options["maxTotalFrames"], "actualTotalFrames": len(frames), "maps": maps}
-        log(f"visual_map_create path={source.logical_path} frames={len(frames)} maps={len(maps)} -> ok")
-        return result
-    except AgentApiError:
-        for output_path in output_paths:
-            output_path.unlink(missing_ok=True)
-        raise
-    finally:
-        shutil.rmtree(temporary_directory.physical_path, ignore_errors=True)
-
-
-def windows_speech_python() -> str:
-    if sys.platform != "win32":
-        raise AgentApiError("SPEECH_NOT_SUPPORTED", "Windows text-to-speech is available only on Windows.")
-    if not getattr(sys, "frozen", False) and not WINDOWS_SPEECH_SCRIPT_PATH.is_file():
-        raise AgentApiError("SPEECH_NOT_AVAILABLE", "The Windows text-to-speech helper is not installed.")
-    return sys.executable
-
-
-def windows_speech_command(executable: str) -> list[str]:
-    return [executable, "--windows-speech-helper"] if getattr(sys, "frozen", False) else [executable, str(WINDOWS_SPEECH_SCRIPT_PATH)]
-
-
-def windows_speech_environment() -> dict[str, str] | None:
-    # A one-file helper owns its extraction lifetime even if the parent exits.
-    return {**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"} if getattr(sys, "frozen", False) else None
-
-
-def speech_options(payload: Any) -> dict[str, Any]:
-    if not isinstance(payload, dict) or set(payload) - {"text", "engine", "voiceId", "outputPath", "outputMode"}:
-        raise AgentApiError("SPEECH_INVALID", "system_speech_speak accepts text, engine, optional voiceId, outputMode, and outputPath only.")
-    text = payload.get("text")
-    voice_id = payload.get("voiceId")
-    if not isinstance(text, str) or not text.strip():
-        raise AgentApiError("SPEECH_INVALID", "text must be a non-empty string.")
-    if len(text.encode("utf-8")) > SPEECH_MAX_TEXT_BYTES:
-        raise AgentApiError("SPEECH_INVALID", f"text must not exceed {SPEECH_MAX_TEXT_BYTES} UTF-8 bytes.")
-    if voice_id is not None and (not isinstance(voice_id, str) or not voice_id.strip()):
-        raise AgentApiError("SPEECH_INVALID", "voiceId must be null or a non-empty voiceId returned by system_speech_list_voices.")
-    engine = payload.get("engine", "googleTranslate")
-    if engine not in {"windows", "googleTranslate"}:
-        raise AgentApiError("SPEECH_INVALID", "engine must be windows or googleTranslate.")
-    if engine == "googleTranslate":
-        if voice_id is not None:
-            raise AgentApiError("SPEECH_INVALID", "voiceId is available only with the Windows speech engine.")
-    output_path = payload.get("outputPath")
-    if output_path is not None and (not isinstance(output_path, str) or not output_path.strip()):
-        raise AgentApiError("SPEECH_INVALID", "outputPath must be omitted, null, or a non-empty workspace-relative audio path.")
-    output_mode = payload.get("outputMode", "speakers")
-    if output_mode not in {"file", "speakers", "both"}:
-        raise AgentApiError("SPEECH_INVALID", "outputMode must be one of: file, speakers, both.")
-    if output_mode == "speakers" and output_path is not None:
-        raise AgentApiError("SPEECH_INVALID", "outputPath is available only when outputMode is file or both.")
-    return {"text": text, "engine": engine, "voiceId": voice_id, "outputPath": output_path, "outputMode": output_mode}
-
-
-def speech_base64(value: str | None) -> str:
-    return base64.b64encode((value or "").encode("utf-8")).decode("ascii")
-
-
-def normalize_speech_voice(voice: Any) -> dict[str, Any]:
-    """Keep Windows' optional/unknown VoiceGender from breaking voice discovery."""
-    if not isinstance(voice, dict):
-        raise AgentApiError("SPEECH_SYNTHESIS_FAILED", "Windows returned an invalid speech voice.")
-    voice_id, name, language = voice.get("voiceId"), voice.get("name"), voice.get("language")
-    if not isinstance(voice_id, str) or not voice_id or not isinstance(name, str) or not name or not isinstance(language, str) or not language or not isinstance(voice.get("isDefault"), bool):
-        raise AgentApiError("SPEECH_SYNTHESIS_FAILED", "Windows returned an invalid speech voice.")
-    gender = voice.get("gender")
-    return {"voiceId": voice_id, "name": name, "language": language, "gender": gender if gender in {"male", "female", "neutral"} else "neutral", "isDefault": voice["isDefault"]}
-
-
-# Public voice IDs intentionally never contain the Windows voice/registry ID.
-# They only need to survive from list_voices to a following speak call in this
-# running Local Agent, so an in-memory, positional mapping is sufficient.
-SPEECH_WINDOWS_VOICE_IDS: dict[str, str] = {}
-SPEECH_WINDOWS_VOICE_NAMES: dict[str, str] = {}
-
-
-def public_speech_voices(voices: list[Any]) -> list[dict[str, Any]]:
-    normalized = [normalize_speech_voice(voice) for voice in voices]
-    SPEECH_WINDOWS_VOICE_IDS.clear()
-    SPEECH_WINDOWS_VOICE_NAMES.clear()
-    public: list[dict[str, Any]] = []
-    for index, voice in enumerate(normalized, start=1):
-        public_id = f"voice_{index}"
-        SPEECH_WINDOWS_VOICE_IDS[public_id] = voice["voiceId"]
-        SPEECH_WINDOWS_VOICE_NAMES[public_id] = voice["name"]
-        public.append({**voice, "voiceId": public_id})
-    return public
-
-
-async def system_speech_list_voices(payload: Any) -> dict[str, Any]:
-    if payload not in ({}, None):
-        raise AgentApiError("SPEECH_INVALID", "system_speech_list_voices does not accept arguments.")
-    executable = windows_speech_python()
-    try:
-        process = await asyncio.create_subprocess_exec(*windows_speech_command(executable), "--action", "list-voices", env=windows_speech_environment(), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=15)
-    except asyncio.TimeoutError as error:
-        process.kill(); await process.communicate()
-        raise AgentApiError("SPEECH_SYNTHESIS_FAILED", "Windows could not enumerate speech voices in time.") from error
-    except OSError as error:
-        raise AgentApiError("SPEECH_NOT_AVAILABLE", "The Windows text-to-speech helper could not start.") from error
-    if process.returncode != 0:
-        raise AgentApiError("SPEECH_SYNTHESIS_FAILED", "Windows could not enumerate speech voices.")
-    try:
-        document = json.loads(stdout.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise AgentApiError("SPEECH_SYNTHESIS_FAILED", "Windows returned an invalid speech-voice list.") from error
-    voices = document.get("voices") if isinstance(document, dict) else None
-    if not isinstance(voices, list):
-        raise AgentApiError("SPEECH_SYNTHESIS_FAILED", "Windows returned an invalid speech-voice list.")
-    return {"voices": public_speech_voices(voices)}
-
-
-async def system_speech_voice_name(executable: str, voice_id: str | None) -> str:
-    """Resolve the actual selected voice's display name without publishing its ID."""
-    process: asyncio.subprocess.Process | None = None
-    try:
-        process = await asyncio.create_subprocess_exec(
-            *windows_speech_command(executable), "--action", "voice-info",
-            "--voice-id-base64", speech_base64(voice_id),
-            env=windows_speech_environment(), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=15)
-    except asyncio.TimeoutError as error:
-        if process is not None:
-            process.kill(); await process.communicate()
-        raise AgentApiError("SPEECH_SYNTHESIS_FAILED", "Windows could not resolve the selected speech voice in time.") from error
-    except OSError as error:
-        raise AgentApiError("SPEECH_NOT_AVAILABLE", "The Windows text-to-speech helper could not start.") from error
-    if process.returncode != 0:
-        code = "VOICE_NOT_FOUND" if b"VOICE_NOT_FOUND" in stderr else "SPEECH_SYNTHESIS_FAILED"
-        raise AgentApiError(code, "The selected Windows voice was not found." if code == "VOICE_NOT_FOUND" else "Windows could not resolve the selected speech voice.")
-    try:
-        name = json.loads(stdout.decode("utf-8")).get("name")
-    except (UnicodeDecodeError, json.JSONDecodeError, AttributeError) as error:
-        raise AgentApiError("SPEECH_SYNTHESIS_FAILED", "Windows returned invalid selected-voice information.") from error
-    if not isinstance(name, str) or not name.strip():
-        raise AgentApiError("SPEECH_SYNTHESIS_FAILED", "Windows returned invalid selected-voice information.")
-    return name.strip()
-
-
-def new_speech_file_id() -> str:
-    return f"tts_{secrets.token_urlsafe(7)}"
-
-
-def speech_filename_stem(voice_name: str, file_id: str) -> str:
-    name = re.sub(r'[\x00-\x1f<>:"/\\|?*]+', " ", voice_name)
-    name = re.sub(r"\s+", " ", name).strip(" .")[:160].rstrip(" .") or "Windows voice"
-    return f"{name} {camera_filename_timestamp()} [{file_id}]"
-
-
-def speech_default_workspace_path(voice_name: str, file_id: str, extension: str = "wav") -> str:
-    return f"text-to-speech/{speech_filename_stem(voice_name, file_id)}.{extension}"
-
-
-@dataclass
-class SpeechTask:
-    task_id: str
-    text: str
-    voice_id: str | None
-    voice_name: str
-    output_mode: str
-    output_path: str | None
-    created_at: str
-    last_updated_at: str
-    engine: str = "windows"
-    upload_token: str | None = None
-    status: str = "working"
-    status_message: str = "Preparing speech."
-    phase: str = "preparing"
-    progress_percent: float = 0.0
-    result: dict[str, Any] | None = None
-    error: dict[str, str] | None = None
-    process: asyncio.subprocess.Process | None = None
-    runner: asyncio.Task[None] | None = None
-    voice_not_found: bool = False
-
-    def touch(self, message: str | None = None) -> None:
-        self.last_updated_at = utc_now()
-        if message is not None:
-            self.status_message = message
-
-
-class SpeechTaskManager:
-    def __init__(self) -> None: self.tasks: dict[str, SpeechTask] = TaskHistory(configured_task_history_limit)
-
-    def new_task_id(self) -> str:
-        while True:
-            task_id = f"tsk_{secrets.token_urlsafe(7)}"
-            if task_id not in self.tasks:
-                return task_id
-
-    def get(self, task_id: str) -> SpeechTask:
-        if not isinstance(task_id, str) or not task_id or task_id not in self.tasks:
-            raise AgentApiError("TASK_NOT_FOUND", "The requested speech task does not exist.")
-        return self.tasks[task_id]
-
-    def snapshot(self, task: SpeechTask) -> dict[str, Any]:
-        result: dict[str, Any] = {"taskId": task.task_id, "status": task.status, "phase": task.phase, "progressPercent": task.progress_percent, "statusMessage": task.status_message, "engine": task.engine, "voiceName": task.voice_name, "outputMode": task.output_mode, "saveToFile": task.output_path is not None, "outputPath": task.output_path, "createdAt": task.created_at, "lastUpdatedAt": task.last_updated_at, "pollIntervalMs": TASK_POLL_INTERVAL_MS}
-        if task.result is not None:
-            result["result"] = task.result
-        if task.error is not None:
-            result["error"] = task.error
-        return result
-
-    async def create(self, payload: Any) -> dict[str, Any]:
-        options = speech_options(payload)
-        now = utc_now()
-        if options["engine"] == "googleTranslate":
-            voice_name = "Google Translate (auto)"
-            output_path = self.prepare_output_path(options, voice_name, "mp3")
-            task = SpeechTask(self.new_task_id(), options["text"], None, voice_name, options["outputMode"], output_path, now, now,
-                              engine="googleTranslate", upload_token=secrets.token_urlsafe(24),
-                              status_message="Opening Google Translate.", phase="preparing")
-            self.tasks[task.task_id] = task
-            result = self.snapshot(task)
-            result["uploadToken"] = task.upload_token
-            return result
-        executable = windows_speech_python()
-        requested_voice_id = options["voiceId"]
-        if requested_voice_id is not None and requested_voice_id not in SPEECH_WINDOWS_VOICE_IDS:
-            raise AgentApiError("VOICE_NOT_FOUND", "The selected Windows voice was not found. Call system_speech_list_voices again.")
-        windows_voice_id = SPEECH_WINDOWS_VOICE_IDS.get(requested_voice_id) if requested_voice_id is not None else None
-        voice_name = SPEECH_WINDOWS_VOICE_NAMES.get(requested_voice_id) if requested_voice_id is not None else None
-        if voice_name is None:
-            voice_name = await system_speech_voice_name(executable, windows_voice_id)
-        output_path = self.prepare_output_path(options, voice_name, "wav")
-        task = SpeechTask(self.new_task_id(), options["text"], windows_voice_id, voice_name, options["outputMode"], output_path, now, now)
-        self.tasks[task.task_id] = task
-        task.runner = asyncio.create_task(self.run(task, executable), name=f"researchtube-speech-{task.task_id}")
-        return self.snapshot(task)
-
-    @staticmethod
-    def prepare_output_path(options: dict[str, Any], voice_name: str, extension: str) -> str | None:
-        if options["outputMode"] not in {"file", "both"}:
-            return None
-        output_path = options["outputPath"] or speech_default_workspace_path(voice_name, new_speech_file_id(), extension)
-        destination = WorkspacePathResolver().resolve_destination(output_path, field_name="outputPath", error_code="SPEECH_INVALID")
-        if destination.physical_path.suffix.lower() != f".{extension}":
-            raise AgentApiError("SPEECH_INVALID", f"outputPath must end in .{extension} for the selected speech engine.")
-        if destination.physical_path.exists() or destination.physical_path.is_symlink():
-            raise AgentApiError("DESTINATION_EXISTS", "The speech output destination already exists; this tool never overwrites files.")
-        return destination.logical_path
-
-    def google_task(self, task_id: str, upload_token: str) -> SpeechTask:
-        task = self.get(task_id)
-        if task.engine != "googleTranslate" or not isinstance(upload_token, str) or not secrets.compare_digest(task.upload_token or "", upload_token):
-            raise AgentApiError("GOOGLE_TRANSLATE_TASK_INVALID", "The Google Translate speech task is invalid.")
-        if task.status != "working":
-            raise AgentApiError("GOOGLE_TRANSLATE_TASK_INVALID", "The Google Translate speech task is no longer active.")
-        return task
-
-    def google_progress(self, task_id: str, payload: Any) -> dict[str, Any]:
-        if not isinstance(payload, dict) or set(payload) != {"uploadToken", "phase", "progressPercent"}:
-            raise AgentApiError("GOOGLE_TRANSLATE_TASK_INVALID", "Google Translate progress is invalid.")
-        task = self.google_task(task_id, payload["uploadToken"])
-        phase = payload["phase"]
-        progress = payload["progressPercent"]
-        messages = {"openingTranslate": "Opening Google Translate.", "synthesizing": "Waiting for Google Translate to prepare speech.", "playing": "Playing Google Translate speech.", "capturing": "Collecting Google Translate source audio.", "saving": "Saving Google Translate source audio."}
-        if phase not in messages or not isinstance(progress, (int, float)) or isinstance(progress, bool) or not math.isfinite(progress) or not 0 <= progress < 100:
-            raise AgentApiError("GOOGLE_TRANSLATE_TASK_INVALID", "Google Translate progress is invalid.")
-        task.phase, task.progress_percent = phase, max(task.progress_percent, float(progress))
-        task.touch(messages[phase])
-        return self.snapshot(task)
-
-    def google_complete(self, task_id: str, payload: Any) -> dict[str, Any]:
-        if not isinstance(payload, dict) or set(payload) != {"uploadToken"}:
-            raise AgentApiError("GOOGLE_TRANSLATE_TASK_INVALID", "Google Translate completion is invalid.")
-        task = self.google_task(task_id, payload["uploadToken"])
-        if task.output_path is not None:
-            raise AgentApiError("GOOGLE_TRANSLATE_TASK_INVALID", "Google Translate audio must be uploaded before completing this task.")
-        task.status, task.phase, task.progress_percent = "completed", "completed", 100.0
-        task.touch("Google Translate speech completed.")
-        return self.snapshot(task)
-
-    def google_fail(self, task_id: str, payload: Any) -> dict[str, Any]:
-        if not isinstance(payload, dict) or set(payload) != {"uploadToken", "code"}:
-            raise AgentApiError("GOOGLE_TRANSLATE_TASK_INVALID", "Google Translate failure is invalid.")
-        task = self.google_task(task_id, payload["uploadToken"])
-        messages = {"GOOGLE_TRANSLATE_UNAVAILABLE": "Google Translate could not prepare the requested speech.", "GOOGLE_TRANSLATE_PLAYBACK_FAILED": "Google Translate could not play the requested speech.", "GOOGLE_TRANSLATE_AUDIO_UNAVAILABLE": "Chrome could not obtain the Google Translate source audio."}
-        if payload["code"] not in messages:
-            raise AgentApiError("GOOGLE_TRANSLATE_TASK_INVALID", "Google Translate failure is invalid.")
-        task.status, task.phase, task.error = "failed", "failed", {"code": payload["code"], "message": messages[payload["code"]]}
-        task.touch("Google Translate speech failed.")
-        return self.snapshot(task)
-
-    async def google_audio(self, task_id: str, upload_token: str, audio: bytes) -> dict[str, Any]:
-        task = self.google_task(task_id, upload_token)
-        is_mp3 = audio.startswith(b"ID3") or (len(audio) >= 2 and audio[0] == 0xff and (audio[1] & 0xe0) == 0xe0)
-        if task.output_path is None or len(audio) < 64 or len(audio) > MAX_GOOGLE_TRANSLATE_AUDIO_BYTES or not is_mp3:
-            raise AgentApiError("GOOGLE_TRANSLATE_AUDIO_UNAVAILABLE", "Chrome did not provide valid Google Translate MP3 audio.")
-        destination = WorkspacePathResolver().resolve_destination(task.output_path, field_name="speech output", error_code="SPEECH_FILE_FAILED")
-        if destination.physical_path.exists() or destination.physical_path.is_symlink():
-            raise AgentApiError("DESTINATION_EXISTS", "The speech output destination already exists; this tool never overwrites files.")
-        task.phase, task.progress_percent = "saving", max(task.progress_percent, 80.0)
-        task.touch("Saving Google Translate source audio.")
-        destination.physical_path.parent.mkdir(parents=True, exist_ok=True)
-        descriptor, temporary_name = tempfile.mkstemp(prefix=".researchtube-google-tts-", suffix=".mp3", dir=destination.physical_path.parent)
-        temporary = Path(temporary_name)
-        try:
-            with os.fdopen(descriptor, "wb") as source:
-                source.write(audio)
-            try:
-                os.link(temporary, destination.physical_path)
-            except FileExistsError as error:
-                raise AgentApiError("DESTINATION_EXISTS", "The speech output destination already exists; this tool never overwrites files.") from error
-        finally:
-            temporary.unlink(missing_ok=True)
-        task.result = {"filePath": destination.logical_path, "format": "mp3", "mimeType": "audio/mpeg"}
-        task.status, task.phase, task.progress_percent = "completed", "completed", 100.0
-        task.touch("Google Translate speech completed.")
-        return self.snapshot(task)
-
-    async def run(self, task: SpeechTask, executable: str) -> None:
-        stdout = b""; stderr = b""; temporary_output: Path | None = None; final_output: ResolvedWorkspacePath | None = None
-        try:
-            if task.voice_not_found:
-                raise AgentApiError("VOICE_NOT_FOUND", "The selected Windows voice was not found.")
-            if task.output_path is not None:
-                final_output = WorkspacePathResolver().resolve_destination(task.output_path, field_name="speech output", error_code="SPEECH_FILE_FAILED")
-                if final_output.physical_path.exists() or final_output.physical_path.is_symlink():
-                    raise AgentApiError("DESTINATION_EXISTS", "The speech output destination already exists; this tool never overwrites files.")
-                final_output.physical_path.parent.mkdir(parents=True, exist_ok=True)
-                temporary_output = final_output.physical_path.with_suffix(".tmp.wav")
-                if temporary_output.exists() or temporary_output.is_symlink():
-                    raise AgentApiError("DESTINATION_EXISTS", "The temporary speech output destination already exists. Try again.")
-            task.phase = "synthesizing"; task.touch("Synthesizing speech.")
-            task.process = await asyncio.create_subprocess_exec(
-                *windows_speech_command(executable), "--action", "speak",
-                "--text-base64", "__STDIN__", "--voice-id-base64", speech_base64(task.voice_id),
-                "--output-path-base64", speech_base64(str(temporary_output) if temporary_output is not None else None),
-                "--play-through-speakers", "true" if task.output_mode in {"speakers", "both"} else "false",
-                env=windows_speech_environment(), stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            )
-            assert task.process.stdin is not None
-            task.process.stdin.write(speech_base64(task.text).encode("ascii"))
-            await task.process.stdin.drain()
-            task.process.stdin.close()
-
-            async def read_events() -> None:
-                assert task.process is not None and task.process.stdout is not None
-                while line := await task.process.stdout.readline():
-                    try:
-                        event = json.loads(line.decode("utf-8"))
-                    except (UnicodeDecodeError, json.JSONDecodeError):
-                        continue
-                    if not isinstance(event, dict):
-                        continue
-                    completed, total = event.get("completedChunks"), event.get("totalChunks")
-                    if isinstance(completed, int) and isinstance(total, int) and total > 0:
-                        task.progress_percent = min(99.0, max(task.progress_percent, completed * 100.0 / total))
-                    reported_progress = event.get("progressPercent")
-                    if isinstance(reported_progress, (int, float)) and math.isfinite(reported_progress):
-                        task.progress_percent = min(99.0, max(task.progress_percent, float(reported_progress)))
-                    kind = event.get("event")
-                    if kind == "synthesizing": task.phase, task.status_message = "synthesizing", "Synthesizing speech."
-                    elif kind == "saving": task.phase, task.status_message = "saving", "Saving synthesized speech to WAV."
-                    elif kind == "speaking": task.phase, task.status_message = "speaking", "Speaking through the default Windows audio output."
-                    task.last_updated_at = utc_now()
-
-            reader = asyncio.create_task(read_events())
-            assert task.process.stderr is not None
-            stderr = await task.process.stderr.read()
-            await task.process.wait()
-            await asyncio.gather(reader, return_exceptions=True)
-            if task.process.returncode != 0:
-                message = stderr.decode("utf-8", errors="replace")
-                code = "VOICE_NOT_FOUND" if "VOICE_NOT_FOUND" in message else "AUDIO_PLAYBACK_FAILED" if "AUDIO_PLAYBACK_FAILED" in message else "SPEECH_FILE_FAILED" if "SPEECH_FILE_FAILED" in message else "SPEECH_SYNTHESIS_FAILED"
-                messages = {"VOICE_NOT_FOUND": "The selected Windows voice was not found.", "AUDIO_PLAYBACK_FAILED": "Windows could not play the requested speech.", "SPEECH_FILE_FAILED": "Windows could not save the requested speech audio.", "SPEECH_SYNTHESIS_FAILED": "Windows could not synthesize the requested speech."}
-                raise AgentApiError(code, messages[code])
-            if temporary_output is not None and final_output is not None:
-                if not temporary_output.is_file() or temporary_output.stat().st_size < 44:
-                    raise AgentApiError("SPEECH_FILE_FAILED", "Windows could not save the requested speech audio.")
-                temporary_output.replace(final_output.physical_path)
-                task.result = {"filePath": final_output.logical_path, "format": "wav", "mimeType": "audio/wav"}
-            task.status, task.phase, task.progress_percent = "completed", "completed", 100.0
-            task.touch("Speech completed.")
-        except asyncio.CancelledError:
-            if task.process is not None and task.process.returncode is None:
-                task.process.terminate()
-                try: await asyncio.wait_for(task.process.wait(), timeout=2)
-                except asyncio.TimeoutError: task.process.kill()
-            task.status, task.phase = "cancelled", "cancelled"; task.touch("Speech cancelled.")
-            raise
-        except AgentApiError as error:
-            task.status, task.phase, task.error = "failed", "failed", {"code": error.code, "message": error.message}; task.touch("Speech failed.")
-        except (OSError, asyncio.SubprocessError) as error:
-            task.status, task.phase, task.error = "failed", "failed", {"code": "SPEECH_SYNTHESIS_FAILED", "message": "Windows could not start text-to-speech."}; task.touch("Speech failed.")
-        finally:
-            task.process = None
-            if temporary_output is not None:
-                temporary_output.unlink(missing_ok=True)
-
-    async def cancel(self, task_id: str) -> dict[str, Any]:
-        task = self.get(task_id)
-        if task.status == "working" and task.engine == "googleTranslate":
-            task.status, task.phase = "cancelled", "cancelled"; task.touch("Speech cancelled.")
-            return {"taskId": task.task_id, "status": task.status}
-        if task.status == "working" and task.runner is not None and not task.runner.done():
-            if task.process is not None and task.process.returncode is None:
-                task.process.terminate()
-            task.status, task.phase = "cancelled", "cancelled"
-            task.touch("Speech cancelled.")
-            task.runner.cancel()
-        return {"taskId": task.task_id, "status": task.status}
-
-    async def shutdown(self) -> None:
-        runners = [task.runner for task in self.tasks.values() if task.runner is not None and not task.runner.done()]
-        for runner in runners: runner.cancel()
-        if runners: await asyncio.gather(*runners, return_exceptions=True)
-
-
-SPEECH_TASKS = SpeechTaskManager()
-
-
-@dataclass
-class VisualMapTask:
-    task_id: str
-    payload: dict[str, Any]
-    created_at: str
-    last_updated_at: str
-    status: str = "working"
-    status_message: str = "Preparing visual map."
-    phase: str = "preparing"
-    progress_percent: float = 0.0
-    completed_frames: int = 0
-    total_frames: int = 0
-    completed_maps: int = 0
-    total_maps: int = 0
-    result: dict[str, Any] | None = None
-    error: dict[str, str] | None = None
-    runner: asyncio.Task[None] | None = None
-
-    def touch(self, message: str | None = None) -> None:
-        self.last_updated_at = utc_now()
-        if message is not None:
-            self.status_message = message
-
-
-class VisualMapTaskManager:
-    def __init__(self) -> None:
-        self.tasks: dict[str, VisualMapTask] = TaskHistory(configured_task_history_limit)
-
-    def new_task_id(self) -> str:
-        while True:
-            task_id = f"vismap_{secrets.token_urlsafe(7)}"
-            if task_id not in self.tasks:
-                return task_id
-
-    def get(self, task_id: str) -> VisualMapTask:
-        if not isinstance(task_id, str) or not task_id or task_id not in self.tasks:
-            raise AgentApiError("VISUAL_MAP_TASK_NOT_FOUND", "The requested visual-map task does not exist.")
-        return self.tasks[task_id]
-
-    def snapshot(self, task: VisualMapTask) -> dict[str, Any]:
-        document: dict[str, Any] = {
-            "taskId": task.task_id, "status": task.status, "statusMessage": task.status_message,
-            "phase": task.phase, "progressPercent": task.progress_percent,
-            "completedFrames": task.completed_frames, "totalFrames": task.total_frames,
-            "completedMaps": task.completed_maps, "totalMaps": task.total_maps,
-            "createdAt": task.created_at, "lastUpdatedAt": task.last_updated_at,
-            "pollIntervalMs": TASK_POLL_INTERVAL_MS,
-        }
-        if task.result is not None:
-            document["result"] = task.result
-        if task.error is not None:
-            document["error"] = task.error
-        return document
-
-    async def cancel(self, task_id: str) -> None:
-        task = self.get(task_id)
-        if task.status in {"completed", "failed", "cancelled"}:
-            return
-        task.touch("Visual-map cancellation requested.")
-        if task.runner is not None and not task.runner.done():
-            task.runner.cancel()
-
-    async def create(self, payload: Any) -> dict[str, Any]:
-        options = visual_map_options(payload)
-        WorkspacePathResolver().resolve_existing(options["workspacePath"], field_name="workspacePath", expected_type="file")
-        # Rendering validates this payload again. Inapplicable threshold and
-        # absent end time must stay omitted, rather than becoming public nulls.
-        options = {name: value for name, value in options.items() if value is not None}
-        now = utc_now()
-        task = VisualMapTask(self.new_task_id(), options, now, now)
-        self.tasks[task.task_id] = task
-        task.runner = asyncio.create_task(self.run(task), name=f"researchtube-visual-map-{task.task_id}")
-        return self.snapshot(task)
-
-    def update_progress(self, task: VisualMapTask, phase: str, percentage: float, message: str, completed_frames: int, total_frames: int, completed_maps: int, total_maps: int) -> None:
-        task.phase, task.progress_percent = phase, max(0.0, min(100.0, percentage))
-        task.completed_frames, task.total_frames = completed_frames, total_frames
-        task.completed_maps, task.total_maps = completed_maps, total_maps
-        task.touch(message)
-
-    async def run(self, task: VisualMapTask) -> None:
-        try:
-            result = await media_create_visual_map(task.payload, lambda *update: self.update_progress(task, *update))
-            task.result, task.status, task.phase, task.progress_percent = result, "completed", "completed", 100.0
-            task.touch("Visual map completed.")
-        except AgentApiError as error:
-            task.status, task.phase = "failed", "failed"
-            task.error = {"code": error.code, "message": error.message}
-            task.touch("Visual map failed.")
-        except asyncio.CancelledError:
-            task.status, task.phase = "cancelled", "cancelled"
-            task.touch("Visual-map task cancelled.")
-            raise
-        except Exception as error:
-            log(f"visual-map task {task.task_id} failed unexpectedly: {error.__class__.__name__}", error=True)
-            task.status, task.phase = "failed", "failed"
-            task.error = {"code": "VISUAL_MAP_INTERNAL_ERROR", "message": "The visual-map task encountered an unexpected error."}
-            task.touch("Visual map failed.")
-
-    async def shutdown(self) -> None:
-        runners = [task.runner for task in self.tasks.values() if task.runner is not None and not task.runner.done()]
-        for runner in runners:
-            runner.cancel()
-        if runners:
-            await asyncio.gather(*runners, return_exceptions=True)
-
-
-VISUAL_MAP_TASKS = VisualMapTaskManager()
-
-
-def camera_public_device(device: CameraDevice) -> dict[str, Any]:
-    video_modes: dict[str, dict[str, int | float]] = {}
-    available: dict[str, CameraMode] = {}
-    for mode in device.modes:
-        if mode.fps is None or not CAMERA_MIN_ADVERTISED_FPS < mode.fps <= CAMERA_MAX_ADVERTISED_FPS:
-            continue
-        key = camera_fps_key(mode.fps)
-        current = available.get(key)
-        if current is None or (mode.width * mode.height, mode.width, mode.height) > (current.width * current.height, current.width, current.height):
-            available[key] = mode
-    for key, mode in sorted(available.items(), key=lambda item: item[1].fps or 0.0):
-        video_modes[key] = {"width": mode.width, "height": mode.height, "fps": mode.fps}
-    return {
-        "cameraId": device.camera_id,
-        "name": device.name,
-        "videoModes": video_modes,
-    }
-
-
-def select_camera_mode(modes: tuple[CameraMode, ...]) -> CameraMode | None:
-    """Prefer responsive camera modes before raw pixel count.
-
-    A nominal 60 fps mode is preferred first, then nominal 30 fps, and only
-    then progressively lower frame rates.  A small tolerance accepts device
-    reports such as 60.0002 fps.  Within the selected FPS band, use the largest
-    available resolution.
-    """
-    if not modes:
-        return None
-    with_fps = [mode for mode in modes if mode.fps is not None]
-    if not with_fps:
-        return max(modes, key=lambda mode: (mode.width * mode.height, mode.width, mode.height))
-    for target in CAMERA_AUTO_TARGET_FPS:
-        mode = camera_mode_for_target_fps(modes, target)
-        if mode is not None:
-            return mode
-    recording_modes = [mode for mode in with_fps if CAMERA_MIN_ADVERTISED_FPS < (mode.fps or 0.0) <= CAMERA_MAX_ADVERTISED_FPS]
-    if recording_modes:
-        with_fps = recording_modes
-    highest_fps = max(mode.fps or 0.0 for mode in with_fps)
-    band = [mode for mode in with_fps if mode.fps is not None and mode.fps >= highest_fps - 0.5]
-    return max(band, key=lambda mode: (mode.width * mode.height, mode.width, mode.height, mode.fps or 0.0))
-
-
-def camera_fps_key(fps: float) -> str:
-    return f"{fps:.3f}".rstrip("0").rstrip(".")
-
-
-def camera_mode_for_target_fps(modes: tuple[CameraMode, ...], target_fps: float) -> CameraMode | None:
-    """Choose the largest native mode close to the requested recording rate."""
-    candidates = [
-        mode for mode in modes
-        if mode.fps is not None and CAMERA_MIN_ADVERTISED_FPS < mode.fps <= CAMERA_MAX_ADVERTISED_FPS and abs(mode.fps - target_fps) <= CAMERA_TARGET_FPS_TOLERANCE
-    ]
-    if not candidates:
-        return None
-    return max(candidates, key=lambda mode: (mode.width * mode.height, mode.width, mode.height, -(abs((mode.fps or 0.0) - target_fps))))
-
-
-async def camera_ffmpeg_lines(command: list[str], *, operation: str) -> list[str]:
-    """Run an internal FFmpeg camera command; keep its output for parsing only."""
-    try:
-        process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=CAMERA_CAPTURE_TIMEOUT_SECONDS)
-    except asyncio.TimeoutError:
-        log(f"camera ffmpeg {operation} timed out", error=True)
-        try:
-            process.kill()
-            await process.communicate()
-        except (OSError, ProcessLookupError):
-            pass
-        return []
-    except OSError as error:
-        log(f"camera ffmpeg {operation} could not start: {error.__class__.__name__}", error=True)
-        return []
-    lines = camera_log_ffmpeg_output(operation, process.returncode, stdout, stderr)
-    return lines
-
-
-def camera_log_ffmpeg_output(operation: str, returncode: int | None, stdout: bytes | None, stderr: bytes | None) -> list[str]:
-    lines = ((stdout or b"") + b"\n" + (stderr or b"")).decode("utf-8", errors="replace").splitlines()
-    # FFmpeg diagnostics are intentionally not mirrored to the Agent console.
-    # They are verbose and implementation-specific; the Agent's own endpoint
-    # result/error is the concise diagnostic surface.
-    return lines
-
-
-def camera_modes_from_lines(lines: list[str]) -> tuple[CameraMode, ...]:
-    found: dict[tuple[int, int, float | None], CameraMode] = {}
-    for line in lines:
-        for match in re.finditer(r"(?<!\d)(\d{2,5})x(\d{2,5})(?:[^\d]+(?:@|fps[= ]?)(\d+(?:\.\d+)?))?", line, re.IGNORECASE):
-            width, height = int(match.group(1)), int(match.group(2))
-            if width < 32 or height < 32 or width > 16384 or height > 16384:
-                continue
-            fps = float(match.group(3)) if match.group(3) else None
-            found[(width, height, fps)] = CameraMode(width, height, fps)
-    return tuple(sorted(found.values(), key=lambda mode: (mode.width * mode.height, mode.fps or 0.0), reverse=True))
-
-
-async def enumerate_camera_candidates(ffmpeg_executable: str) -> list[tuple[str, str, str, str | None]]:
-    """Return video camera details and its matching audio input when discoverable."""
-    system = platform.system()
-    if system == "Windows":
-        lines = await camera_ffmpeg_lines([ffmpeg_executable, "-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "dummy"], operation="list-dshow-devices")
-        video_entries: list[tuple[str, str]] = []
-        audio_entries: list[tuple[str, str]] = []
-        kind: str | None = None
-        friendly: str | None = None
-        for line in lines:
-            lower = line.lower()
-            if "directshow video devices" in lower:
-                kind = "video"
-                continue
-            if "directshow audio devices" in lower:
-                kind = "audio"
-                continue
-            quoted = re.findall(r'"([^"]+)"', line)
-            if not quoted:
-                continue
-            value = quoted[-1]
-            # FFmpeg 9 prints individual entries as `"name" (video)` / `(audio)`
-            # without the older DirectShow section headings.  Support both
-            # layouts.
-            if "(video)" in lower:
-                kind, friendly = "video", value
-                continue
-            if "(audio)" in lower:
-                kind, friendly = "audio", value
-                continue
-            if "alternative name" in lower and kind is not None and friendly is not None:
-                (video_entries if kind == "video" else audio_entries).append((friendly, value))
-                friendly = None
-            elif kind is not None and "alternative name" not in lower:
-                friendly = value
-        if friendly is not None and kind is not None:
-            (video_entries if kind == "video" else audio_entries).append((friendly, friendly))
-        def matching_audio(video_name: str) -> str | None:
-            normalized = video_name.casefold()
-            matches = [identity for name, identity in audio_entries if normalized in name.casefold()]
-            return matches[0] if matches else None
-        return [("dshow", name, identity, matching_audio(name)) for name, identity in video_entries]
-    if system == "Darwin":
-        lines = await camera_ffmpeg_lines([ffmpeg_executable, "-hide_banner", "-f", "avfoundation", "-list_devices", "true", "-i", ""], operation="list-avfoundation-devices")
-        candidates = []
-        in_video = False
-        for line in lines:
-            lower = line.lower()
-            if "avfoundation video devices" in lower:
-                in_video = True
-                continue
-            if "avfoundation audio devices" in lower:
-                break
-            if not in_video:
-                continue
-            match = re.search(r"\[(\d+)\]\s+(.+)$", line)
-            if match:
-                candidates.append(("avfoundation", match.group(2).strip(), match.group(1), None))
-        return candidates
-    candidates = []
-    try:
-        for item in sorted(Path("/dev").glob("video*"), key=lambda path: path.name):
-            if not re.fullmatch(r"video\d+", item.name):
-                continue
-            name_path = Path("/sys/class/video4linux") / item.name / "name"
-            try:
-                name = name_path.read_text(encoding="utf-8", errors="replace").strip() or "Camera"
-            except OSError:
-                name = "Camera"
-            candidates.append(("v4l2", name, str(item), None))
-    except OSError:
-        pass
-    return candidates
-
-
-def camera_input_arguments(device: CameraDevice, mode: CameraMode | None = None, *, include_audio: bool = False) -> list[str]:
-    mode = mode or device.selected_mode
-    if mode is None:
-        raise AgentApiError("CAMERA_CAPABILITIES_UNAVAILABLE", "The selected camera does not expose a usable video mode.")
-    arguments: list[str]
-    if device.backend == "dshow":
-        arguments = ["-f", "dshow", "-video_size", f"{mode.width}x{mode.height}"]
-        if mode.fps is not None:
-            arguments.extend(["-framerate", f"{mode.fps:g}"])
-        source = f"video={device.native_identity}"
-        if include_audio:
-            if not device.audio_identity:
-                raise AgentApiError("CAMERA_AUDIO_NOT_AVAILABLE", "This camera has no matching microphone available for recording.")
-            source += f":audio={device.audio_identity}"
-        return [*arguments, "-i", source]
-    if device.backend == "avfoundation":
-        arguments = ["-f", "avfoundation", "-video_size", f"{mode.width}x{mode.height}"]
-        if mode.fps is not None:
-            arguments.extend(["-framerate", f"{mode.fps:g}"])
-        return [*arguments, "-i", f"{device.native_identity}:none"]
-    arguments = ["-f", "v4l2", "-video_size", f"{mode.width}x{mode.height}"]
-    if mode.fps is not None:
-        arguments.extend(["-framerate", f"{mode.fps:g}"])
-    if include_audio:
-        raise AgentApiError("CAMERA_AUDIO_NOT_AVAILABLE", "This platform does not expose a matching camera microphone for recording.")
-    return [*arguments, "-i", device.native_identity]
-
-
-async def camera_modes(ffmpeg_executable: str, backend: str, identity: str) -> tuple[CameraMode, ...]:
-    if backend == "dshow":
-        command = [ffmpeg_executable, "-hide_banner", "-list_options", "true", "-f", "dshow", "-i", f"video={identity}"]
-    elif backend == "avfoundation":
-        command = [ffmpeg_executable, "-hide_banner", "-f", "avfoundation", "-list_formats", "all", "-i", f"{identity}:none"]
-    else:
-        command = [ffmpeg_executable, "-hide_banner", "-f", "v4l2", "-list_formats", "all", "-i", identity]
-    return camera_modes_from_lines(await camera_ffmpeg_lines(command, operation=f"list-{backend}-modes"))
-
-
-async def camera_devices() -> list[CameraDevice]:
-    ffmpeg = find_component("ffmpeg", COMPONENTS["ffmpeg"][0])
-    if ffmpeg.error:
-        raise AgentApiError("FFMPEG_DISCOVERY_ERROR", "ffmpeg discovery is ambiguous.")
-    if not ffmpeg.executable:
-        raise AgentApiError("FFMPEG_NOT_AVAILABLE", "ffmpeg is required for camera operations.")
-    discovered: list[CameraDevice] = []
-    for backend, name, identity, audio_identity in await enumerate_camera_candidates(ffmpeg.executable):
-        key = (backend, identity)
-        modes = await camera_modes(ffmpeg.executable, backend, identity)
-        device = CAMERA_DEVICES_BY_NATIVE.get(key)
-        if device is None:
-            camera_id = "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(6))
-            device = CameraDevice(camera_id, name, backend, identity, audio_identity, modes, select_camera_mode(modes))
-            CAMERA_DEVICES_BY_NATIVE[key] = device
-        else:
-            device.name, device.audio_identity, device.modes, device.selected_mode = name, audio_identity, modes, select_camera_mode(modes)
-        discovered.append(device)
-    return discovered
-
-
-async def camera_device(camera_id: Any) -> CameraDevice:
-    if not isinstance(camera_id, str) or not camera_id:
-        raise AgentApiError("CAMERA_INVALID", "cameraId must be a non-empty camera identifier.")
-    devices = await camera_devices()
-    device = next((item for item in devices if item.camera_id == camera_id), None)
-    if device is None:
-        raise AgentApiError("CAMERA_NOT_FOUND", "The requested camera is not available. Call camera_list and choose a current cameraId.")
-    return device
-
-
-def new_camera_task_id() -> str:
-    """Create the compact camera session/task identifier used in filenames."""
-    return f"cam_{secrets.token_urlsafe(7)}"
-
-
-def camera_filename_timestamp() -> str:
-    """Return a Windows-safe ISO-8601 UTC timestamp (colons become underscores)."""
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H_%M_%SZ")
-
-
-def camera_filename_stem(camera_name: str, task_id: str) -> str:
-    name = re.sub(r'[\x00-\x1f<>:"/\\|?*]+', " ", camera_name)
-    name = re.sub(r"\s+", " ", name).strip(" .")[:160].rstrip(" .") or "Camera"
-    return f"{name} {camera_filename_timestamp()} [{task_id}]"
-
-
-def camera_capture_default_path(camera_name: str, task_id: str, extension: str) -> str:
-    return f"captures/{camera_filename_stem(camera_name, task_id)}.{extension}"
-
-
-def camera_recording_default_path(camera_name: str, task_id: str, extension: str = "mp4") -> str:
-    return f"webcamera/{camera_filename_stem(camera_name, task_id)}.{extension}"
-
-
-def camera_audio_recording_default_path(camera_name: str, task_id: str) -> str:
-    return f"sound/{camera_filename_stem(camera_name, task_id)}.m4a"
-
-
-def camera_audio_input_arguments(device: CameraDevice) -> list[str]:
-    if device.backend != "dshow" or not device.audio_identity:
-        raise AgentApiError("CAMERA_AUDIO_NOT_AVAILABLE", "This camera has no matching microphone available for recording.")
-    return ["-f", "dshow", "-i", f"audio={device.audio_identity}"]
-
-
-def camera_rational(value: Any) -> float | None:
-    if not isinstance(value, str) or not re.fullmatch(r"\d+(?:\.\d+)?/\d+(?:\.\d+)?", value):
-        return None
-    numerator, denominator = value.split("/", 1)
-    try:
-        result = float(numerator) / float(denominator)
-    except (ValueError, ZeroDivisionError):
-        return None
-    return result if math.isfinite(result) and result > 0 else None
-
-
-async def camera_recording_metadata(path: Path, ffprobe_executable: str) -> dict[str, Any]:
-    command = [ffprobe_executable, "-v", "error", "-show_entries", "format=duration:stream=codec_type,width,height,avg_frame_rate,nb_frames,duration", "-of", "json", str(path)]
-    try:
-        process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-        stdout, _stderr = await asyncio.wait_for(process.communicate(), timeout=MEDIA_PROBE_TIMEOUT_SECONDS)
-    except (asyncio.TimeoutError, OSError) as error:
-        raise AgentApiError("CAMERA_RECORD_FAILED", "ffprobe could not inspect the camera recording.") from error
-    if process.returncode != 0:
-        raise AgentApiError("CAMERA_RECORD_FAILED", "ffprobe could not inspect the camera recording.")
-    try:
-        document = json.loads(stdout.decode("utf-8"))
-        streams = document["streams"]
-        duration = float(document["format"]["duration"])
-    except (KeyError, TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise AgentApiError("CAMERA_RECORD_FAILED", "ffprobe returned invalid camera recording metadata.") from error
-    if not math.isfinite(duration) or duration < 0 or not isinstance(streams, list):
-        raise AgentApiError("CAMERA_RECORD_FAILED", "ffprobe returned invalid camera recording metadata.")
-    video = next((stream for stream in streams if isinstance(stream, dict) and stream.get("codec_type") == "video"), None)
-    audio = next((stream for stream in streams if isinstance(stream, dict) and stream.get("codec_type") == "audio"), None)
-    result: dict[str, Any] = {"durationSeconds": duration, "hasAudio": audio is not None}
-    if video is not None:
-        width, height = ffprobe_integer(video.get("width")), ffprobe_integer(video.get("height"))
-        stream_duration = float(video.get("duration")) if str(video.get("duration", "")).strip() else duration
-        frame_count = ffprobe_integer(video.get("nb_frames"))
-        fps = frame_count / stream_duration if frame_count is not None and stream_duration > 0 else camera_rational(video.get("avg_frame_rate"))
-        if width is None or height is None or fps is None:
-            raise AgentApiError("CAMERA_RECORD_FAILED", "ffprobe returned incomplete video recording metadata.")
-        result.update({"width": width, "height": height, "fps": fps})
-    return result
-
-
-def camera_encoder_arguments(image_format: str) -> tuple[list[str], str]:
-    if image_format == "png":
-        return ["-c:v", "png", "-compression_level", "6"], "image/png"
-    if image_format == "jpeg":
-        return ["-c:v", "mjpeg", "-q:v", "3"], "image/jpeg"
-    return ["-c:v", "libwebp", "-q:v", "85"], "image/webp"
-
-
-async def camera_capture_frame(payload: Any) -> dict[str, Any]:
-    if not isinstance(payload, dict) or set(payload) - {"cameraId", "targetPath", "targetFormat"}:
-        raise AgentApiError("CAMERA_CAPTURE_INVALID", "camera_capture_frame accepts cameraId, targetPath, and targetFormat only.")
-    device = await camera_device(payload.get("cameraId"))
-    image_format = payload.get("targetFormat", "png")
-    if not isinstance(image_format, str) or image_format not in {"png", "jpeg", "webp"}:
-        raise AgentApiError("CAMERA_CAPTURE_INVALID", "targetFormat must be png, jpeg, or webp.")
-    extension = {"png": "png", "jpeg": "jpg", "webp": "webp"}[image_format]
-    resolver = WorkspacePathResolver()
-    session_id = new_camera_task_id()
-    logical_path = payload.get("targetPath", camera_capture_default_path(device.name, session_id, extension))
-    destination = resolver.resolve_destination(logical_path, field_name="targetPath", error_code="WORKSPACE_PATH_INVALID")
-    if destination.physical_path.suffix.lower() not in ({"png": {".png"}, "jpeg": {".jpg", ".jpeg"}, "webp": {".webp"}}[image_format]):
-        raise AgentApiError("CAMERA_CAPTURE_INVALID", "targetPath extension must match targetFormat.")
-    if destination.physical_path.exists() or destination.physical_path.is_symlink():
-        raise AgentApiError("DESTINATION_EXISTS", "The camera frame destination already exists; this tool never overwrites files.")
-    destination.physical_path.parent.mkdir(parents=True, exist_ok=True)
-    ffmpeg = find_component("ffmpeg", COMPONENTS["ffmpeg"][0])
-    assert ffmpeg.executable
-    encoder, mime_type = camera_encoder_arguments(image_format)
-    command = [ffmpeg.executable, "-hide_banner", "-nostdin", "-v", "info", *camera_input_arguments(device), "-frames:v", "1", *encoder, "-y", str(destination.physical_path)]
-    try:
-        process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=CAMERA_CAPTURE_TIMEOUT_SECONDS)
-    except asyncio.TimeoutError as error:
-        process.kill(); await process.communicate()
-        raise AgentApiError("CAMERA_CAPTURE_FAILED", "Timed out while capturing the camera frame.") from error
-    except OSError as error:
-        raise AgentApiError("CAMERA_CAPTURE_FAILED", "ffmpeg could not start camera capture.") from error
-    camera_log_ffmpeg_output("capture-frame", process.returncode, stdout, stderr)
-    if process.returncode != 0 or not destination.physical_path.is_file():
-        destination.physical_path.unlink(missing_ok=True)
-        raise AgentApiError("CAMERA_CAPTURE_FAILED", "ffmpeg could not capture a frame from the camera.")
-    mode = device.selected_mode
-    assert mode is not None
-    result = {"cameraId": device.camera_id, "taskId": session_id, "workspacePath": destination.logical_path, "format": image_format, "mimeType": mime_type, "width": mode.width, "height": mode.height, "imageSizeBytes": destination.physical_path.stat().st_size}
-    log(f"camera_capture_frame cameraId={device.camera_id} -> {destination.logical_path}")
-    return result
-
-
-@dataclass
-class CameraRecordTask:
-    task_id: str
-    camera_id: str
-    recording_kind: str
-    requested_duration_seconds: int
-    target_fps: float | None
-    created_at: str
-    last_updated_at: str
-    max_duration_seconds: int = 60
-    status: str = "working"
-    phase: str = "starting"
-    status_message: str = "Starting camera recording."
-    progress_percent: float = 0.0
-    elapsed_seconds: float = 0.0
-    started_monotonic: float | None = None
-    stopped_early: bool = False
-    result: dict[str, Any] | None = None
-    error: dict[str, str] | None = None
-    process: asyncio.subprocess.Process | None = None
-    runner: asyncio.Task[None] | None = None
-
-    def touch(self, message: str | None = None) -> None:
-        self.last_updated_at = utc_now()
-        if message is not None:
-            self.status_message = message
-
-
-class CameraRecordTaskManager:
-    def __init__(self) -> None:
-        self.tasks: dict[str, CameraRecordTask] = TaskHistory(configured_task_history_limit)
-
-    def get(self, task_id: Any) -> CameraRecordTask:
-        if not isinstance(task_id, str) or task_id not in self.tasks:
-            raise AgentApiError("CAMERA_RECORD_TASK_NOT_FOUND", "The requested camera recording task does not exist.")
-        return self.tasks[task_id]
-
-    def new_task_id(self) -> str:
-        while True:
-            task_id = new_camera_task_id()
-            if task_id not in self.tasks and task_id not in TASKS.tasks:
-                return task_id
-
-    def snapshot(self, task: CameraRecordTask) -> dict[str, Any]:
-        if task.status in {"working", "stopping"} and task.started_monotonic is not None:
-            task.elapsed_seconds = min(float(task.requested_duration_seconds), max(0.0, time.monotonic() - task.started_monotonic))
-            if task.status == "working" and task.phase == "recording":
-                task.progress_percent = min(99.0, task.elapsed_seconds * 100.0 / task.requested_duration_seconds)
-        document: dict[str, Any] = {"taskId": task.task_id, "recordingKind": task.recording_kind, "status": task.status, "phase": task.phase, "statusMessage": task.status_message, "progressPercent": task.progress_percent, "elapsedSeconds": task.elapsed_seconds, "requestedDurationSeconds": task.requested_duration_seconds, "targetFps": task.target_fps, "maxDurationSeconds": task.max_duration_seconds, "createdAt": task.created_at, "lastUpdatedAt": task.last_updated_at, "pollIntervalMs": TASK_POLL_INTERVAL_MS}
-        if task.result is not None:
-            document["result"] = task.result
-        if task.error is not None:
-            document["error"] = task.error
-        return document
-
-    async def create(self, payload: Any, *, recording_kind: str = "video") -> dict[str, Any]:
-        allowed = {"cameraId", "durationSeconds", "targetFps"} if recording_kind == "video" else {"cameraId", "durationSeconds"}
-        tool_name = "camera_record_video" if recording_kind == "video" else "camera_record_audio"
-        maximum = configured_tool_limits()["cameraRecordVideoMaxMinutes" if recording_kind == "video" else "cameraRecordAudioMaxMinutes"] * 60
-        if not isinstance(payload, dict) or set(payload) - allowed:
-            raise AgentApiError("CAMERA_RECORD_INVALID", f"{tool_name} accepts only documented fields.")
-        duration = payload.get("durationSeconds")
-        if not isinstance(duration, int) or isinstance(duration, bool) or not 1 <= duration <= maximum:
-            raise AgentApiError("CAMERA_RECORD_INVALID", f"durationSeconds must be an integer from 1 to {maximum}.")
-        requested_fps = payload.get("targetFps")
-        if recording_kind == "video" and requested_fps is not None and (not isinstance(requested_fps, (int, float)) or isinstance(requested_fps, bool) or not CAMERA_MIN_ADVERTISED_FPS < float(requested_fps) <= CAMERA_MAX_ADVERTISED_FPS):
-            raise AgentApiError("CAMERA_RECORD_INVALID", "targetFps, when supplied, must be a number greater than 25 and no greater than 120.")
-        for task in self.tasks.values():
-            if task.camera_id == payload.get("cameraId") and task.status in {"working", "stopping"}:
-                raise AgentApiError("CAMERA_BUSY", "That camera already has an active recording task.")
-        device = await camera_device(payload.get("cameraId"))
-        mode = camera_mode_for_target_fps(device.modes, float(requested_fps)) if requested_fps is not None else select_camera_mode(device.modes)
-        if recording_kind == "video" and (mode is None or mode.fps is None):
-            label = f"{requested_fps} FPS" if requested_fps is not None else "a usable recording mode"
-            raise AgentApiError("CAMERA_MODE_NOT_AVAILABLE", f"This camera does not provide {label}. Call camera_list and choose an advertised videoModes rate.")
-        now = utc_now()
-        if recording_kind == "audio" and not device.audio_identity:
-            raise AgentApiError("CAMERA_AUDIO_NOT_AVAILABLE", "This camera has no matching microphone available for recording.")
-        # Audio-only recording has no video mode. Keep targetFps null in its
-        # public task document; selecting a mode above is only needed for the
-        # video branch and must not leak into the audio contract.
-        task = CameraRecordTask(self.new_task_id(), payload["cameraId"], recording_kind, duration, mode.fps if recording_kind == "video" and mode is not None else None, now, now, maximum)
-        self.tasks[task.task_id] = task
-        task.runner = asyncio.create_task(self.run(task), name=f"researchtube-camera-record-{task.task_id}")
-        return self.snapshot(task)
-
-    async def stop(self, task_id: Any) -> dict[str, Any]:
-        task = self.get(task_id)
-        if task.status != "working":
-            return {"taskId": task.task_id, "accepted": False, "message": "The camera recording task is already terminal."}
-        task.stopped_early, task.status, task.phase = True, "stopping", "finalizing"
-        task.touch("Stopping camera recording.")
-        if task.process is not None and task.process.stdin is not None:
-            try:
-                # FFmpeg's interactive command reader accepts a single `q`.
-                # Do not add a newline: it can remain buffered behind a live
-                # DirectShow source and postpone the graceful trailer write.
-                task.process.stdin.write(b"q")
-                await task.process.stdin.drain()
-            except (ConnectionError, OSError):
-                pass
-        return {"taskId": task.task_id, "accepted": True, "message": "Stop request accepted. Poll camera_record_status for completion."}
-
-    async def run(self, task: CameraRecordTask) -> None:
-        temporary_path: Path | None = None
-        final_path: Path | None = None
-        try:
-            device = await camera_device(task.camera_id)
-            ffmpeg = find_component("ffmpeg", COMPONENTS["ffmpeg"][0])
-            ffprobe = find_component("ffprobe", COMPONENTS["ffprobe"][0])
-            assert ffmpeg.executable
-            assert ffprobe.executable
-            resolver = WorkspacePathResolver()
-            mode = camera_mode_for_target_fps(device.modes, task.target_fps) if task.target_fps is not None else None
-            if task.recording_kind == "video" and mode is None:
-                raise AgentApiError("CAMERA_MODE_NOT_AVAILABLE", "This camera no longer provides the requested video recording mode.")
-            output_path = camera_recording_default_path(device.name, task.task_id) if task.recording_kind == "video" else camera_audio_recording_default_path(device.name, task.task_id)
-            final = resolver.resolve_destination(output_path, field_name="camera recording output", error_code="WORKSPACE_PATH_INVALID")
-            final.physical_path.parent.mkdir(parents=True, exist_ok=True)
-            final_path = final.physical_path
-            temporary_path = final.physical_path.with_suffix(f".tmp{final.physical_path.suffix}")
-            if task.recording_kind == "video":
-                assert mode is not None
-                command = [ffmpeg.executable, "-hide_banner", "-v", "error", *camera_input_arguments(device, mode, include_audio=True), "-t", str(task.requested_duration_seconds), "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-movflags", "+faststart", "-y", str(temporary_path)]
-            else:
-                command = [ffmpeg.executable, "-hide_banner", "-v", "error", *camera_audio_input_arguments(device), "-t", str(task.requested_duration_seconds), "-vn", "-c:a", "aac", "-movflags", "+faststart", "-y", str(temporary_path)]
-            task.process = await asyncio.create_subprocess_exec(*command, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
-            task.phase, task.started_monotonic = "recording", time.monotonic()
-            task.touch(f"Recording camera {task.recording_kind}.")
-            await asyncio.wait_for(task.process.wait(), timeout=task.requested_duration_seconds + CAMERA_CAPTURE_TIMEOUT_SECONDS)
-            stderr = await task.process.stderr.read() if task.process.stderr is not None else b""
-            camera_log_ffmpeg_output(f"record-video taskId={task.task_id}", task.process.returncode, b"", stderr)
-            task.elapsed_seconds = min(float(task.requested_duration_seconds), time.monotonic() - task.started_monotonic)
-            if task.process.returncode != 0 or not temporary_path.is_file() or temporary_path.stat().st_size == 0:
-                raise AgentApiError("CAMERA_RECORD_FAILED", f"ffmpeg could not record {task.recording_kind} from the camera.")
-            task.phase = "finalizing"; task.touch("Finalizing camera recording.")
-            temporary_path.replace(final_path)
-            metadata = await camera_recording_metadata(final_path, ffprobe.executable)
-            if task.recording_kind == "video" and not metadata["hasAudio"]:
-                raise AgentApiError("CAMERA_RECORD_FAILED", "The completed camera video has no audio track.")
-            task.elapsed_seconds = metadata["durationSeconds"]
-            result = {"cameraId": device.camera_id, "filePath": resolver.logical_existing_file(final_path, error_code="CAMERA_RECORD_FAILED"), "format": "mp4" if task.recording_kind == "video" else "m4a", "durationSeconds": metadata["durationSeconds"], **({"stoppedEarly": True} if task.stopped_early else {})}
-            if task.recording_kind == "video":
-                result.update({"width": metadata["width"], "height": metadata["height"], "fps": metadata["fps"], "hasAudio": True})
-            task.result = result
-            task.status, task.phase, task.progress_percent = "completed", "completed", 100.0
-            task.touch("Camera recording completed.")
-            log(f"camera_record_{task.recording_kind} taskId={task.task_id} cameraId={task.camera_id} -> completed")
-        except AgentApiError as error:
-            task.status, task.phase, task.error = "failed", "failed", {"code": error.code, "message": error.message}
-            task.touch("Camera recording failed.")
-        except (asyncio.TimeoutError, OSError) as error:
-            task.status, task.phase, task.error = "failed", "failed", {"code": "CAMERA_RECORD_FAILED", "message": "Camera recording could not be completed."}
-            task.touch("Camera recording failed.")
-            log(f"camera recording task {task.task_id} failed: {error.__class__.__name__}", error=True)
-        finally:
-            task.process = None
-            if temporary_path is not None:
-                temporary_path.unlink(missing_ok=True)
-
-    async def shutdown(self) -> None:
-        for task in self.tasks.values():
-            if task.status == "working":
-                await self.stop(task.task_id)
-        runners = [task.runner for task in self.tasks.values() if task.runner is not None and not task.runner.done()]
-        if runners:
-            await asyncio.gather(*runners, return_exceptions=True)
-
-
-CAMERA_RECORD_TASKS = CameraRecordTaskManager()
-
-
-async def capture_frame_from_workspace_options(options: dict[str, Any]) -> dict[str, Any]:
-    item = WorkspacePathResolver().resolve_existing(options["path"], field_name="path", expected_type="file")
-    ffmpeg = find_component("ffmpeg", COMPONENTS["ffmpeg"][0])
-    ffprobe = find_component("ffprobe", COMPONENTS["ffprobe"][0])
-    if ffmpeg.error:
-        raise AgentApiError("FFMPEG_DISCOVERY_ERROR", "ffmpeg discovery is ambiguous.", ffmpeg.error)
-    if ffprobe.error:
-        raise AgentApiError("FFPROBE_DISCOVERY_ERROR", "ffprobe discovery is ambiguous.", ffprobe.error)
-    if not ffmpeg.executable:
-        raise AgentApiError("FFMPEG_NOT_AVAILABLE", "ffmpeg is not available. Extract it under tools/ffmpeg or install it on PATH.")
-    if not ffprobe.executable:
-        raise AgentApiError("FFPROBE_NOT_AVAILABLE", "ffprobe is not available. Extract it under tools/ffmpeg or install it on PATH.")
-
-    streams = await ffprobe_streams(item, ffprobe.executable)
-    video_streams = [stream for stream in streams if stream.get("codec_type") == "video" and isinstance(stream.get("index"), int)]
-    if not video_streams:
-        raise AgentApiError("VIDEO_STREAM_NOT_FOUND", "The workspace media file has no video stream.")
-    selected_index = options["videoStreamIndex"]
-    if selected_index is None:
-        selected_stream = video_streams[0]
-    else:
-        selected_stream = next((stream for stream in video_streams if stream["index"] == selected_index), None)
-        if selected_stream is None:
-            raise AgentApiError("VIDEO_STREAM_NOT_FOUND", "videoStreamIndex does not identify a video stream in this file.")
-    selected_index = selected_stream["index"]
-
-    output = options["outputPath"]
-    destination_path: Path | None = None
-    try:
-        # A capture is always a normal workspace file.  The widget may display
-        # it immediately, but it never owns the only copy of the image.
-        resolver = WorkspacePathResolver()
-        destination = resolver.resolve_destination(output["path"], field_name="outputPath", error_code="WORKSPACE_PATH_INVALID")
-        destination.physical_path.parent.mkdir(parents=True, exist_ok=True)
-        # Re-run the resolver after creating parents so redirects cannot be introduced by the parent creation.
-        destination = resolver.resolve_destination(destination.logical_path, field_name="outputPath", error_code="WORKSPACE_PATH_INVALID")
-        if destination.physical_path.exists() or destination.physical_path.is_symlink():
-            raise AgentApiError("CAPTURE_FRAME_DESTINATION_EXISTS", "outputPath already exists; capture_frame never overwrites a workspace file.")
-        destination_path = destination.physical_path
-        logical_output_path = destination.logical_path
-
-        command = [ffmpeg.executable, "-hide_banner", "-nostdin", "-v", "info"]
-        if not options["applyDisplayRotation"]:
-            command.append("-noautorotate")
-        if options["seekMode"] == "fast":
-            command.extend(["-ss", f"{options['timestampSeconds']:.9f}"])
-        command.extend(["-i", str(item.physical_path)])
-        encoder_args, mime_type = capture_encoder_arguments(options["image"])
-        command.extend(["-map", f"0:{selected_index}", "-an", "-frames:v", "1", "-vf", capture_filter(options), *encoder_args, "-y", str(destination_path)])
-        try:
-            process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
-            _stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=CAPTURE_FRAME_TIMEOUT_SECONDS)
-        except asyncio.TimeoutError as error:
-            process.kill()
-            await process.communicate()
-            raise AgentApiError("CAPTURE_FRAME_FAILED", "ffmpeg timed out while extracting the frame.") from error
-        except OSError as error:
-            raise AgentApiError("CAPTURE_FRAME_FAILED", "ffmpeg could not be started.") from error
-        if process.returncode != 0 or not destination_path.is_file():
-            raise AgentApiError("CAPTURE_FRAME_FAILED", "ffmpeg could not extract a frame at the requested timestamp.")
-        try:
-            image_size = destination_path.stat().st_size
-        except OSError as error:
-            raise AgentApiError("CAPTURE_FRAME_FAILED", "The extracted image is unavailable.") from error
-        output_streams = await ffprobe_streams_for_file(destination_path, ffprobe.executable)
-        output_stream = next((stream for stream in output_streams if stream.get("codec_type") == "video"), None)
-        width = output_stream.get("width") if isinstance(output_stream, dict) else None
-        height = output_stream.get("height") if isinstance(output_stream, dict) else None
-        if not isinstance(width, int) or not isinstance(height, int):
-            raise AgentApiError("CAPTURE_FRAME_FAILED", "ffprobe did not report usable dimensions for the extracted image.")
-        rotation_degrees = video_stream_rotation(selected_stream)
-        rotation_applied = options["applyDisplayRotation"] and not math.isclose(rotation_degrees % 180, 0.0, abs_tol=0.001)
-        result: dict[str, Any] = {
-            "sourcePath": item.logical_path,
-            "requestedTimestampSeconds": options["timestampSeconds"],
-            # Input-side fast seeking normally re-bases timestamps. Its frame
-            # is intentionally approximate, so do not report a false absolute PTS.
-            "actualTimestampSeconds": showinfo_timestamp(stderr) if options["seekMode"] == "accurate" else None,
-            "selectedVideoStreamIndex": selected_index,
-            "seekMode": options["seekMode"],
-            "displayRotationApplied": rotation_applied,
-            "image": {
-                "format": options["image"]["format"], "mimeType": mime_type,
-                "width": width, "height": height, "imageSizeBytes": image_size,
-                "workspacePath": logical_output_path,
-            },
-        }
-        log(f"capture_frame path={item.logical_path} timestamp={options['timestampSeconds']:.3f} -> {logical_output_path}")
-        return result
-    except AgentApiError:
-        if destination_path is not None:
-            try:
-                destination_path.unlink(missing_ok=True)
-            except OSError:
-                pass
-        raise
-
-
-def safe_capture_title(value: str) -> str:
-    """Make a human-readable, cross-platform-safe filename component."""
-    # Preserve all punctuation and Unicode that Windows permits. Invalid
-    # filename characters stay visible instead of being silently discarded.
-    title = re.sub(r'[\x00-\x1f<>:"/\\|?*]+', "_", value).strip(" .")
-    if not title:
-        return "YouTube frame"
-    if title.split(".", 1)[0].upper() in WINDOWS_RESERVED_BASENAMES:
-        title = f"YouTube {title}"
-    # Leave room for YouTube, timestamp, and capture-id tags in the same
-    # Windows filename component without needlessly truncating the title.
-    return title[:190].rstrip(" .") or "YouTube frame"
-
-
-def youtube_capture_default_workspace_path(title: str, video_id: str, timestamp_seconds: float, image_format: str) -> str:
-    timestamp_part = f"{timestamp_seconds:.3f}".replace("-", "_")
-    capture_id = secrets.token_urlsafe(6)
-    return f"captures/{safe_capture_title(title)} [yt_{video_id}] [t_{timestamp_part}] [cap_{capture_id}].{image_format}"
-
-
-def youtube_capture_stdout(stdout: bytes) -> tuple[str | None, Path | None]:
-    title: str | None = None
-    partial_path: Path | None = None
-    for raw_line in stdout.decode("utf-8", errors="replace").splitlines():
-        if raw_line.startswith("__RESEARCHTUBE_CAPTURE_TITLE__:"):
-            title = raw_line.removeprefix("__RESEARCHTUBE_CAPTURE_TITLE__:").strip()
-        elif raw_line.startswith("__RESEARCHTUBE_CAPTURE_PARTIAL__:"):
-            candidate = raw_line.removeprefix("__RESEARCHTUBE_CAPTURE_PARTIAL__:").strip()
-            if candidate:
-                partial_path = Path(candidate)
-    return title, partial_path
-
-
-async def capture_youtube_frame(options: dict[str, Any]) -> dict[str, Any]:
-    """Download only a small yt-dlp/ffmpeg time section, then extract one frame.
-
-    The signed YouTube media URL and yt-dlp diagnostics stay entirely inside the
-    Agent.  The temporary media section is deleted in every outcome.
-    """
-    youtube = options["youtube"]
-    assert isinstance(youtube, dict)
-    yt_dlp = find_component("ytDlp", COMPONENTS["ytDlp"][0])
-    ffmpeg = find_component("ffmpeg", COMPONENTS["ffmpeg"][0])
-    if yt_dlp.error:
-        raise AgentApiError("YTDLP_DISCOVERY_ERROR", "yt-dlp discovery is ambiguous.", yt_dlp.error)
-    if ffmpeg.error:
-        raise AgentApiError("FFMPEG_DISCOVERY_ERROR", "ffmpeg discovery is ambiguous.", ffmpeg.error)
-    if not yt_dlp.executable:
-        raise AgentApiError("YTDLP_NOT_AVAILABLE", "yt-dlp is not available. Place it in tools/yt-dlp or install it on PATH.")
-    if not ffmpeg.executable:
-        raise AgentApiError("FFMPEG_NOT_AVAILABLE", "ffmpeg is required for partial YouTube frame capture. Extract it under tools/ffmpeg or install it on PATH.")
-
-    # The browser's player card can advertise a different format set from this
-    # local yt-dlp invocation. Confirm the exact numeric ID here, and reject
-    # audio-only IDs before starting the partial download.
-    local_formats = (await youtube_download_formats({"videoId": youtube["videoId"]}))["downloadFormats"]
-    selectable_video_ids = {
-        entry["formatId"] for kind in ("combined", "video") for entry in local_formats.get(kind, [])
-        if isinstance(entry, dict) and isinstance(entry.get("formatId"), str)
-    }
-    if youtube["formatId"] not in selectable_video_ids:
-        raise AgentApiError("CAPTURE_VIDEO_FORMAT_NOT_AVAILABLE", "youtube.formatId must be a currently available video or combined format from youtube_download_get_formats.")
-
-    timestamp = options["timestampSeconds"]
-    section_start = max(0.0, timestamp - YOUTUBE_CAPTURE_PRE_ROLL_SECONDS)
-    section_end = timestamp + YOUTUBE_CAPTURE_POST_ROLL_SECONDS
-    capture_token = secrets.token_urlsafe(8)
-    resolver = WorkspacePathResolver()
-    temporary_directory = resolver.resolve_destination(".researchtube-capture-tmp", field_name="temporary directory", error_code="WORKSPACE_PATH_INVALID")
-    temporary_directory.physical_path.mkdir(parents=True, exist_ok=True)
-    temporary_directory = resolver.resolve_destination(temporary_directory.logical_path, field_name="temporary directory", error_code="WORKSPACE_PATH_INVALID")
-    output_template = f"partial [yt_%(id)s] [cap_{capture_token}].%(ext)s"
-    command = [
-        yt_dlp.executable, *yt_dlp_youtube_arguments(resolve_deno_runtime()), "--ignore-config", "--no-playlist", "--no-part", "--encoding", "utf-8",
-        # Do not use --windows-filenames here: yt-dlp also applies it to the
-        # %(title)s value printed below, which would discard Cyrillic before
-        # safe_capture_title can make the final Windows-safe filename. The
-        # temporary template is already ASCII-only.
-        "--download-sections", f"*{section_start:.3f}-{section_end:.3f}", "--downloader", "ffmpeg",
-        "--ffmpeg-location", str(Path(ffmpeg.executable).parent), "--format", youtube["formatId"],
-        "--paths", str(temporary_directory.physical_path), "--output", output_template,
-        "--print", "before_dl:__RESEARCHTUBE_CAPTURE_TITLE__:%(title)s",
-        "--print", "after_move:__RESEARCHTUBE_CAPTURE_PARTIAL__:%(filepath)s",
-        f"https://www.youtube.com/watch?v={youtube['videoId']}",
-    ]
-    partial_item: ResolvedWorkspacePath | None = None
-    try:
-        try:
-            process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=YOUTUBE_CAPTURE_FRAME_TIMEOUT_SECONDS)
-        except asyncio.TimeoutError as error:
-            process.kill()
-            await process.communicate()
-            raise AgentApiError("YOUTUBE_CAPTURE_FRAME_FAILED", "yt-dlp timed out while downloading the short frame section.") from error
-        except OSError as error:
-            raise AgentApiError("YOUTUBE_CAPTURE_FRAME_FAILED", "yt-dlp could not be started for partial frame capture.") from error
-        if process.returncode != 0:
-            if b"requested format is not available" in stderr.lower():
-                raise AgentApiError("FORMAT_NOT_AVAILABLE", "The selected YouTube format is not available to local yt-dlp.")
-            raise AgentApiError("YOUTUBE_CAPTURE_FRAME_FAILED", "yt-dlp could not download the short video section needed for this frame.")
-        title, partial_path = youtube_capture_stdout(stdout)
-        if partial_path is None:
-            raise AgentApiError("YOUTUBE_CAPTURE_FRAME_FAILED", "yt-dlp completed without reporting the temporary video section.")
-        if not partial_path.is_absolute():
-            partial_path = temporary_directory.physical_path / partial_path
-        partial_item = resolver.resolve_existing(resolver.logical_existing_file(partial_path, error_code="YOUTUBE_CAPTURE_FRAME_FAILED"), field_name="path", expected_type="file")
-        local_options = dict(options)
-        local_options["path"] = partial_item.logical_path
-        local_options["youtube"] = None
-        local_options["timestampSeconds"] = timestamp - section_start
-        local_options["videoStreamIndex"] = None
-        if not options["outputPath"]["provided"]:
-            local_options["outputPath"] = dict(options["outputPath"])
-            local_options["outputPath"]["path"] = youtube_capture_default_workspace_path(title or "YouTube frame", youtube["videoId"], timestamp, options["image"]["format"])
-        result = await capture_frame_from_workspace_options(local_options)
-        result["sourcePath"] = f"youtube:{youtube['videoId']}"
-        result["sourceVideoId"] = youtube["videoId"]
-        result["sourceVideoFormatId"] = youtube["formatId"]
-        result["sourceTitle"] = title or "YouTube video"
-        result["requestedTimestampSeconds"] = timestamp
-        actual = result.get("actualTimestampSeconds")
-        result["actualTimestampSeconds"] = section_start + actual if isinstance(actual, (int, float)) else None
-        result["partialDownload"] = {"startSeconds": section_start, "endSeconds": section_end}
-        log(f"capture_frame youtube={youtube['videoId']} format={youtube['formatId']} timestamp={timestamp:.3f} -> {result['image']['workspacePath']}")
-        return result
-    finally:
-        if partial_item is not None:
-            try:
-                partial_item.physical_path.unlink(missing_ok=True)
-            except OSError:
-                pass
-        try:
-            temporary_directory.physical_path.rmdir()
-        except OSError:
-            pass
-
-
-async def capture_frame(payload: Any) -> dict[str, Any]:
-    options = capture_frame_options(payload)
-    if options["youtube"] is not None:
-        return await capture_youtube_frame(options)
-    return await capture_frame_from_workspace_options(options)
-
-
-def youtube_capture_sections(timestamps: list[float]) -> list[tuple[float, float, list[float]]]:
-    """Group nearby frame windows without creating an oversized partial download."""
-    sections: list[tuple[float, float, list[float]]] = []
-    for timestamp in timestamps:
-        start, end = max(0.0, timestamp - YOUTUBE_CAPTURE_PRE_ROLL_SECONDS), timestamp + YOUTUBE_CAPTURE_POST_ROLL_SECONDS
-        if sections and start <= sections[-1][1] + YOUTUBE_CAPTURE_SECTION_MERGE_GAP_SECONDS and end - sections[-1][0] <= YOUTUBE_CAPTURE_MAX_SECTION_SECONDS:
-            previous_start, previous_end, points = sections[-1]
-            sections[-1] = (previous_start, max(previous_end, end), [*points, timestamp])
-        else:
-            sections.append((start, end, [timestamp]))
-    return sections
-
-
-def youtube_capture_many_stdout(stdout: bytes) -> tuple[str | None, list[Path]]:
-    title: str | None = None
-    paths: list[Path] = []
-    for raw_line in stdout.decode("utf-8", errors="replace").splitlines():
-        if raw_line.startswith("__RESEARCHTUBE_CAPTURE_TITLE__:"):
-            title = raw_line.removeprefix("__RESEARCHTUBE_CAPTURE_TITLE__:").strip() or title
-        elif raw_line.startswith("__RESEARCHTUBE_CAPTURE_PARTIAL__:"):
-            value = raw_line.removeprefix("__RESEARCHTUBE_CAPTURE_PARTIAL__:").strip()
-            if value:
-                paths.append(Path(value))
-    return title, paths
-
-
-def sanitized_ytdlp_diagnostic_lines(stdout: bytes | None, stderr: bytes | None) -> list[str]:
-    """Return bounded yt-dlp output without signed URLs, tokens, or host paths."""
-    text = ((stdout or b"") + b"\n" + (stderr or b"")).decode("utf-8", errors="replace")
-    lines: list[str] = []
-    for raw_line in text.splitlines():
-        # Signed googlevideo URLs can contain short-lived access signatures and
-        # PO Tokens; diagnostic output must never export either one.
-        line = re.sub(r"https?://[^\s'\"]+", "[redacted URL]", raw_line)
-        line = re.sub(r"(?i)\b(?:pot|po_token|signature|sig|lsig)=[^\s&]+", "[redacted token]", line)
-        line = re.sub(r"(?:[A-Za-z]:\\|/)[^\s'\"]+", "[private path]", line)
-        line = line.strip()
-        if line:
-            lines.append(line[:MAX_DIAGNOSTIC_LINE_LENGTH])
-    return lines[-MAX_DIAGNOSTIC_LINES:]
-
-
-_YTDLP_DOWNLOAD_PERCENT_RE = re.compile(rb"\[download\]\s+(\d+(?:\.\d+)?)%")
-_FFMPEG_DOWNLOAD_TIME_RE = re.compile(rb"\btime=(\d{1,2}):(\d{2}):(\d{2}(?:\.\d+)?)")
-
-
-def youtube_section_download_progress(line: bytes, section_duration_seconds: float) -> float | None:
-    """Extract a bounded approximate section-download percentage from tool output."""
-    match = _YTDLP_DOWNLOAD_PERCENT_RE.search(line)
-    if match:
-        return min(100.0, max(0.0, float(match.group(1))))
-    match = _FFMPEG_DOWNLOAD_TIME_RE.search(line)
-    if not match or section_duration_seconds <= 0:
-        return None
-    hours, minutes, seconds = match.groups()
-    elapsed = int(hours) * 3600 + int(minutes) * 60 + float(seconds)
-    return min(100.0, max(0.0, elapsed * 100.0 / section_duration_seconds))
-
-
-def youtube_section_expected_bytes(format_record: dict[str, Any] | None, section_duration_seconds: float) -> int | None:
-    """Estimate a partial-range size from yt-dlp's advertised source bitrate."""
-    if not isinstance(format_record, dict) or section_duration_seconds <= 0:
-        return None
-    bitrate = format_record.get("bitrateBps")
-    if isinstance(bitrate, bool) or not isinstance(bitrate, int) or bitrate <= 0:
-        return None
-    return max(1, math.ceil(bitrate * section_duration_seconds / 8.0))
-
-
-def youtube_section_written_bytes(directory: Path, section_index: int) -> int:
-    """Read bytes currently written for one ASCII-only temporary section name."""
-    prefix = f"partial [section_{section_index:03d}]."
-    total = 0
-    try:
-        for candidate in directory.iterdir():
-            if candidate.is_file() and candidate.name.startswith(prefix):
-                try:
-                    total += candidate.stat().st_size
-                except OSError:
-                    pass
-    except OSError:
-        pass
-    return total
-
-
-async def collect_process_output_with_progress(
-    process: Any, *, timeout_seconds: float, on_line: Callable[[bytes], None] | None = None,
-) -> tuple[bytes, bytes]:
-    """Drain both subprocess streams while exposing newline/carriage-return progress updates.
-
-    A small fallback keeps the lightweight fake process objects used by unit tests
-    compatible with the real asyncio subprocess implementation.
-    """
-    stdout_stream, stderr_stream = getattr(process, "stdout", None), getattr(process, "stderr", None)
-    if stdout_stream is None or stderr_stream is None or not hasattr(process, "wait"):
-        return await asyncio.wait_for(process.communicate(), timeout=timeout_seconds)
-
-    async def drain(stream: asyncio.StreamReader, chunks: list[bytes]) -> None:
-        pending = b""
-        while chunk := await stream.read(4096):
-            chunks.append(chunk)
-            pending += chunk
-            pieces = re.split(rb"[\r\n]+", pending)
-            pending = pieces.pop()
-            if on_line is not None:
-                for piece in pieces:
-                    if piece:
-                        on_line(piece)
-        if pending and on_line is not None:
-            on_line(pending)
-
-    stdout_chunks: list[bytes] = []
-    stderr_chunks: list[bytes] = []
-    readers = [asyncio.create_task(drain(stdout_stream, stdout_chunks)), asyncio.create_task(drain(stderr_stream, stderr_chunks))]
-    try:
-        await asyncio.wait_for(process.wait(), timeout=timeout_seconds)
-    except asyncio.TimeoutError:
-        process.kill()
-        await process.wait()
-        raise
-    finally:
-        await asyncio.gather(*readers, return_exceptions=True)
-    return b"".join(stdout_chunks), b"".join(stderr_chunks)
-
-
-async def capture_youtube_frames(
-    options: dict[str, Any], progress: Callable[..., None],
-    diagnostics: dict[str, Any] | None = None,
-) -> list[dict[str, Any]]:
-    youtube = options["youtube"]
-    assert isinstance(youtube, dict)
-    yt_dlp, ffmpeg = find_component("ytDlp", COMPONENTS["ytDlp"][0]), find_component("ffmpeg", COMPONENTS["ffmpeg"][0])
-    if yt_dlp.error:
-        raise AgentApiError("YTDLP_DISCOVERY_ERROR", "yt-dlp discovery is ambiguous.", yt_dlp.error)
-    if ffmpeg.error:
-        raise AgentApiError("FFMPEG_DISCOVERY_ERROR", "ffmpeg discovery is ambiguous.", ffmpeg.error)
-    if not yt_dlp.executable or not ffmpeg.executable:
-        raise AgentApiError("YTDLP_NOT_AVAILABLE", "yt-dlp and ffmpeg are required for partial YouTube frame capture.")
-    formats = (await youtube_download_formats({"videoId": youtube["videoId"]}))["downloadFormats"]
-    available = [entry for kind in ("combined", "video") for entry in formats.get(kind, []) if isinstance(entry, dict) and isinstance(entry.get("formatId"), str)]
-    selected_format = next((entry for entry in available if entry["formatId"] == youtube["formatId"]), None)
-    if selected_format is None:
-        raise AgentApiError("CAPTURE_VIDEO_FORMAT_NOT_AVAILABLE", "youtube.formatId must be a currently available video or combined format from youtube_download_get_formats.")
-    sections = youtube_capture_sections(options["timestampsSeconds"])
-    deno_executable = resolve_deno_runtime()
-    if diagnostics is not None:
-        diagnostics["youtube"] = {
-            "formatId": youtube["formatId"],
-            "sectionCount": len(sections),
-            "sections": [{"startSeconds": start, "endSeconds": end, "frameCount": len(points)} for start, end, points in sections],
-            "poTokenProvider": youtube_pot_provider_status(deno_executable),
-            "ytDlpExitCode": None,
-            "output": [],
-        }
-    resolver = WorkspacePathResolver()
-    temporary_directory = resolver.resolve_destination(f".researchtube-capture-tmp/{secrets.token_urlsafe(8)}", field_name="temporary directory", error_code="WORKSPACE_PATH_INVALID")
-    temporary_directory.physical_path.mkdir(parents=True, exist_ok=True)
-    def record_failed_section(section_index: int, start: float, end: float, timestamps: list[float], attempt_count: int) -> dict[str, Any]:
-        section = {"sectionIndex": section_index, "startSeconds": start, "endSeconds": end, "frameCount": len(timestamps), "attemptCount": attempt_count}
-        if diagnostics is not None:
-            diagnostics["youtube"]["failedSection"] = section
-        return section
-
-    try:
-        results: list[dict[str, Any]] = []
-        total = len(options["timestampsSeconds"])
-        title: str | None = None
-        # Do not pass multiple --download-sections values to one yt-dlp process.
-        # A failure in a late FFmpeg section otherwise discards every earlier
-        # section and prevents the task from reporting useful incremental work.
-        for section_index, (start, end, timestamps) in enumerate(sections, start=1):
-            partial_path: Path | None = None
-            section_title: str | None = None
-            section_error: AgentApiError | None = None
-            expected_section_bytes = youtube_section_expected_bytes(selected_format, end - start)
-            for attempt_count in range(1, len(YOUTUBE_CAPTURE_SECTION_RETRY_DELAYS_SECONDS) + 2):
-                command = [
-                    yt_dlp.executable, *yt_dlp_youtube_arguments(deno_executable), "--verbose", "--newline", "--ignore-config", "--no-playlist", "--no-part", "--encoding", "utf-8",
-                    "--download-sections", f"*{start:.3f}-{end:.3f}", "--downloader", "ffmpeg",
-                    "--ffmpeg-location", str(Path(ffmpeg.executable).parent), "--format", youtube["formatId"],
-                    "--paths", str(temporary_directory.physical_path), "--output", f"partial [section_{section_index:03d}].%(ext)s",
-                    "--print", "before_dl:__RESEARCHTUBE_CAPTURE_TITLE__:%(title)s",
-                    "--print", "after_move:__RESEARCHTUBE_CAPTURE_PARTIAL__:%(filepath)s",
-                    f"https://www.youtube.com/watch?v={youtube['videoId']}",
-                ]
-                try:
-                    process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-                    file_progress_stopped = asyncio.Event()
-
-                    def report_download_progress(line: bytes) -> None:
-                        percent = youtube_section_download_progress(line, end - start)
-                        if percent is not None:
-                            progress(len(results), total, None, percent, len(timestamps))
-
-                    async def report_partial_file_progress() -> None:
-                        # yt-dlp delegates --download-sections to its external
-                        # FFmpeg downloader and does not relay that child's
-                        # standard progress events. The partial file itself is
-                        # the actual download destination, so its growing size
-                        # gives us a non-invasive, real transfer indicator.
-                        if expected_section_bytes is None:
-                            return
-                        while not file_progress_stopped.is_set():
-                            await asyncio.sleep(YOUTUBE_CAPTURE_FILE_PROGRESS_INTERVAL_SECONDS)
-                            written = youtube_section_written_bytes(temporary_directory.physical_path, section_index)
-                            if written > 0:
-                                percent = min(95.0, written * 100.0 / expected_section_bytes)
-                                progress(len(results), total, None, percent, len(timestamps))
-
-                    file_progress = asyncio.create_task(report_partial_file_progress())
-                    try:
-                        stdout, stderr = await collect_process_output_with_progress(
-                            process, timeout_seconds=YOUTUBE_CAPTURE_FRAME_TIMEOUT_SECONDS, on_line=report_download_progress,
-                        )
-                    finally:
-                        file_progress_stopped.set()
-                        file_progress.cancel()
-                        await asyncio.gather(file_progress, return_exceptions=True)
-                except asyncio.TimeoutError as error:
-                    process.kill(); await process.communicate()
-                    section_error = AgentApiError("YOUTUBE_CAPTURE_FRAME_FAILED", "yt-dlp timed out while downloading a required frame section.")
-                except OSError:
-                    section_error = AgentApiError("YOUTUBE_CAPTURE_FRAME_FAILED", "yt-dlp could not be started for a partial frame section.")
-                else:
-                    if diagnostics is not None:
-                        diagnostics["youtube"]["ytDlpExitCode"] = process.returncode
-                        diagnostics["youtube"]["output"] = sanitized_ytdlp_diagnostic_lines(stdout, stderr)
-                    if process.returncode != 0:
-                        section_error = AgentApiError("FORMAT_NOT_AVAILABLE" if b"requested format is not available" in stderr.lower() else "YOUTUBE_CAPTURE_FRAME_FAILED", "The selected YouTube format is unavailable." if b"requested format is not available" in stderr.lower() else "yt-dlp could not download a required frame section.")
-                    else:
-                        section_title, paths = youtube_capture_many_stdout(stdout)
-                        if len(paths) == 1:
-                            partial_path = paths[0]
-                            break
-                        section_error = AgentApiError("YOUTUBE_CAPTURE_FRAME_FAILED", "yt-dlp did not return the requested temporary frame section.")
-                # A permanently unavailable selected format cannot be repaired by
-                # waiting. FFmpeg/transport failures receive two paced retries.
-                if section_error.code == "FORMAT_NOT_AVAILABLE" or attempt_count > len(YOUTUBE_CAPTURE_SECTION_RETRY_DELAYS_SECONDS):
-                    record_failed_section(section_index, start, end, timestamps, attempt_count)
-                    raise section_error
-                await asyncio.sleep(YOUTUBE_CAPTURE_SECTION_RETRY_DELAYS_SECONDS[attempt_count - 1])
-            title = section_title or title
-            assert partial_path is not None
-            actual_path = partial_path if partial_path.is_absolute() else temporary_directory.physical_path / partial_path
-            try:
-                item = resolver.resolve_existing(resolver.logical_existing_file(actual_path, error_code="YOUTUBE_CAPTURE_FRAME_FAILED"), field_name="path", expected_type="file")
-            except AgentApiError:
-                record_failed_section(section_index, start, end, timestamps, attempt_count)
-                raise
-            try:
-                for timestamp in timestamps:
-                    local = dict(options)
-                    local.update({"path": item.logical_path, "youtube": None, "timestampSeconds": timestamp - start, "videoStreamIndex": None, "outputPath": {"path": youtube_capture_default_workspace_path(title or "YouTube frame", youtube["videoId"], timestamp, options["image"]["format"]), "provided": False}})
-                    result = await capture_frame_from_workspace_options(local)
-                    result.update({"sourcePath": f"youtube:{youtube['videoId']}", "sourceVideoId": youtube["videoId"], "sourceVideoFormatId": youtube["formatId"], "sourceTitle": title or "YouTube video", "requestedTimestampSeconds": timestamp, "partialDownload": {"startSeconds": start, "endSeconds": end}})
-                    actual = result.get("actualTimestampSeconds")
-                    result["actualTimestampSeconds"] = start + actual if isinstance(actual, (int, float)) else None
-                    results.append(result)
-                    progress(len(results), total, result)
-            except AgentApiError:
-                record_failed_section(section_index, start, end, timestamps, attempt_count)
-                raise
-            finally:
-                try:
-                    item.physical_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
-            if section_index < len(sections):
-                await asyncio.sleep(YOUTUBE_CAPTURE_SECTION_DELAY_SECONDS)
-        return results
-    finally:
-        shutil.rmtree(temporary_directory.physical_path, ignore_errors=True)
-
-
-async def capture_frames(
-    options: dict[str, Any], progress: Callable[..., None],
-    diagnostics: dict[str, Any] | None = None,
-) -> list[dict[str, Any]]:
-    if options["youtube"] is not None:
-        return await capture_youtube_frames(options, progress, diagnostics)
-    results: list[dict[str, Any]] = []
-    for timestamp in options["timestampsSeconds"]:
-        local = dict(options)
-        local.update({"timestampSeconds": timestamp, "outputPath": capture_output_path(None, options["path"], timestamp, options["image"]["format"])})
-        result = await capture_frame_from_workspace_options(local)
-        results.append(result)
-        progress(len(results), len(options["timestampsSeconds"]), result)
-    return results
-
-
-@dataclass
-class CaptureFrameTask:
-    task_id: str
-    payload: dict[str, Any]
-    created_at: str
-    last_updated_at: str
-    status: str = "working"
-    status_message: str = "Preparing frame extraction."
-    progress_percent: float = 0.0
-    completed_frames: int = 0
-    total_frames: int = 0
-    frames: list[dict[str, Any]] = field(default_factory=list)
-    error: dict[str, str] | None = None
-    failed_section: dict[str, Any] | None = None
-    diagnostics: dict[str, Any] = field(default_factory=dict)
-    runner: asyncio.Task[None] | None = None
-
-
-class CaptureFrameTaskManager:
-    def __init__(self) -> None: self.tasks: dict[str, CaptureFrameTask] = TaskHistory(configured_task_history_limit)
-    def get(self, task_id: str) -> CaptureFrameTask:
-        if not isinstance(task_id, str) or task_id not in self.tasks: raise AgentApiError("CAPTURE_FRAME_TASK_NOT_FOUND", "The requested frame-extraction task does not exist.")
-        return self.tasks[task_id]
-    def snapshot(self, task: CaptureFrameTask) -> dict[str, Any]:
-        value: dict[str, Any] = {"taskId": task.task_id, "status": task.status, "statusMessage": task.status_message, "progressPercent": task.progress_percent, "completedFrames": task.completed_frames, "totalFrames": task.total_frames, "frames": task.frames, "createdAt": task.created_at, "lastUpdatedAt": task.last_updated_at, "pollIntervalMs": TASK_POLL_INTERVAL_MS}
-        if task.error is not None: value["error"] = task.error
-        if task.failed_section is not None: value["failedSection"] = task.failed_section
-        return value
-    def diagnostics_snapshot(self, task_id: str) -> dict[str, Any]:
-        task = self.get(task_id)
-        youtube = task.diagnostics.get("youtube")
-        return {
-            "taskId": task.task_id,
-            "status": task.status,
-            "error": task.error,
-            "youtube": youtube if isinstance(youtube, dict) else None,
-        }
-    async def create(self, payload: Any) -> dict[str, Any]:
-        options = capture_frames_options(payload)
-        if options["path"] is not None: WorkspacePathResolver().resolve_existing(options["path"], field_name="path", expected_type="file")
-        task_id = f"frame_{secrets.token_urlsafe(7)}"
-        now = utc_now(); task = CaptureFrameTask(task_id, options, now, now, total_frames=len(options["timestampsSeconds"]))
-        self.tasks[task_id] = task; task.runner = asyncio.create_task(self.run(task), name=f"researchtube-capture-frame-{task_id}")
-        return self.snapshot(task)
-    async def run(self, task: CaptureFrameTask) -> None:
-        def progress(completed: int, total: int, frame: dict[str, Any] | None = None, section_download_percent: float | None = None, section_frame_count: int = 0) -> None:
-            task.completed_frames, task.total_frames = completed, total
-            if section_download_percent is not None and section_frame_count > 0:
-                estimated = ((completed + (section_download_percent / 100.0) * section_frame_count) * 100.0 / total)
-                # Retried downloaders can restart their own progress at zero. Do
-                # not make the task's externally visible progress move backwards.
-                task.progress_percent = max(task.progress_percent, min(99.0, estimated))
-                task.status_message = f"Downloading frame section: {section_download_percent:.0f}% (extracted {completed} of {total} frames)."
-            else:
-                task.progress_percent = completed * 100.0 / total
-                task.status_message = f"Extracted {completed} of {total} frames."
-            task.last_updated_at = utc_now()
-            if frame is not None:
-                task.frames.append(frame)
-        try:
-            await capture_frames(task.payload, progress, task.diagnostics); task.status = "completed"; task.progress_percent = 100.0; task.status_message = "Frame extraction completed."; task.last_updated_at = utc_now()
-        except AgentApiError as error:
-            youtube = task.diagnostics.get("youtube")
-            failed_section = youtube.get("failedSection") if isinstance(youtube, dict) else None
-            task.failed_section = failed_section if isinstance(failed_section, dict) else None
-            detail = f" at section {task.failed_section['sectionIndex']}" if task.failed_section is not None else ""
-            task.status, task.error, task.status_message, task.last_updated_at = "failed", {"code": error.code, "message": error.message}, f"Frame extraction failed{detail}.", utc_now()
-        except asyncio.CancelledError:
-            task.status, task.status_message, task.last_updated_at = "cancelled", "Frame-extraction task cancelled.", utc_now(); raise
-        except Exception as error:
-            log(f"capture-frame task {task.task_id} failed unexpectedly: {error.__class__.__name__}", error=True); task.status, task.error, task.status_message, task.last_updated_at = "failed", {"code": "CAPTURE_FRAME_INTERNAL_ERROR", "message": "The frame-extraction task encountered an unexpected error."}, "Frame extraction failed.", utc_now()
-    async def cancel(self, task_id: str) -> None:
-        task = self.get(task_id)
-        if task.status == "working" and task.runner and not task.runner.done(): task.status_message = "Frame-extraction cancellation requested."; task.last_updated_at = utc_now(); task.runner.cancel()
-    async def shutdown(self) -> None:
-        runners = [task.runner for task in self.tasks.values() if task.runner and not task.runner.done()]
-        for runner in runners: runner.cancel()
-        if runners: await asyncio.gather(*runners, return_exceptions=True)
-
-
-CAPTURE_FRAME_TASKS = CaptureFrameTaskManager()
-
-
-@dataclass
-class MediaClipTask:
-    task_id: str
-    payload: dict[str, Any]
-    created_at: str
-    last_updated_at: str
-    status: str = "working"
-    phase: str = "preparing"
-    status_message: str = "Preparing media clips."
-    progress_percent: float = 0.0
-    completed_clips: int = 0
-    total_clips: int = 1
-    clips: list[dict[str, Any]] = field(default_factory=list)
-    failed_segment: dict[str, Any] | None = None
-    error: dict[str, str] | None = None
-    process: asyncio.subprocess.Process | None = None
-    runner: asyncio.Task[None] | None = None
-
-    def touch(self, message: str | None = None) -> None:
-        self.last_updated_at = utc_now()
-        if message is not None:
-            self.status_message = message
-
-
-def media_clip_number_tag(value: float) -> str:
-    return f"{value:.3f}".rstrip("0").rstrip(".") or "0"
-
-
-def media_clip_audio_extension(codec_name: str | None, cut_mode: str) -> str:
-    if cut_mode == "accurate":
-        return "m4a"
-    return {
-        "aac": "m4a", "alac": "m4a", "mp3": "mp3", "opus": "opus",
-        "vorbis": "ogg", "flac": "flac", "pcm_s16le": "wav",
-        "pcm_s24le": "wav", "pcm_s32le": "wav", "pcm_f32le": "wav",
-    }.get(codec_name or "", "mka")
-
-
-def media_clip_video_extension(source: Path, cut_mode: str) -> str:
-    if cut_mode == "accurate":
-        return "mp4"
-    suffix = source.suffix.lower().removeprefix(".")
-    return suffix if suffix in {"avi", "m4v", "mkv", "mov", "mp4", "mpeg", "mpg", "ogv", "webm"} else "mkv"
-
-
-def media_clip_mime_type(extension: str, output_kind: str) -> str:
-    if output_kind == "video":
-        return {"mp4": "video/mp4", "m4v": "video/mp4", "mov": "video/quicktime", "webm": "video/webm", "ogv": "video/ogg", "mkv": "video/x-matroska", "avi": "video/x-msvideo", "mpeg": "video/mpeg", "mpg": "video/mpeg"}.get(extension, "application/octet-stream")
-    return {"m4a": "audio/mp4", "mp3": "audio/mpeg", "opus": "audio/ogg", "ogg": "audio/ogg", "flac": "audio/flac", "wav": "audio/wav", "mka": "audio/x-matroska"}.get(extension, "application/octet-stream")
-
-
-async def media_clip_probe_file(path: Path, executable: str) -> tuple[list[dict[str, Any]], float | None]:
-    command = [executable, "-v", "error", "-show_streams", "-show_format", "-of", "json", str(path)]
-    process: asyncio.subprocess.Process | None = None
-    try:
-        process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-        stdout, _stderr = await asyncio.wait_for(process.communicate(), timeout=MEDIA_PROBE_TIMEOUT_SECONDS)
-    except asyncio.TimeoutError as error:
-        if process is not None:
-            process.kill()
-            await process.communicate()
-        raise AgentApiError("MEDIA_CLIP_PROBE_FAILED", "ffprobe timed out while inspecting clip media.") from error
-    except OSError as error:
-        raise AgentApiError("MEDIA_CLIP_PROBE_FAILED", "ffprobe could not be started for media clipping.") from error
-    if process.returncode != 0:
-        raise AgentApiError("MEDIA_CLIP_PROBE_FAILED", "ffprobe could not inspect the clip media.")
-    try:
-        document = json.loads(stdout.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise AgentApiError("MEDIA_CLIP_PROBE_FAILED", "ffprobe returned invalid clip-media metadata.") from error
-    streams = document.get("streams")
-    if not isinstance(streams, list):
-        raise AgentApiError("MEDIA_CLIP_PROBE_FAILED", "ffprobe returned no usable clip-media streams.")
-    duration: float | None = None
-    candidates: list[Any] = []
-    if isinstance(document.get("format"), dict):
-        candidates.append(document["format"].get("duration"))
-    candidates.extend(stream.get("duration") for stream in streams if isinstance(stream, dict))
-    for candidate in candidates:
-        try:
-            value = float(candidate)
-        except (TypeError, ValueError):
-            continue
-        if math.isfinite(value) and value > 0:
-            duration = max(duration or 0.0, value)
-    return [stream for stream in streams if isinstance(stream, dict)], duration
-
-
-def media_clip_select_stream(streams: list[dict[str, Any]], codec_type: str, requested_index: int | None, *, required: bool) -> dict[str, Any] | None:
-    candidates = [stream for stream in streams if stream.get("codec_type") == codec_type and isinstance(stream.get("index"), int)]
-    if requested_index is not None:
-        selected = next((stream for stream in candidates if stream["index"] == requested_index), None)
-        if selected is None:
-            raise AgentApiError("MEDIA_CLIP_STREAM_NOT_FOUND", f"{codec_type}StreamIndex does not identify a {codec_type} stream in the source.")
-        return selected
-    if candidates:
-        return candidates[0]
-    if required:
-        raise AgentApiError("MEDIA_CLIP_STREAM_NOT_FOUND", f"The source contains no {codec_type} stream.")
-    return None
-
-
-def media_clip_select_output_streams(streams: list[dict[str, Any]], payload: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-    """Select only streams that will actually be mapped into the output."""
-    output_kind = payload["outputKind"]
-    video_stream = None
-    if output_kind == "video":
-        video_stream = media_clip_select_stream(streams, "video", payload["videoStreamIndex"], required=True)
-    require_audio = output_kind == "audio" or payload["audioStreamIndex"] is not None
-    audio_stream = media_clip_select_stream(streams, "audio", payload["audioStreamIndex"], required=require_audio)
-    if output_kind == "video" and not payload["includeAudio"]:
-        audio_stream = None
-    return video_stream, audio_stream
-
-
-def media_clip_publish_without_overwrite(temporary_path: Path, final_path: Path) -> None:
-    if final_path.exists() or final_path.is_symlink():
-        raise AgentApiError("DESTINATION_EXISTS", "A media-clip output destination already exists; this tool never overwrites files.")
-    try:
-        os.link(temporary_path, final_path)
-        temporary_path.unlink()
-        return
-    except FileExistsError as error:
-        raise AgentApiError("DESTINATION_EXISTS", "A media-clip output destination already exists; this tool never overwrites files.") from error
-    except OSError:
-        pass
-    try:
-        with temporary_path.open("rb") as source, final_path.open("xb") as destination:
-            shutil.copyfileobj(source, destination, length=1024 * 1024)
-        temporary_path.unlink()
-    except FileExistsError as error:
-        raise AgentApiError("DESTINATION_EXISTS", "A media-clip output destination already exists; this tool never overwrites files.") from error
-    except OSError as error:
-        try:
-            final_path.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise AgentApiError("MEDIA_CLIP_FAILED", "The completed media clip could not be published in the workspace.") from error
-
-
-class MediaClipTaskManager:
-    def __init__(self) -> None:
-        self.tasks: dict[str, MediaClipTask] = TaskHistory(configured_task_history_limit)
-
-    def new_task_id(self) -> str:
-        while True:
-            task_id = f"clip_{secrets.token_urlsafe(7)}"
-            if task_id not in self.tasks:
-                return task_id
-
-    def get(self, task_id: Any) -> MediaClipTask:
-        if not isinstance(task_id, str) or task_id not in self.tasks:
-            raise AgentApiError("MEDIA_CLIP_TASK_NOT_FOUND", "The requested media-clip task does not exist.")
-        return self.tasks[task_id]
-
-    def snapshot(self, task: MediaClipTask) -> dict[str, Any]:
-        document: dict[str, Any] = {
-            "taskId": task.task_id, "sourcePath": task.payload["path"], "outputKind": task.payload["outputKind"],
-            "cutMode": task.payload["cutMode"], "status": task.status, "phase": task.phase,
-            "statusMessage": task.status_message, "progressPercent": task.progress_percent,
-            "completedClips": task.completed_clips, "totalClips": task.total_clips, "clips": task.clips,
-            "createdAt": task.created_at, "lastUpdatedAt": task.last_updated_at,
-            "pollIntervalMs": TASK_POLL_INTERVAL_MS,
-        }
-        if task.failed_segment is not None:
-            document["failedSegment"] = task.failed_segment
-        if task.error is not None:
-            document["error"] = task.error
-        return document
-
-    async def create(self, payload: Any) -> dict[str, Any]:
-        options = media_clip_options(payload)
-        WorkspacePathResolver().resolve_existing(options["path"], field_name="path", expected_type="file")
-        now = utc_now()
-        task = MediaClipTask(self.new_task_id(), options, now, now, total_clips=len(options["segments"] or [None]))
-        self.tasks[task.task_id] = task
-        task.runner = asyncio.create_task(self.run(task), name=f"researchtube-media-clip-{task.task_id}")
-        return self.snapshot(task)
-
-    async def read_progress(self, task: MediaClipTask, segment_index: int, segment_duration: float) -> None:
-        assert task.process is not None and task.process.stdout is not None
-        while line := await task.process.stdout.readline():
-            text = line.decode("utf-8", errors="replace").strip()
-            if not text.startswith(("out_time_us=", "out_time_ms=")):
-                continue
-            try:
-                processed_seconds = max(0.0, float(text.split("=", 1)[1]) / 1_000_000.0)
-            except ValueError:
-                continue
-            fraction = min(1.0, processed_seconds / segment_duration) if segment_duration > 0 else 0.0
-            task.progress_percent = max(task.progress_percent, min(99.9, (segment_index + fraction) * 100.0 / task.total_clips))
-            task.touch(f"Creating clip {segment_index + 1} of {task.total_clips}: {fraction * 100.0:.0f}%.")
-
-    async def create_one_clip(
-        self, task: MediaClipTask, source: ResolvedWorkspacePath, output_directory: ResolvedWorkspacePath,
-        ffmpeg_executable: str, ffprobe_executable: str, video_stream: dict[str, Any] | None,
-        audio_stream: dict[str, Any] | None, segment: dict[str, float], segment_index: int,
-    ) -> dict[str, Any]:
-        start, end = segment["startSeconds"], segment["endSeconds"]
-        duration = end - start
-        output_kind, cut_mode = task.payload["outputKind"], task.payload["cutMode"]
-        extension = media_clip_video_extension(source.physical_path, cut_mode) if output_kind == "video" else media_clip_audio_extension(audio_stream.get("codec_name") if audio_stream else None, cut_mode)
-        source_stem = safe_capture_title(source.physical_path.stem)[:150].rstrip(" .") or "ResearchTube media"
-        range_tag = f"clip_{media_clip_number_tag(start)}_{media_clip_number_tag(end)}"
-        file_name = f"{source_stem} [{range_tag}] [{task.task_id}].{extension}"
-        destination = WorkspacePathResolver().resolve_destination(
-            f"{output_directory.logical_path}/{file_name}", field_name="media clip output", error_code="MEDIA_CLIP_INVALID",
-        )
-        destination.physical_path.parent.mkdir(parents=True, exist_ok=True)
-        if destination.physical_path.exists() or destination.physical_path.is_symlink():
-            raise AgentApiError("DESTINATION_EXISTS", "A media-clip output destination already exists; this tool never overwrites files.")
-        temporary = destination.physical_path.with_name(f".{destination.physical_path.stem}.{secrets.token_urlsafe(5)}.tmp.{extension}")
-        command = [
-            ffmpeg_executable, "-hide_banner", "-nostdin", "-v", "error", "-progress", "pipe:1", "-nostats",
-            "-ss", f"{start:.6f}", "-i", str(source.physical_path), "-t", f"{duration:.6f}",
-        ]
-        if output_kind == "video":
-            assert video_stream is not None
-            command.extend(["-map", f"0:{video_stream['index']}"])
-            if audio_stream is not None:
-                command.extend(["-map", f"0:{audio_stream['index']}"])
-            command.extend(["-sn", "-dn"])
-            if cut_mode == "copy":
-                command.extend(["-c", "copy", "-avoid_negative_ts", "make_zero"])
-            else:
-                command.extend(["-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p"])
-                command.extend(["-c:a", "aac", "-b:a", "192k"] if audio_stream is not None else ["-an"])
-                command.extend(["-movflags", "+faststart"])
-        else:
-            assert audio_stream is not None
-            command.extend(["-map", f"0:{audio_stream['index']}", "-vn", "-sn", "-dn"])
-            if cut_mode == "copy":
-                command.extend(["-c:a", "copy", "-avoid_negative_ts", "make_zero"])
-            else:
-                command.extend(["-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"])
-        command.extend(["-n", str(temporary)])
-        stderr_task: asyncio.Task[bytes] | None = None
-        try:
-            task.process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-            assert task.process.stderr is not None
-            stderr_task = asyncio.create_task(task.process.stderr.read())
-            await asyncio.gather(self.read_progress(task, segment_index, duration), task.process.wait())
-            stderr = await stderr_task
-            if task.process.returncode != 0 or not temporary.is_file() or temporary.stat().st_size == 0:
-                detail = bounded_line(stderr.decode("utf-8", errors="replace").splitlines()[-1] if stderr else "")
-                raise AgentApiError("MEDIA_CLIP_FAILED", "FFmpeg could not create the requested media clip.", detail or None)
-            # Validate the completed temporary file before making it visible in
-            # Workspace.  There must be no await between publication and the
-            # caller appending the returned metadata: otherwise cancellation
-            # can leave a published file missing from clips[].
-            result_streams, result_duration = await media_clip_probe_file(temporary, ffprobe_executable)
-            has_video = any(stream.get("codec_type") == "video" for stream in result_streams)
-            has_audio = any(stream.get("codec_type") == "audio" for stream in result_streams)
-            if (output_kind == "video" and not has_video) or (output_kind == "audio" and not has_audio):
-                raise AgentApiError("MEDIA_CLIP_FAILED", "The completed clip does not contain the requested media stream.")
-            media_clip_publish_without_overwrite(temporary, destination.physical_path)
-            return {
-                "index": segment_index, "sourcePath": source.logical_path, "outputKind": output_kind,
-                "startSeconds": start, "endSeconds": end, "durationSeconds": result_duration if result_duration is not None else duration,
-                "selectedVideoStreamIndex": video_stream.get("index") if video_stream is not None else None,
-                "selectedAudioStreamIndex": audio_stream.get("index") if audio_stream is not None else None,
-                "hasAudio": has_audio, "reencoded": cut_mode == "accurate", "format": extension,
-                "mimeType": media_clip_mime_type(extension, output_kind),
-                "fileSizeBytes": destination.physical_path.stat().st_size,
-                "workspacePath": WorkspacePathResolver().logical_existing_file(destination.physical_path, error_code="MEDIA_CLIP_FAILED"),
-            }
-        except asyncio.CancelledError:
-            if task.process is not None and task.process.returncode is None:
-                task.process.terminate()
-                try:
-                    await asyncio.wait_for(task.process.wait(), timeout=3)
-                except asyncio.TimeoutError:
-                    task.process.kill()
-                    await task.process.wait()
-            if stderr_task is not None:
-                stderr_task.cancel()
-                await asyncio.gather(stderr_task, return_exceptions=True)
-            raise
-        finally:
-            task.process = None
-            try:
-                temporary.unlink(missing_ok=True)
-            except OSError:
-                pass
-
-    async def run(self, task: MediaClipTask) -> None:
-        current_segment: dict[str, float] | None = None
-        current_index = 0
-        try:
-            ffmpeg = find_component("ffmpeg", COMPONENTS["ffmpeg"][0])
-            ffprobe = find_component("ffprobe", COMPONENTS["ffprobe"][0])
-            if ffmpeg.error or ffprobe.error:
-                raise AgentApiError("FFMPEG_DISCOVERY_ERROR", "ffmpeg or ffprobe discovery is ambiguous.", ffmpeg.error or ffprobe.error)
-            if not ffmpeg.executable or not ffprobe.executable:
-                raise AgentApiError("FFMPEG_NOT_AVAILABLE", "ffmpeg and ffprobe are required for media clipping.")
-            resolver = WorkspacePathResolver()
-            source = resolver.resolve_existing(task.payload["path"], field_name="path", expected_type="file")
-            output_directory = resolver.resolve_destination(task.payload["outputDir"], field_name="outputDir", error_code="MEDIA_CLIP_INVALID")
-            output_directory.physical_path.mkdir(parents=True, exist_ok=True)
-            streams, source_duration = await media_clip_probe_file(source.physical_path, ffprobe.executable)
-            video_stream, audio_stream = media_clip_select_output_streams(streams, task.payload)
-            segments = task.payload["segments"]
-            if segments is None:
-                if source_duration is None:
-                    raise AgentApiError("MEDIA_CLIP_DURATION_UNAVAILABLE", "The source duration is required when segments is omitted.")
-                segments = [{"startSeconds": 0.0, "endSeconds": source_duration}]
-            if source_duration is not None:
-                for index, segment in enumerate(segments):
-                    if segment["endSeconds"] > source_duration + 0.001:
-                        raise AgentApiError("MEDIA_CLIP_RANGE_INVALID", f"segments[{index}].endSeconds exceeds the source duration.")
-            task.total_clips = len(segments)
-            task.phase = "processing"
-            task.touch(f"Creating clip 1 of {task.total_clips}.")
-            for current_index, current_segment in enumerate(segments):
-                clip = await self.create_one_clip(task, source, output_directory, ffmpeg.executable, ffprobe.executable, video_stream, audio_stream, current_segment, current_index)
-                task.clips.append(clip)
-                task.completed_clips = len(task.clips)
-                task.progress_percent = task.completed_clips * 100.0 / task.total_clips
-                task.touch(f"Created {task.completed_clips} of {task.total_clips} clips.")
-            task.status, task.phase, task.progress_percent = "completed", "completed", 100.0
-            task.touch("Media clipping completed.")
-        except asyncio.CancelledError:
-            task.status, task.phase = "cancelled", "cancelled"
-            task.touch("Media-clip task cancelled.")
-            raise
-        except AgentApiError as error:
-            if current_segment is not None:
-                task.failed_segment = {"index": current_index, **current_segment}
-            task.status, task.phase, task.error = "failed", "failed", {"code": error.code, "message": error.message}
-            task.touch("Media clipping failed.")
-        except Exception as error:
-            log(f"media-clip task {task.task_id} failed unexpectedly: {error.__class__.__name__}", error=True)
-            if current_segment is not None:
-                task.failed_segment = {"index": current_index, **current_segment}
-            task.status, task.phase, task.error = "failed", "failed", {"code": "MEDIA_CLIP_INTERNAL_ERROR", "message": "The media-clip task encountered an unexpected error."}
-            task.touch("Media clipping failed.")
-
-    async def cancel(self, task_id: Any) -> None:
-        task = self.get(task_id)
-        if task.status == "working" and task.runner is not None and not task.runner.done():
-            task.touch("Media-clip cancellation requested.")
-            task.runner.cancel()
-
-    async def shutdown(self) -> None:
-        runners = [task.runner for task in self.tasks.values() if task.runner is not None and not task.runner.done()]
-        for runner in runners:
-            runner.cancel()
-        if runners:
-            await asyncio.gather(*runners, return_exceptions=True)
-
-
-MEDIA_CLIP_TASKS = MediaClipTaskManager()
-
-
-IMAGE_MIME_TYPES = {
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".webp": "image/webp",
-}
-
-VIDEO_MIME_TYPES = {
-    ".mp4": "video/mp4",
-    ".webm": "video/webm",
-    ".ogv": "video/ogg",
-    ".mov": "video/quicktime",
-}
-
-AUDIO_MIME_TYPES = {
-    ".mp3": "audio/mpeg",
-    ".m4a": "audio/mp4",
-    ".wav": "audio/wav",
-    ".ogg": "audio/ogg",
-    ".opus": "audio/ogg",
-    ".webm": "audio/webm",
-}
-
-
-def workspace_preview_mime_type(path: Path) -> tuple[str, str] | None:
-    suffix = path.suffix.lower()
-    if (mime_type := IMAGE_MIME_TYPES.get(suffix)) is not None:
-        return "image", mime_type
-    if (mime_type := VIDEO_MIME_TYPES.get(suffix)) is not None:
-        return "video", mime_type
-    if (mime_type := AUDIO_MIME_TYPES.get(suffix)) is not None:
-        return "audio", mime_type
-    return None
-
-
-async def image_crop(payload: Any) -> dict[str, Any]:
-    """Crop one existing workspace image without exposing a host path."""
-    options = image_crop_options(payload)
-    resolver = WorkspacePathResolver()
-    source = resolver.resolve_existing(options["path"], field_name="path", expected_type="file")
-    if source.physical_path.suffix.lower() not in IMAGE_MIME_TYPES:
-        raise AgentApiError("IMAGE_CROP_INVALID", "path must identify a PNG, JPEG, or WebP image in the workspace.")
-    ffmpeg = find_component("ffmpeg", COMPONENTS["ffmpeg"][0])
-    ffprobe = find_component("ffprobe", COMPONENTS["ffprobe"][0])
-    if ffmpeg.error:
-        raise AgentApiError("FFMPEG_DISCOVERY_ERROR", "ffmpeg discovery is ambiguous.", ffmpeg.error)
-    if ffprobe.error:
-        raise AgentApiError("FFPROBE_DISCOVERY_ERROR", "ffprobe discovery is ambiguous.", ffprobe.error)
-    if not ffmpeg.executable:
-        raise AgentApiError("FFMPEG_NOT_AVAILABLE", "ffmpeg is not available. Extract it under tools/ffmpeg or install it on PATH.")
-    if not ffprobe.executable:
-        raise AgentApiError("FFPROBE_NOT_AVAILABLE", "ffprobe is not available. Extract it under tools/ffmpeg or install it on PATH.")
-
-    streams = await ffprobe_streams(source, ffprobe.executable)
-    source_stream = next((stream for stream in streams if stream.get("codec_type") == "video"), None)
-    source_width = source_stream.get("width") if isinstance(source_stream, dict) else None
-    source_height = source_stream.get("height") if isinstance(source_stream, dict) else None
-    if not isinstance(source_width, int) or source_width < 1 or not isinstance(source_height, int) or source_height < 1:
-        raise AgentApiError("IMAGE_CROP_INVALID", "ffprobe did not report usable dimensions for the source image.")
-    crop = options["crop"]
-    if crop["x"] + crop["width"] > source_width or crop["y"] + crop["height"] > source_height:
-        raise AgentApiError("IMAGE_CROP_INVALID", "crop must lie completely within the source image dimensions.")
-
-    destination_path: Path | None = None
-    try:
-        destination = resolver.resolve_destination(options["outputPath"], field_name="outputPath", error_code="WORKSPACE_PATH_INVALID")
-        destination.physical_path.parent.mkdir(parents=True, exist_ok=True)
-        destination = resolver.resolve_destination(destination.logical_path, field_name="outputPath", error_code="WORKSPACE_PATH_INVALID")
-        if destination.physical_path.exists() or destination.physical_path.is_symlink():
-            raise AgentApiError("IMAGE_CROP_DESTINATION_EXISTS", "outputPath already exists; image_crop never overwrites a workspace file.")
-        destination_path = destination.physical_path
-        encoder_args, mime_type = capture_encoder_arguments(options["image"])
-        command = [
-            ffmpeg.executable, "-hide_banner", "-nostdin", "-v", "error", "-noautorotate", "-i", str(source.physical_path),
-            "-map", "0:v:0", "-an", "-frames:v", "1",
-            "-vf", f"crop={crop['width']}:{crop['height']}:{crop['x']}:{crop['y']}",
-            *encoder_args, "-y", str(destination_path),
-        ]
-        try:
-            process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
-            await asyncio.wait_for(process.communicate(), timeout=CAPTURE_FRAME_TIMEOUT_SECONDS)
-        except asyncio.TimeoutError as error:
-            process.kill()
-            await process.communicate()
-            raise AgentApiError("IMAGE_CROP_FAILED", "ffmpeg timed out while cropping the image.") from error
-        except OSError as error:
-            raise AgentApiError("IMAGE_CROP_FAILED", "ffmpeg could not be started.") from error
-        if process.returncode != 0 or not destination_path.is_file():
-            raise AgentApiError("IMAGE_CROP_FAILED", "ffmpeg could not crop the image.")
-        output_streams = await ffprobe_streams_for_file(destination_path, ffprobe.executable)
-        output_stream = next((stream for stream in output_streams if stream.get("codec_type") == "video"), None)
-        width = output_stream.get("width") if isinstance(output_stream, dict) else None
-        height = output_stream.get("height") if isinstance(output_stream, dict) else None
-        if width != crop["width"] or height != crop["height"]:
-            raise AgentApiError("IMAGE_CROP_FAILED", "ffmpeg did not produce the requested crop dimensions.")
-        result = {
-            "sourcePath": source.logical_path,
-            "sourceWidth": source_width,
-            "sourceHeight": source_height,
-            "crop": crop,
-            "image": {
-                "format": options["image"]["format"], "mimeType": mime_type,
-                "width": width, "height": height, "imageSizeBytes": destination_path.stat().st_size,
-                "workspacePath": destination.logical_path,
-            },
-        }
-        log(f"image_crop path={source.logical_path} crop={crop['x']},{crop['y']} {crop['width']}x{crop['height']} -> {destination.logical_path}")
-        return result
-    except AgentApiError:
-        if destination_path is not None:
-            try:
-                destination_path.unlink(missing_ok=True)
-            except OSError:
-                pass
-        raise
-
-
-def workspace_image_metadata(payload: Any) -> tuple[ResolvedWorkspacePath, dict[str, Any]]:
-    """Resolve compact metadata for one locally previewable workspace media file."""
-    if not isinstance(payload, dict) or set(payload) != {"path"}:
-        raise AgentApiError("WORKSPACE_IMAGE_INVALID", "workspace image retrieval requires only path.")
-    item = WorkspacePathResolver().resolve_existing(payload.get("path"), field_name="path", expected_type="file")
-    preview = workspace_preview_mime_type(item.physical_path)
-    if preview is None:
-        raise AgentApiError("WORKSPACE_IMAGE_INVALID", "path must identify a supported image, video, or audio file in the workspace.")
-    media_kind, mime_type = preview
-    try:
-        size = item.physical_path.stat().st_size
-    except OSError as error:
-        raise AgentApiError("WORKSPACE_IMAGE_UNAVAILABLE", "The workspace media file could not be inspected.") from error
-    return item, {"path": item.logical_path, "mediaKind": media_kind, "mimeType": mime_type, "sizeBytes": size}
-
-
-def widget_image_file(logical_path: str) -> tuple[Path, str]:
-    """Resolve one direct Workspace-relative GET path for the media widget."""
-    if not isinstance(logical_path, str) or not logical_path:
-        raise AgentApiError("WORKSPACE_IMAGE_INVALID", "workspace image path is required.")
-    item = WorkspacePathResolver().resolve_existing(logical_path, field_name="path", expected_type="file")
-    preview = workspace_preview_mime_type(item.physical_path)
-    if preview is None:
-        raise AgentApiError("WORKSPACE_IMAGE_INVALID", "path must identify a supported image, video, or audio file in the workspace.")
-    _media_kind, mime_type = preview
-    return item.physical_path, mime_type
-
-
-async def copy_widget_workspace_path(logical_path: str) -> dict[str, bool]:
-    """Copy one image-widget URL path after resolving it inside the Workspace."""
-    widget_image_file(logical_path)
-    await clipboard_set({"text": logical_path})
-    return {"success": True}
-
-
-async def inspect_workspace_image(payload: Any) -> dict[str, Any]:
-    """Return verified, bounded metadata for one workspace image only."""
-    if not isinstance(payload, dict) or set(payload) != {"path"}:
-        raise AgentApiError("IMAGE_INSPECT_INVALID", "image inspection requires only path.")
-    item = WorkspacePathResolver().resolve_existing(payload.get("path"), field_name="path", expected_type="file")
-    image_specifications = {
-        ".png": ("png", "image/png", "png"),
-        ".jpg": ("jpeg", "image/jpeg", "mjpeg"),
-        ".jpeg": ("jpeg", "image/jpeg", "mjpeg"),
-        ".webp": ("webp", "image/webp", "webp"),
-    }
-    specification = image_specifications.get(item.physical_path.suffix.lower())
-    if specification is None:
-        raise AgentApiError("INVALID_IMAGE", "path must identify a PNG, JPEG, or WebP image in the workspace.")
-    ffprobe = find_component("ffprobe", COMPONENTS["ffprobe"][0])
-    if not ffprobe.executable:
-        raise AgentApiError("FFMPEG_NOT_AVAILABLE", "ffprobe is required to inspect workspace image metadata.")
-    streams = await ffprobe_streams_for_file(item.physical_path, ffprobe.executable)
-    stream = next((candidate for candidate in streams if candidate.get("codec_type") == "video"), None)
-    width, height = (stream.get("width"), stream.get("height")) if isinstance(stream, dict) else (None, None)
-    if not isinstance(stream, dict) or stream.get("codec_name") != specification[2] or not isinstance(width, int) or width < 1 or not isinstance(height, int) or height < 1:
-        raise AgentApiError("INVALID_IMAGE", "The workspace file is not a valid image matching its PNG, JPEG, or WebP extension.")
-    try:
-        image_size = item.physical_path.stat().st_size
-    except OSError as error:
-        raise AgentApiError("WORKSPACE_IMAGE_UNAVAILABLE", "The workspace image could not be inspected.") from error
-    log(f"inspect_workspace_image path={item.logical_path} -> ok")
-    return {"workspacePath": item.logical_path, "format": specification[0], "mimeType": specification[1], "width": width, "height": height, "imageSizeBytes": image_size}
-
-
-class WindowsClipboard:
-    """Small, explicit Win32 clipboard wrapper; no clipboard history is kept."""
-
-    CF_TEXT = 1
-    CF_DIB = 8
-    CF_UNICODETEXT = 13
-    CF_DIBV5 = 17
-    GMEM_MOVEABLE = 0x0002
-
-    def __init__(self) -> None:
-        if os.name != "nt":
-            raise AgentApiError("CLIPBOARD_UNAVAILABLE", "System clipboard access is unavailable on this operating system.")
-        try:
-            self.user32 = ctypes.WinDLL("user32", use_last_error=True)
-            self.kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-            self.user32.OpenClipboard.argtypes = [ctypes.c_void_p]
-            self.user32.OpenClipboard.restype = ctypes.c_int
-            self.user32.CloseClipboard.restype = ctypes.c_int
-            self.user32.GetClipboardData.argtypes = [ctypes.c_uint]
-            self.user32.GetClipboardData.restype = ctypes.c_void_p
-            self.user32.SetClipboardData.argtypes = [ctypes.c_uint, ctypes.c_void_p]
-            self.user32.SetClipboardData.restype = ctypes.c_void_p
-            self.user32.EmptyClipboard.restype = ctypes.c_int
-            self.user32.IsClipboardFormatAvailable.argtypes = [ctypes.c_uint]
-            self.user32.IsClipboardFormatAvailable.restype = ctypes.c_int
-            self.user32.CountClipboardFormats.restype = ctypes.c_int
-            self.user32.GetClipboardSequenceNumber.restype = ctypes.c_uint32
-            self.kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
-            self.kernel32.GlobalLock.restype = ctypes.c_void_p
-            self.kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
-            self.kernel32.GlobalSize.argtypes = [ctypes.c_void_p]
-            self.kernel32.GlobalSize.restype = ctypes.c_size_t
-            self.kernel32.GlobalAlloc.argtypes = [ctypes.c_uint, ctypes.c_size_t]
-            self.kernel32.GlobalAlloc.restype = ctypes.c_void_p
-            self.kernel32.GlobalFree.argtypes = [ctypes.c_void_p]
-            self.kernel32.GlobalFree.restype = ctypes.c_void_p
-        except (AttributeError, OSError) as error:
-            raise AgentApiError("CLIPBOARD_UNAVAILABLE", "Windows clipboard APIs are unavailable in this session.") from error
-
-    def open(self) -> None:
-        for attempt in range(CLIPBOARD_OPEN_ATTEMPTS):
-            if self.user32.OpenClipboard(None):
-                return
-            if attempt + 1 < CLIPBOARD_OPEN_ATTEMPTS:
-                time.sleep(0.03 * (attempt + 1))
-        raise AgentApiError("CLIPBOARD_BUSY", "The Windows clipboard is temporarily in use by another application.")
-
-    def close(self) -> None:
-        self.user32.CloseClipboard()
-
-    def sequence(self) -> int:
-        return int(self.user32.GetClipboardSequenceNumber())
-
-    @staticmethod
-    def revision(sequence: int) -> str:
-        return f"cb_{sequence}"
-
-    def has_image(self) -> bool:
-        return bool(self.user32.IsClipboardFormatAvailable(self.CF_DIBV5) or self.user32.IsClipboardFormatAvailable(self.CF_DIB))
-
-    def has_text(self) -> bool:
-        return bool(self.user32.IsClipboardFormatAvailable(self.CF_UNICODETEXT))
-
-    def global_bytes(self, handle: int, max_bytes: int) -> bytes:
-        size = int(self.kernel32.GlobalSize(handle))
-        if size < 1:
-            raise AgentApiError("CLIPBOARD_UNAVAILABLE", "Windows returned an unreadable clipboard object.")
-        if size > max_bytes:
-            raise AgentApiError("CLIPBOARD_TOO_LARGE", "The clipboard object exceeds the configured size limit.")
-        pointer = self.kernel32.GlobalLock(handle)
-        if not pointer:
-            raise AgentApiError("CLIPBOARD_BUSY", "The Windows clipboard object could not be read.")
-        try:
-            return ctypes.string_at(pointer, size)
-        finally:
-            self.kernel32.GlobalUnlock(handle)
-
-    def clipboard_dib(self) -> bytes:
-        handle = self.user32.GetClipboardData(self.CF_DIBV5) or self.user32.GetClipboardData(self.CF_DIB)
-        if not handle:
-            raise AgentApiError("CLIPBOARD_UNSUPPORTED", "The clipboard image cannot be read as a Windows bitmap.")
-        return self.global_bytes(handle, MAX_CLIPBOARD_IMAGE_DIB_BYTES)
-
-    def clipboard_text_bytes(self) -> bytes:
-        handle = self.user32.GetClipboardData(self.CF_UNICODETEXT)
-        if not handle:
-            raise AgentApiError("CLIPBOARD_UNSUPPORTED", "The clipboard text cannot be read as Unicode text.")
-        return self.global_bytes(handle, MAX_CLIPBOARD_TEXT_BYTES + 2)
-
-    def set_global_data(self, clipboard_format: int, data: bytes) -> None:
-        memory = self.kernel32.GlobalAlloc(self.GMEM_MOVEABLE, len(data))
-        if not memory:
-            raise AgentApiError("CLIPBOARD_UNAVAILABLE", "Windows could not allocate clipboard memory.")
-        pointer = self.kernel32.GlobalLock(memory)
-        if not pointer:
-            self.kernel32.GlobalFree(memory)
-            raise AgentApiError("CLIPBOARD_UNAVAILABLE", "Windows could not prepare clipboard memory.")
-        try:
-            ctypes.memmove(pointer, data, len(data))
-        finally:
-            self.kernel32.GlobalUnlock(memory)
-        if not self.user32.SetClipboardData(clipboard_format, memory):
-            self.kernel32.GlobalFree(memory)
-            raise AgentApiError("CLIPBOARD_UNAVAILABLE", "Windows rejected the clipboard data.")
-
-
-def clipboard_dib_metadata(dib: bytes) -> dict[str, int]:
-    """Validate a Windows DIB and return dimensions plus the BMP pixel offset."""
-    if len(dib) < 16:
-        raise AgentApiError("CLIPBOARD_UNSUPPORTED", "The clipboard image has an invalid bitmap header.")
-    header_size = struct.unpack_from("<I", dib)[0]
-    if header_size == 12:
-        if len(dib) < 12:
-            raise AgentApiError("CLIPBOARD_UNSUPPORTED", "The clipboard image has an incomplete bitmap header.")
-        width, height, bit_count = struct.unpack_from("<HHH", dib, 4)[0], struct.unpack_from("<HHH", dib, 4)[1], struct.unpack_from("<HHH", dib, 4)[2]
-        offset = 12 + (3 * (1 << bit_count) if bit_count <= 8 else 0)
-    elif header_size >= 40 and len(dib) >= header_size:
-        width, height = struct.unpack_from("<ii", dib, 4)
-        bit_count = struct.unpack_from("<H", dib, 14)[0]
-        compression = struct.unpack_from("<I", dib, 16)[0]
-        color_count = struct.unpack_from("<I", dib, 32)[0]
-        palette_entries = color_count or ((1 << bit_count) if bit_count <= 8 else 0)
-        extra_masks = 12 if header_size == 40 and compression == 3 else 0
-        offset = header_size + extra_masks + (4 * palette_entries)
-    else:
-        raise AgentApiError("CLIPBOARD_UNSUPPORTED", "The clipboard image uses an unsupported bitmap header.")
-    width, height = abs(int(width)), abs(int(height))
-    if width < 1 or height < 1 or bit_count not in {1, 4, 8, 16, 24, 32} or offset >= len(dib):
-        raise AgentApiError("CLIPBOARD_UNSUPPORTED", "The clipboard image bitmap is invalid.")
-    if width * height > MAX_CLIPBOARD_IMAGE_PIXELS:
-        raise AgentApiError("CLIPBOARD_TOO_LARGE", "The clipboard image exceeds the configured pixel limit.")
-    return {"width": width, "height": height, "pixelOffset": offset}
-
-
-def clipboard_bmp_from_dib(dib: bytes) -> bytes:
-    metadata = clipboard_dib_metadata(dib)
-    return struct.pack("<2sIHHI", b"BM", len(dib) + 14, 0, 0, 14 + metadata["pixelOffset"]) + dib
-
-
-def clipboard_status(payload: Any) -> dict[str, Any]:
-    if not isinstance(payload, dict) or set(payload) - {"sinceRevision"}:
-        raise AgentApiError("CLIPBOARD_INVALID", "clipboard_status accepts only optional sinceRevision.")
-    since = payload.get("sinceRevision")
-    if since is not None and (not isinstance(since, str) or not since.startswith("cb_")):
-        raise AgentApiError("CLIPBOARD_INVALID", "sinceRevision must be a clipboard revision returned by this tool.")
-    clipboard = WindowsClipboard()
-    clipboard.open()
-    try:
-        revision = clipboard.revision(clipboard.sequence())
-        result: dict[str, Any] = {"revision": revision}
-        if clipboard.has_image():
-            dib = clipboard.clipboard_dib()
-            metadata = clipboard_dib_metadata(dib)
-            result.update({"type": "image", "width": metadata["width"], "height": metadata["height"], "sizeBytes": len(dib)})
-        elif clipboard.has_text():
-            result.update({"type": "text", "sizeBytes": max(0, int(clipboard.kernel32.GlobalSize(clipboard.user32.GetClipboardData(clipboard.CF_UNICODETEXT))) - 2)})
-        elif clipboard.user32.CountClipboardFormats() == 0:
-            result["type"] = "empty"
-        else:
-            result["type"] = "unsupported"
-        if since is not None:
-            result["changed"] = since != revision
-        return result
-    finally:
-        clipboard.close()
-
-
-async def clipboard_get(payload: Any) -> dict[str, Any]:
-    if not isinstance(payload, dict) or set(payload) - {"revision"}:
-        raise AgentApiError("CLIPBOARD_INVALID", "clipboard_get accepts only optional revision.")
-    expected_revision = payload.get("revision")
-    if expected_revision is not None and (not isinstance(expected_revision, str) or not expected_revision.startswith("cb_")):
-        raise AgentApiError("CLIPBOARD_INVALID", "revision must be a clipboard revision returned by clipboard_status.")
-    clipboard = WindowsClipboard()
-    clipboard.open()
-    destination_path: Path | None = None
-    try:
-        revision = clipboard.revision(clipboard.sequence())
-        if expected_revision is not None and expected_revision != revision:
-            raise AgentApiError("CLIPBOARD_CHANGED", "The clipboard changed after the supplied revision.")
-        if clipboard.has_image():
-            dib = clipboard.clipboard_dib()
-            metadata = clipboard_dib_metadata(dib)
-            value_type = "image"
-        elif clipboard.has_text():
-            text_bytes = clipboard.clipboard_text_bytes()
-            value_type = "text"
-        elif clipboard.user32.CountClipboardFormats() == 0:
-            raise AgentApiError("CLIPBOARD_EMPTY", "The clipboard is empty.")
-        else:
-            raise AgentApiError("CLIPBOARD_UNSUPPORTED", "The clipboard does not contain supported text or image data.")
-    finally:
-        clipboard.close()
-    if value_type == "text":
-        text = text_bytes.decode("utf-16-le", "strict").rstrip("\x00")
-        if len(text.encode("utf-8")) > MAX_CLIPBOARD_TEXT_BYTES:
-            raise AgentApiError("CLIPBOARD_TOO_LARGE", "The clipboard text exceeds the configured size limit.")
-        return {"type": "text", "revision": revision, "text": text}
-    try:
-        bmp = clipboard_bmp_from_dib(dib)
-        resolver = WorkspacePathResolver()
-        output_path = f"clipboard/clipboard_image_{revision.removeprefix('cb_')}_{secrets.token_urlsafe(6)}.png"
-        destination = resolver.resolve_destination(output_path, field_name="outputPath", error_code="WORKSPACE_PATH_INVALID")
-        destination.physical_path.parent.mkdir(parents=True, exist_ok=True)
-        destination = resolver.resolve_destination(destination.logical_path, field_name="outputPath", error_code="WORKSPACE_PATH_INVALID")
-        destination_path = destination.physical_path
-        ffmpeg = find_component("ffmpeg", COMPONENTS["ffmpeg"][0])
-        if not ffmpeg.executable:
-            raise AgentApiError("FFMPEG_NOT_AVAILABLE", "ffmpeg is required to materialize a clipboard image into the workspace.")
-        process = await asyncio.create_subprocess_exec(ffmpeg.executable, "-hide_banner", "-nostdin", "-v", "error", "-f", "image2pipe", "-vcodec", "bmp", "-i", "pipe:0", "-frames:v", "1", "-c:v", "png", "-y", str(destination_path), stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
-        _stdout, _stderr = await asyncio.wait_for(process.communicate(bmp), timeout=CAPTURE_FRAME_TIMEOUT_SECONDS)
-        if process.returncode != 0 or not destination_path.is_file():
-            raise AgentApiError("CLIPBOARD_UNSUPPORTED", "The clipboard image could not be converted to PNG.")
-        return {"type": "image", "revision": revision, "workspacePath": destination.logical_path, "width": metadata["width"], "height": metadata["height"], "sizeBytes": destination_path.stat().st_size}
-    except AgentApiError:
-        if destination_path is not None:
-            destination_path.unlink(missing_ok=True)
-        raise
-
-
-async def clipboard_set(payload: Any) -> dict[str, Any]:
-    if not isinstance(payload, dict) or set(payload) - {"text", "workspacePath"} or ("text" in payload) == ("workspacePath" in payload):
-        raise AgentApiError("CLIPBOARD_INVALID", "clipboard_set requires exactly one of text or workspacePath.")
-    if "text" in payload:
-        text = payload["text"]
-        if not isinstance(text, str):
-            raise AgentApiError("CLIPBOARD_INVALID", "text must be a Unicode string.")
-        encoded = text.encode("utf-16-le") + b"\x00\x00"
-        if len(encoded) - 2 > MAX_CLIPBOARD_TEXT_BYTES:
-            raise AgentApiError("CLIPBOARD_TOO_LARGE", "The text exceeds the configured clipboard limit.")
-        clipboard = WindowsClipboard()
-        clipboard.open()
-        try:
-            if not clipboard.user32.EmptyClipboard():
-                raise AgentApiError("CLIPBOARD_BUSY", "The Windows clipboard could not be cleared.")
-            clipboard.set_global_data(clipboard.CF_UNICODETEXT, encoded)
-            return {"success": True, "type": "text", "revision": clipboard.revision(clipboard.sequence())}
-        finally:
-            clipboard.close()
-    source = WorkspacePathResolver().resolve_existing(payload["workspacePath"], field_name="workspacePath", expected_type="file")
-    if source.physical_path.suffix.lower() not in IMAGE_MIME_TYPES:
-        raise AgentApiError("INVALID_IMAGE", "workspacePath must identify a PNG, JPEG, or WebP image.")
-    if source.physical_path.stat().st_size > MAX_CLIPBOARD_IMAGE_FILE_BYTES:
-        raise AgentApiError("CLIPBOARD_TOO_LARGE", "The workspace image file exceeds the configured clipboard limit.")
-    ffprobe = find_component("ffprobe", COMPONENTS["ffprobe"][0])
-    ffmpeg = find_component("ffmpeg", COMPONENTS["ffmpeg"][0])
-    if not ffprobe.executable or not ffmpeg.executable:
-        raise AgentApiError("FFMPEG_NOT_AVAILABLE", "ffmpeg and ffprobe are required to put a workspace image on the clipboard.")
-    streams = await ffprobe_streams_for_file(source.physical_path, ffprobe.executable)
-    stream = next((item for item in streams if item.get("codec_type") == "video"), None)
-    width, height = (stream.get("width"), stream.get("height")) if isinstance(stream, dict) else (None, None)
-    if not isinstance(width, int) or not isinstance(height, int) or width < 1 or height < 1:
-        raise AgentApiError("INVALID_IMAGE", "The workspace file is not a valid decodable image.")
-    if width * height > MAX_CLIPBOARD_IMAGE_PIXELS or width * height * 4 > MAX_CLIPBOARD_IMAGE_DIB_BYTES:
-        raise AgentApiError("CLIPBOARD_TOO_LARGE", "The workspace image exceeds the configured pixel or decoded-size limit.")
-    process = await asyncio.create_subprocess_exec(ffmpeg.executable, "-hide_banner", "-nostdin", "-v", "error", "-i", str(source.physical_path), "-frames:v", "1", "-f", "image2pipe", "-vcodec", "bmp", "pipe:1", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-    bmp, _stderr = await asyncio.wait_for(process.communicate(), timeout=CAPTURE_FRAME_TIMEOUT_SECONDS)
-    if process.returncode != 0 or len(bmp) < 15 or not bmp.startswith(b"BM"):
-        raise AgentApiError("INVALID_IMAGE", "The workspace image could not be decoded for the clipboard.")
-    dib = bmp[14:]
-    clipboard_dib_metadata(dib)
-    clipboard = WindowsClipboard()
-    clipboard.open()
-    try:
-        if not clipboard.user32.EmptyClipboard():
-            raise AgentApiError("CLIPBOARD_BUSY", "The Windows clipboard could not be cleared.")
-        clipboard.set_global_data(clipboard.CF_DIB, dib)
-        return {"success": True, "type": "image", "revision": clipboard.revision(clipboard.sequence()), "width": width, "height": height}
-    finally:
-        clipboard.close()
-
-
-def resolve_chat_transfer_files(payload: Any, *, destination: str) -> dict[str, Any]:
-    """Private CDP path resolution: host paths never enter public MCP results."""
-    if destination == "library":
-        error_code, count_setting, size_setting = "LIBRARY_STORE_INVALID", "libraryStoreMaxFiles", "libraryStoreMaxFileSizeMiB"
-    elif destination == "chat":
-        error_code, count_setting, size_setting = "MEDIA_TO_CHAT_INVALID", "mediaToChatMaxFiles", "mediaToChatMaxFileSizeMiB"
-    else:
-        raise AgentApiError("INVALID_ARGUMENT", "Unknown file-transfer destination.")
-    if not isinstance(payload, dict) or set(payload) != {"files"} or not isinstance(payload["files"], list):
-        raise AgentApiError(error_code, "workspace file resolution requires files.")
-    requested = payload["files"]
-    limits = configured_tool_limits()
-    maximum = limits[count_setting]
-    if not 1 <= len(requested) <= maximum:
-        raise AgentApiError(error_code, f"files must contain from 1 to {maximum} items (configured maximum).")
-    resolved_files: list[dict[str, Any]] = []
-    skipped_files: list[dict[str, Any]] = []
-    seen_paths: set[str] = set()
-    resolver = WorkspacePathResolver()
-    for entry in requested:
-        if not isinstance(entry, dict) or set(entry) != {"workspacePath"} or not isinstance(entry["workspacePath"], str):
-            raise AgentApiError(error_code, "each workspace file requires workspacePath.")
-        item = resolver.resolve_existing(entry["workspacePath"], field_name="workspacePath", expected_type="file")
-        if item.logical_path in seen_paths:
-            raise AgentApiError(error_code, "workspace file paths must be unique within one batch.")
-        seen_paths.add(item.logical_path)
-        size = item.physical_path.stat().st_size
-        size_limit = limits[size_setting] * 1024 * 1024
-        if size > size_limit:
-            skipped_files.append({"workspacePath": item.logical_path, "sizeBytes": size, "maxFileSizeBytes": size_limit, "reason": "FILE_TOO_LARGE"})
-        else:
-            resolved_files.append({"workspacePath": item.logical_path, "localPath": str(item.physical_path), "sizeBytes": size})
-    return {"files": resolved_files, "skippedFiles": skipped_files}
-
-
-def library_store_files(payload: Any) -> dict[str, Any]:
-    return resolve_chat_transfer_files(payload, destination="library")
-
-
-def media_to_chat_files(payload: Any) -> dict[str, Any]:
-    return resolve_chat_transfer_files(payload, destination="chat")
-
-
-def media_probe_sections(payload: dict[str, Any]) -> list[str]:
-    value = payload.get("sections")
-    if value is None:
-        return list(MEDIA_PROBE_SECTIONS)
-    if not isinstance(value, list) or not value or len(value) > len(MEDIA_PROBE_SECTIONS):
-        raise AgentApiError("MEDIA_PROBE_SECTIONS_INVALID", "sections must be a non-empty array of supported ffprobe metadata sections.")
-    if any(not isinstance(section, str) or section not in MEDIA_PROBE_SECTIONS for section in value) or len(set(value)) != len(value):
-        raise AgentApiError("MEDIA_PROBE_SECTIONS_INVALID", "sections must contain unique supported ffprobe metadata section names.")
-    return value
-
-
-def public_ffprobe_document(document: Any, sections: list[str]) -> tuple[dict[str, Any], int | None]:
-    if not isinstance(document, dict):
-        raise AgentApiError("MEDIA_PROBE_FAILED", "ffprobe returned invalid media metadata.")
-    probe: dict[str, Any] = {}
-    ffprobe_file_size_bytes: int | None = None
-    for section in sections:
-        json_key = MEDIA_PROBE_SECTIONS[section][1]
-        value = document.get(json_key)
-        if section == "format":
-            if not isinstance(value, dict):
-                continue
-            public_format = dict(value)
-            # ffprobe's native format.filename is the physical host path.
-            public_format.pop("filename", None)
-            ffprobe_file_size_bytes = ffprobe_integer(public_format.pop("size", None))
-            probe[json_key] = public_format
-        elif section in {"streams", "chapters", "programs"}:
-            if isinstance(value, list):
-                probe[json_key] = value
-    return probe, ffprobe_file_size_bytes
-
-
-async def media_probe(payload: Any) -> dict[str, Any]:
-    if not isinstance(payload, dict):
-        raise AgentApiError("INVALID_REQUEST", "media_probe requires a JSON object.")
-    item = WorkspacePathResolver().resolve_existing(payload.get("path"), field_name="path", expected_type="file")
-    sections = media_probe_sections(payload)
-    ffprobe = find_component("ffprobe", COMPONENTS["ffprobe"][0])
-    if ffprobe.error:
-        raise AgentApiError("FFPROBE_DISCOVERY_ERROR", "ffprobe discovery is ambiguous.", ffprobe.error)
-    if not ffprobe.executable:
-        raise AgentApiError("FFPROBE_NOT_AVAILABLE", "ffprobe is not available. Extract it under tools/ffmpeg or install it on PATH.")
-    command = [
-        ffprobe.executable, "-v", "error", *(MEDIA_PROBE_SECTIONS[section][0] for section in sections),
-        "-of", "json", str(item.physical_path),
-    ]
-    try:
-        process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-        stdout, _stderr = await asyncio.wait_for(process.communicate(), timeout=MEDIA_PROBE_TIMEOUT_SECONDS)
-    except asyncio.TimeoutError as error:
-        process.kill()
-        await process.communicate()
-        raise AgentApiError("MEDIA_PROBE_FAILED", "ffprobe timed out while inspecting the media file.") from error
-    except OSError as error:
-        raise AgentApiError("MEDIA_PROBE_FAILED", "ffprobe could not be started.") from error
-    if process.returncode != 0:
-        raise AgentApiError("MEDIA_PROBE_FAILED", "ffprobe could not inspect the media file.")
-    try:
-        document = json.loads(stdout.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise AgentApiError("MEDIA_PROBE_FAILED", "ffprobe returned invalid media metadata.") from error
-    probe, ffprobe_file_size_bytes = public_ffprobe_document(document, sections)
-    try:
-        size = item.physical_path.stat().st_size
-    except OSError as error:
-        raise AgentApiError("MEDIA_PROBE_FAILED", "The media file could not be inspected.") from error
-    log(f"media_probe path={item.logical_path} -> ok")
-    return {
-        "path": item.logical_path, "fileSizeBytes": size,
-        "ffprobeFileSizeBytes": ffprobe_file_size_bytes,
-        "sections": sections, "probe": probe,
-    }
-
-
-def bounded_line(value: str) -> str:
-    return value.strip().replace("\x00", "")[:MAX_DIAGNOSTIC_LINE_LENGTH]
-
-
-@dataclass
-class DownloadTask:
-    task_id: str
-    url: str
-    video_id: str
-    selection: DownloadSelection
-    partial_range: DownloadRange | None
-    output_directory: Path
-    output_directory_relative: str
-    created_at: str
-    last_updated_at: str
-    status: str = "working"
-    status_message: str = "Starting YouTube download."
-    phase: str = "preparing"
-    progress_percent: float | None = None
-    result: dict[str, Any] | None = None
-    error: dict[str, str] | None = None
-    process: asyncio.subprocess.Process | None = None
-    runner: asyncio.Task[None] | None = None
-    cancel_requested: bool = False
-    diagnostics: list[str] = field(default_factory=list)
-    output_file: Path | None = None
-    events: list[dict[str, Any]] = field(default_factory=list)
-    next_event_id: int = 1
-    yt_dlp_exit_code: int | None = None
-    final_output_state: str = "notReported"
-    cleanup_removed_count: int = 0
-
-    def touch(self, message: str | None = None) -> None:
-        self.last_updated_at = utc_now()
-        if message is not None:
-            self.status_message = message
-
-
-class DownloadTaskManager:
-    """In-memory task state: no queue and no artificial concurrency ceiling."""
-
-    def __init__(self) -> None:
-        self.tasks: dict[str, DownloadTask] = TaskHistory(configured_task_history_limit)
-
-    def record_event(
-        self, task: DownloadTask, kind: str, *, message: str | None = None,
-        process: str | None = None, exit_code: int | None = None,
-        error_code: str | None = None, workspace_path: str | None = None,
-        removed_workspace_paths: list[str] | None = None,
-    ) -> None:
-        """Keep a bounded, public-safe lifecycle record for post-mortem use."""
-        event = {
-            "eventId": task.next_event_id, "at": utc_now(), "kind": kind,
-            "phase": task.phase, "message": (message or "")[:MAX_TASK_EVENT_MESSAGE_LENGTH] or None,
-            "process": process, "exitCode": exit_code, "errorCode": error_code,
-            "workspacePath": workspace_path,
-            "removedWorkspacePaths": removed_workspace_paths or [],
-        }
-        task.next_event_id += 1
-        task.events.append(event)
-        if len(task.events) > MAX_TASK_EVENTS:
-            del task.events[:-MAX_TASK_EVENTS]
-
-    def set_phase(self, task: DownloadTask, phase: str, message: str) -> None:
-        changed = task.phase != phase
-        task.phase = phase
-        task.touch(message)
-        if changed:
-            self.record_event(task, "phaseChanged", message=message)
-
-    def fail_task(self, task: DownloadTask, code: str, message: str) -> None:
-        task.status = "failed"
-        self.set_phase(task, "failed", "Download failed.")
-        task.error = {"code": code, "message": message}
-        self.record_event(task, "taskFailed", message=message, error_code=code)
-
-    async def create_download(self, payload: Any) -> dict[str, Any]:
-        if not isinstance(payload, dict):
-            raise AgentApiError("INVALID_REQUEST", "The JSON body must be an object.")
-        unknown = set(payload) - {"videoId", "formatSelection", "outputDir", "startSeconds", "endSeconds"}
-        if unknown:
-            raise AgentApiError("INVALID_REQUEST", "youtube_download contains an unsupported field.")
-        video_id = validate_video_id(payload.get("videoId"))
-        selection = parse_format_selection(payload.get("formatSelection"))
-        partial_range = parse_download_range(payload)
-        # yt-dlp requires a URL, but URL construction is private Agent work.
-        url = f"https://www.youtube.com/watch?v={video_id}"
-        output_directory, output_directory_relative = resolve_output_directory(payload.get("outputDir"))
-        yt_dlp = find_component("ytDlp", COMPONENTS["ytDlp"][0])
-        if yt_dlp.error:
-            raise AgentApiError("YTDLP_DISCOVERY_ERROR", "yt-dlp discovery is ambiguous.", yt_dlp.error)
-        if not yt_dlp.executable:
-            raise AgentApiError("YTDLP_NOT_AVAILABLE", "yt-dlp is not available. Place it in tools/yt-dlp or install it on PATH.")
-        deno_executable = resolve_deno_runtime()
-        ffmpeg_executable: str | None = None
-        if selection.requires_merge or partial_range is not None:
-            ffmpeg = find_component("ffmpeg", COMPONENTS["ffmpeg"][0])
-            if ffmpeg.error:
-                raise AgentApiError("FFMPEG_DISCOVERY_ERROR", "ffmpeg discovery is ambiguous.", ffmpeg.error)
-            if not ffmpeg.executable:
-                raise AgentApiError(
-                    "FFMPEG_NOT_AVAILABLE",
-                    "ffmpeg is required to merge selected tracks or download a time range. Extract it under tools/ffmpeg or install it on PATH.",
-                )
-            ffmpeg_executable = ffmpeg.executable
-        now = utc_now()
-        task = DownloadTask(self.new_task_id(), url, video_id, selection, partial_range, output_directory, output_directory_relative, now, now)
-        # Store before responding: returned IDs are immediately pollable.
-        self.tasks[task.task_id] = task
-        self.record_event(task, "taskCreated", message="Download task created.")
-        task.runner = asyncio.create_task(
-            self.run_download(task, yt_dlp.executable, ffmpeg_executable, deno_executable),
-            name=f"researchtube-download-{task.task_id}",
-        )
-        return self.snapshot(task)
-
-    def new_task_id(self) -> str:
-        """Return a short opaque ID with the same length as yt_<videoId>."""
-        while True:
-            task_id = f"tsk_{secrets.token_urlsafe(7)}"
-            if task_id not in self.tasks:
-                return task_id
-
-    def get(self, task_id: str) -> DownloadTask:
-        if not isinstance(task_id, str) or not task_id or task_id not in self.tasks:
-            raise AgentApiError("TASK_NOT_FOUND", "The requested task does not exist.")
-        return self.tasks[task_id]
-
-    def snapshot(self, task: DownloadTask) -> dict[str, Any]:
-        document: dict[str, Any] = {
-            "taskId": task.task_id, "status": task.status, "statusMessage": task.status_message,
-            "createdAt": task.created_at, "lastUpdatedAt": task.last_updated_at, "ttlMs": None,
-            "pollIntervalMs": TASK_POLL_INTERVAL_MS, "phase": task.phase, "progressPercent": task.progress_percent,
-        }
-        if task.result is not None:
-            document["result"] = task.result
-        if task.error is not None:
-            document["error"] = task.error
-        return document
-
-    def diagnostics_snapshot(self, task_id: str, payload: Any) -> dict[str, Any]:
-        if not isinstance(payload, dict):
-            raise AgentApiError("INVALID_REQUEST", "Diagnostics input must be a JSON object.")
-        after_event_id = payload.get("afterEventId", 0)
-        limit = payload.get("limit", 100)
-        if isinstance(after_event_id, bool) or not isinstance(after_event_id, int) or after_event_id < 0:
-            raise AgentApiError("INVALID_REQUEST", "afterEventId must be a non-negative integer.")
-        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
-            raise AgentApiError("INVALID_REQUEST", "limit must be an integer from 1 to 100.")
-        task = self.get(task_id)
-        events = [event for event in task.events if event["eventId"] > after_event_id][:limit]
-        return {
-            "taskId": task.task_id, "status": task.status, "phase": task.phase,
-            "error": task.error, "process": {
-                "ytDlpExitCode": task.yt_dlp_exit_code,
-                "finalOutput": task.final_output_state,
-                "cleanupRemovedCount": task.cleanup_removed_count,
-            },
-            "events": events, "returned": len(events), "nextEventId": task.next_event_id - 1,
-        }
-
-    async def cancel(self, task_id: str) -> None:
-        task = self.get(task_id)
-        if task.status in {"completed", "failed", "cancelled"}:
-            return
-        task.cancel_requested = True
-        task.touch("Cancellation requested.")
-        self.record_event(task, "cancellationRequested", message="Cancellation requested.")
-        if task.process is None:
-            if task.runner and not task.runner.done():
-                task.runner.cancel()
-            task.status = "cancelled"
-            self.set_phase(task, "cancelled", "Download cancelled.")
-            self.record_event(task, "taskCancelled", message="Download cancelled.")
-            return
-        await self.terminate_process(task, task.process)
-
-    async def terminate_process(self, task: DownloadTask, process: asyncio.subprocess.Process) -> None:
-        if process.returncode is None:
-            try:
-                process.terminate()
-            except ProcessLookupError:
-                pass
-            try:
-                await asyncio.wait_for(process.wait(), timeout=5)
-            except asyncio.TimeoutError:
-                try:
-                    process.kill()
-                except ProcessLookupError:
-                    pass
-                await process.wait()
-        task.status = "cancelled"
-        self.set_phase(task, "cancelled", "Download cancelled.")
-        self.record_event(task, "taskCancelled", message="Download cancelled.")
-
-    async def run_download(self, task: DownloadTask, executable: str, ffmpeg: str | None, deno: str | None) -> None:
-        heartbeat: asyncio.Task[None] | None = None
-        try:
-            if task.cancel_requested:
-                task.status = "cancelled"
-                self.set_phase(task, "cancelled", "Download cancelled.")
-                self.record_event(task, "taskCancelled", message="Download cancelled.")
-                return
-            task.output_directory.mkdir(parents=True, exist_ok=True)
-            partial_tag = f" [{task.partial_range.filename_tag()}]" if task.partial_range is not None else ""
-            output_template = f"%(title)s [yt_%(id)s]{partial_tag} [{task.task_id}].%(ext)s"
-            command = [
-                # --print below is required for the final workspace file path,
-                # but yt-dlp documents that it implies --quiet.  Re-enable
-                # progress explicitly so the progress template is emitted.
-                executable, *yt_dlp_youtube_arguments(deno),
-                "--no-playlist", "--windows-filenames", "--trim-filenames", "180", "--newline", "--progress", "--progress-delta", "1",
-                "--format", task.selection.format_selector(),
-            ]
-            if task.selection.requires_merge:
-                # No re-encode: yt-dlp/ffmpeg remux the exact selected tracks.
-                command.extend(["--merge-output-format", "mp4", "--ffmpeg-location", str(Path(ffmpeg).parent)])
-            elif task.partial_range is not None:
-                command.extend(["--ffmpeg-location", str(Path(ffmpeg).parent)])
-            if task.partial_range is not None:
-                command.extend(["--download-sections", f"*{task.partial_range.start_seconds:.3f}-{task.partial_range.end_seconds:.3f}", "--downloader", "ffmpeg"])
-            command.extend([
-                "--progress-template", "download:researchtube_progress:%(progress._percent_str)s",
-                "--progress-template", "postprocess:researchtube_postprocess:%(progress.status)s",
-                "--print", "after_move:__RESEARCHTUBE_FINAL_FILE__:%(filepath)s", "--paths", str(task.output_directory),
-                "--output", output_template, task.url,
-            ])
-            task.touch("Preparing yt-dlp download.")
-            task.process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-            self.record_event(task, "processStarted", message="yt-dlp process started.", process="ytDlp")
-            stdout_task = asyncio.create_task(self.consume_stream(task, task.process.stdout, source="stdout"))
-            stderr_task = asyncio.create_task(self.consume_stream(task, task.process.stderr, source="stderr"))
-            heartbeat = asyncio.create_task(self.heartbeat(task))
-            await asyncio.gather(stdout_task, stderr_task, task.process.wait())
-            task.yt_dlp_exit_code = task.process.returncode
-            self.record_event(task, "processExited", message="yt-dlp process exited.", process="ytDlp", exit_code=task.process.returncode)
-            if task.cancel_requested:
-                task.status = "cancelled"
-                self.set_phase(task, "cancelled", "Download cancelled.")
-                self.record_event(task, "taskCancelled", message="Download cancelled.")
-                return
-            if task.process.returncode != 0:
-                if any("requested format is not available" in line.lower() for line in task.diagnostics):
-                    self.fail_task(task, "FORMAT_NOT_AVAILABLE", "The selected YouTube format is not available to local yt-dlp.")
-                else:
-                    self.fail_task(task, "DOWNLOAD_FAILED", "yt-dlp could not download this video.")
-                return
-            output_file = self.valid_output_file(task)
-            if output_file is None:
-                if task.final_output_state == "reportedButMissing":
-                    self.fail_task(task, "YTDLP_FINAL_OUTPUT_MISSING", "yt-dlp reported a final output file, but it was not present in the workspace.")
-                else:
-                    self.fail_task(task, "YTDLP_FINAL_PATH_NOT_REPORTED", "yt-dlp completed without reporting its final output path.")
-                return
-            relative_file = WorkspacePathResolver().logical_existing_file(output_file, error_code="OUTPUT_FILE_NOT_FOUND")
-            task.final_output_state = "verified"
-            self.record_event(task, "finalOutputVerified", message="yt-dlp final output verified in workspace.", workspace_path=relative_file)
-            task.result = {"videoId": task.video_id, "filePath": relative_file, "fileName": output_file.name, "outputDir": task.output_directory_relative, "partial": None if task.partial_range is None else {"startSeconds": task.partial_range.start_seconds, "endSeconds": task.partial_range.end_seconds}}
-            task.status = "completed"
-            self.set_phase(task, "completed", "Download completed.")
-            task.progress_percent = 100.0
-            self.record_event(task, "taskCompleted", message="Download completed.", workspace_path=relative_file)
-        except asyncio.CancelledError:
-            task.status = "cancelled"
-            self.set_phase(task, "cancelled", "Download cancelled.")
-            self.record_event(task, "taskCancelled", message="Download cancelled.")
-        except FileNotFoundError:
-            self.fail_task(task, "YTDLP_NOT_AVAILABLE", "yt-dlp is no longer available.")
-        except OSError as error:
-            log(f"yt-dlp start failed for {task.task_id}: {error.__class__.__name__}", error=True)
-            self.fail_task(task, "DOWNLOAD_START_FAILED", "yt-dlp could not be started.")
-        except Exception as error:
-            log(f"download task {task.task_id} failed unexpectedly: {error.__class__.__name__}", error=True)
-            self.fail_task(task, "DOWNLOAD_INTERNAL_ERROR", "The download task encountered an unexpected error.")
-        finally:
-            if heartbeat is not None:
-                heartbeat.cancel()
-                await asyncio.gather(heartbeat, return_exceptions=True)
-            if task.status in {"failed", "cancelled"}:
-                self.remove_task_artifacts(task)
-            task.process = None
-
-    async def heartbeat(self, task: DownloadTask) -> None:
-        """Expose liveness when yt-dlp has no new progress line yet."""
-        while task.status == "working" and task.process is not None and task.process.returncode is None:
-            await asyncio.sleep(TASK_HEARTBEAT_SECONDS)
-            if task.status != "working" or task.process is None or task.process.returncode is not None:
-                return
-            phase_label = {
-                "downloadingCombined": "Downloading combined track",
-                "downloadingVideo": "Downloading video track",
-                "downloadingAudio": "Downloading audio track",
-                "merging": "Merging selected tracks",
-            }.get(task.phase, "yt-dlp is still running")
-            message = f"{phase_label}: {round(task.progress_percent)}%." if task.progress_percent is not None else f"{phase_label}."
-            task.touch(message)
-
-    async def consume_stream(self, task: DownloadTask, stream: asyncio.StreamReader | None, *, source: str) -> None:
-        if stream is None:
-            return
-        buffered = ""
-        while chunk := await stream.read(4_096):
-            buffered += chunk.decode("utf-8", errors="replace")
-            lines = re.split(r"[\r\n]+", buffered)
-            buffered = lines.pop()
-            for line in lines:
-                self.consume_output_line(task, line, source=source)
-        if buffered:
-            self.consume_output_line(task, buffered, source=source)
-
-    def consume_output_line(self, task: DownloadTask, line: str, *, source: str = "manual") -> None:
-        raw_text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", line).strip().replace("\x00", "")
-        text = bounded_line(raw_text)
-        if not text:
-            return
-        # New yt-dlp releases and wrappers may preserve the custom template or
-        # emit the standard "[download] 37.4%" form. Both are authoritative.
-        progress = re.search(r"(?:researchtube_progress:\s*|\[download\]\s+)([0-9]+(?:[.,][0-9]+)?)%", text)
-        if progress:
-            percentage = min(100.0, max(0.0, float(progress.group(1).replace(",", "."))))
-            next_phase = self.download_phase(task, percentage)
-            if next_phase != task.phase:
-                self.set_phase(task, next_phase, "yt-dlp changed download phase.")
-                task.progress_percent = None
-            task.progress_percent = percentage
-            label = {
-                "downloadingCombined": "Downloading combined track",
-                "downloadingVideo": "Downloading video track",
-                "downloadingAudio": "Downloading audio track",
-            }[task.phase]
-            task.touch(f"{label}: {round(task.progress_percent)}%.")
-        elif raw_text.startswith("__RESEARCHTUBE_FINAL_FILE__:"):
-            candidate = Path(raw_text.removeprefix("__RESEARCHTUBE_FINAL_FILE__:").strip())
-            task.output_file = candidate if candidate.is_absolute() else task.output_directory / candidate
-            task.final_output_state = "reportedButMissing"
-            self.record_event(task, "finalOutputReported", message="yt-dlp reported its final output path.")
-        elif text.startswith("researchtube_postprocess:") or "[Merger]" in text:
-            self.set_phase(task, "merging", "Merging selected video and audio tracks.")
-            task.progress_percent = None
-        else:
-            task.diagnostics.append(text)
-            if len(task.diagnostics) > MAX_DIAGNOSTIC_LINES:
-                del task.diagnostics[:-MAX_DIAGNOSTIC_LINES]
-
-    @staticmethod
-    def download_phase(task: DownloadTask, percentage: float) -> str:
-        """Translate yt-dlp's per-file percentage into an honest task phase.
-
-        yt-dlp reports 0â€“100 independently for each selected source.  For a
-        selected video+audio pair its second source starts after the first one
-        completed, so a reset following a nearly complete video is an audio
-        phase transition, not a backwards global task percentage.
-        """
-        selection = task.selection
-        if selection.combined is not None:
-            return "downloadingCombined"
-        if selection.video is not None and selection.audio is None:
-            return "downloadingVideo"
-        if selection.audio is not None and selection.video is None:
-            return "downloadingAudio"
-        if task.phase == "downloadingAudio":
-            return "downloadingAudio"
-        if task.phase == "downloadingVideo" and task.progress_percent is not None and task.progress_percent >= 99.0 and percentage < task.progress_percent:
-            return "downloadingAudio"
-        return "downloadingVideo"
-
-    def remove_task_artifacts(self, task: DownloadTask) -> None:
-        """Do not leave separate A/V tracks or partial files after a failed task."""
-        try:
-            marker = f" [{task.task_id}]"
-            removed: list[str] = []
-            for item in task.output_directory.iterdir():
-                if item.is_file() and marker in item.name:
-                    try:
-                        logical_path = WorkspacePathResolver().logical_existing_file(item, error_code="OUTPUT_FILE_NOT_FOUND")
-                    except AgentApiError:
-                        logical_path = None
-                    item.unlink(missing_ok=True)
-                    if logical_path is not None:
-                        removed.append(logical_path)
-            task.cleanup_removed_count += len(removed)
-            self.record_event(task, "cleanupCompleted", message="Task-specific partial artifacts removed.", removed_workspace_paths=removed)
-        except OSError as error:
-            log(f"could not clean partial files for task {task.task_id}: {error.__class__.__name__}", error=True)
-
-    def valid_output_file(self, task: DownloadTask) -> Path | None:
-        workspace = WORKSPACE_PATH.resolve()
-        if task.output_file is not None:
-            try:
-                resolved = task.output_file.resolve()
-                if resolved.is_file() and path_is_within(resolved, workspace):
-                    return resolved
-            except OSError:
-                pass
-        return None
-
-    async def shutdown(self) -> None:
-        await asyncio.gather(*(self.cancel(task.task_id) for task in self.tasks.values() if task.status == "working"), return_exceptions=True)
-
-
-TASKS = DownloadTaskManager()
-
-
-def error_document(error: AgentApiError) -> dict[str, Any]:
-    payload: dict[str, str] = {"code": error.code, "message": error.message}
-    if error.detail:
-        payload["detail"] = error.detail
-    return {"error": payload}
-
-
-def http_response(status: str, body: dict[str, Any] | None = None) -> bytes:
-    encoded = b"" if body is None else json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    headers = [
-        f"HTTP/1.1 {status}", "Content-Type: application/json; charset=utf-8", f"Content-Length: {len(encoded)}",
-        "Access-Control-Allow-Origin: *", "Access-Control-Allow-Methods: GET, POST, OPTIONS",
-        "Access-Control-Allow-Headers: Content-Type", "Access-Control-Allow-Private-Network: true", "Connection: close", "", "",
-    ]
-    return "\r\n".join(headers).encode("ascii") + encoded
-
-
-def image_response(status: str, image_bytes: bytes = b"", mime_type: str = "text/plain; charset=utf-8") -> bytes:
-    headers = [
-        f"HTTP/1.1 {status}", f"Content-Type: {mime_type}", f"Content-Length: {len(image_bytes)}",
-        "X-Content-Type-Options: nosniff", "Cache-Control: no-store", "Access-Control-Allow-Origin: *", "Access-Control-Allow-Private-Network: true", "Connection: close", "", "",
-    ]
-    return "\r\n".join(headers).encode("ascii") + image_bytes
-
-
-def public_file_response_headers(status: str, size: int, mime_type: str) -> bytes:
-    headers = [
-        f"HTTP/1.1 {status}", f"Content-Type: {mime_type}", f"Content-Length: {size}",
-        "X-Content-Type-Options: nosniff", "Cache-Control: no-store", "Connection: close", "", "",
-    ]
-    return "\r\n".join(headers).encode("ascii")
-
-
-def widget_image_response_headers(status: str, size: int, mime_type: str, *, content_range: str | None = None) -> bytes:
-    headers = [
-        f"HTTP/1.1 {status}", f"Content-Type: {mime_type}", f"Content-Length: {size}",
-        "X-Content-Type-Options: nosniff", "Cache-Control: no-store", "Access-Control-Allow-Origin: *",
-        "Access-Control-Allow-Methods: GET, OPTIONS", "Access-Control-Allow-Private-Network: true", "Accept-Ranges: bytes",
-        *([f"Content-Range: {content_range}"] if content_range is not None else []), "Connection: close", "", "",
-    ]
-    return "\r\n".join(headers).encode("ascii")
-
-
-def widget_media_byte_range(value: str | None, size: int) -> tuple[int, int] | None:
-    """Parse one HTTP byte range for a locally served Workspace media file."""
-    if size < 1:
-        return None
-    if value is None:
-        return 0, size - 1
-    match = re.fullmatch(r"bytes=(\d*)-(\d*)", value.strip())
-    if match is None:
-        return None
-    start_text, end_text = match.groups()
-    if not start_text and not end_text:
-        return None
-    if not start_text:
-        suffix = int(end_text)
-        if suffix < 1:
-            return None
-        return max(0, size - suffix), size - 1
-    start = int(start_text)
-    end = size - 1 if not end_text else int(end_text)
-    if start >= size or end < start:
-        return None
-    return start, min(end, size - 1)
-
-
-async def read_request(reader: asyncio.StreamReader) -> tuple[str, str, dict[str, list[str]], bytes, dict[str, str]]:
-    request_line = await asyncio.wait_for(reader.readline(), timeout=5)
-    parts = request_line.decode("latin-1").strip().split()
-    if len(parts) < 2:
-        raise AgentApiError("BAD_REQUEST", "Invalid HTTP request.")
-    headers: dict[str, str] = {}
-    while True:
-        line = await asyncio.wait_for(reader.readline(), timeout=5)
-        if line in (b"", b"\r\n", b"\n"):
-            break
-        text = line.decode("latin-1").strip()
-        if ":" not in text:
-            raise AgentApiError("BAD_REQUEST", "Invalid HTTP headers.")
-        key, value = text.split(":", 1)
-        headers[key.lower()] = value.strip()
-    try:
-        content_length = int(headers.get("content-length", "0"))
-    except ValueError as error:
-        raise AgentApiError("BAD_REQUEST", "Invalid Content-Length.") from error
-    parsed = urlparse(parts[1])
-    maximum = MAX_GOOGLE_TRANSLATE_AUDIO_BYTES if re.fullmatch(r"/tasks/system-speech/tsk_[A-Za-z0-9_-]{10}/google-translate-audio", parsed.path) else MAX_REQUEST_BODY_BYTES
-    if parsed.path == "/internal/browser-resource":
-        maximum = configured_tool_limits()["mediaToChatMaxFileSizeMiB"] * 1048576
-    if content_length < 0 or content_length > maximum:
-        raise AgentApiError("REQUEST_TOO_LARGE", "Request body is too large.")
-    body = await asyncio.wait_for(reader.readexactly(content_length), timeout=30 if maximum > MAX_REQUEST_BODY_BYTES else 5) if content_length else b""
-    return parts[0].upper(), parsed.path, parse_qs(parsed.query, keep_blank_values=True), body, headers
-
-
-@dataclass(frozen=True)
-class WorkspaceShareOptions:
-    folder: ResolvedWorkspacePath | None
-    file: ResolvedWorkspacePath | None
-    file_types: tuple[str, ...]
-    verify_external: bool
-    probe_file: ResolvedWorkspacePath | None
-
-
-def workspace_share_options(payload: Any) -> WorkspaceShareOptions:
-    if not isinstance(payload, dict) or not set(payload).issubset({"folder", "file", "fileTypes", "verifyExternal", "probePath"}):
-        raise AgentApiError("ONLINE_SHARE_INVALID", "online_share_start received unsupported fields.")
-    has_folder, has_file = "folder" in payload, "file" in payload
-    if has_folder == has_file:
-        raise AgentApiError("ONLINE_SHARE_INVALID", "Specify exactly one of folder or file.")
-    verify_external = payload.get("verifyExternal", False)
-    if not isinstance(verify_external, bool):
-        raise AgentApiError("ONLINE_SHARE_INVALID", "verifyExternal must be a boolean.")
-    resolver = WorkspacePathResolver()
-    if has_file:
-        if "fileTypes" in payload or "probePath" in payload:
-            raise AgentApiError("ONLINE_SHARE_INVALID", "A single-file share does not accept fileTypes or probePath.")
-        shared_file = resolver.resolve_existing(payload["file"], field_name="file", expected_type="file")
-        if verify_external and public_share_file_type(shared_file.physical_path) != "images":
-            raise AgentApiError("ONLINE_SHARE_INVALID", "verifyExternal requires an image file for wsrv.nl.")
-        return WorkspaceShareOptions(None, shared_file, (), verify_external, shared_file if verify_external else None)
-    if "fileTypes" not in payload:
-        raise AgentApiError("ONLINE_SHARE_INVALID", "A folder share requires fileTypes.")
-    folder = resolver.resolve_existing(payload["folder"], field_name="folder", expected_type="directory", allow_root=True)
-    file_types = payload["fileTypes"]
-    if not isinstance(file_types, list) or not file_types or len(file_types) > len(PUBLIC_SHARE_FILE_TYPE_NAMES) or len(set(file_types)) != len(file_types):
-        raise AgentApiError("ONLINE_SHARE_INVALID", "fileTypes must be a non-empty array of unique supported file categories.")
-    if any(not isinstance(item, str) or item not in PUBLIC_SHARE_FILE_TYPE_NAMES for item in file_types):
-        raise AgentApiError("ONLINE_SHARE_INVALID", "fileTypes contains an unsupported file category.")
-    if "all" in file_types and len(file_types) != 1:
-        raise AgentApiError("ONLINE_SHARE_INVALID", "fileTypes all cannot be combined with other categories.")
-    if not verify_external:
-        if "probePath" in payload:
-            raise AgentApiError("ONLINE_SHARE_INVALID", "probePath is only valid when verifyExternal is true.")
-        return WorkspaceShareOptions(folder, None, tuple(file_types), False, None)
-    if "probePath" not in payload:
-        raise AgentApiError("ONLINE_SHARE_INVALID", "A verified folder share requires probePath.")
-    probe_file = resolver.resolve_existing(payload["probePath"], field_name="probePath", expected_type="file")
-    if not path_is_within(probe_file.physical_path, folder.physical_path):
-        raise AgentApiError("ONLINE_SHARE_INVALID", "probePath must be inside the shared folder.")
-    if public_share_file_type(probe_file.physical_path) != "images" or ("all" not in file_types and "images" not in file_types):
-        raise AgentApiError("ONLINE_SHARE_INVALID", "probePath must be an allowed image file for wsrv.nl.")
-    return WorkspaceShareOptions(folder, None, tuple(file_types), True, probe_file)
-
-
-def public_share_file_type(path: Path) -> str:
-    suffix = path.suffix.lower()
-    for name, suffixes in PUBLIC_SHARE_FILE_TYPE_SUFFIXES.items():
-        if suffix in suffixes:
-            return name
-    return "other"
-
-
-def public_share_directory_listing(path: str) -> bytes | None:
-    """Return a small browseable listing for a directory within a folder share."""
-    if PUBLIC_SHARE_FOLDER is None:
-        return None
-    encoded_segments = [segment for segment in path.removeprefix("/").split("/") if segment]
-    try:
-        segments = tuple(unquote(segment, encoding="utf-8", errors="strict") for segment in encoded_segments)
-    except UnicodeDecodeError:
-        return None
-    if any(segment in {".", ".."} or "/" in segment or "\\" in segment for segment in segments):
-        return None
-    folder_parts, _ = WorkspacePathResolver.logical_parts(PUBLIC_SHARE_FOLDER.logical_path, field_name="shared folder", error_code="PUBLIC_SHARE_NOT_FOUND", allow_root=True)
-    if tuple(segments[:len(folder_parts)]) != folder_parts:
-        return None
-    relative_parts = segments[len(folder_parts):]
-    candidate = PUBLIC_SHARE_FOLDER.physical_path.joinpath(*relative_parts)
-    try:
-        resolved = candidate.resolve(strict=True)
-    except OSError:
-        return None
-    if not path_is_within(resolved, PUBLIC_SHARE_FOLDER.physical_path) or not resolved.is_dir() or resolved.is_symlink():
-        return None
-    entries: list[tuple[str, bool]] = []
-    try:
-        children = sorted(resolved.iterdir(), key=lambda item: (not item.is_dir(), item.name.casefold()))[:MAX_PUBLIC_SHARE_DIRECTORY_ENTRIES]
-        for child in children:
-            is_junction = getattr(child, "is_junction", lambda: False)
-            if child.is_symlink() or is_junction():
-                continue
-            if child.is_dir():
-                entries.append((child.name, True))
-            elif child.is_file() and ("all" in PUBLIC_SHARE_FILE_TYPES or public_share_file_type(child) in PUBLIC_SHARE_FILE_TYPES):
-                entries.append((child.name, False))
-    except OSError:
-        return None
-    title = "/".join((*folder_parts, *relative_parts)) or "Workspace"
-    rows = []
-    if relative_parts:
-        rows.append('<li><a href="../">../</a></li>')
-    for name, is_directory in entries:
-        label = f"{name}/" if is_directory else name
-        href = f"{quote(name, safe='')}/" if is_directory else quote(name, safe='')
-        rows.append(f'<li><a href="{href}">{escape(label)}</a></li>')
-    body = f"<!doctype html><meta charset=\"utf-8\"><title>Index of /{escape(title)}</title><h1>Index of /{escape(title)}</h1><ul>{''.join(rows)}</ul>"
-    return body.encode("utf-8")
-
-
-def public_share_file(path: str) -> tuple[Path, str]:
-    """Resolve one public URL whose path begins with the shared folder path."""
-    if PUBLIC_SHARE_FOLDER is None and PUBLIC_SHARE_FILE is None:
-        raise AgentApiError("PUBLIC_SHARE_NOT_ACTIVE", "No workspace item is currently shared.")
-    encoded_segments = path.removeprefix("/").split("/")
-    if not encoded_segments or any(not segment for segment in encoded_segments):
-        raise AgentApiError("PUBLIC_SHARE_NOT_FOUND", "The requested shared file was not found.")
-    try:
-        segments = tuple(unquote(segment, encoding="utf-8", errors="strict") for segment in encoded_segments)
-    except UnicodeDecodeError as error:
-        raise AgentApiError("PUBLIC_SHARE_NOT_FOUND", "The requested shared file was not found.") from error
-    if any(not segment or segment in {".", ".."} or "/" in segment or "\\" in segment for segment in segments):
-        raise AgentApiError("PUBLIC_SHARE_NOT_FOUND", "The requested shared file was not found.")
-    if PUBLIC_SHARE_FILE is not None:
-        file_parts, _ = WorkspacePathResolver.logical_parts(PUBLIC_SHARE_FILE.logical_path, field_name="shared file", error_code="PUBLIC_SHARE_NOT_FOUND")
-        if tuple(segments) != file_parts:
-            raise AgentApiError("PUBLIC_SHARE_NOT_FOUND", "The requested shared file was not found.")
-        mime_type = mimetypes.guess_type(PUBLIC_SHARE_FILE.physical_path.name)[0] or "application/octet-stream"
-        return PUBLIC_SHARE_FILE.physical_path, mime_type
-    assert PUBLIC_SHARE_FOLDER is not None
-    folder_parts, _ = WorkspacePathResolver.logical_parts(
-        PUBLIC_SHARE_FOLDER.logical_path, field_name="shared folder", error_code="PUBLIC_SHARE_NOT_FOUND", allow_root=True,
-    )
-    if tuple(segments[:len(folder_parts)]) != folder_parts:
-        raise AgentApiError("PUBLIC_SHARE_NOT_FOUND", "The requested shared file was not found.")
-    relative_parts = segments[len(folder_parts):]
-    if not relative_parts:
-        raise AgentApiError("PUBLIC_SHARE_NOT_FOUND", "The requested shared file was not found.")
-    candidate = PUBLIC_SHARE_FOLDER.physical_path
-    for segment in relative_parts:
-        candidate = candidate / segment
-        is_junction = getattr(candidate, "is_junction", lambda: False)
-        if candidate.is_symlink() or is_junction():
-            raise AgentApiError("PUBLIC_SHARE_NOT_FOUND", "The requested shared file was not found.")
-    try:
-        resolved = candidate.resolve(strict=True)
-    except OSError as error:
-        raise AgentApiError("PUBLIC_SHARE_NOT_FOUND", "The requested shared file was not found.") from error
-    if not path_is_within(resolved, PUBLIC_SHARE_FOLDER.physical_path) or not resolved.is_file():
-        raise AgentApiError("PUBLIC_SHARE_NOT_FOUND", "The requested shared file was not found.")
-    file_type = public_share_file_type(resolved)
-    if "all" not in PUBLIC_SHARE_FILE_TYPES and file_type not in PUBLIC_SHARE_FILE_TYPES:
-        raise AgentApiError("PUBLIC_SHARE_NOT_FOUND", "The requested shared file was not found.")
-    mime_type = mimetypes.guess_type(resolved.name)[0] or "application/octet-stream"
-    return resolved, mime_type
-
-
-async def handle_public_share_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-    try:
-        method, path, _query, body, _headers = await read_request(reader)
-        if method not in {"GET", "HEAD"} or body:
-            writer.write(image_response("404 Not Found"))
-        else:
-            directory_listing = public_share_directory_listing(path)
-            if directory_listing is not None:
-                writer.write(public_file_response_headers("200 OK", len(directory_listing), "text/html; charset=utf-8"))
-                if method == "GET":
-                    writer.write(directory_listing)
-            else:
-                shared_file, mime_type = public_share_file(path)
-                size = shared_file.stat().st_size
-                writer.write(public_file_response_headers("200 OK", size, mime_type))
-                if method == "GET":
-                    with shared_file.open("rb") as source:
-                        while chunk := source.read(64 * 1024):
-                            writer.write(chunk)
-                            await writer.drain()
-        await writer.drain()
-    except (AgentApiError, OSError, UnicodeDecodeError, asyncio.TimeoutError, asyncio.IncompleteReadError):
-        try:
-            writer.write(image_response("404 Not Found"))
-            await writer.drain()
-        except ConnectionError:
-            pass
-    finally:
-        for manager in (TASKS, SPEECH_TASKS, VISUAL_MAP_TASKS, CAMERA_RECORD_TASKS, CAPTURE_FRAME_TASKS, MEDIA_CLIP_TASKS, STORYBOARD_TASKS, TIMER_TASKS):
-            manager.tasks.prune()
-        writer.close()
-        try:
-            await writer.wait_closed()
-        except ConnectionError:
-            pass
-
-
-async def watch_cloudflared_stream(stream: asyncio.StreamReader | None) -> None:
-    global PUBLIC_TUNNEL_URL
-    if stream is None:
-        return
-    try:
-        while line := await stream.readline():
-            message = line.decode("utf-8", errors="replace").strip()
-            match = re.search(r"https://[A-Za-z0-9-]+\.trycloudflare\.com", message)
-            if match and PUBLIC_TUNNEL_URL is None:
-                PUBLIC_TUNNEL_URL = match.group(0)
-                PUBLIC_TUNNEL_READY.set()
-                log(f"Public workspace tunnel: {PUBLIC_TUNNEL_URL}")
-    except (OSError, asyncio.CancelledError):
-        return
-
-
-async def start_public_share_tunnel(port: int) -> None:
-    global PUBLIC_TUNNEL_PROCESS, PUBLIC_TUNNEL_WATCHERS
-    cloudflared = find_component("cloudflared", COMPONENTS["cloudflared"][0])
-    if cloudflared.error:
-        raise AgentApiError("CLOUDFLARED_DISCOVERY_ERROR", "cloudflared discovery is ambiguous.", cloudflared.error)
-    if not cloudflared.executable:
-        raise AgentApiError("CLOUDFLARED_NOT_AVAILABLE", "cloudflared is not available. Extract it under tools/cloudflared or install it on PATH.")
-    try:
-        PUBLIC_TUNNEL_PROCESS = await asyncio.create_subprocess_exec(
-            cloudflared.executable, "tunnel", "--url", f"http://127.0.0.1:{port}",
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )
-    except OSError as error:
-        raise AgentApiError("CLOUDFLARED_START_FAILED", "cloudflared could not start.") from error
-    PUBLIC_TUNNEL_WATCHERS = [
-        asyncio.create_task(watch_cloudflared_stream(PUBLIC_TUNNEL_PROCESS.stdout)),
-        asyncio.create_task(watch_cloudflared_stream(PUBLIC_TUNNEL_PROCESS.stderr)),
-    ]
-
-
-def public_share_file_url(shared_file: ResolvedWorkspacePath) -> str | None:
-    if PUBLIC_TUNNEL_URL is None:
-        return None
-    parts, _ = WorkspacePathResolver.logical_parts(shared_file.logical_path, field_name="shared file", error_code="PUBLIC_SHARE_NOT_FOUND")
-    return f"{PUBLIC_TUNNEL_URL}/{'/'.join(quote(part, safe='') for part in parts)}"
-
-
-def wsrv_external_probe_sync(public_url: str) -> dict[str, Any]:
-    probe_url = f"https://wsrv.nl/?url={quote(public_url, safe='')}&w=1&h=1&output=png"
-    try:
-        request = Request(probe_url, headers={"User-Agent": f"ResearchTube/{AGENT_VERSION}"})
-        with urlopen(request, timeout=20) as response:
-            content_type = response.headers.get_content_type().lower()
-            response.read(1)
-            return {"state": "passed" if 200 <= response.status < 300 and content_type.startswith("image/") else "failed", "provider": "wsrv.nl", "httpStatus": response.status, "contentType": content_type}
-    except HTTPError as error:
-        return {"state": "failed", "provider": "wsrv.nl", "httpStatus": error.code, "contentType": error.headers.get_content_type().lower() if error.headers else None}
-    except (URLError, OSError, TimeoutError, ValueError):
-        return {"state": "failed", "provider": "wsrv.nl", "httpStatus": None, "contentType": None}
-
-
-async def run_external_share_probe(probe_file: ResolvedWorkspacePath | None) -> None:
-    global PUBLIC_SHARE_EXTERNAL_PROBE
-    if probe_file is None:
-        PUBLIC_SHARE_EXTERNAL_PROBE = {"state": "not_requested", "provider": "wsrv.nl", "probePath": None, "httpStatus": None, "contentType": None}
-        return
-    public_url = public_share_file_url(probe_file)
-    if public_url is None:
-        PUBLIC_SHARE_EXTERNAL_PROBE = {"state": "failed", "provider": "wsrv.nl", "probePath": probe_file.logical_path, "httpStatus": None, "contentType": None}
-        return
-    result = await asyncio.to_thread(wsrv_external_probe_sync, public_url)
-    PUBLIC_SHARE_EXTERNAL_PROBE = {**result, "probePath": probe_file.logical_path}
-
-
-async def stop_public_share_unlocked() -> bool:
-    global PUBLIC_SHARE_SERVER, PUBLIC_SHARE_FOLDER, PUBLIC_SHARE_FILE, PUBLIC_SHARE_FILE_TYPES, PUBLIC_SHARE_EXTERNAL_PROBE, PUBLIC_TUNNEL_PROCESS, PUBLIC_TUNNEL_URL, PUBLIC_TUNNEL_WATCHERS
-    was_active = PUBLIC_SHARE_SERVER is not None or PUBLIC_TUNNEL_PROCESS is not None
-    if PUBLIC_SHARE_SERVER is not None:
-        PUBLIC_SHARE_SERVER.close()
-        await PUBLIC_SHARE_SERVER.wait_closed()
-    PUBLIC_SHARE_SERVER = None
-    PUBLIC_SHARE_FOLDER = None
-    PUBLIC_SHARE_FILE = None
-    PUBLIC_SHARE_FILE_TYPES = ()
-    PUBLIC_SHARE_EXTERNAL_PROBE = {"state": "not_requested", "provider": "wsrv.nl", "probePath": None, "httpStatus": None, "contentType": None}
-    for watcher in PUBLIC_TUNNEL_WATCHERS:
-        watcher.cancel()
-    if PUBLIC_TUNNEL_WATCHERS:
-        await asyncio.gather(*PUBLIC_TUNNEL_WATCHERS, return_exceptions=True)
-    PUBLIC_TUNNEL_WATCHERS = []
-    if PUBLIC_TUNNEL_PROCESS is not None and PUBLIC_TUNNEL_PROCESS.returncode is None:
-        PUBLIC_TUNNEL_PROCESS.terminate()
-        try:
-            await asyncio.wait_for(PUBLIC_TUNNEL_PROCESS.wait(), timeout=5)
-        except asyncio.TimeoutError:
-            PUBLIC_TUNNEL_PROCESS.kill()
-            await PUBLIC_TUNNEL_PROCESS.wait()
-    PUBLIC_TUNNEL_PROCESS = None
-    PUBLIC_TUNNEL_URL = None
-    PUBLIC_TUNNEL_READY.clear()
-    return was_active
-
-
-async def workspace_share_start(payload: Any) -> dict[str, Any]:
-    options = workspace_share_options(payload)
-    async with PUBLIC_SHARE_LOCK:
-        await stop_public_share_unlocked()
-        global PUBLIC_SHARE_SERVER, PUBLIC_SHARE_FOLDER, PUBLIC_SHARE_FILE, PUBLIC_SHARE_FILE_TYPES
-        server = await asyncio.start_server(handle_public_share_client, host="127.0.0.1", port=0)
-        socket = next(iter(server.sockets or ()), None)
-        if socket is None:
-            server.close()
-            await server.wait_closed()
-            raise AgentApiError("PUBLIC_SHARE_START_FAILED", "The local workspace sharing server did not receive a port.")
-        PUBLIC_SHARE_SERVER = server
-        PUBLIC_SHARE_FOLDER = options.folder
-        PUBLIC_SHARE_FILE = options.file
-        PUBLIC_SHARE_FILE_TYPES = options.file_types
-        try:
-            await start_public_share_tunnel(socket.getsockname()[1])
-            await asyncio.wait_for(PUBLIC_TUNNEL_READY.wait(), timeout=15)
-            if PUBLIC_TUNNEL_URL is None:
-                raise AgentApiError("PUBLIC_SHARE_START_FAILED", "cloudflared did not provide a public URL.")
-        except (AgentApiError, asyncio.TimeoutError) as error:
-            await stop_public_share_unlocked()
-            if isinstance(error, AgentApiError):
-                raise
-            raise AgentApiError("PUBLIC_SHARE_START_FAILED", "cloudflared did not provide a public URL within 15 seconds.") from error
-        await run_external_share_probe(options.probe_file)
-        target = options.file.logical_path if options.file is not None else (options.folder.logical_path or "<root>")
-        log(f"workspace_share_start target={target} mode={'file' if options.file is not None else 'folder'} verifyExternal={str(options.verify_external).lower()}")
-        return workspace_share_status_document()
-
-
-def public_share_base_url() -> str | None:
-    if PUBLIC_TUNNEL_URL is None or PUBLIC_SHARE_FOLDER is None:
-        return None
-    parts, _ = WorkspacePathResolver.logical_parts(
-        PUBLIC_SHARE_FOLDER.logical_path, field_name="shared folder", error_code="PUBLIC_SHARE_NOT_FOUND", allow_root=True,
-    )
-    route = "/".join(quote(part, safe="") for part in parts)
-    return f"{PUBLIC_TUNNEL_URL}/{route}/" if route else f"{PUBLIC_TUNNEL_URL}/"
-
-
-def workspace_share_status_document() -> dict[str, Any]:
-    active = PUBLIC_SHARE_SERVER is not None and PUBLIC_TUNNEL_PROCESS is not None and PUBLIC_TUNNEL_PROCESS.returncode is None and PUBLIC_TUNNEL_URL is not None
-    external_probe = PUBLIC_SHARE_EXTERNAL_PROBE if active else {"state": "not_requested", "provider": "wsrv.nl", "probePath": None, "httpStatus": None, "contentType": None}
-    return {
-        "state": "active" if active else "inactive",
-        "folder": PUBLIC_SHARE_FOLDER.logical_path if active and PUBLIC_SHARE_FOLDER is not None else None,
-        "file": PUBLIC_SHARE_FILE.logical_path if active and PUBLIC_SHARE_FILE is not None else None,
-        "fileTypes": list(PUBLIC_SHARE_FILE_TYPES) if active else [],
-        "publicBaseUrl": public_share_base_url() if active else None,
-        "publicFileUrl": public_share_file_url(PUBLIC_SHARE_FILE) if active and PUBLIC_SHARE_FILE is not None else None,
-        "methods": ["GET", "HEAD"] if active else [],
-        "externallyReachable": True if external_probe["state"] == "passed" else False if external_probe["state"] == "failed" else None,
-        "externalProbe": external_probe,
-    }
-
-
-async def workspace_share_status(payload: Any) -> dict[str, Any]:
-    if not isinstance(payload, dict) or set(payload) - {"verifyExternal"}:
-        raise AgentApiError("ONLINE_SHARE_INVALID", "online_share_status received unsupported fields.")
-    verify_external = payload.get("verifyExternal", False)
-    if not isinstance(verify_external, bool):
-        raise AgentApiError("ONLINE_SHARE_INVALID", "verifyExternal must be a boolean.")
-    async with PUBLIC_SHARE_LOCK:
-        if verify_external and (PUBLIC_SHARE_FOLDER is not None or PUBLIC_SHARE_FILE is not None):
-            if PUBLIC_SHARE_FILE is not None:
-                probe_file = PUBLIC_SHARE_FILE
-            else:
-                probe_path = PUBLIC_SHARE_EXTERNAL_PROBE.get("probePath")
-                probe_file = WorkspacePathResolver().resolve_existing(probe_path, field_name="probePath", expected_type="file") if isinstance(probe_path, str) else None
-            if probe_file is None:
-                raise AgentApiError("ONLINE_SHARE_INVALID", "This share has no image probePath. Restart it with verifyExternal and a probePath.")
-            await run_external_share_probe(probe_file)
-        return workspace_share_status_document()
-
-
-async def workspace_share_stop() -> dict[str, Any]:
-    async with PUBLIC_SHARE_LOCK:
-        stopped = await stop_public_share_unlocked()
-    log(f"workspace_share_stop stopped={str(stopped).lower()}")
-    return {"state": "stopped", "stopped": stopped}
-
-
-def parse_json_body(body: bytes) -> Any:
-    if not body:
-        return {}
-    try:
-        return json.loads(body.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise AgentApiError("INVALID_JSON", "The request body must be valid UTF-8 JSON.") from error
-
-
-def response_log_suffix(path: str, body: dict[str, Any] | None) -> str:
-    """Add a compact, user-visible state to task and MCP log lines."""
-    if not isinstance(body, dict):
-        return ""
-    if path.startswith("/custom-tools/"):
-        if body.get("kind") == "result":
-            return " completed"
-        document = body.get("task", body)
-        if not isinstance(document, dict):
-            return ""
-        progress = document.get("progressPercent")
-        percentage = f" {progress:g}%" if isinstance(progress, (int, float)) and not isinstance(progress, bool) and math.isfinite(progress) and 0 <= progress <= 100 else ""
-        status = document.get("status", "")
-        state = f" {status}" if isinstance(status, str) and status in {"working", "completed", "failed", "cancelled"} else ""
-        return state + percentage
-    if path.startswith("/mcp/log/") and isinstance(body.get("status"), str):
-        progress = body.get("progressPercent")
-        percentage = f" {progress:g}%" if isinstance(progress, (int, float)) and not isinstance(progress, bool) and 0 <= progress <= 100 else ""
-        return f" {body['status']}{percentage}"
-    if not path.startswith("/tasks/") or "taskId" not in body:
-        return ""
-    progress = body.get("progressPercent")
-    if isinstance(progress, (int, float)) and not isinstance(progress, bool) and 0 <= progress <= 100:
-        percentage = f"{progress:.1f}".rstrip("0").rstrip(".")
-        return f" {percentage}%"
-    return ""
-
-
-def internal_google_translate_speech_path(path: str) -> bool:
-    """Google Translate callbacks are internal task plumbing, not user-facing actions."""
-    return bool(re.fullmatch(
-        r"/tasks/system-speech/tsk_[A-Za-z0-9_-]{10}/google-translate-(?:progress|complete|fail|audio)",
-        path,
-    ))
-
-
-def compact_custom_tool_log_path(path: str, body: dict[str, Any] | None) -> str:
-    """Resolve the manifest name for start, status and cancellation requests."""
-    if not path.startswith("/custom-tools/") or not isinstance(body, dict):
-        return path
-    document = body.get("task", body)
-    if not isinstance(document, dict):
-        return path
-    tool = document.get("tool")
-    if not isinstance(tool, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,79}", tool):
-        return path
-    task_id = document.get("taskId")
-    suffix = f"/{task_id}" if isinstance(task_id, str) and re.fullmatch(r"tsk_[A-Za-z0-9_-]{10}", task_id) else ""
-    if path.endswith("/cancel"):
-        suffix += "/cancel"
-    return f"/custom-tools/{tool}{suffix}"
-
-
-def compact_google_translate_speech_log_path(path: str, body: dict[str, Any] | None) -> str:
-    """Show every Google TTS request, without repeating its long internal route."""
-    callback = re.fullmatch(
-        r"/tasks/system-speech/(tsk_[A-Za-z0-9_-]{10})/google-translate-(progress|complete|fail|audio)",
-        path,
-    )
-    if callback:
-        task_id, _action = callback.groups()
-        return f"/tasks/{task_id}"
-    if re.fullmatch(r"/tasks/system-speech/tsk_[A-Za-z0-9_-]{10}", path) and isinstance(body, dict) and body.get("engine") == "googleTranslate":
-        return f"/tasks/{body['taskId']}"
-    return path
-
-
-def mcp_tool_log(tool: str, payload: Any) -> dict[str, Any]:
-    if not re.fullmatch(r"[a-z0-9_]{1,80}", tool):
-        raise AgentApiError("MCP_LOG_INVALID", "The MCP tool name is invalid.")
-    if not isinstance(payload, dict) or "status" not in payload or set(payload) - {"status", "progressPercent"} or not isinstance(payload["status"], str):
-        raise AgentApiError("MCP_LOG_INVALID", "The MCP log request requires status and optional progressPercent.")
-    status = payload["status"].strip()
-    if not re.fullmatch(r"[a-z0-9_-]{1,40}", status):
-        raise AgentApiError("MCP_LOG_INVALID", "The MCP log status is invalid.")
-    progress = payload.get("progressPercent")
-    if "progressPercent" in payload and (isinstance(progress, bool) or not isinstance(progress, (int, float)) or not math.isfinite(progress) or not 0 <= progress <= 100):
-        raise AgentApiError("MCP_LOG_INVALID", "progressPercent must be a finite number from 0 to 100.")
-    return {"status": status, **({"progressPercent": progress} if progress is not None else {})}
-
-
-try:
-    from .storyboards import StoryboardService
-except ImportError:  # Direct python researchtube_agent.py launch.
-    from storyboards import StoryboardService
-
-try:
-    from .timers import TimerService
-except ImportError:
-    from timers import TimerService
-
-TIMER_TASKS = TimerService(sys.modules[__name__])
-
-STORYBOARD_TASKS = StoryboardService(sys.modules[__name__])
-
-
-async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-    method, path = "", ""
-    try:
-        method, path, query, body, headers = await read_request(reader)
-        if method == "OPTIONS":
-            response_status, response_body = "204 No Content", None
-        elif method == "GET" and path == "/health":
-            response_status, response_body = "200 OK", cached_public_health()
-        elif method == "GET" and path == "/internal/tool-limits":
-            response_status, response_body = "200 OK", {"limits": configured_tool_limits(), "newToolsEnabledByDefault": configured_new_tools_default(), "mediaWidgetHandshakeTimeoutSeconds": configured_media_widget_handshake_timeout(), "browserStudyGroupTabs": configured_browser_study_group_tabs(), "browserStudyDetailedLogging": configured_browser_study_detailed_logging(), "browserStudyObservation": configured_browser_study_observation(), "composerMediaRetry": configured_composer_media_retry(), "composerAutoSendTimeoutSeconds": configured_composer_auto_send_timeout()}
-        elif method == "GET" and path == "/custom-tools":
-            response_status, response_body = "200 OK", CUSTOM_TOOLS.catalog()
-        elif method == "POST" and path == "/custom-tools/call":
-            payload = parse_json_body(body)
-            if not isinstance(payload, dict) or set(payload) != {"name", "arguments"} or not isinstance(payload.get("name"), str):
-                raise AgentApiError("CUSTOM_TOOL_REQUEST_INVALID", "Custom tool calls require name and arguments.")
-            response_status, response_body = "200 OK", await CUSTOM_TOOLS.call(payload["name"], payload["arguments"])
-        elif method == "GET" and re.fullmatch(r"/custom-tools/tasks/tsk_[A-Za-z0-9_-]{10}", path):
-            response_status, response_body = "200 OK", CUSTOM_TOOLS.status(path.removeprefix("/custom-tools/tasks/"))
-        elif method == "POST" and re.fullmatch(r"/custom-tools/tasks/tsk_[A-Za-z0-9_-]{10}/cancel", path):
-            if parse_json_body(body) != {}:
-                raise AgentApiError("CUSTOM_TOOL_REQUEST_INVALID", "Custom tool cancellation accepts an empty body.")
-            response_status, response_body = "200 OK", await CUSTOM_TOOLS.cancel(path.removeprefix("/custom-tools/tasks/").removesuffix("/cancel"))
-        elif method == "POST" and path == "/timer/start":
-            response_status, response_body = "200 OK", await TIMER_TASKS.create(parse_json_body(body))
-        elif method == "GET" and re.fullmatch(r"/tasks/timer/[^/]+", path):
-            response_status, response_body = "200 OK", await TIMER_TASKS.status(path.removeprefix("/tasks/timer/"))
-        elif method == "POST" and re.fullmatch(r"/tasks/timer/[^/]+/cancel", path):
-            if parse_json_body(body) != {}:
-                raise AgentApiError("TIMER_INVALID", "Timer cancellation accepts an empty body.")
-            response_status, response_body = "200 OK", await TIMER_TASKS.cancel(path.removeprefix("/tasks/timer/").removesuffix("/cancel"))
-        elif method == "POST" and path == "/workspace/list":
-            response_status, response_body = "200 OK", workspace_list(parse_json_body(body))
-        elif method == "POST" and path == "/workspace/stat":
-            response_status, response_body = "200 OK", workspace_stat(parse_json_body(body))
-        elif method == "POST" and path == "/workspace/mkdir":
-            response_status, response_body = "200 OK", workspace_mkdir(parse_json_body(body))
-        elif method == "POST" and path == "/workspace/move":
-            response_status, response_body = "200 OK", workspace_move(parse_json_body(body))
-        elif method == "POST" and path == "/workspace/delete":
-            response_status, response_body = "200 OK", workspace_delete(parse_json_body(body))
-        elif method == "POST" and path == "/workspace/share/start":
-            response_status, response_body = "200 OK", await workspace_share_start(parse_json_body(body))
-        elif method == "POST" and path == "/workspace/share/status":
-            response_status, response_body = "200 OK", await workspace_share_status(parse_json_body(body))
-        elif method == "POST" and path == "/workspace/share/stop":
-            response_status, response_body = "200 OK", await workspace_share_stop()
-        elif method == "POST" and path == "/media/probe":
-            response_status, response_body = "200 OK", await media_probe(parse_json_body(body))
-        elif method == "POST" and path == "/system/speech/voices":
-            response_status, response_body = "200 OK", await system_speech_list_voices(parse_json_body(body))
-        elif method == "POST" and path == "/tasks/system-speech":
-            response_status, response_body = "201 Created", await SPEECH_TASKS.create(parse_json_body(body))
-        elif method == "POST" and re.fullmatch(r"/tasks/system-speech/tsk_[A-Za-z0-9_-]{10}/google-translate-progress", path):
-            task_id = path.removeprefix("/tasks/system-speech/").removesuffix("/google-translate-progress")
-            response_status, response_body = "200 OK", SPEECH_TASKS.google_progress(task_id, parse_json_body(body))
-        elif method == "POST" and re.fullmatch(r"/tasks/system-speech/tsk_[A-Za-z0-9_-]{10}/google-translate-complete", path):
-            task_id = path.removeprefix("/tasks/system-speech/").removesuffix("/google-translate-complete")
-            response_status, response_body = "200 OK", SPEECH_TASKS.google_complete(task_id, parse_json_body(body))
-        elif method == "POST" and re.fullmatch(r"/tasks/system-speech/tsk_[A-Za-z0-9_-]{10}/google-translate-fail", path):
-            task_id = path.removeprefix("/tasks/system-speech/").removesuffix("/google-translate-fail")
-            response_status, response_body = "200 OK", SPEECH_TASKS.google_fail(task_id, parse_json_body(body))
-        elif method == "POST" and re.fullmatch(r"/tasks/system-speech/tsk_[A-Za-z0-9_-]{10}/google-translate-audio", path):
-            task_id = path.removeprefix("/tasks/system-speech/").removesuffix("/google-translate-audio")
-            tokens = query.get("token")
-            if not isinstance(tokens, list) or len(tokens) != 1:
-                raise AgentApiError("GOOGLE_TRANSLATE_TASK_INVALID", "The Google Translate speech task is invalid.")
-            response_status, response_body = "200 OK", await SPEECH_TASKS.google_audio(task_id, tokens[0], body)
-        elif method == "POST" and path == "/tasks/capture-frame":
-            response_status, response_body = "201 Created", await CAPTURE_FRAME_TASKS.create(parse_json_body(body))
-        elif method == "POST" and path == "/tasks/media-clip":
-            response_status, response_body = "201 Created", await MEDIA_CLIP_TASKS.create(parse_json_body(body))
-        elif method == "POST" and path == "/media/camera/list":
-            response_status, response_body = "200 OK", {"cameras": [camera_public_device(device) for device in await camera_devices()]}
-        elif method == "POST" and path == "/media/camera/capture-frame":
-            response_status, response_body = "200 OK", await camera_capture_frame(parse_json_body(body))
-        elif method == "POST" and path == "/tasks/camera-record":
-            response_status, response_body = "201 Created", await CAMERA_RECORD_TASKS.create(parse_json_body(body))
-        elif method == "POST" and path == "/tasks/camera-record-audio":
-            response_status, response_body = "201 Created", await CAMERA_RECORD_TASKS.create(parse_json_body(body), recording_kind="audio")
-        elif method == "POST" and path in {"/youtube/storyboards/info", "/youtube/storyboards/download", "/youtube/storyboards/status", "/youtube/storyboards/cancel"}:
-            response_status, response_body = "200 OK", await STORYBOARD_TASKS.dispatch(path.rsplit("/", 1)[1], parse_json_body(body))
-        elif method == "POST" and path == "/tasks/visual-map":
-            response_status, response_body = "201 Created", await VISUAL_MAP_TASKS.create(parse_json_body(body))
-        elif method == "POST" and path == "/media/capture-screen":
-            response_status, response_body = "200 OK", await capture_screen(parse_json_body(body))
-        elif method == "POST" and path == "/media/image-crop":
-            response_status, response_body = "200 OK", await image_crop(parse_json_body(body))
-        elif method == "POST" and path == "/media/workspace-image-info":
-            _item, response_body = workspace_image_metadata(parse_json_body(body))
-            response_status = "200 OK"
-        elif method == "POST" and path == "/media/inspect-image":
-            response_status, response_body = "200 OK", await inspect_workspace_image(parse_json_body(body))
-        elif method == "POST" and path == "/clipboard/status":
-            response_status, response_body = "200 OK", clipboard_status(parse_json_body(body))
-        elif method == "POST" and path == "/clipboard/get":
-            response_status, response_body = "200 OK", await clipboard_get(parse_json_body(body))
-        elif method == "POST" and path == "/clipboard/set":
-            response_status, response_body = "200 OK", await clipboard_set(parse_json_body(body))
-        elif method == "POST" and path == "/internal/library-store-files":
-            response_status, response_body = "200 OK", library_store_files(parse_json_body(body))
-        elif method == "POST" and path == "/internal/browser-resource":
-            if set(query) != {"taskId", "resourceId"} or any(len(values) != 1 for values in query.values()):
-                raise AgentApiError("BROWSER_INVALID", "Browser file ingestion requires one taskId and resourceId.")
-            response_status, response_body = "201 Created", save_browser_resource(
-                body, query["taskId"][0], headers.get("content-type", "application/octet-stream"),
-                configured_tool_limits()["mediaToChatMaxFileSizeMiB"] * 1048576, WorkspacePathResolver(), AgentApiError,
-                resource_id=query["resourceId"][0],
-            )
-        elif method == "POST" and path == "/internal/media-to-chat-files":
-            response_status, response_body = "200 OK", media_to_chat_files(parse_json_body(body))
-        elif method == "POST" and path.startswith("/mcp/log/"):
-            response_status, response_body = "200 OK", mcp_tool_log(path.removeprefix("/mcp/log/"), parse_json_body(body))
-        elif method == "POST" and path == "/youtube/download-formats":
-            response_status, response_body = "200 OK", await youtube_download_formats(parse_json_body(body))
-        elif method == "POST" and path == "/tasks/youtube-download":
-            response_status, response_body = "201 Created", await TASKS.create_download(parse_json_body(body))
-        elif method == "POST" and path.startswith("/tasks/visual-map/") and path.endswith("/cancel"):
-            task_id = path.removeprefix("/tasks/visual-map/").removesuffix("/cancel").rstrip("/")
-            await VISUAL_MAP_TASKS.cancel(task_id)
-            response_status, response_body = "202 Accepted", {"accepted": True}
-        elif method == "POST" and path.startswith("/tasks/system-speech/") and path.endswith("/cancel"):
-            task_id = path.removeprefix("/tasks/system-speech/").removesuffix("/cancel").rstrip("/")
-            response_status, response_body = "200 OK", await SPEECH_TASKS.cancel(task_id)
-        elif method == "POST" and path.startswith("/tasks/capture-frame/") and path.endswith("/cancel"):
-            task_id = path.removeprefix("/tasks/capture-frame/").removesuffix("/cancel").rstrip("/")
-            await CAPTURE_FRAME_TASKS.cancel(task_id)
-            response_status, response_body = "202 Accepted", {"accepted": True}
-        elif method == "POST" and path.startswith("/tasks/media-clip/") and path.endswith("/cancel"):
-            task_id = path.removeprefix("/tasks/media-clip/").removesuffix("/cancel").rstrip("/")
-            await MEDIA_CLIP_TASKS.cancel(task_id)
-            response_status, response_body = "202 Accepted", {"accepted": True}
-        elif method == "POST" and path.startswith("/tasks/capture-frame/") and path.endswith("/diagnostics"):
-            task_id = path.removeprefix("/tasks/capture-frame/").removesuffix("/diagnostics").rstrip("/")
-            response_status, response_body = "200 OK", CAPTURE_FRAME_TASKS.diagnostics_snapshot(task_id)
-        elif method == "POST" and path.startswith("/tasks/camera-record/") and path.endswith("/stop"):
-            task_id = path.removeprefix("/tasks/camera-record/").removesuffix("/stop").rstrip("/")
-            response_status, response_body = "202 Accepted", await CAMERA_RECORD_TASKS.stop(task_id)
-        elif method == "POST" and path.startswith("/tasks/") and path.endswith("/diagnostics"):
-            task_id = path.removeprefix("/tasks/").removesuffix("/diagnostics").rstrip("/")
-            response_status, response_body = "200 OK", TASKS.diagnostics_snapshot(task_id, parse_json_body(body))
-        elif method == "POST" and path.startswith("/tasks/") and path.endswith("/cancel"):
-            task_id = path.removeprefix("/tasks/").removesuffix("/cancel").rstrip("/")
-            await TASKS.cancel(task_id)
-            response_status, response_body = "202 Accepted", {"accepted": True}
-        elif method == "GET" and path.startswith("/tasks/visual-map/"):
-            response_status, response_body = "200 OK", VISUAL_MAP_TASKS.snapshot(VISUAL_MAP_TASKS.get(path.removeprefix("/tasks/visual-map/")))
-        elif method == "GET" and path.startswith("/tasks/system-speech/"):
-            response_status, response_body = "200 OK", SPEECH_TASKS.snapshot(SPEECH_TASKS.get(path.removeprefix("/tasks/system-speech/")))
-        elif method == "GET" and path.startswith("/tasks/capture-frame/"):
-            response_status, response_body = "200 OK", CAPTURE_FRAME_TASKS.snapshot(CAPTURE_FRAME_TASKS.get(path.removeprefix("/tasks/capture-frame/")))
-        elif method == "GET" and path.startswith("/tasks/media-clip/"):
-            response_status, response_body = "200 OK", MEDIA_CLIP_TASKS.snapshot(MEDIA_CLIP_TASKS.get(path.removeprefix("/tasks/media-clip/")))
-        elif method == "GET" and path.startswith("/tasks/camera-record/"):
-            response_status, response_body = "200 OK", CAMERA_RECORD_TASKS.snapshot(CAMERA_RECORD_TASKS.get(path.removeprefix("/tasks/camera-record/")))
-        elif method == "GET" and path.startswith("/tasks/"):
-            response_status, response_body = "200 OK", TASKS.snapshot(TASKS.get(path.removeprefix("/tasks/")))
-        elif method == "POST":
-            logical_path = unquote(path.removeprefix("/"))
-            response_body = await copy_widget_workspace_path(logical_path)
-            writer.write(http_response("200 OK", response_body))
-            await writer.drain()
-            log("POST /<workspace-image> -> 200 copied")
-            return
-        elif method == "GET":
-            image_file, mime_type = widget_image_file(unquote(path.removeprefix("/")))
-            size = image_file.stat().st_size
-            byte_range = widget_media_byte_range(headers.get("range"), size)
-            if byte_range is None:
-                writer.write(widget_image_response_headers("416 Range Not Satisfiable", 0, mime_type, content_range=f"bytes */{size}"))
-                await writer.drain()
-                log("GET /<workspace-image> -> 416")
-                return
-            start, end = byte_range
-            length = end - start + 1
-            partial = headers.get("range") is not None
-            writer.write(widget_image_response_headers("206 Partial Content" if partial else "200 OK", length, mime_type, content_range=f"bytes {start}-{end}/{size}" if partial else None))
-            with image_file.open("rb") as source:
-                source.seek(start)
-                remaining = length
-                while remaining > 0 and (chunk := source.read(min(64 * 1024, remaining))):
-                    writer.write(chunk)
-                    await writer.drain()
-                    remaining -= len(chunk)
-            await writer.drain()
-            log(f"GET /<workspace-image> -> {'206' if partial else '200'}")
-            return
-        elif not method:
-            response_status, response_body = "400 Bad Request", error_document(AgentApiError("BAD_REQUEST", "Invalid HTTP request."))
-        else:
-            response_status, response_body = "404 Not Found", error_document(AgentApiError("NOT_FOUND", "Unknown local Agent endpoint."))
-        writer.write(http_response(response_status, response_body))
-        await writer.drain()
-        log_path = compact_google_translate_speech_log_path(path, response_body)
-        log_path = compact_custom_tool_log_path(log_path, response_body)
-        log(f"{method or 'INVALID'} {log_path or '/'} -> {response_status.split()[0]}{response_log_suffix(path, response_body)}")
-    except AgentApiError as error:
-        status = "404 Not Found" if error.code in {"TASK_NOT_FOUND", "VISUAL_MAP_TASK_NOT_FOUND", "CAMERA_RECORD_TASK_NOT_FOUND", "CAPTURE_FRAME_TASK_NOT_FOUND", "MEDIA_CLIP_TASK_NOT_FOUND", "TIMER_NOT_FOUND", "CUSTOM_TOOL_NOT_FOUND", "CUSTOM_TOOL_TASK_NOT_FOUND"} else "400 Bad Request"
-        writer.write(http_response(status, error_document(error)))
-        await writer.drain()
-        log(f"{method or 'INVALID'} {path or '/'} -> {status.split()[0]}")
-    except (ConnectionError, asyncio.TimeoutError, UnicodeDecodeError, asyncio.IncompleteReadError) as error:
-        log(f"request failed: {error.__class__.__name__}", error=True)
-    finally:
-        # Health polling only reads the startup snapshot. Task pruning reads
-        # user configuration and belongs to task/other requests and done callbacks.
-        if not (method == "GET" and path == "/health"):
-            for manager in (TASKS, SPEECH_TASKS, VISUAL_MAP_TASKS, CAMERA_RECORD_TASKS, CAPTURE_FRAME_TASKS, MEDIA_CLIP_TASKS, STORYBOARD_TASKS, TIMER_TASKS):
-                manager.tasks.prune()
-        writer.close()
-        try:
-            await writer.wait_closed()
-        except ConnectionError:
-            pass
-
-
-async def serve(port: int) -> None:
-    global WORKSPACE_PATH
-    # Freeze the root for this run: live edits must not redirect active tasks,
-    # media viewers or shares into a different directory mid-operation.
-    WORKSPACE_PATH = startup_workspace_path()
-    initial_health = initialize_health_snapshot()
-    server = await asyncio.start_server(handle_client, host="127.0.0.1", port=port)
-    log_startup_health(initial_health, port)
-    diagnostics = asyncio.create_task(collect_startup_health(initial_health), name="startup-health")
-    try:
-        async with server:
-            await server.serve_forever()
-    finally:
-        diagnostics.cancel()
-        await asyncio.gather(diagnostics, return_exceptions=True)
-        async with PUBLIC_SHARE_LOCK:
-            await stop_public_share_unlocked()
-        await TIMER_TASKS.shutdown()
-        await CAPTURE_FRAME_TASKS.shutdown()
-        await MEDIA_CLIP_TASKS.shutdown()
-        await SPEECH_TASKS.shutdown()
-        await STORYBOARD_TASKS.shutdown()
-        await VISUAL_MAP_TASKS.shutdown()
-        await CAMERA_RECORD_TASKS.shutdown()
-        await TASKS.shutdown()
-        await CUSTOM_TOOLS.shutdown()
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run the ResearchTube Local Agent Task service.")
-    parser.add_argument("--port", type=int, help="Override agent-config.json for this run.")
-    args = parser.parse_args()
-    if args.port is not None and not 1 <= args.port <= 65535:
-        parser.error("--port must be between 1 and 65535")
-    return args
-
-
-def main() -> int:
-    if sys.argv[1:2] == ["--windows-speech-helper"]:
-        try:
-            from .windows_speech import main as speech_main
-        except ImportError:
-            from windows_speech import main as speech_main
-        return speech_main(sys.argv[2:])
-    args = parse_args()
-    clear_console()
-    try:
-        # PyInstaller's DLL search directory must not leak into FFmpeg/yt-dlp.
-        # Speech runs in a fresh self-exec helper and restores its own bundle.
-        if getattr(sys, "frozen", False) and sys.platform == "win32":
-            if not ctypes.windll.kernel32.SetDllDirectoryW(None):
-                raise OSError("Could not restore the Windows external-program DLL search path.")
-        asyncio.run(serve(args.port if args.port is not None else configured_port()))
-    except KeyboardInterrupt:
-        return 0
-    except AgentApiError as error:
-        log(f"ResearchTube Local Agent could not start: {error.code}: {error.message}", error=True)
-        return 1
-    except OSError as error:
-        log(f"ResearchTube Local Agent could not start: {error}", error=True)
-        return 1
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+YªçŠx-®éÜj×¢ëiºÚ+Š§j[h‘éÜ¢éí×m7Ó”èµ©hºÚn¶X§zÍHÈKÝ\Ü‹Øš[‹Ù[ˆ]ÛŒÂˆˆˆ”™\ÙX\˜ÚX™HØØ[YÙ[8 %]\˜][ÛˆˆÝÛ›ØY\ÚÈÙ\šXÙK‚‚•HYÙ[\ÈHÛÜ˜XÚË[Û›HÙ\šXÙKˆœ›ÝÜÙ\ˆÛÙHÝÛœÈHX›XÈPÔ˜ÛÛ˜XÝÈ\È›ØÙ\ÜÈÝÛœÈ^XÝ]X›H\ØÛÝ™\žKÛÜšÜÜXÙHØ[™›Þ[™Ë[™š[™\[™[]YÝXœ›ØÙ\ÜÙ\Ë‚ˆˆˆ‚‚™œ›ÛH×Ù]\™W×È[\Ü[››Ý][ÛœÂ‚š[\Ü\™Ü\œÙBš[\Ü\Þ[˜Ú[Âš[\Ü˜\ÙMš[\ÜÝ\\Â™œ›ÛH[[\Ü\ØØ\Bš[\ÜœÛÛ‚š[\ÜX]š[\ÜZ[Y]\\Âš[\ÜÜÂš[\Ü]›Ü›Bš[\Ü™Bš[\ÜÙXÜ™]Âš[\ÜÚ][š[\ÜÝXÝš[\ÜÝš[™Âš[\ÜÞ\Âš[\Ü[\š[Bš[\Ü[YB™œ›ÛH]XÛ\ÜÙ\È[\Ü]XÛ\ÜËšY[™œ›ÛH]][YH[\Ü]][YK[Y^›Û™B™œ›ÛH]Xˆ[\Ü]™œ›ÛH\[™È[\Ü[žKØ[X›B™œ›ÛH\›X‹™\œ›Üˆ[\Ü\œ›Ü‹T“\œ›Ü‚™œ›ÛH\›X‹œ\œÙH[\Ü\œÙWÜ\Ë][ÝK[œ][ÝK\›\œÙB™œ›ÛH\›X‹œ™\]Y\Ý[\Ü™\]Y\Ý\›Ü[‚‚žN‚ˆœ›ÛHœ[[YWÜ]È[\Ü[œÝ[][Û—Ü›ÛÝˆœ›ÛH\Ú×Ú\ÝÜžH[\Ü\ÚÒ\ÝÜžBˆœ›ÛH˜œ›ÝÜÙ\—Ü™\ÛÝ\˜Ù\È[\ÜØ]™WØœ›ÝÜÙ\—Ü™\ÛÝ\˜ÙB™^Ù\[\Ü\œ›ÜŽ‚ˆœ›ÛH[[YWÜ]È[\Ü[œÝ[][Û—Ü›ÛÝˆœ›ÛH\Ú×Ú\ÝÜžH[\Ü\ÚÒ\ÝÜžBˆœ›ÛHœ›ÝÜÙ\—Ü™\ÛÝ\˜Ù\È[\ÜØ]™WØœ›ÝÜÙ\—Ü™\ÛÝ\˜ÙB‚QÑS•Õ‘T”ÒSÓˆHŒ‹Œ‹Ìˆ‚’S•T‘PÑWÕ‘T”ÒSÓˆHÎ‘QUSÔÔ•HMÎÂ“PVÔ‘TUQTÕÐ“ÑWÐ–UTÈH
+ˆL“PVÑÓÓÑÓWÕS”ÓUWÐUQS×Ð–UTÈHMˆ
+ˆL
+ˆL•TÒ×ÔÓÒS•T•SÓTÈHWÌ”ÔQPÒÓPVÕVÐ–UTÈHŒ
+ˆL•TÒ×ÒPT•‘PUÔÑPÓÓ‘ÈHB“PVÑPQÓ“ÔÕP×ÓS‘TÈHŒ“PVÑPQÓ“ÔÕP×ÓS‘WÓS‘ÕH“PVÕTÒ×ÑU‘S•ÈHL“PVÕTÒ×ÑU‘S•ÓQTÔÐQÑWÓS‘ÕH–UÑ“Ô“PU×ÕSQSÕUÔÑPÓÓ‘ÈHÌ”“ÓÕH[œÝ[][Û—Ü›ÛÝ
+×Ùš[W×ÊBÓÓ‘’Q×ÔUH“ÓÕÈ˜YÙ[XÛÛ™šYËšœÛÛˆ‚•ÓÔ’ÔÔPÑWÔUH“ÓÕÈÛÜšÜÜXÙH‚•ÓÓ×ÔUH“ÓÕÈÛÛÈ‚•ÒS‘ÕÔ×ÔÔQPÒÔÐÔ’TÔUHÓÓ×ÔUÈÚ[™ÝÜË\ÜYXÚˆÈœ™\ÙX\˜ÚX™WÜÜYXÚœH‚‘“Ó•×ÔUHÓÓ×ÔUÈ™›ÛÈ‚–SÕUP‘WÔÕÔ“Õ’QT—ÔUHÓÓ×ÔUÈž[Ý]X™K\Ý\›ÝšY\ˆ‚–SÕUP‘WÔÕÔ“Õ’QT—ÔÑT•‘T—ÔUHSÕUP‘WÔÕÔ“Õ’QT—ÔUÈœÙ\™\ˆ‚–SÕUP‘WÔÕÔQÒS—ÔUHÓÓ×ÔUÈž]YˆÈž]Y\YÚ[œÈˆÈ˜™Ý][^]\Ý\›ÝšY\‹žš\‚–SÕUP‘WÔÕÔ“Õ’QT—Ô‘PQWÔUHSÕUP‘WÔÕÔ“Õ’QT—ÔUÈ‹œ™\ÙX\˜ÚX™K\›ÝšY\‹\™XYKšœÛÛˆ‚‘QUSÑÕÓ“ÐQÑT‘PÕÔ–HH™ÝÛ›ØYÈ‚“PVÓÑÒPÐSÔUÓS‘ÕHWÌ“PVÓÑÒPÐSÐÓÓTÓ‘S•ÓS‘ÕH“PVÕÓÔ’ÔÔPÑWÓTÕÑS•’QTÈHL“PVÔP“P×ÔÒT‘WÑT‘PÕÔ–WÑS•’QTÈHL“QQPWÔ“Ð‘WÕSQSÕUÔÑPÓÓ‘ÈHMBÐTT‘WÑ”SQWÕSQSÕUÔÑPÓÓ‘ÈHŒÐSQTWÐÐTT‘WÕSQSÕUÔÑPÓÓ‘ÈHŒÐSQTWÐUU×ÕT‘ÑUÑ”ÈH
+ŒŒÌŒ
+BÐSQTWÓRS—ÐQ‘T•TÑQÑ”ÈHKŒÐSQTWÓPVÐQ‘T•TÑQÑ”ÈHLŒŒÐSQTWÕT‘ÑUÑ”×ÕÓTSÑHHKŒ•’TÕPSÓPTÕSQSÕUÔÑPÓÓ‘ÈHN•’TÕPSÓPTÓPVÕÕSÑ”SQTÈHLŒ•’TÕPSÓPTÓPVÑÔ’QÔÒQHHŒ•’TÕPSÓPTÓPVÐÑSÈHLŒ‘QUSÕ’TÕPSÓPTÓPVÑSQS”ÒSÓˆHM‚‘QUSÕSQTÕSTÑ“Ó•ÔÒV‘WÔH‘QUSÕ’TÕPSÓPTÕSQTÕSTÑ“Ó•H‘Z˜UTØ[œËˆ‚‘QUSÕ’TÕPSÓPTÔÐÑS‘WÑUPÕÕ‘TÒÓHLŒ•’TÕPSÓPTÔÐÑS‘WÓRS—ÑTÕSÑWÔÑPÓÓ‘ÈH‹Œ–SÕUP‘WÐÐTT‘WÑ”SQWÕSQSÕUÔÑPÓÓ‘ÈHL–SÕUP‘WÐÐTT‘WÔ‘WÔ“ÓÔÑPÓÓ‘ÈHL‹Œ–SÕUP‘WÐÐTT‘WÔÔÕÔ“ÓÔÑPÓÓ‘ÈHËŒ–SÕUP‘WÐÐTT‘WÔÑPÕSÓ—ÓQT‘ÑWÑÐTÔÑPÓÓ‘ÈHLŒ–SÕUP‘WÐÐTT‘WÓPVÔÑPÕSÓ—ÔÑPÓÓ‘ÈHŒŒ–SÕUP‘WÐÐTT‘WÔÑPÕSÓ—ÑSVWÔÑPÓÓ‘ÈH‹Œ–SÕUP‘WÐÐTT‘WÔÑPÕSÓ—Ô‘U–WÑSVT×ÔÑPÓÓ‘ÈH
+ËŒ‹Œ
+B–SÕUP‘WÐÐTT‘WÑ’SWÔ“ÑÔ‘TÔ×ÒS•T•SÔÑPÓÓ‘ÈHB‘QUSÕÓÓÓSRUÈHÂˆ›YYXPØ\\™Qœ˜[YSX^œ˜[Y\ÈŽˆŒˆ›YYXPÛ\X^ÙYÛY[ÈŽˆŒˆ˜Ø[Y\˜T™XÛÜ™]Y[ÓX^Z[]\ÈŽˆLˆ˜Ø[Y\˜T™XÛÜ™šY[ÓX^Z[]\ÈŽˆKˆ›Xœ˜\žTÝÜ™SX^š[\ÈŽˆKˆ›Xœ˜\žTÝÜ™SX^š[TÚ^™SZPˆŽˆŒˆ›YYXUÐÚ]X^š[\ÈŽˆKˆ›YYXUÐÚ]X^š[TÚ^™SZPˆŽˆŒˆ˜ÛÛ\]Y\ÚÒ\ÝÜžS[Z]ŽˆŒŸB•ÓÓÓSRUÐÑRSS‘ÔÈHÂˆ›YYXPØ\\™Qœ˜[YSX^œ˜[Y\ÈŽˆLˆ›YYXPÛ\X^ÙYÛY[ÈŽˆLˆ˜Ø[Y\˜T™XÛÜ™]Y[ÓX^Z[]\ÈŽˆMˆ˜Ø[Y\˜T™XÛÜ™šY[ÓX^Z[]\ÈŽˆMˆ›Xœ˜\žTÝÜ™SX^š[\ÈŽˆLˆ›Xœ˜\žTÝÜ™SX^š[TÚ^™SZPˆŽˆLL‹ˆ›YYXUÐÚ]X^š[\ÈŽˆLˆ›YYXUÐÚ]X^š[TÚ^™SZPˆŽˆLL‹ˆ˜ÛÛ\]Y\ÚÒ\ÝÜžS[Z]ŽˆLÌŸB‘QUSÓQQPWÐÓTÑT‘PÕÔ–HH˜Û\È‚‘P•Q×ÐS“‘T—ÔÕÒUÒH‹K\Ú[[YXYÙÙ\‹Y^[œÚ[Û‹X\H‚“PVÐÓT“ÐT‘ÕVÐ–UTÈHˆ
+ˆL
+ˆL“PVÐÓT“ÐT‘ÒSPQÑWÑ’SWÐ–UTÈHŒ
+ˆL
+ˆL“PVÐÓT“ÐT‘ÒSPQÑWÔVSÈHLÌÌ“PVÐÓT“ÐT‘ÒSPQÑWÑP—Ð–UTÈHŒ
+ˆL
+ˆLÓT“ÐT‘ÓÔS—ÐUSTÈH“QQPWÔ“Ð‘WÔÑPÕSÓ”ÈHÂˆ™›Ü›X]Žˆ
+‹\ÚÝ×Ù›Ü›X]‹™›Ü›X]ŠKˆœÝ™X[\ÈŽˆ
+‹\ÚÝ×ÜÝ™X[\È‹œÝ™X[\ÈŠKˆ˜Ú\\œÈŽˆ
+‹\ÚÝ×ØÚ\\œÈ‹˜Ú\\œÈŠKˆœ›ÙÜ˜[\ÈŽˆ
+‹\ÚÝ×Ü›ÙÜ˜[\È‹œ›ÙÜ˜[\ÈŠKŸB•ÒS‘ÕÔ×ÒS•SQÑ’SSSQWÐÒTPÕT”ÈHœ›Þ™[œÙ]
+	ÏŽˆŸÊ‰ÊB•ÒS‘ÕÔ×Ô‘TÑT•‘QÐTÑSSQTÈHœ›Þ™[œÙ]
+ÂˆÓÓˆ‹”“ˆ‹UV‹“•S‹
+ŠˆÓÓ^Ú[™^Hˆ›Üˆ[™^[ˆ˜[™ÙJKL
+JK
+Šˆ“Ú[™^Hˆ›Üˆ[™^[ˆ˜[™ÙJKL
+JKŸJB˜Û\ÜÈYÙ[\Q\œ›ÜŠ^Ù\[ÛŠN‚ˆYˆ×Ú[š]×ÊÙ[‹ÛÙNˆÝ‹Y\ÜØYÙNˆÝ‹]Z[ˆÝˆ›Û™HH›Û™JHOˆ›Û™N‚ˆÝ\\Š
+K—×Ú[š]×ÊY\ÜØYÙJBˆÙ[‹˜ÛÙKÙ[‹›Y\ÜØYÙKÙ[‹™]Z[HÛÙKY\ÜØYÙK]Z[‚‚žN‚ˆœ›ÛH˜Ý\ÝÛWÝÛÛÈ[\ÜÝ\ÝÛUÛÛ™YÚ\ÝžB™^Ù\[\Ü\œ›ÜŽˆÈ\™XÝ]Ûˆ™\ÙX\˜ÚX™WØYÙ[œH][˜Ú‚ˆœ›ÛHÝ\ÝÛWÝÛÛÈ[\ÜÝ\ÝÛUÛÛ™YÚ\ÝžB‚‚ÕTÕÓWÕÓÓÈHÝ\ÝÛUÛÛ™YÚ\ÝžJ“ÓÕÈ˜Ý\ÝÛK]ÛÛÈ‹YÙ[\Q\œ›Ü‹[X™NˆÛÛ™šYÝ\™YÝ\Ú×Ú\ÝÜžWÛ[Z]
+
+KÙÙÙ\[[X™HY\ÜØYÙNˆÙÊY\ÜØYÙJJB‚‚]XÛ\ÜÊœ›Þ™[UYJB˜Û\ÜÈØ[Y\˜S[ÙN‚ˆÚYˆ[ˆZYÚˆ[ˆœÎˆ›Ø]›Û™HH›Û™B‚‚]XÛ\ÜÂ˜Û\ÜÈØ[Y\˜Q]šXÙN‚ˆˆˆ[ˆYÙ[[Û›HØ[Y\˜H™XÛÜ™ˆ˜]]™WÚY[]H\È™]™\ˆÙ\šX[^™YÜˆÙÙÙYˆˆˆ‚ˆØ[Y\˜WÚYˆÝ‚ˆ˜[YNˆÝ‚ˆ˜XÚÙ[™ˆÝ‚ˆ˜]]™WÚY[]NˆÝ‚ˆ]Y[×ÚY[]NˆÝˆ›Û™Bˆ[Ù\Îˆ\VÐØ[Y\˜S[ÙK‹‹—BˆÙ[XÝYÛ[ÙNˆØ[Y\˜S[ÙH›Û™B‚‚ÐSQTWÑU’PÑT×Ð–WÓUU‘NˆXÝÝ\VÜÝ‹Ý—KØ[Y\˜Q]šXÙWHHßB‚‚™Yˆ^XÝ]X›WÛ˜[Y\Ê˜[YNˆÝŠHOˆ\VÜÝ‹‹‹—N‚ˆ™]\›ˆ
+ˆžÛ˜[Y_K™^H‹˜[YJHYˆÜË›˜[YHOH›ˆ[ÙH
+˜[YKˆžÛ˜[Y_K™^HŠB‚‚ÓÓTÓ‘S•ÎˆXÝÜÝ‹\VÝ\VÜÝ‹‹‹—K\VÜÝ‹‹‹—WWHHÂˆž]Žˆ
+^XÝ]X›WÛ˜[Y\Êž]YŠK
+‹K]™\œÚ[Ûˆ‹
+JKˆ™[›ÈŽˆ
+^XÝ]X›WÛ˜[Y\Ê™[›ÈŠK
+‹K]™\œÚ[Ûˆ‹
+JKˆ™™›\YÈŽˆ
+^XÝ]X›WÛ˜[Y\Ê™™›\YÈŠK
+‹]™\œÚ[Ûˆ‹
+JKˆ™™œ›Ø™HŽˆ
+^XÝ]X›WÛ˜[Y\Ê™™œ›Ø™HŠK
+‹]™\œÚ[Ûˆ‹
+JKˆ˜ÛÝY›\™YŽˆ
+^XÝ]X›WÛ˜[Y\Ê˜ÛÝY›\™YŠK
+‹K]™\œÚ[Ûˆ‹
+JKŸBÓÓTÓ‘S•ÓP‘SÈHÈž]Žˆž]Y‹™[›ÈŽˆ‘[›È‹™™›\YÈŽˆ™™›\YÈ‹™™œ›Ø™HŽˆ™™œ›Ø™H‹˜ÛÝY›\™YŽˆ˜ÛÝY›\™Y‹ž[Ý]X™TÕÚÙ[”›ÝšY\ˆŽˆ–[ÝUX™HË]ÚÙ[ˆ›ÝšY\ˆŸBÓÓTÓ‘S•ÕÓÓÑT‘PÕÔ’QTÈHÈž]Žˆž]Y‹™[›ÈŽˆ™[›È‹™™›\YÈŽˆ™™›\YÈ‹™™œ›Ø™HŽˆ™™›\YÈ‹˜ÛÝY›\™YŽˆ˜ÛÝY›\™YŸB”P“P×ÕS“‘SÕT“ˆÝˆ›Û™HH›Û™B”P“P×ÕS“‘SÔ“ÐÑTÔÎˆ\Þ[˜Ú[ËœÝXœ›ØÙ\ÜË”›ØÙ\ÜÈ›Û™HH›Û™B”P“P×ÕS“‘SÔ‘PQHH\Þ[˜Ú[Ë‘]™[
+
+B”P“P×ÕS“‘SÕÐUÒT”Îˆ\ÝØ\Þ[˜Ú[Ë•\ÚÖÓ›Û™WWHH×B”P“P×ÔÒT‘WÔÑT•‘TŽˆ\Þ[˜Ú[ËXœÝ˜XÝÙ\™\ˆ›Û™HH›Û™B”P“P×ÔÒT‘WÑ“ÓTŽˆ™\ÛÛ™YÛÜšÜÜXÙT]›Û™HH›Û™B”P“P×ÔÒT‘WÑ’SNˆ™\ÛÛ™YÛÜšÜÜXÙT]›Û™HH›Û™B”P“P×ÔÒT‘WÑ’SWÕTTÎˆ\VÜÝ‹‹‹—HH
+
+B”P“P×ÔÒT‘WÑVT“SÔ“Ð‘NˆXÝÜÝ‹[žWHHÈœÝ]HŽˆ››ÝÜ™\]Y\ÝY‹œ›ÝšY\ˆŽˆÜÜ‹››‹œ›Ø™T]Žˆ›Û™KšÝ]\ÈŽˆ›Û™K˜ÛÛ[\HŽˆ›Û™_B”P“P×ÔÒT‘WÓÐÒÈH\Þ[˜Ú[Ë“ØÚÊ
+B”P“P×ÔÒT‘WÑ’SWÕTWÔÕQ‘’VTÎˆXÝÜÝ‹œ›Þ™[œÙ]ÜÝ—WHHÂˆš[XYÙ\ÈŽˆœ›Þ™[œÙ]
+È‹˜]šYˆ‹‹˜›\‹‹™ÚYˆ‹‹šœYÈ‹‹šœÈ‹‹œ™È‹‹œÝ™È‹‹ÙXœŸJKˆ˜]Y[ÈŽˆœ›Þ™[œÙ]
+È‹˜XXÈ‹‹™›XÈ‹‹›MH‹‹›\È‹‹›ÙÙÈ‹‹›Ü\È‹‹Ø]ˆ‹‹ÙX˜HŸJKˆšY[ÈŽˆœ›Þ™[œÙ]
+È‹˜]šH‹‹›Mˆ‹‹›ZÝˆ‹‹›[Ýˆ‹‹›\‹‹›\YÈ‹‹›\È‹‹ÙX›HŸJKˆ™ØÝ[Y[ÈŽˆœ›Þ™[œÙ]
+È‹˜ÜÝˆ‹‹š[‹‹šH‹‹šœÛÛˆ‹‹›Y‹‹œˆ‹‹œˆ‹‹^‹‹‹‹ž[ŸJKˆ˜\˜Ú]™\ÈŽˆœ›Þ™[œÙ]
+È‹Þˆ‹‹˜žŒˆ‹‹™Þˆ‹‹œ˜\ˆ‹‹\ˆ‹‹žˆ‹‹žš\ŸJKŸB”P“P×ÔÒT‘WÑ’SWÕTWÓSQTÈHœ›Þ™[œÙ]
+
+
+”P“P×ÔÒT‘WÑ’SWÕTWÔÕQ‘’VTË›Ý\ˆ‹˜[ŠJB‚‚]XÛ\ÜÊœ›Þ™[UYJB˜Û\ÜÈÛÛ\Û™[\ØÛÝ™\žN‚ˆÛÝ\˜ÙNˆÝˆ›Û™Bˆ^XÝ]X›NˆÝˆ›Û™Bˆ\œ›ÜŽˆÝˆ›Û™HH›Û™B‚‚™YˆÙÊY\ÜØYÙNˆÝ‹
+‹\œ›ÜŽˆ›ÛÛH˜[ÙKÛÛÜŽˆÝˆ›Û™HH›Û™JHOˆ›Û™N‚ˆ™Yš^H]][YK››ÝÊ
+KœÝ™[YJ–ÉR‰SN‰T×HŠBˆÝ™X[HHÞ\ËœÝ\œˆYˆ\œ›Üˆ[ÙHÞ\ËœÝÝ]ˆ[™HHˆžÜ™Yš^HÉÑT”“Ôˆ	ÈYˆ\œ›Üˆ[ÙH	Éß^ÛY\ÜØYÙ_H‚ˆÈÙY\™Y\™XÝYÙÜÈZ[‹Ú[HXZÚ[™ÈHš\œÝ[\˜XÝ]™HÝ\\ˆÈ[™HX\ÞHÈÜÝ[ˆHYÙ[ÛÛœÛÛK‚ˆYˆÛÛÜˆOHœ™Yˆ[™Ý™X[Kš\Ø]J
+N‚ˆ[™HHˆ—X–ÌÌ[^Û[™_WX–ÌH‚ˆš[
+[™Kš[O\Ý™X[K›\ÚUYJB‚‚™YˆÛX\—ØÛÛœÛÛJ
+HOˆ›Û™N‚ˆˆˆÛX\ˆ[ˆ[\˜XÝ]™H\›Z[˜[™Y›Ü™HHYÙ[š[È]ÈÝ\\X[ˆˆˆ‚ˆYˆ›ÝÞ\ËœÝÝ]š\Ø]J
+N‚ˆ™]\›‚ˆžN‚ˆÜËœÞ\Ý[J˜ÛÈˆYˆÜË›˜[YHOH›ˆ[ÙH˜ÛX\ˆŠBˆ^Ù\ÔÑ\œ›ÜŽ‚ˆ\ÜÂ‚‚™Yˆ]×Û›ÝÊ
+HOˆÝŽ‚ˆ™]\›ˆ]][YK››ÝÊ[Y^›Û™K]ÊKš\ÛÙ›Ü›X]
+[Y\ÜXÏH›Z[\ÙXÛÛ™ÈŠKœ™\XÙJŠÌŒ‹–ˆŠB‚‚™Yˆ™XYØYÙ[ØÛÛ™šYÊ
+HOˆXÝÜÝ‹[žWN‚ˆˆˆ•[Ü˜\Y]X›H˜[YKØÛÛ[Y[[šY\È]HÚ[™ÛHÛÛ™šYÝ\˜][Ûˆ›Ý[™\žKˆˆˆ‚ˆžN‚ˆØÝ[Y[HœÛÛ‹›ØYÊÓÓ‘’Q×ÔUœ™XYÝ^
+[˜ÛÙ[™ÏH]‹NŠJBˆ^Ù\
+ÔÑ\œ›Ü‹œÛÛ‹’”ÓÓ‘XÛÙQ\œ›ÜŠH\È\œ›ÜŽ‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠÓÓ‘’Q×ÒS•SQ‹˜YÙ[XÛÛ™šYËšœÛÛˆÛÝ[›Ý™H™XY\È”ÓÓ‹ˆŠHœ›ÛH\œ›Ü‚ˆYˆ›Ý\Ú[œÝ[˜ÙJØÝ[Y[XÝ
+N‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠÓÓ‘’Q×ÒS•SQ‹˜YÙ[XÛÛ™šYËšœÛÛˆ]\ÝÛÛZ[ˆ[ˆØš™XÝˆŠB‚ˆYˆÙ][™Ê[žNˆ[žK˜[YNˆÝŠHOˆ[žN‚ˆYˆ›Ý\Ú[œÝ[˜ÙJ[žKXÝ
+HÜˆ˜[YHˆ›Ý[ˆ[žHÜˆÙ]
+[žJHHÈ˜[YH‹˜ÛÛ[Y[ŸN‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠÓÓ‘’Q×ÒS•SQ‹ˆžÛ˜[Y_H]\Ý™H[ˆØš™XÝÛÛZ[š[™È˜[YH[™[ˆÜ[Û˜[ÛÛ[Y[ˆŠBˆYˆ˜ÛÛ[Y[ˆ[ˆ[žH[™›Ý\Ú[œÝ[˜ÙJ[žVÈ˜ÛÛ[Y[—KÝŠN‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠÓÓ‘’Q×ÒS•SQ‹ˆžÛ˜[Y_K˜ÛÛ[Y[]\Ý™H^ˆŠBˆ™]\›ˆ[žVÈ˜[YH—B‚ˆ™\Ý[HßBˆ›Üˆ˜[YK[žH[ˆØÝ[Y[š][\Ê
+N‚ˆYˆ˜[YHOH›[Z]ÈŽ‚ˆYˆ›Ý\Ú[œÝ[˜ÙJ[žKXÝ
+N‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠÓÓ‘’Q×ÒS•SQ‹›[Z]È[ˆYÙ[XÛÛ™šYËšœÛÛˆ]\Ý™H[ˆØš™XÝˆŠBˆ™\Ý[Û˜[YWHHÚÙ^NˆÙ][™Ê˜[YKˆ›[Z]ËžÚÙ^_HŠH›ÜˆÙ^K˜[YH[ˆ[žKš][\Ê
+_Bˆ[ÙN‚ˆ™\Ý[Û˜[YWHHÙ][™Ê[žK˜[YJBˆ™]\›ˆ™\Ý[‚‚™YˆÛÛ™šYÝ\™YÜÜ
+
+HOˆ[‚ˆžN‚ˆÜH™XYØYÙ[ØÛÛ™šYÊ
+K™Ù]
+œÜŠBˆYˆ\Ú[œÝ[˜ÙJÜ[
+H[™›Ý\Ú[œÝ[˜ÙJÜ›ÛÛ
+H[™HHÜHMLÍN‚ˆ™]\›ˆÜˆ^Ù\YÙ[\Q\œ›ÜŽ‚ˆ\ÜÂˆ™]\›ˆQUSÔÔ•‚‚™YˆÛÛ™šYÝ\™YÝÛÜšÜÜXÙWÜ]
+
+HOˆ]‚ˆˆˆ”™\ÛÛ™HH\ÝYØØ[Ù][™ÈÛ˜ÙH\ˆ[‹™Y›Ü™HÛÜšÜÜXÙHKÓËˆˆˆ‚ˆ˜[YHH™XYØYÙ[ØÛÛ™šYÊ
+K™Ù]
+ÛÜšÜÜXÙT]‹ÛÜšÜÜXÙHŠBˆYˆ›Ý\Ú[œÝ[˜ÙJ˜[YKÝŠHÜˆ›Ý˜[YKœÝš\
+
+HÜˆ—ˆ[ˆ˜[YN‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠÓÓ‘’Q×ÒS•SQ‹ÛÜšÜÜXÙT]]\Ý™HH›Û‹Y[\H\™XÝÜžH]ˆŠBˆžN‚ˆ]H]
+˜[YKœÝš\
+
+JBˆ™]\›ˆ
+]Yˆ]š\×ØXœÛÛ]J
+H[ÙH“ÓÕÈ]
+Kœ™\ÛÛ™J
+Bˆ^Ù\
+ÔÑ\œ›Ü‹˜[YQ\œ›Ü‹[[YQ\œ›ÜŠH\È\œ›ÜŽ‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠÓÓ‘’Q×ÒS•SQ‹ÛÜšÜÜXÙT]ÛÝ[›Ý™H™\ÛÛ™YˆŠHœ›ÛH\œ›Ü‚‚‚™YˆÝ\\ÝÛÜšÜÜXÙWÜ]
+
+HOˆ]‚ˆˆˆ\ÚÈÛ›H›Üˆ[ˆ^XÚ]H[œÙ]›ÛÝ[™\œÚ\ÝHÚÚXÙHØØ[Kˆˆˆ‚ˆÛÛ™šYÈH™XYØYÙ[ØÛÛ™šYÊ
+Bˆ˜[YHHÛÛ™šYË™Ù]
+ÛÜšÜÜXÙT]‹ÛÜšÜÜXÙHŠBˆYˆ›Ý\Ú[œÝ[˜ÙJ˜[YKÝŠN‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠÓÓ‘’Q×ÒS•SQ‹ÛÜšÜÜXÙT]]\Ý™H^ˆŠBˆYˆ˜[YKœÝš\
+
+N‚ˆ™]\›ˆÛÛ™šYÝ\™YÝÛÜšÜÜXÙWÜ]
+
+BˆY˜][H
+“ÓÕÈÛÜšÜÜXÙHŠKœ™\ÛÛ™J
+BˆžN‚ˆÚÜÙ[ˆH[œ]
+ˆ•ÛÜšÜÜXÙH›Û\ˆÞÙY˜][WNˆŠKœÝš\
+
+HÜˆÛÜšÜÜXÙH‚ˆ^Ù\
+SÑ‘\œ›Ü‹Ù^X›Ø\™[\œ\
+H\È\œ›ÜŽ‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠ•ÓÔ’ÔÔPÑWÔÑUTÔ‘TURT‘Q‹”Ù]ÛÜšÜÜXÙT][ˆYÙ[XÛÛ™šYËšœÛÛˆÜˆÝ\HYÙ[[ˆ[ˆ[\˜XÝ]™H\›Z[˜[ˆŠHœ›ÛH\œ›Ü‚ˆYˆ—ˆ[ˆÚÜÙ[Ž‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠÓÓ‘’Q×ÒS•SQ‹ÛÜšÜÜXÙT]]\Ý™HH˜[Y\™XÝÜžH]ˆŠBˆ]H]
+ÚÜÙ[ŠBˆ]H
+]Yˆ]š\×ØXœÛÛ]J
+H[ÙH“ÓÕÈ]
+Kœ™\ÛÛ™J
+Bˆ]›ZÙ\Š\™[ÏUYK^\ÝÛÚÏUYJBˆØÝ[Y[HœÛÛ‹›ØYÊÓÓ‘’Q×ÔUœ™XYÝ^
+[˜ÛÙ[™ÏH]‹NŠJBˆ[žHHØÝ[Y[™Ù]
+ÛÜšÜÜXÙT]‹ßJBˆØÝ[Y[ÈÛÜšÜÜXÙT]—HHÊŠ™[žK˜[YHŽˆÚÜÙ[ŸBˆÈ™\XÙHÛ›HHÛÛ™šYÝ\˜][ÛˆY\ˆÜš][™ÈHÛÛ\]H”ÓÓˆØÝ[Y[‚ˆ[\Ü˜\žHH›Û™BˆžN‚ˆÚ][\š[K“˜[YY[\Ü˜\žQš[J[ÙOHÈ‹[˜ÛÙ[™ÏH]‹N‹\PÓÓ‘’Q×ÔUœ\™[™Yš^H‹˜YÙ[XÛÛ™šYËH‹ÝY™š^H‹\‹[]OQ˜[ÙJH\ÈÝ™X[N‚ˆ[\Ü˜\žHH]
+Ý™X[K›˜[YJBˆœÛÛ‹™[\
+ØÝ[Y[Ý™X[K[œÝ\™WØ\ØÚZOQ˜[ÙK[™[LŠBˆÝ™X[KÜš]J—ˆŠBˆ[\Ü˜\žKœ™\XÙJÓÓ‘’Q×ÔU
+Bˆš[˜[N‚ˆYˆ[\Ü˜\žH\È›Ý›Û™N‚ˆ[\Ü˜\žK[›[šÊZ\ÜÚ[™×ÛÚÏUYJBˆ™]\›ˆ]‚‚™YˆÛÛ™šYÝ\™YÝÛÛÛ[Z]Ê
+HOˆXÝÜÝ‹[N‚ˆˆˆ”™XYHÚ[™ÛH\Ù\ˆÛÛ™šYÈÛˆ[X[™ÛÈY]È\HÈH™^Ø[ˆˆˆ‚ˆÛÛ™šYÈH™XYØYÙ[ØÛÛ™šYÊ
+Bˆ˜[Y\ÈHÛÛ™šYË™Ù]
+›[Z]È‹ßJBˆYˆ›Ý\Ú[œÝ[˜ÙJ˜[Y\ËXÝ
+N‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠÓÓ‘’Q×ÒS•SQ‹›[Z]È[ˆYÙ[XÛÛ™šYËšœÛÛˆ]\Ý™H[ˆØš™XÝˆŠBˆ™\Ý[HXÝ
+QUSÕÓÓÓSRUÊBˆ›Üˆ˜[YK˜[YH[ˆ˜[Y\Ëš][\Ê
+N‚ˆYˆ˜[YH›Ý[ˆ™\Ý[‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠÓÓ‘’Q×ÒS•SQ‹ˆ›[Z]ËžÛ˜[Y_H\È›ÝHÝ\ÜYÙ][™ËˆŠBˆYˆ\Ú[œÝ[˜ÙJ˜[YK›ÛÛ
+HÜˆ›Ý\Ú[œÝ[˜ÙJ˜[YK[
+HÜˆ›ÝHH˜[YHHÓÓÓSRUÐÑRSS‘ÔÖÛ˜[YWN‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠÓÓ‘’Q×ÒS•SQ‹ˆ›[Z]ËžÛ˜[Y_H]\Ý™H[ˆ[YÙ\ˆœ›ÛHHÈÕÓÓÓSRUÐÑRSS‘ÔÖÛ˜[YW_KˆŠBˆ™\Ý[Û˜[YWHH˜[YBˆ™]\›ˆ™\Ý[‚‚™YˆÛÛ™šYÝ\™YÝ\Ú×Ú\ÝÜžWÛ[Z]
+
+HOˆ[‚ˆÈÛX[\]\Ý™[XZ[ˆ›Ý[™Y]™[ˆÚ[HH\Ù\ˆ\ÈY][™È[˜[Y”ÓÓ‹‚ˆžN‚ˆ™]\›ˆÛÛ™šYÝ\™YÝÛÛÛ[Z]Ê
+VÈ˜ÛÛ\]Y\ÚÒ\ÝÜžS[Z]—Bˆ^Ù\YÙ[\Q\œ›ÜŽ‚ˆ™]\›ˆQUSÕÓÓÓSRUÖÈ˜ÛÛ\]Y\ÚÒ\ÝÜžS[Z]—B‚‚™YˆÛÛ™šYÝ\™YÛ™]×ÝÛÛ×ÙY˜][
+
+HOˆ›ÛÛ‚ˆ˜[YHH™XYØYÙ[ØÛÛ™šYÊ
+K™Ù]
+›™]ÕÛÛÑ[˜X›YžQY˜][‹YJBˆYˆ›Ý\Ú[œÝ[˜ÙJ˜[YK›ÛÛ
+N‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠÓÓ‘’Q×ÒS•SQ‹›™]ÕÛÛÑ[˜X›YžQY˜][]\Ý™HH›ÛÛX[‹ˆŠBˆ™]\›ˆ˜[YB‚‚™YˆÛÛ™šYÝ\™YØÛÛ\ÜÙ\—Ø]]×ÜÙ[™Ý[Y[Ý]
+
+HOˆ[‚ˆ˜[YHH™XYØYÙ[ØÛÛ™šYÊ
+K™Ù]
+˜ÛÛ\ÜÙ\]]ÔÙ[™[Y[Ý]ÙXÛÛ™È‹Œ
+BˆYˆ\Ú[œÝ[˜ÙJ˜[YK›ÛÛ
+HÜˆ›Ý\Ú[œÝ[˜ÙJ˜[YK[
+HÜˆ›ÝHH˜[YHHÍŒ‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠÓÓ‘’Q×ÒS•SQ‹˜ÛÛ\ÜÙ\]]ÔÙ[™[Y[Ý]ÙXÛÛ™È]\Ý™H[ˆ[YÙ\ˆœ›ÛHHÈÍŒˆŠBˆ™]\›ˆ˜[YB‚‚™YˆÛÛ™šYÝ\™YØÛÛ\ÜÙ\—ÛYYXWÜ™]žJ
+HOˆXÝÜÝ‹[N‚ˆÛÛ™šYÈH™XYØYÙ[ØÛÛ™šYÊ
+Bˆ™\Ý[HßBˆ›Üˆ˜[YKY˜][X^[][H[ˆÊ˜ÛÛ\ÜÙ\“YYXT™]žPÛÝ[‹MKÌ
+K
+˜ÛÛ\ÜÙ\“YYXT™]žR[\˜[ÙXÛÛ™È‹‹Œ
+WN‚ˆ˜[YHHÛÛ™šYË™Ù]
+˜[YKY˜][
+BˆYˆ\Ú[œÝ[˜ÙJ˜[YK›ÛÛ
+HÜˆ›Ý\Ú[œÝ[˜ÙJ˜[YK[
+HÜˆ›ÝHH˜[YHHX^[][N‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠÓÓ‘’Q×ÒS•SQ‹ˆžÛ˜[Y_H]\Ý™H[ˆ[YÙ\ˆœ›ÛHHÈÛX^[][_KˆŠBˆ™\Ý[Èœ™]žPÛÝ[ˆYˆ˜[YHOH˜ÛÛ\ÜÙ\“YYXT™]žPÛÝ[ˆ[ÙHœ™]žR[\˜[ÙXÛÛ™È—HH˜[YBˆ™]\›ˆ™\Ý[‚‚™YˆÛÛ™šYÝ\™YØœ›ÝÜÙ\—ÜÝYWÙ]Z[YÛÙÙÚ[™Ê
+HOˆ›ÛÛ‚ˆ˜[YHH™XYØYÙ[ØÛÛ™šYÊ
+K™Ù]
+˜œ›ÝÜÙ\”ÝYQ]Z[YÙÙÚ[™È‹YJBˆYˆ›Ý\Ú[œÝ[˜ÙJ˜[YK›ÛÛ
+N‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠÓÓ‘’Q×ÒS•SQ‹˜œ›ÝÜÙ\”ÝYQ]Z[YÙÙÚ[™È]\Ý™HH›ÛÛX[‹ˆŠBˆ™]\›ˆ˜[YB‚‚™YˆÛÛ™šYÝ\™YØœ›ÝÜÙ\—ÜÝYWÙÜ›Ý\ÝXœÊ
+HOˆ›ÛÛ‚ˆ˜[YHH™XYØYÙ[ØÛÛ™šYÊ
+K™Ù]
+˜œ›ÝÜÙ\”ÝYQÜ›Ý\XœÈ‹YJBˆYˆ›Ý\Ú[œÝ[˜ÙJ˜[YK›ÛÛ
+N‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠÓÓ‘’Q×ÒS•SQ‹˜œ›ÝÜÙ\”ÝYQÜ›Ý\XœÈ]\Ý™HH›ÛÛX[‹ˆŠBˆ™]\›ˆ˜[YB‚‚™YˆÛÛ™šYÝ\™YØœ›ÝÜÙ\—ÜÝYWÛØœÙ\˜][ÛŠ
+HOˆXÝÜÝ‹[N‚ˆÛÛ™šYÈH™XYØYÙ[ØÛÛ™šYÊ
+Bˆ™\Ý[HßBˆ›Üˆ˜[YKÝ]]Y˜][Z[š[][KX^[][H[ˆÂˆ
+˜œ›ÝÜÙ\”ÝYSX^›Ù\È‹›X^›Ù\È‹ŒKL
+Kˆ
+˜œ›ÝÜÙ\”ÝYSX^Ú\œÈ‹›X^Ú\œÈ‹LL
+KˆN‚ˆ˜[YHHÛÛ™šYË™Ù]
+˜[YKY˜][
+BˆYˆ\Ú[œÝ[˜ÙJ˜[YK›ÛÛ
+HÜˆ›Ý\Ú[œÝ[˜ÙJ˜[YK[
+HÜˆ›ÝZ[š[][HH˜[YHHX^[][N‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠÓÓ‘’Q×ÒS•SQ‹ˆžÛ˜[Y_H]\Ý™H[ˆ[YÙ\ˆœ›ÛHÛZ[š[][_HÈÛX^[][_KˆŠBˆ™\Ý[ÛÝ]]HH˜[YBˆ™]\›ˆ™\Ý[‚‚™YˆÛÛ™šYÝ\™YÛYYXWÝÚYÙ]Ú[™ÚZÙWÝ[Y[Ý]
+
+HOˆ[‚ˆ˜[YHH™XYØYÙ[ØÛÛ™šYÊ
+K™Ù]
+›YYXUÚYÙ][™ÚZÙU[Y[Ý]ÙXÛÛ™È‹L
+BˆYˆ\Ú[œÝ[˜ÙJ˜[YK›ÛÛ
+HÜˆ›Ý\Ú[œÝ[˜ÙJ˜[YK[
+HÜˆ›ÝHH˜[YHHÌ‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠÓÓ‘’Q×ÒS•SQ‹›YYXUÚYÙ][™ÚZÙU[Y[Ý]ÙXÛÛ™È]\Ý™H[ˆ[YÙ\ˆœ›ÛHHÈÌˆŠBˆ™]\›ˆ˜[YB‚‚™YˆÛÛ™šYÝ\™YÝš\ÝX[ÛX\Ý[Y\Ý[\Ù›Û
+
+HOˆÝŽ‚ˆˆˆ”™]\›ˆHÛÛ™šYÝ\™Y›Ûš[[˜[YK™]™\ˆH]Ý]ÚYHÛÛËÙ›ÛËˆˆˆ‚ˆžN‚ˆ˜[YHH™XYØYÙ[ØÛÛ™šYÊ
+K™Ù]
+š\ÝX[X\[Y\Ý[\›Û‹QUSÕ’TÕPSÓPTÕSQTÕSTÑ“Ó•
+Bˆ^Ù\YÙ[\Q\œ›ÜŽ‚ˆ™]\›ˆQUSÕ’TÕPSÓPTÕSQTÕSTÑ“Ó•ˆYˆ›Ý\Ú[œÝ[˜ÙJ˜[YKÝŠHÜˆ›Ý˜[YHÜˆ‹Èˆ[ˆ˜[YHÜˆ—ˆ[ˆ˜[YHÜˆ]
+˜[YJK›˜[YHOH˜[YHÜˆ]
+˜[YJKœÝY™š^›ÝÙ\Š
+H›Ý[ˆÈ‹ˆ‹‹›ÝˆŸN‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠ•’TÕPSÓPTÕSQTÕSTÑ“Ó•ÒS•SQ‹š\ÝX[X\[Y\Ý[\›Û]\Ý™HHˆÜˆ›Ýˆš[[˜[YHœ›ÛHÛÛËÙ›ÛËˆŠBˆ™]\›ˆ˜[YB‚‚™YˆÛÜšÜÜXÙWÚX[
+
+HOˆXÝÜÝ‹Ýˆ[›Û™WN‚ˆžN‚ˆÓÔ’ÔÔPÑWÔU›ZÙ\Š\™[ÏUYK^\ÝÛÚÏUYJBˆ™]\›ˆÈœÝ]\ÈŽˆ˜]˜Z[X›H‹˜]˜Z[X›Pž]\ÈŽˆÚ][™\Ú×Ý\ØYÙJÓÔ’ÔÔPÑWÔU
+K™œ™Y_Bˆ^Ù\ÔÑ\œ›Üˆ\È\œ›ÜŽ‚ˆÙÊˆÛÜšÜÜXÙHX[ÚXÚÈ˜Z[Y]ÕÓÔ’ÔÔPÑWÔUNˆÙ\œ›Ü‹—×ØÛ\Ü××Ë—×Û˜[YW×ßH‹\œ›ÜUYJBˆ™]\›ˆÈœÝ]\ÈŽˆ™\œ›Üˆ‹˜]˜Z[X›Pž]\ÈŽˆ›Û™_B‚‚™YˆØØ[Ù^XÝ]X›J]ˆ]›ÛÝˆ]
+HOˆ]›Û™N‚ˆˆˆXØÙ\Hš[HÛ›HÚ[ˆ]Ý^\È[œÚYHH\ÚYÛ˜]YYÙ[\™XÝÜžKˆˆˆ‚ˆžN‚ˆ™\ÛÛ™YH]œ™\ÛÛ™JÝšXÝUYJBˆ™\ÛÛ™Yœ™[]]™WÝÊ›ÛÝœ™\ÛÛ™J
+JBˆ™]\›ˆ™\ÛÛ™YYˆ™\ÛÛ™Yš\×Ùš[J
+H[ÙH›Û™Bˆ^Ù\
+ÔÑ\œ›Ü‹˜[YQ\œ›ÜŠN‚ˆ™]\›ˆ›Û™B‚‚™Yˆ[š\]YWÛØØ[ÛX]Ú\Ê]Îˆ\ÝÔ]K›ÛÝˆ]
+HOˆ\ÝÔ]N‚ˆX]Ú\ÎˆXÝÜÝ‹]HHßBˆ›Üˆ][ˆ]Î‚ˆ™\ÛÛ™YHØØ[Ù^XÝ]X›J]›ÛÝ
+BˆYˆ™\ÛÛ™Y\È›Ý›Û™N‚ˆX]Ú\ÖÜÝŠ™\ÛÛ™Y
+WHH™\ÛÛ™Yˆ™]\›ˆÛX]Ú\ÖÚÙ^WH›ÜˆÙ^H[ˆÛÜY
+X]Ú\ÊWB‚‚™Yˆš[™ØÛÛ\Û™[
+˜[YNˆÝ‹Ø[™Y]\Îˆ\VÜÝ‹‹‹—JHOˆÛÛ\Û™[\ØÛÝ™\žN‚ˆˆˆ”™\ÛÛ™HHÛ›ÝÛˆØØ[ÛÛÈ^[Ý]™Y›Ü™HU‚‚ˆÝ\YY\˜Ú]™\ÈX^HÙY\Z\ˆÝÛˆÜ[]™[\™XÝÜšY\ËˆÙX\˜ÚÛ›HBˆ\ÚYÛ˜]YÛÛ\Û™[\™XÝÜžH[™\ˆÛÛËË™XÝ\œÚ]™[Kˆ\ÈÝ\ÜÂˆÜ™[˜\žH^˜XÝY\˜Ú]™\ÈÚ]Ý]]™\ˆÙX\˜Ú[™ÈH\Ù\‰ÜÈ\ÚËˆXXÚˆ™\ÛÛ™Yš[H\È[ÛÈÚXÚÙYÈ™[XZ[ˆ[œÚYHÛÛËÎÈÞ[[[šÜÈØ[››Ý\›‚ˆH›Ý[™Y˜]™\œØ[[ÈH]\ØØ\K‚ˆˆˆ‚ˆÛÛÙ\™XÝÜžHHÓÓ×ÔUÈÓÓTÓ‘S•ÕÓÓÑT‘PÕÔ’QTÖÛ˜[YWBˆ\™XÝÜ]ÈHÝÛÛÙ\™XÝÜžHÈØ[™Y]H›ÜˆØ[™Y]H[ˆØ[™Y]\×Bˆš[—Ü]ÈHÝÛÛÙ\™XÝÜžHÈ˜š[ˆˆÈØ[™Y]H›ÜˆØ[™Y]H[ˆØ[™Y]\×BˆXÚØYÙWÜ]Îˆ\ÝÔ]HH×BˆžN‚ˆXÚØYÙ\ÈHÛÜY
+][H›Üˆ][H[ˆÛÛÙ\™XÝÜžKš]\™\Š
+HYˆ][Kš\×Ù\Š
+H[™›Ý][Kš\×ÜÞ[[[šÊ
+JBˆ^Ù\ÔÑ\œ›ÜŽ‚ˆXÚØYÙ\ÈH×Bˆ›ÜˆXÚØYÙH[ˆXÚØYÙ\Î‚ˆXÚØYÙWÜ]Ë™^[™
+XÚØYÙHÈØ[™Y]H›ÜˆØ[™Y]H[ˆØ[™Y]\ÊBˆXÚØYÙWÜ]Ë™^[™
+XÚØYÙHÈ˜š[ˆˆÈØ[™Y]H›ÜˆØ[™Y]H[ˆØ[™Y]\ÊB‚ˆ™XÝ\œÚ]™WÜ]Îˆ\ÝÔ]HH×BˆžN‚ˆ›ÜˆØ[™Y]H[ˆØ[™Y]\Î‚ˆ™XÝ\œÚ]™WÜ]Ë™^[™
+ÛÛÙ\™XÝÜžKœ™ÛØŠØ[™Y]JJBˆ^Ù\ÔÑ\œ›ÜŽ‚ˆ\ÜÂ‚ˆ›Üˆ]È[ˆ
+\™XÝÜ]Ëš[—Ü]ËXÚØYÙWÜ]Ë™XÝ\œÚ]™WÜ]ÊN‚ˆX]Ú\ÈH[š\]YWÛØØ[ÛX]Ú\Ê]ËÓÓ×ÔU
+BˆYˆ[ŠX]Ú\ÊHOHN‚ˆ™]\›ˆÛÛ\Û™[\ØÛÝ™\žJ›ØØ[‹ÝŠX]Ú\ÖÌJJBˆYˆ[ŠX]Ú\ÊHˆN‚ˆ™]\›ˆÛÛ\Û™[\ØÛÝ™\žJˆ›ØØ[‹›Û™Kˆˆ“][\HÐÓÓTÓ‘S•ÓP‘SÖÛ˜[YW_H^XÝ]X›\ÈÙ\™H›Ý[™[ˆHØØ[ÛÛÈ›Û\‹ˆÙY\Û™HXÚØYÙH\™Kˆ‹ˆ
+B‚ˆ›ÜˆØ[™Y]H[ˆØ[™Y]\Î‚ˆ™\ÛÛ™YHÚ][ÚXÚ
+Ø[™Y]JBˆYˆ™\ÛÛ™Y‚ˆ™]\›ˆÛÛ\Û™[\ØÛÝ™\žJœ]‹ÝŠ]
+™\ÛÛ™Y
+Kœ™\ÛÛ™J
+JJBˆ™]\›ˆÛÛ\Û™[\ØÛÝ™\žJ›Û™K›Û™JB‚‚™Yˆ™\ÛÛ™WÙ[›×Ü[[YJ
+HOˆÝˆ›Û™N‚ˆˆˆ”™]\›ˆÛ™H^XÚ]HÛÛ™šYÝ\™YØØ[ÔU[›È^XÝ]X›KYˆ[žK‚‚ˆ[›È\ÈÜ[Û˜[›ÜˆHYÙ[]Ù[‹ˆÚ[ˆ™\Ù[]Y™XÙZ]™\ÈBˆ™\ÛÛ™Y^XÝ]X›H^XÚ]H˜]\ˆ[ˆ™[Z[™ÈÛˆ]ÈÝÛˆ›ØÙ\ÜÈU‚ˆ[ˆ[XšYÝ[Ý\ÈØØ[ÛÛÈ›Û\ˆ\ÈHÛÛ™šYÝ\˜][Ûˆ\œ›Ü‹™]™\ˆH™X\ÛÛˆÂˆÚÛÜÙH[ˆ\˜š]˜\žH^XÝ]X›K‚ˆˆˆ‚ˆ\ØÛÝ™\žHHš[™ØÛÛ\Û™[
+™[›È‹ÓÓTÓ‘S•ÖÈ™[›È—VÌJBˆYˆ\ØÛÝ™\žK™\œ›ÜŽ‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠ‘S“×ÑTÐÓÕ‘T–WÑT”“Ôˆ‹‘[›È\ØÛÝ™\žH\È[XšYÝ[Ý\Ëˆ‹\ØÛÝ™\žK™\œ›ÜŠBˆ™]\›ˆ\ØÛÝ™\žK™^XÝ]X›B‚‚™Yˆ]ÙÚœ×Ü[[YWØ\™Ý[Y[Ê[›×Ù^XÝ]X›NˆÝˆ›Û™JHOˆ\ÝÜÝ—N‚ˆˆˆZ[]\›Z[š\ÝXÈ]Y”Ë\[[YH\™Ý[Y[È›Üˆ™\ÛÛ™Y[›Ëˆˆˆ‚ˆYˆ›Ý[›×Ù^XÝ]X›N‚ˆ™]\›ˆ×BˆÈÙ[XÝH™\ÛÛ™YØØ[[›È]™[ˆYˆ[›Ý\ˆ[[YH\È™\Ù[ÛˆU‚ˆ™]\›ˆÈ‹K[›ËZœË\[[Y\È‹‹KZœË\[[Y\È‹ˆ™[›ÎžÙ[›×Ù^XÝ]X›_H—B‚‚™Yˆ[Ý]X™WÜÝÜ›ÝšY\—ÜÝ]\Ê[›×Ù^XÝ]X›NˆÝˆ›Û™HH›Û™JHOˆXÝÜÝ‹Ý—N‚ˆˆˆ‘\ØÜšX™HHX[™]ÜžHØØ[™Õ][È›ÝšY\ˆÚ]Ý]^ÜÚ[™È]Ëˆˆˆ‚ˆYˆ›ÝSÕUP‘WÔÕÔQÒS—ÔUš\×Ùš[J
+N‚ˆ™]\›ˆÈœÝ]HŽˆ››Ý[œÝ[Y‹œ›ÝšY\ˆŽˆ˜™Ý][ŸBˆYˆ›ÝSÕUP‘WÔÕÔ“Õ’QT—ÔÑT•‘T—ÔUš\×Ù\Š
+N‚ˆ™]\›ˆÈœÝ]HŽˆš[˜ÛÛ\]H‹œ›ÝšY\ˆŽˆ˜™Ý][ŸBˆYˆ›ÝSÕUP‘WÔÕÔ“Õ’QT—Ô‘PQWÔUš\×Ùš[J
+N‚ˆ™]\›ˆÈœÝ]HŽˆ››Ý™XYH‹œ›ÝšY\ˆŽˆ˜™Ý][ŸBˆYˆ[›×Ù^XÝ]X›H\È›Û™N‚ˆžN‚ˆ[›×Ù^XÝ]X›HH™\ÛÛ™WÙ[›×Ü[[YJ
+Bˆ^Ù\YÙ[\Q\œ›ÜŽ‚ˆ[›×Ù^XÝ]X›HH›Û™BˆYˆ›Ý[›×Ù^XÝ]X›N‚ˆ™]\›ˆÈœÝ]HŽˆœ[[YSZ\ÜÚ[™È‹œ›ÝšY\ˆŽˆ˜™Ý][ŸBˆ™]\›ˆÈœÝ]HŽˆœ™XYH‹œ›ÝšY\ˆŽˆ˜™Ý][ŸB‚‚˜\Þ[˜ÈYˆ[Ý]X™WÜÝÜ›ÝšY\—ÚX[
+
+HOˆ\VÜÝ‹XÝÜÝ‹Ýˆ›Û™WWN‚ˆˆˆ‘^ÜÙHH[œÝ[Y›ÝšY\ˆ\ÈHš\œÝXÛ\ÜÈX[™]ÜžHYÙ[ÛÛˆˆˆ‚ˆÝ]HH]ØZ]\Þ[˜Ú[Ë×Ý™XY
+[Ý]X™WÜÝÜ›ÝšY\—ÜÝ]\ÊBˆ˜\ÙHHÈœÛÝ\˜ÙHŽˆ›ØØ[‹œš]˜]T]ŽˆÝŠSÕUP‘WÔÕÔ“Õ’QT—ÔU
+_BˆYˆÝ]VÈœÝ]H—HOHœ™XYHŽ‚ˆžN‚ˆX\šÙ\ˆHœÛÛ‹›ØYÊSÕUP‘WÔÕÔ“Õ’QT—Ô‘PQWÔUœ™XYÝ^
+[˜ÛÙ[™ÏH]‹NŠJBˆ™\œÚ[ÛˆHX\šÙ\‹™Ù]
+™\œÚ[ÛˆŠHYˆ\Ú[œÝ[˜ÙJX\šÙ\‹XÝ
+H[ÙH›Û™Bˆ^Ù\
+ÔÑ\œ›Ü‹œÛÛ‹’”ÓÓ‘XÛÙQ\œ›ÜŠN‚ˆ™\œÚ[ÛˆH›Û™Bˆ™]\›ˆž[Ý]X™TÕÚÙ[”›ÝšY\ˆ‹ÈœÝ]\ÈŽˆ˜]˜Z[X›H‹™\œÚ[ÛˆŽˆ™\œÚ[ÛˆYˆ\Ú[œÝ[˜ÙJ™\œÚ[Û‹ÝŠH[ÙH˜™Ý][‹
+Š˜˜\ÙK›Y\ÜØYÙHŽˆ›Û™_BˆYˆÝ]VÈœÝ]H—HOH››Ý[œÝ[YŽ‚ˆ™]\›ˆž[Ý]X™TÕÚÙ[”›ÝšY\ˆ‹ÈœÝ]\ÈŽˆ›Z\ÜÚ[™È‹™\œÚ[ÛˆŽˆ›Û™K
+Š˜˜\ÙK›Y\ÜØYÙHŽˆ”[ˆ[œÝ[^[Ý]X™K\Ë]ÚÙ[‹\›ÝšY\‹œÌKˆŸBˆY\ÜØYÙ\ÈHÂˆš[˜ÛÛ\]HŽˆ”›ÝšY\ˆš[\È\™H[˜ÛÛ\]Kˆ[ˆ[œÝ[^[Ý]X™K\Ë]ÚÙ[‹\›ÝšY\‹œÌHYØZ[‹ˆ‹ˆ››Ý™XYHŽˆ”›ÝšY\ˆ\[™[˜ÚY\È\™H›Ý\›Ý™Yˆ™K\[ˆ[œÝ[^[Ý]X™K\Ë]ÚÙ[‹\›ÝšY\‹œÌKˆ‹ˆœ[[YSZ\ÜÚ[™ÈŽˆ‘[›È\È™\]Z\™YžHH[ÝUX™HË]ÚÙ[ˆ›ÝšY\‹ˆ‹ˆBˆ™]\›ˆž[Ý]X™TÕÚÙ[”›ÝšY\ˆ‹ÈœÝ]\ÈŽˆ™\œ›Üˆ‹™\œÚ[ÛˆŽˆ›Û™K
+Š˜˜\ÙK›Y\ÜØYÙHŽˆY\ÜØYÙ\Ë™Ù]
+Ý]VÈœÝ]H—K”›ÝšY\ˆ\È[˜]˜Z[X›KˆŠ_B‚‚™Yˆ]ÙÞ[Ý]X™WØ\™Ý[Y[Ê[›×Ù^XÝ]X›NˆÝˆ›Û™JHOˆ\ÝÜÝ—N‚ˆˆˆ•\ÙHHØ[YH[[YKØÛY[Ü›ÝšY\ˆÙ]\›Üˆ]™\žH[ÝUX™HØ[ˆˆˆ‚ˆ\™Ý[Y[ÈH]ÙÚœ×Ü[[YWØ\™Ý[Y[Ê[›×Ù^XÝ]X›JBˆ›ÝšY\ˆH[Ý]X™WÜÝÜ›ÝšY\—ÜÝ]\Ê[›×Ù^XÝ]X›JBˆYˆ›ÝšY\–ÈœÝ]H—HOHœ™XYHŽ‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠ–SÕUP‘WÔÕÔ“Õ’QT—Ó“ÕÐURSP“H‹•HX[™]ÜžH[ÝUX™HË]ÚÙ[ˆ›ÝšY\ˆ\È›Ý™XYKˆ[ˆ[œÝ[^[Ý]X™K\Ë]ÚÙ[‹\›ÝšY\‹œÌH[™™\Ý\HØØ[YÙ[ˆŠBˆYˆ›ÝšY\–ÈœÝ]H—HOHœ™XYHŽ‚ˆÈÙY\]Y	ÜÈ›Ü›X[ÛY[Ù[XÝ[Û‹ˆ›Ü˜Ú[™È]ÙXˆXZÙ\ÈHÚÙ[‚ˆÈ]ÛÜšÈÛˆÛÛYHšY[ÜÈ]Ø[ˆ™[[Ý™HYÚ\™\ÛÛ][ÛˆTÒ›Ü›X]ËˆÈÚXÚY™X]È™\ÙX\˜ÚX™IÜÈ^XÝÝ™X[HÙ[XÝ[Û‹ˆH›ÝšY\‚ˆÈÛÚÜÈ[ÈÚXÚ]™\ˆ›Ü›X[[ÝUX™HÛY[]YÙ[XÝË‚ˆ\™Ý[Y[Ë™^[™
+Âˆ‹KY^˜XÝÜ‹X\™ÜÈ‹ˆˆž[Ý]X™KX™Ý][ØÜš\œÙ\™\—ÚÛYO^ÖSÕUP‘WÔÕÔ“Õ’QT—ÔÑT•‘T—ÔUH‹ˆJBˆ™]\›ˆ\™Ý[Y[Â‚‚˜\Þ[˜ÈYˆX[Ü›ØÙ\Ü×ÛÝ]]
+ÛÛ[X[™ˆ\VÜÝ‹‹‹—K[Y[Ý]ˆ›Ø]
+HOˆ\VØž]\Ëž]\×N‚ˆˆˆ›Ý[™Û™HÝ\\›Ø™H[™™X\]È›ØÙ\ÜÈÛˆ[Y[Ý]ÜˆÚ]ÝÛ‹ˆˆˆ‚ˆ›ØÙ\ÜÈH]ØZ]\Þ[˜Ú[Ë˜Ü™X]WÜÝXœ›ØÙ\Ü×Ù^XÊˆ
+˜ÛÛ[X[™ÝÝ]X\Þ[˜Ú[ËœÝXœ›ØÙ\ÜË”TKÝ\œX\Þ[˜Ú[ËœÝXœ›ØÙ\ÜË”TKˆ
+BˆžN‚ˆÝ]]H]ØZ]\Þ[˜Ú[ËØZ]Ù›ÜŠ›ØÙ\ÜË˜ÛÛ[][šXØ]J
+K[Y[Ý]][Y[Ý]
+BˆYˆ›ØÙ\ÜËœ™]\›˜ÛÙHOH‚ˆ˜Z\ÙHÔÑ\œ›ÜŠ‘XYÛ›ÜÝXÈÝXœ›ØÙ\ÜÈ™]\›™YH›Û‹^™\›È^]ÛÙKˆŠBˆ™]\›ˆÝ]]ˆš[˜[N‚ˆYˆ›ØÙ\ÜËœ™]\›˜ÛÙH\È›Û™N‚ˆžN‚ˆ›ØÙ\ÜËšÚ[
+
+Bˆ^Ù\›ØÙ\ÜÓÛÚÝ\\œ›ÜŽ‚ˆ\ÜÂˆ]ØZ]›ØÙ\ÜËØZ]
+
+B‚‚˜\Þ[˜ÈYˆÛÛ\Û™[ÚX[
+˜[YNˆÝ‹Yš[š][ÛŽˆ\VÝ\VÜÝ‹‹‹—K\VÜÝ‹‹‹—WJHOˆ\VÜÝ‹XÝÜÝ‹Ýˆ›Û™WWN‚ˆØ[™Y]\Ë™\œÚ[Û—Ø\™ÜÈHYš[š][Û‚ˆ\ØÛÝ™\žHH]ØZ]\Þ[˜Ú[Ë×Ý™XY
+š[™ØÛÛ\Û™[˜[YKØ[™Y]\ÊBˆYˆ\ØÛÝ™\žK™\œ›ÜŽ‚ˆ™]\›ˆ˜[YKÈœÝ]\ÈŽˆ™\œ›Üˆ‹™\œÚ[ÛˆŽˆ›Û™KœÛÝ\˜ÙHŽˆ\ØÛÝ™\žKœÛÝ\˜ÙKœš]˜]T]Žˆ›Û™K›Y\ÜØYÙHŽˆ\ØÛÝ™\žK™\œ›ÜŸBˆYˆ›Ý\ØÛÝ™\žK™^XÝ]X›N‚ˆ™]\›ˆ˜[YKÈœÝ]\ÈŽˆ›Z\ÜÚ[™È‹™\œÚ[ÛˆŽˆ›Û™KœÛÝ\˜ÙHŽˆ›Û™Kœš]˜]T]Žˆ›Û™K›Y\ÜØYÙHŽˆ›Û™_BˆžN‚ˆÝÝ]Ý\œˆH]ØZ]X[Ü›ØÙ\Ü×ÛÝ]]
+
+\ØÛÝ™\žK™^XÝ]X›K
+™\œÚ[Û—Ø\™ÜÊKÊBˆÝ]]H
+ÝÝ]ÜˆÝ\œŠK™XÛÙJ]‹N‹\œ›ÜœÏHœ™\XÙHŠKœÝš\
+
+KœÜ][™\Ê
+Bˆ™]\›ˆ˜[YKÈœÝ]\ÈŽˆ˜]˜Z[X›H‹™\œÚ[ÛˆŽˆÝ]]ÌHYˆÝ]][ÙH›Û™KœÛÝ\˜ÙHŽˆ\ØÛÝ™\žKœÛÝ\˜ÙKœš]˜]T]Žˆ\ØÛÝ™\žK™^XÝ]X›K›Y\ÜØYÙHŽˆ›Û™_Bˆ^Ù\
+ÔÑ\œ›Ü‹\Þ[˜Ú[Ë•[Y[Ý]\œ›ÜŠN‚ˆ™]\›ˆ˜[YKÈœÝ]\ÈŽˆ™\œ›Üˆ‹™\œÚ[ÛˆŽˆ›Û™KœÛÝ\˜ÙHŽˆ\ØÛÝ™\žKœÛÝ\˜ÙKœš]˜]T]Žˆ\ØÛÝ™\žK™^XÝ]X›K›Y\ÜØYÙHŽˆ•™\œÚ[Ûˆ›Ø™HÛÝ[›Ý™HÛÛ\]YˆŸB‚‚ˆÈÝ\\XYÛ›ÜÝXÜÈ\™HÛÛXÝYÛ˜ÙKˆ™\]Y\Ý[™\œÈÛ›H™XY\ÙBˆÈÛ˜\ÚÝÎÈ›ÈÝXœ›ØÙ\ÜËš[\Þ\Ý[H›Ø™HÜˆ™Yœ™\Ú[œÈÛˆÚX[‚’PSÔÓTÒÕˆXÝÜÝ‹[žWH›Û™HH›Û™B”P“P×ÒPSÔÓTÒÕˆXÝÜÝ‹[žWH›Û™HH›Û™B‚‚™Yˆ[š]X[^™WÚX[ÜÛ˜\ÚÝ
+
+HOˆXÝÜÝ‹[žWN‚ˆÛØ˜[PSÔÓTÒÕP“P×ÒPSÔÓTÒÕˆÛ˜\ÚÝHÂˆœÝ]\ÈŽˆ›ÚÈ‹˜YÙ[™\œÚ[ÛˆŽˆQÑS•Õ‘T”ÒSÓ‹š[\™˜XÙU™\œÚ[ÛˆŽˆS•T‘PÑWÕ‘T”ÒSÓ‹ˆœ]›Ü›HŽˆX›X×Ü]›Ü›WÛY]Y]J
+KÛÜšÜÜXÙHŽˆÛÜšÜÜXÙWÚX[
+
+Kˆ˜ÛÛ\Û™[ÈŽˆÂˆ˜[YNˆÈœÝ]\ÈŽˆ˜ÚXÚÚ[™È‹™\œÚ[ÛˆŽˆ›Û™KœÛÝ\˜ÙHŽˆ›Û™Kˆœš]˜]T]Žˆ›Û™K›Y\ÜØYÙHŽˆ”Ý\\XYÛ›ÜÝXÈ\ÈÚXÚÚ[™È\ÈÛÛ\Û™[ˆŸBˆ›Üˆ˜[YH[ˆ
+
+ÓÓTÓ‘S•Ëž[Ý]X™TÕÚÙ[”›ÝšY\ˆŠBˆKˆ˜Ú›ÛYP]]ÛX][ÛˆŽˆÂˆœÝ]HŽˆ˜ÚXÚÚ[™È‹˜Ú›ÛYT[›š[™ÈŽˆ›Û™K˜œ›ÝÜÙ\’[œÝ[˜Ù\ÈŽˆˆ›Y\ÜØYÙHŽˆÚ›ÛYH][˜Ú›YÜÈ\™H™Z[™ÈÚXÚÙYÛ˜ÙH]YÙ[Ý\\ˆ‹ˆKˆBˆPSÔÓTÒÕHÛ˜\ÚÝˆP“P×ÒPSÔÓTÒÕHX›X×ÚX[ÙØÝ[Y[
+Û˜\ÚÝ
+Bˆ™]\›ˆÛ˜\ÚÝ‚‚˜\Þ[˜ÈYˆX[ÜÛ˜\ÚÝ
+
+HOˆXÝÜÝ‹[žWN‚ˆYˆPSÔÓTÒÕ\È›Û™N‚ˆ˜Z\ÙH[[YQ\œ›ÜŠYÙ[Ý\\X[\È›Ý™Y[ˆ[š]X[^™YˆŠBˆ™]\›ˆPSÔÓTÒÕ‚‚™YˆØXÚYÜX›X×ÚX[
+
+HOˆXÝÜÝ‹[žWN‚ˆYˆP“P×ÒPSÔÓTÒÕ\È›Û™N‚ˆ˜Z\ÙH[[YQ\œ›ÜŠYÙ[Ý\\X[\È›Ý™Y[ˆ[š]X[^™YˆŠBˆ™]\›ˆP“P×ÒPSÔÓTÒÕ‚‚˜\Þ[˜ÈYˆÛÛXÝÜÝ\\ÚX[
+Û˜\ÚÝˆXÝÜÝ‹[žWJHOˆ›Û™N‚ˆˆˆ‘š[š\ÚÛÛXYÛ›ÜÝXÜËÛÙÜÈ™Y›Ü™HHÛ™HÝË\š[Üš]HÚ›ÛYH›Ø™Kˆˆˆ‚ˆYˆX›\Ú
+
+HOˆ›Û™N‚ˆÛØ˜[P“P×ÒPSÔÓTÒÕˆYˆPSÔÓTÒÕ\ÈÛ˜\ÚÝ‚ˆP“P×ÒPSÔÓTÒÕHX›X×ÚX[ÙØÝ[Y[
+Û˜\ÚÝ
+B‚ˆ\Þ[˜ÈYˆÛÛXÝØÛÛ\Û™[
+˜[YNˆÝŠHOˆ›Û™N‚ˆžN‚ˆÛ˜[YK™\Ý[H]ØZ]
+[Ý]X™WÜÝÜ›ÝšY\—ÚX[
+
+HYˆ˜[YHOHž[Ý]X™TÕÚÙ[”›ÝšY\ˆ‚ˆ[ÙHÛÛ\Û™[ÚX[
+˜[YKÓÓTÓ‘S•ÖÛ˜[YWJJBˆ^Ù\^Ù\[ÛŽ‚ˆ™\Ý[HÈœÝ]\ÈŽˆ™\œ›Üˆ‹™\œÚ[ÛˆŽˆ›Û™KœÛÝ\˜ÙHŽˆ›Û™Kˆœš]˜]T]Žˆ›Û™K›Y\ÜØYÙHŽˆ”Ý\\ÛÛ\Û™[XYÛ›ÜÝXÈ˜Z[YˆŸBˆÛ˜\ÚÝÈ˜ÛÛ\Û™[È—VÛ˜[YWHH™\Ý[ˆX›\Ú
+
+BˆÙ×ØÛÛ\Û™[ÚX[
+˜[YK™\Ý[
+B‚ˆ\Þ[˜ÈYˆÛÛXÝØÚ›ÛYJ
+HOˆ›Û™N‚ˆžN‚ˆ™\Ý[H]ØZ]Ú›ÛYWØ]]ÛX][Û—ÜÝ]\Ê
+Bˆ^Ù\^Ù\[ÛŽ‚ˆ™\Ý[HÈœÝ]HŽˆ[šÛ›ÝÛˆ‹˜Ú›ÛYT[›š[™ÈŽˆ›Û™K˜œ›ÝÜÙ\’[œÝ[˜Ù\ÈŽˆˆ›Y\ÜØYÙHŽˆÚ›ÛYHÝ\\ÝÚ]Ú\ÈÛÝ[›Ý™HÚXÚÙYˆŸBˆÛ˜\ÚÝÈ˜Ú›ÛYP]]ÛX][Ûˆ—HH™\Ý[ˆX›\Ú
+
+B‚ˆ]ØZ]\Þ[˜Ú[Ë™Ø]\Š
+ŠÛÛXÝØÛÛ\Û™[
+˜[YJH›Üˆ˜[YH[ˆÛ˜\ÚÝÈ˜ÛÛ\Û™[È—JJBˆÙÊ”Ý\\ÚXÚÜÈÛÛ\]YˆØZ][™È›Üˆ^[œÚ[Ûˆ™\]Y\ÝËˆŠBˆÈHÛÜ˜XÚÈÙ\™\ˆ\È[™XYHÙ\š[™ËˆZY[Y\ˆH\ÝÝ\\ÙÂˆÈ™Y›Ü™HÜ]Ûš[™ÈH[œ™[]YÚ[™ÝÜËÔÝÙ\”Ú[Ú›ÛYH›ØÙ\ÜÈÚXÚË‚ˆ]ØZ]\Þ[˜Ú[ËœÛY\
+
+Bˆ]ØZ]ÛÛXÝØÚ›ÛYJ
+B‚‚™YˆX›X×Ü]›Ü›WÛY]Y]J
+HOˆXÝÜÝ‹Ý—N‚ˆˆˆ”™]\›ˆÜX›HÔÈ˜XÝÈÚ]Ý]ÜÝ\Ù\‹]Üˆ™]ÛÜšÈY[]Kˆˆˆ‚ˆ™]\›ˆÂˆ›Ü\˜][™ÔÞ\Ý[HŽˆ]›Ü›KœÞ\Ý[J
+HÜˆ•[šÛ›ÝÛˆ‹ˆœ™[X\ÙHŽˆ]›Ü›Kœ™[X\ÙJ
+HÜˆ•[šÛ›ÝÛˆ‹ˆ™\œÚ[ÛˆŽˆ]›Ü›K™\œÚ[ÛŠ
+HÜˆ•[šÛ›ÝÛˆ‹ˆ˜\˜Ú]XÝ\™HŽˆ]›Ü›K›XXÚ[™J
+HÜˆ•[šÛ›ÝÛˆ‹ˆB‚‚™YˆXY×Ø˜[›™\—Ý[šÛ›ÝÛŠY\ÜØYÙNˆÝ‹
+‹Ú›ÛYWÜ[›š[™Îˆ›ÛÛ›Û™HH›Û™JHOˆXÝÜÝ‹[žWN‚ˆˆˆ”™]\›ˆHš]˜XÞK\™\Ù\š[™È™\Ý[Ú[ˆÚ›ÛYH][˜Ú›YÜÈ\™H[˜]˜Z[X›Kˆˆˆ‚ˆ™]\›ˆÂˆ˜Ú›ÛYT[›š[™ÈŽˆÚ›ÛYWÜ[›š[™Ëˆ˜œ›ÝÜÙ\’[œÝ[˜Ù\ÈŽˆˆ˜ÛÛ™šYÝ\˜][ÛˆŽˆ[šÛ›ÝÛˆ‹ˆœ™\]Z\™YÝÚ]ÚŽˆP•Q×ÐS“‘T—ÔÕÒUÒˆ›Y\ÜØYÙHŽˆY\ÜØYÙKˆB‚‚™YˆÝ[[X\š^™WÙXY×Ø˜[›™\—Ü›ØÙ\Ü×Ü™\Ü
+™\Üˆ[žJHOˆXÝÜÝ‹[žWN‚ˆˆˆ•˜[Y]HH[X™\˜][HYÙÜ™YØ]K[Û›HÚ[™ÝÜÈ›ØÙ\ÜÈ]Y\žH™\Ý[ˆˆˆ‚ˆYˆ›Ý\Ú[œÝ[˜ÙJ™\ÜXÝ
+N‚ˆ™]\›ˆXY×Ø˜[›™\—Ý[šÛ›ÝÛŠÚ›ÛYH›ØÙ\ÜÈ[™›Ü›X][ÛˆÛÝ[›Ý™H™XYˆŠBˆÚ›ÛYWÜ[›š[™ÈH™\Ü™Ù]
+˜Ú›ÛYT[›š[™ÈŠBˆœ›ÝÜÙ\—Ú[œÝ[˜Ù\ÈH™\Ü™Ù]
+˜œ›ÝÜÙ\’[œÝ[˜Ù\ÈŠBˆ[˜X›YÚ[œÝ[˜Ù\ÈH™\Ü™Ù]
+™[˜X›Y[œÝ[˜Ù\ÈŠBˆYˆ›Ý\Ú[œÝ[˜ÙJÚ›ÛYWÜ[›š[™Ë›ÛÛ
+HÜˆ›Ý\Ú[œÝ[˜ÙJœ›ÝÜÙ\—Ú[œÝ[˜Ù\Ë[
+HÜˆ\Ú[œÝ[˜ÙJœ›ÝÜÙ\—Ú[œÝ[˜Ù\Ë›ÛÛ
+HˆÜˆ›Ý\Ú[œÝ[˜ÙJ[˜X›YÚ[œÝ[˜Ù\Ë[
+HÜˆ\Ú[œÝ[˜ÙJ[˜X›YÚ[œÝ[˜Ù\Ë›ÛÛ
+HˆÜˆœ›ÝÜÙ\—Ú[œÝ[˜Ù\ÈÜˆ[˜X›YÚ[œÝ[˜Ù\ÈÜˆ[˜X›YÚ[œÝ[˜Ù\Èˆœ›ÝÜÙ\—Ú[œÝ[˜Ù\Î‚ˆ™]\›ˆXY×Ø˜[›™\—Ý[šÛ›ÝÛŠÚ›ÛYH›ØÙ\ÜÈ[™›Ü›X][ÛˆÛÝ[›Ý™H™XYˆŠBˆYˆ›ÝÚ›ÛYWÜ[›š[™Î‚ˆ™]\›ˆXY×Ø˜[›™\—Ý[šÛ›ÝÛŠÚ›ÛYH\È›ÝÝ\œ™[H[›š[™Ëˆ‹Ú›ÛYWÜ[›š[™ÏQ˜[ÙJBˆYˆœ›ÝÜÙ\—Ú[œÝ[˜Ù\ÈOH‚ˆ™]\›ˆXY×Ø˜[›™\—Ý[šÛ›ÝÛŠÚ›ÛYH\È[›š[™Ë]]Èœ›ÝÜÙ\ˆ[œÝ[˜Ù\ÈÛÝ[›Ý™HY[YšYYˆ‹Ú›ÛYWÜ[›š[™ÏUYJBˆYˆ[˜X›YÚ[œÝ[˜Ù\ÈOHœ›ÝÜÙ\—Ú[œÝ[˜Ù\Î‚ˆÛÛ™šYÝ\˜][ÛˆH˜˜[›™\—ÜÝ\™\ÜÙY‚ˆY\ÜØYÙHHˆ[[›š[™ÈÚ›ÛYHœ›ÝÜÙ\ˆ[œÝ[˜Ù\È\ÙHÑP•Q×ÐS“‘T—ÔÕÒUÒKˆ™\ÙX\˜ÚX™HXYÙÙ\ˆÜ\˜][ÛœÈÚÝ[›ÝÚÝÈHÚ›ÛYHXYÙÚ[™È˜[›™\‹ˆ‚ˆ[Yˆ[˜X›YÚ[œÝ[˜Ù\ÈOH‚ˆÛÛ™šYÝ\˜][ÛˆH˜˜[›™\—Ù[˜X›Y‚ˆY\ÜØYÙHHˆÚ›ÛYH\È[›š[™ÈÚ]Ý]ÑP•Q×ÐS“‘T—ÔÕÒUÒKˆ™\ÙX\˜ÚX™HXYÙÙ\ˆÜ\˜][ÛœÈX^HÚÝÈHÚ›ÛYHXYÙÚ[™È˜[›™\‹ˆ‚ˆ[ÙN‚ˆÛÛ™šYÝ\˜][ÛˆH›Z^Y‚ˆY\ÜØYÙHHˆ”ÛÛYH[›š[™ÈÚ›ÛYHœ›ÝÜÙ\ˆ[œÝ[˜Ù\È\ÙHÑP•Q×ÐS“‘T—ÔÕÒUÒH[™ÛÛYHÈ›ÝˆHÚ›ÛYHXYÙÚ[™È˜[›™\ˆX^H\X\ˆ\[™[™ÈÛˆH[œÝ[˜ÙH\ÙYžH™\ÙX\˜ÚX™Kˆ‚ˆ™]\›ˆÂˆ˜Ú›ÛYT[›š[™ÈŽˆYKˆ˜œ›ÝÜÙ\’[œÝ[˜Ù\ÈŽˆœ›ÝÜÙ\—Ú[œÝ[˜Ù\Ëˆ˜ÛÛ™šYÝ\˜][ÛˆŽˆÛÛ™šYÝ\˜][Û‹ˆœ™\]Z\™YÝÚ]ÚŽˆP•Q×ÐS“‘T—ÔÕÒUÒˆ›Y\ÜØYÙHŽˆY\ÜØYÙKˆB‚‚˜\Þ[˜ÈYˆXY×Ø˜[›™\—ÜÝ]\Ê
+HOˆXÝÜÝ‹[žWN‚ˆˆˆ’[œÜXÝÛ›HYÙÜ™YØ]HÚ›ÛYH][˜ÚY›YÈÝ]H›ÜˆHÝ\œ™[™\]Y\Ý‚‚ˆHÝÙ\”Ú[ÚYH[X™\˜][H[Z]ÈÛÝ[ÈÛ›Kˆ˜]ÈÛÛ[X[™[™\ËQËˆ›Ùš[\È[™]È™]™\ˆÜ›ÜÜÈ[ÈHYÙ[™\Ý[Üˆ]ÈÛÜ˜XÚÈTK‚ˆˆˆ‚ˆYˆÜË›˜[YHOH›Ž‚ˆ™]\›ˆXY×Ø˜[›™\—Ý[šÛ›ÝÛŠÚ›ÛYHÝ\\ÝÚ]Ú\ÈØ[ˆ™HÚXÚÙYžH\È™\ÙX\˜ÚX™HYÙ[Û›HÛˆÚ[™ÝÜËˆŠBˆØÜš\H‰ÉÉÂ‰\œ›ÜXÝ[Û”™Y™\™[˜ÙHH	ÔÝÜ	Â‰Ú›ÛYHH
+Ù]PÚ[R[œÝ[˜ÙHPÛ\ÜÓ˜[YHÚ[ŒÌ—Ô›ØÙ\ÜÈQš[\ˆ“˜[YHH	ØÚ›ÛYK™^IÈŠB‰œ›ÝÜÙ\ˆH
+	Ú›ÛYHÚ\™KSØš™XÝÂˆ	ÛÛ[X[™[™HHÜÝš[™×IËÛÛ[X[™[™Bˆ	ÛÛ[X[™[™H[›ÝX]Ú	ÊÚJJÎ—ŸÊKK]\JÎ_ÊIÂŸJB‰[˜X›YH
+	œ›ÝÜÙ\ˆÚ\™KSØš™XÝÂˆ
+ÜÝš[™×IËÛÛ[X[™[™JH[X]Ú	ÊÚJJÎ—ŸÊKK\Ú[[YXYÙÙ\‹Y^[œÚ[Û‹X\JÎ—ß	
+IÂŸJB–ÜØÝ\ÝÛ[Øš™XÝPÂˆÚ›ÛYT[›š[™ÈH
+	Ú›ÛYKÛÝ[YÝ
+Bˆœ›ÝÜÙ\’[œÝ[˜Ù\ÈH	œ›ÝÜÙ\‹ÛÝ[ˆ[˜X›Y[œÝ[˜Ù\ÈH	[˜X›YÛÝ[ŸHÛÛ™\ËRœÛÛˆPÛÛ\™\ÜÂ‰ÉÉÂˆžN‚ˆÝÝ]ÜÝ\œˆH]ØZ]X[Ü›ØÙ\Ü×ÛÝ]]
+ˆ
+œÝÙ\œÚ[™^H‹‹S›Ô›Ùš[H‹‹S›Û’[\˜XÝ]™H‹‹PÛÛ[X[™‹ØÜš\
+KKˆ
+Bˆ™\ÜHœÛÛ‹›ØYÊÝÝ]™XÛÙJ]‹N\ÚYÈ‹\œ›ÜœÏHœ™\XÙHŠJBˆ™]\›ˆÝ[[X\š^™WÙXY×Ø˜[›™\—Ü›ØÙ\Ü×Ü™\Ü
+™\Ü
+Bˆ^Ù\
+ÔÑ\œ›Ü‹\Þ[˜Ú[Ë•[Y[Ý]\œ›Ü‹œÛÛ‹’”ÓÓ‘XÛÙQ\œ›ÜŠN‚ˆ™]\›ˆXY×Ø˜[›™\—Ý[šÛ›ÝÛŠÚ›ÛYH›ØÙ\ÜÈ[™›Ü›X][ÛˆÛÝ[›Ý™H™XYˆŠB‚‚˜\Þ[˜ÈYˆÚ›ÛYWØ]]ÛX][Û—ÜÝ]\Ê
+HOˆXÝÜÝ‹[žWN‚ˆˆˆ‘^ÜÙHHYÙÜ™YØ]H]]ÛX][Û‹\ÝÚ]ÚÝ]H\È\ÙˆYÙ[X[ˆˆˆ‚ˆ™\ÜH]ØZ]XY×Ø˜[›™\—ÜÝ]\Ê
+BˆÛÛ™šYÝ\˜][ÛˆH™\ÜÈ˜ÛÛ™šYÝ\˜][Ûˆ—BˆÝ]HHÂˆ˜˜[›™\—ÜÝ\™\ÜÙYŽˆ™[˜X›Y‹ˆ˜˜[›™\—Ù[˜X›YŽˆ™\ØX›Y‹ˆ›Z^YŽˆ›Z^Y‹ˆ[šÛ›ÝÛˆŽˆ[šÛ›ÝÛˆ‹ˆVØÛÛ™šYÝ\˜][Û—Bˆ™]\›ˆÂˆœÝ]HŽˆÝ]Kˆ˜Ú›ÛYT[›š[™ÈŽˆ™\ÜÈ˜Ú›ÛYT[›š[™È—Kˆ˜œ›ÝÜÙ\’[œÝ[˜Ù\ÈŽˆ™\ÜÈ˜œ›ÝÜÙ\’[œÝ[˜Ù\È—Kˆ›Y\ÜØYÙHŽˆ™\ÜÈ›Y\ÜØYÙH—KˆB‚‚™YˆX›X×ÚX[ÙØÝ[Y[
+Û˜\ÚÝˆXÝÜÝ‹[žWJHOˆXÝÜÝ‹[žWN‚ˆˆˆ”™[[Ý™HÜÝ]È™Y›Ü™HHÛÜ˜XÚÈÓPÔ›Ý[™\žKˆˆˆ‚ˆÛÛ\Û™[ÈHÂˆ˜[YNˆÂˆœÝ]\ÈŽˆÛÛ\Û™[ÈœÝ]\È—K™\œÚ[ÛˆŽˆÛÛ\Û™[È™\œÚ[Ûˆ—KˆœÛÝ\˜ÙHŽˆÛÛ\Û™[ÈœÛÝ\˜ÙH—K›Y\ÜØYÙHŽˆÛÛ\Û™[È›Y\ÜØYÙH—KˆBˆ›Üˆ˜[YKÛÛ\Û™[[ˆÛ˜\ÚÝÈ˜ÛÛ\Û™[È—Kš][\Ê
+BˆBˆ™]\›ˆÂˆœÝ]\ÈŽˆÛ˜\ÚÝÈœÝ]\È—K˜YÙ[™\œÚ[ÛˆŽˆÛ˜\ÚÝÈ˜YÙ[™\œÚ[Ûˆ—Kš[\™˜XÙU™\œÚ[ÛˆŽˆÛ˜\ÚÝÈš[\™˜XÙU™\œÚ[Ûˆ—Kˆœ]›Ü›HŽˆÛ˜\ÚÝÈœ]›Ü›H—KˆÛÜšÜÜXÙHŽˆÂˆœÝ]\ÈŽˆÛ˜\ÚÝÈÛÜšÜÜXÙH—VÈœÝ]\È—Kˆ˜]˜Z[X›Pž]\ÈŽˆÛ˜\ÚÝÈÛÜšÜÜXÙH—VÈ˜]˜Z[X›Pž]\È—KˆKˆ˜ÛÛ\Û™[ÈŽˆÛÛ\Û™[Ëˆ˜Ú›ÛYP]]ÛX][ÛˆŽˆÛ˜\ÚÝ™Ù]
+˜Ú›ÛYP]]ÛX][Ûˆ‹ÈœÝ]HŽˆ[šÛ›ÝÛˆ‹˜Ú›ÛYT[›š[™ÈŽˆ›Û™K˜œ›ÝÜÙ\’[œÝ[˜Ù\ÈŽˆ›Y\ÜØYÙHŽˆÚ›ÛYH]]ÛX][ÛˆÝ]\ÈØ\È›Ý[˜ÛYY[ˆ\ÈX[Û˜\ÚÝˆŸJKˆB‚‚™YˆÙ×ÜÝ\\ÚX[
+X[ˆXÝÜÝ‹[žWKÜˆ[
+HOˆ›Û™N‚ˆÙÊˆ”™\ÙX\˜ÚX™HYÙ[ÐQÑS•Õ‘T”ÒSÓŸHÝ\Y‹ÛÛÜHœ™YŠBˆÙÊˆYÙ[[\™˜XÙH™\œÚ[ÛŽˆÚX[ÉÚ[\™˜XÙU™\œÚ[Û‰×_H8 %]]\ÝX]ÚH™\ÙX\˜ÚX™H^[œÚ[Ûˆ[\™˜XÙH™\œÚ[Û‹ˆŠBˆ]›Ü›WÛY]Y]HHX[Èœ]›Ü›H—BˆÙÊˆ”]›Ü›NˆÜ]›Ü›WÛY]Y]VÉÛÜ\˜][™ÔÞ\Ý[I×_HÜ]›Ü›WÛY]Y]VÉÜ™[X\ÙI×_H
+Ü]›Ü›WÛY]Y]VÉØ\˜Ú]XÝ\™I×_JHŠBˆÙÊˆ“\Ý[š[™ÈÛˆLËŒŒŒNžÜÜHŠBˆÙÊˆ•ÛÜšÜÜXÙNˆÕÓÔ’ÔÔPÑWÔUH
+ÚX[ÉÝÛÜšÜÜXÙI×VÉÜÝ]\É×_JHŠBˆ›Üˆ˜[YKÛÛ\Û™[[ˆX[È˜ÛÛ\Û™[È—Kš][\Ê
+N‚ˆYˆÛÛ\Û™[ÈœÝ]\È—HOH˜ÚXÚÚ[™ÈŽ‚ˆÙ×ØÛÛ\Û™[ÚX[
+˜[YKÛÛ\Û™[
+B‚‚™YˆÙ×ØÛÛ\Û™[ÚX[
+˜[YNˆÝ‹ÛÛ\Û™[ˆXÝÜÝ‹[žWJHOˆ›Û™N‚ˆX™[HÓÓTÓ‘S•ÓP‘SÖÛ˜[YWBˆYˆÛÛ\Û™[ÈœÝ]\È—HOH˜]˜Z[X›HŽ‚ˆÜšYÚ[ˆH”UˆYˆÛÛ\Û™[ÈœÛÝ\˜ÙH—HOHœ]ˆ[ÙH›ØØ[‚ˆÙÊˆžÛX™[NˆØÛÛ\Û™[ÉÝ™\œÚ[Û‰×HÜˆ	Ø]˜Z[X›IßH
+ÛÜšYÚ[ŸNˆØÛÛ\Û™[ÉÜš]˜]T]	×_JHŠBˆ[YˆÛÛ\Û™[ÈœÝ]\È—HOH›Z\ÜÚ[™ÈŽ‚ˆÙÊˆžÛX™[NˆZ\ÜÚ[™ÈŠBˆ[ÙN‚ˆÙÊˆžÛX™[NˆØÛÛ\Û™[ÉÛY\ÜØYÙI×HÜˆ	Ý™\œÚ[Ûˆ›Ø™H˜Z[Y	ßH
+ØÛÛ\Û™[ÉÜÛÝ\˜ÙI×_NˆØÛÛ\Û™[ÉÜš]˜]T]	×_JH‹\œ›ÜUYJB‚‚™Yˆ]Ú\×ÝÚ][Š]ˆ]\™[ˆ]
+HOˆ›ÛÛ‚ˆžN‚ˆ]œ™[]]™WÝÊ\™[
+Bˆ™]\›ˆYBˆ^Ù\˜[YQ\œ›ÜŽ‚ˆ™]\›ˆ˜[ÙB‚‚™Yˆ˜[Y]WÝšY[×ÚY
+˜[YNˆ[žJHOˆÝŽ‚ˆˆˆXØÙ\Û›HHÝX›HX›XÈšY[ÈY[YšY\ˆ]HYÙ[›Ý[™\žKˆˆˆ‚ˆYˆ›Ý\Ú[œÝ[˜ÙJ˜[YKÝŠHÜˆ›Ý™K™[X]Ú
+ˆ–ÐKV˜K^ŒNWËW^Í‹H‹˜[YJN‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠ’S•SQÕ’QS×ÒQ‹šY[ÒY]\Ý™HÛ™HX›XÈ[ÝUX™HšY[ÈQˆŠBˆ™]\›ˆ˜[YB‚‚]XÛ\ÜÊœ›Þ™[UYJB˜Û\ÜÈÝÛ›ØYÙ[XÝ[ÛŽ‚ˆˆˆH[X™\˜][HÛX[ØY™HÝXœÙ]Ùˆ]Y	ÜÈ›Ü›X]\Ù[XÝÜˆÞ[^‚‚ˆHYÙ[™]™\ˆXØÙ\È[ˆ\˜š]˜\žH]YÙ[XÝÜˆÜˆÛÛ[X[™[[™Bˆœ˜YÛY[ˆ^XÝ[Y\šXÈQÈ\™H^XÝYÈÛÛYHœ›ÛHHØØ[YÙ[	ÜÂˆ[Ý]X™WÙÝÛ›ØYÙÙ]Ù›Ü›X]ÈÛÜšÙ›ÝË›ÝHYš\ÛÜžH[ÝUX™HÛ˜\ÚÝ‚ˆˆˆ‚‚ˆÛÛXš[™YˆÝˆ›Û™HH›Û™BˆšY[ÎˆÝˆ›Û™HH›Û™Bˆ]Y[ÎˆÝˆ›Û™HH›Û™B‚ˆ›Ü\BˆYˆ™\]Z\™\×ÛY\™ÙJÙ[ŠHOˆ›ÛÛ‚ˆ™]\›ˆÙ[‹šY[È\È›Ý›Û™H[™Ù[‹˜]Y[È\È›Ý›Û™B‚ˆYˆ›Ü›X]ÜÙ[XÝÜŠÙ[ŠHOˆÝŽ‚ˆYˆÙ[‹˜ÛÛXš[™Y\È›Ý›Û™N‚ˆ™]\›ˆ˜™\ÝˆYˆÙ[‹˜ÛÛXš[™YOH˜™\Ýˆ[ÙHÙ[‹˜ÛÛXš[™Yˆ\Îˆ\ÝÜÝ—HH×BˆYˆÙ[‹šY[È\È›Ý›Û™N‚ˆ\Ë˜\[™
+˜™\ÝšY[ÈˆYˆÙ[‹šY[ÈOH˜™\Ýˆ[ÙHÙ[‹šY[ÊBˆYˆÙ[‹˜]Y[È\È›Ý›Û™N‚ˆ\Ë˜\[™
+˜™\Ý]Y[ÈˆYˆÙ[‹˜]Y[ÈOH˜™\Ýˆ[ÙHÙ[‹˜]Y[ÊBˆ™]\›ˆŠÈ‹š›Ú[Š\ÊB‚‚™Yˆ\œÙWÙ›Ü›X]ÜÙ[XÝ[ÛŠ˜[YNˆ[žJHOˆÝÛ›ØYÙ[XÝ[ÛŽ‚ˆYˆ›Ý\Ú[œÝ[˜ÙJ˜[YKXÝ
+N‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠ‘“Ô“PUÔÑSPÕSÓ—ÒS•SQ‹™›Ü›X]Ù[XÝ[Ûˆ]\Ý\ØÜšX™HÛ™HÛÛXš[™Y˜XÚÈÜˆšY[È[™ÛÜˆ]Y[È˜XÚÜËˆŠBˆ[šÛ›ÝÛˆHÙ]
+˜[YJHHÈ˜ÛÛXš[™Y‹šY[È‹˜]Y[ÈŸBˆYˆ[šÛ›ÝÛŽ‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠ‘“Ô“PUÔÑSPÕSÓ—ÒS•SQ‹™›Ü›X]Ù[XÝ[ÛˆÛÛZ[œÈ[ˆ[œÝ\ÜYšY[ˆŠB‚ˆYˆ\œÙWÝ˜[YJ˜[YNˆÝŠHOˆÝˆ›Û™N‚ˆØ[™Y]HH˜[YK™Ù]
+˜[YJBˆYˆØ[™Y]H\È›Û™N‚ˆ™]\›ˆ›Û™BˆYˆ›Ý\Ú[œÝ[˜ÙJØ[™Y]KÝŠHÜˆ›Ý™K™[X]Ú
+ˆŠÎ˜™\ÝÌNWJÊH‹Ø[™Y]JN‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠ‘“Ô“PUÔÑSPÕSÓ—ÒS•SQ‹ˆ™›Ü›X]Ù[XÝ[Û‹žÛ˜[Y_H]\Ý™H	Ø™\Ý	ËH[Y\šXÈ[ÝUX™H›Ü›X]YÜˆ[ˆŠBˆ™]\›ˆØ[™Y]B‚ˆÙ[XÝ[ÛˆHÝÛ›ØYÙ[XÝ[ÛŠ\œÙWÝ˜[YJ˜ÛÛXš[™YŠK\œÙWÝ˜[YJšY[ÈŠK\œÙWÝ˜[YJ˜]Y[ÈŠJBˆYˆÙ[XÝ[Û‹˜ÛÛXš[™Y\È›Ý›Û™H[™
+Ù[XÝ[Û‹šY[È\È›Ý›Û™HÜˆÙ[XÝ[Û‹˜]Y[È\È›Ý›Û™JN‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠ‘“Ô“PUÔÑSPÕSÓ—ÒS•SQ‹”Ù[XÝZ]\ˆÛ™HÛÛXš[™Y˜XÚÈÜˆšY[ËØ]Y[È˜XÚÜÎÈÈ›ÝZ^[KˆŠBˆYˆÙ[XÝ[Û‹˜ÛÛXš[™Y\È›Û™H[™Ù[XÝ[Û‹šY[È\È›Û™H[™Ù[XÝ[Û‹˜]Y[È\È›Û™N‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠ‘“Ô“PUÔÑSPÕSÓ—ÒS•SQ‹”Ù[XÝHÛÛXš[™YšY[ËÜˆ]Y[È˜XÚËˆŠBˆ™]\›ˆÙ[XÝ[Û‚‚‚]XÛ\ÜÊœ›Þ™[UYJB˜Û\ÜÈÝÛ›ØY˜[™ÙN‚ˆÝ\ÜÙXÛÛ™Îˆ›Ø]ˆ[™ÜÙXÛÛ™Îˆ›Ø]‚ˆYˆš[[˜[YWÝYÊÙ[ŠHOˆÝŽ‚ˆ™]\›ˆˆœ\X[ÞÜÙ[‹œÝ\ÜÙXÛÛ™Î‹ŒÙŸWÞÜÙ[‹™[™ÜÙXÛÛ™Î‹ŒÙŸH‚‚‚™Yˆ\œÙWÙÝÛ›ØYÜ˜[™ÙJ^[ØYˆXÝÜÝ‹[žWJHOˆÝÛ›ØY˜[™ÙH›Û™N‚ˆÝ\H^[ØY™Ù]
+œÝ\ÙXÛÛ™ÈŠBˆ[™H^[ØY™Ù]
+™[™ÙXÛÛ™ÈŠBˆYˆÝ\\È›Û™H[™[™\È›Û™N‚ˆ™]\›ˆ›Û™BˆYˆÝ\\È›Û™HÜˆ[™\È›Û™N‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠ‘ÕÓ“ÐQÔS‘ÑWÒS•SQ‹œÝ\ÙXÛÛ™È[™[™ÙXÛÛ™È]\Ý™HÝ\YYÙÙ]\‹ˆŠBˆYˆ\Ú[œÝ[˜ÙJÝ\›ÛÛ
+HÜˆ›Ý\Ú[œÝ[˜ÙJÝ\
+[›Ø]
+JHÜˆ›ÝX]š\Ùš[š]JÝ\
+HÜˆÝ\‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠ‘ÕÓ“ÐQÔS‘ÑWÒS•SQ‹œÝ\ÙXÛÛ™È]\Ý™HHš[š]H›Û‹[™YØ]]™H[X™\‹ˆŠBˆYˆ\Ú[œÝ[˜ÙJ[™›ÛÛ
+HÜˆ›Ý\Ú[œÝ[˜ÙJ[™
+[›Ø]
+JHÜˆ›ÝX]š\Ùš[š]J[™
+HÜˆ[™‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠ‘ÕÓ“ÐQÔS‘ÑWÒS•SQ‹™[™ÙXÛÛ™È]\Ý™HHš[š]H›Û‹[™YØ]]™H[X™\‹ˆŠBˆYˆ[™HÝ\‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠ‘ÕÓ“ÐQÔS‘ÑWÒS•SQ‹™[™ÙXÛÛ™È]\Ý™HÜ™X]\ˆ[ˆÝ\ÙXÛÛ™ËˆŠBˆ™]\›ˆÝÛ›ØY˜[™ÙJ›Ø]
+Ý\
+K›Ø]
+[™
+JB‚‚™Yˆ[X›WÛ›Û›™YØ]]™WÛ[X™\Š˜[YNˆ[žJHOˆ›Ø][›Û™N‚ˆˆˆ”™]\›ˆÛ™Hš[š]H›Û‹[™YØ]]™H”ÓÓˆ[X™\‹Ý\Ú\ÙH›Û™Kˆˆˆ‚ˆYˆ\Ú[œÝ[˜ÙJ˜[YK›ÛÛ
+HÜˆ›Ý\Ú[œÝ[˜ÙJ˜[YK
+[›Ø]
+JHÜˆ›ÝX]š\Ùš[š]J˜[YJHÜˆ˜[YH‚ˆ™]\›ˆ›Û™Bˆ™]\›ˆ˜[YB‚‚™Yˆ[X›WÛ›Û›™YØ]]™WÚ[YÙ\Š˜[YNˆ[žJHOˆ[›Û™N‚ˆ[X™\ˆH[X›WÛ›Û›™YØ]]™WÛ[X™\Š˜[YJBˆ™]\›ˆ[
+[X™\ŠHYˆ[X™\ˆ\È›Ý›Û™H[™›Ø]
+[X™\ŠKš\×Ú[YÙ\Š
+H[ÙH›Û™B‚‚™Yˆ›Ü›X[^™WÞ]ÙÙ›Ü›X]
+›Ü›X]Ù]Nˆ[žJHOˆXÝÜÝ‹[žWH›Û™N‚ˆˆˆ”X›\ÚH›Û‹\Ù[œÚ]]™KÙ[XÝX›H]Y›Ü›X]™XÛÜ™‚‚ˆHÛÝ\˜ÙHØÝ[Y[ÛÛZ[œÈÚYÛ™YYYXHT“È[™Ý\ˆ\[Y\˜[^Y\‚ˆ]Z[Ëˆ\È›Ú™XÝ[Ûˆ[[[Û˜[HÙY\ÈÛ›HÝX›HXÚšXØ[ˆ›Ü\Y\È[™H^XÝ›Ü›X]QXØÙ\YžHHØ[YHØØ[]Y‚ˆˆˆ‚ˆYˆ›Ý\Ú[œÝ[˜ÙJ›Ü›X]Ù]KXÝ
+N‚ˆ™]\›ˆ›Û™Bˆ›Ü›X]ÚYH›Ü›X]Ù]K™Ù]
+™›Ü›X]ÚYŠBˆYˆ›Ý\Ú[œÝ[˜ÙJ›Ü›X]ÚYÝŠHÜˆ›Ý™K™[X]Ú
+ˆ–ÌNWJÈ‹›Ü›X]ÚY
+N‚ˆ™]\›ˆ›Û™BˆšY[×ØÛÙXÈH›Ü›X]Ù]K™Ù]
+˜ÛÙXÈŠBˆ]Y[×ØÛÙXÈH›Ü›X]Ù]K™Ù]
+˜XÛÙXÈŠBˆ\×ÝšY[ÈH\Ú[œÝ[˜ÙJšY[×ØÛÙXËÝŠH[™šY[×ØÛÙXÈOH››Û™H‚ˆ\×Ø]Y[ÈH\Ú[œÝ[˜ÙJ]Y[×ØÛÙXËÝŠH[™]Y[×ØÛÙXÈOH››Û™H‚ˆYˆ›Ý\×ÝšY[È[™›Ý\×Ø]Y[Î‚ˆ™]\›ˆ›Û™BˆÚ[™H˜ÛÛXš[™YˆYˆ\×ÝšY[È[™\×Ø]Y[È[ÙHšY[ÈˆYˆ\×ÝšY[È[ÙH˜]Y[È‚ˆÚ^™HH[X›WÛ›Û›™YØ]]™WÚ[YÙ\Š›Ü›X]Ù]K™Ù]
+™š[\Ú^™HŠJBˆYˆÚ^™H\È›Û™N‚ˆÚ^™HH[X›WÛ›Û›™YØ]]™WÚ[YÙ\Š›Ü›X]Ù]K™Ù]
+™š[\Ú^™WØ\›ÞŠJBˆš]˜]WÚØœÈH[X›WÛ›Û›™YØ]]™WÛ[X™\Š›Ü›X]Ù]K™Ù]
+œˆŠJBˆYˆš]˜]WÚØœÈ\È›Û™N‚ˆš]˜]WÚØœÈH[X›WÛ›Û›™YØ]]™WÛ[X™\Š›Ü›X]Ù]K™Ù]
+˜œˆˆYˆ\×ÝšY[È[ÙH˜XœˆŠJBˆ]X[]HH›Ü›X]Ù]K™Ù]
+™›Ü›X]Û›ÝHŠBˆYˆ›Ý\Ú[œÝ[˜ÙJ]X[]KÝŠHÜˆ›Ý]X[]N‚ˆ]X[]HH›Ü›X]Ù]K™Ù]
+œ™\ÛÛ][ÛˆŠHYˆ\×ÝšY[È[ÙH›Û™Bˆ™]\›ˆÂˆ™›Ü›X]YŽˆ›Ü›X]ÚYˆšÚ[™ŽˆÚ[™ˆ˜ÛÛZ[™\ˆŽˆ›Ü›X]Ù]K™Ù]
+™^ŠHYˆ\Ú[œÝ[˜ÙJ›Ü›X]Ù]K™Ù]
+™^ŠKÝŠH[ÙH›Û™KˆšY[ÐÛÙXÈŽˆšY[×ØÛÙXÈYˆ\×ÝšY[È[ÙH›Û™Kˆ˜]Y[ÐÛÙXÈŽˆ]Y[×ØÛÙXÈYˆ\×Ø]Y[È[ÙH›Û™KˆÚYŽˆ[X›WÛ›Û›™YØ]]™WÚ[YÙ\Š›Ü›X]Ù]K™Ù]
+ÚYŠJHYˆ\×ÝšY[È[ÙH›Û™KˆšZYÚŽˆ[X›WÛ›Û›™YØ]]™WÚ[YÙ\Š›Ü›X]Ù]K™Ù]
+šZYÚŠJHYˆ\×ÝšY[È[ÙH›Û™Kˆ™œÈŽˆ[X›WÛ›Û›™YØ]]™WÛ[X™\Š›Ü›X]Ù]K™Ù]
+™œÈŠJHYˆ\×ÝšY[È[ÙH›Û™Kˆ˜š]˜]PœÈŽˆ[
+š]˜]WÚØœÈ
+ˆL
+HYˆš]˜]WÚØœÈ\È›Ý›Û™H[ÙH›Û™Kˆ˜]Y[ÔØ[\T˜]RˆŽˆ[X›WÛ›Û›™YØ]]™WÚ[YÙ\Š›Ü›X]Ù]K™Ù]
+˜\ÜˆŠJHYˆ\×Ø]Y[È[ÙH›Û™Kˆ˜]Y[ÐÚ[›™[ÈŽˆ[X›WÛ›Û›™YØ]]™WÚ[YÙ\Š›Ü›X]Ù]K™Ù]
+˜]Y[×ØÚ[›™[ÈŠJHYˆ\×Ø]Y[È[ÙH›Û™Kˆœ]X[]SX™[Žˆ]X[]KˆœÚ^™Pž]\ÈŽˆÚ^™KˆB‚‚™Yˆ›Ü›X[^™WÞ]ÙÙ›Ü›X]ÊØÝ[Y[ˆ[žJHOˆXÝÜÝ‹[žWN‚ˆÜ›Ý\YˆXÝÜÝ‹[žWHHÂˆ˜]˜Z[X›HŽˆ˜[ÙKœÛÝ\˜ÙHŽˆ[˜]˜Z[X›H‹ˆ›Y\ÜØYÙHŽˆž]YY›Ý^ÜÙHÝÛ›ØYX›HYYXH›Ü›X]È›Üˆ\ÈšY[Ëˆ‹ˆ˜ÛÛXš[™YŽˆ×KšY[ÈŽˆ×K˜]Y[ÈŽˆ×KˆBˆ›Ü›X]ÈHØÝ[Y[™Ù]
+™›Ü›X]ÈŠHYˆ\Ú[œÝ[˜ÙJØÝ[Y[XÝ
+H[ÙH›Û™BˆYˆ›Ý\Ú[œÝ[˜ÙJ›Ü›X]Ë\Ý
+N‚ˆ™]\›ˆÜ›Ý\YˆÙY[ŽˆÙ]ÜÝ—HHÙ]
+
+Bˆ›Üˆ˜]×Ù›Ü›X][ˆ›Ü›X]Î‚ˆ][HH›Ü›X[^™WÞ]ÙÙ›Ü›X]
+˜]×Ù›Ü›X]
+BˆYˆ][H\È›Û™HÜˆ][VÈ™›Ü›X]Y—H[ˆÙY[Ž‚ˆÛÛ[YBˆÙY[‹˜Y
+][VÈ™›Ü›X]Y—JBˆÜ›Ý\YÚ][VÈšÚ[™—WK˜\[™
+][JBˆ›Üˆ[šY\È[ˆ
+Ü›Ý\YÈ˜ÛÛXš[™Y—KÜ›Ý\YÈšY[È—KÜ›Ý\YÈ˜]Y[È—JN‚ˆ[šY\ËœÛÜ
+Ù^O[[X™H][Nˆ
+][VÈšZYÚ—HÜˆ][VÈ™œÈ—HÜˆ][VÈ˜š]˜]PœÈ—HÜˆ][VÈ™›Ü›X]Y—JJBˆYˆÙY[Ž‚ˆÜ›Ý\YÈ˜]˜Z[X›H—HHYBˆÜ›Ý\YÈœÛÝ\˜ÙH—HHž]‚ˆÜ›Ý\YÈ›Y\ÜØYÙH—HH›Û™Bˆ™]\›ˆÜ›Ý\Y‚‚˜\Þ[˜ÈYˆ[Ý]X™WÙÝÛ›ØYÙ›Ü›X]Ê^[ØYˆ[žJHOˆXÝÜÝ‹[žWN‚ˆˆˆ”™XY›Ü›X]Èœ›ÛHH^XÝØØ[]Y[œÝ[][Ûˆ\ÙY›ÜˆÝÛ›ØYËˆˆˆ‚ˆYˆ›Ý\Ú[œÝ[˜ÙJ^[ØYXÝ
+N‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠ’S•SQÔ‘TUQTÕ‹ž[Ý]X™WÙÝÛ›ØYÙÙ]Ù›Ü›X]È™\]Z\™\ÈH”ÓÓˆØš™XÝˆŠBˆšY[×ÚYH˜[Y]WÝšY[×ÚY
+^[ØY™Ù]
+šY[ÒYŠJBˆ=Ó}9¶‰žËkºwµçYš[U\\È]\Ý™HH›Û‹Y[\H\œ˜^HÙˆ[š\]YHÝ\ÜYš[HØ]YÛÜšY\ËˆŠBˆYˆ[žJ›Ý\Ú[œÝ[˜ÙJ][KÝŠHÜˆ][H›Ý[ˆP“P×ÔÒT‘WÑ’SWÕTWÓSQTÈ›Üˆ][H[ˆš[WÝ\\ÊN‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠ“Ó“S‘WÔÒT‘WÒS•SQ‹™š[U\\ÈÛÛZ[œÈ[ˆ[œÝ\ÜYš[HØ]YÛÜžKˆŠBˆYˆ˜[ˆ[ˆš[WÝ\\È[™[Šš[WÝ\\ÊHOHN‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠ“Ó“S‘WÔÒT‘WÒS•SQ‹™š[U\\È[Ø[››Ý™HÛÛXš[™YÚ]Ý\ˆØ]YÛÜšY\ËˆŠBˆYˆ›Ý™\šYžWÙ^\›˜[‚ˆYˆœ›Ø™T]ˆ[ˆ^[ØY‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠ“Ó“S‘WÔÒT‘WÒS•SQ‹œ›Ø™T]\ÈÛ›H˜[YÚ[ˆ™\šYžQ^\›˜[\ÈYKˆŠBˆ™]\›ˆÛÜšÜÜXÙTÚ\™SÜ[ÛœÊ›Û\‹›Û™K\Jš[WÝ\\ÊK˜[ÙK›Û™JBˆYˆœ›Ø™T]ˆ›Ý[ˆ^[ØY‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠ“Ó“S‘WÔÒT‘WÒS•SQ‹H™\šYšYY›Û\ˆÚ\™H™\]Z\™\È›Ø™T]ˆŠBˆ›Ø™WÙš[HH™\ÛÛ™\‹œ™\ÛÛ™WÙ^\Ý[™Ê^[ØYÈœ›Ø™T]—KšY[Û˜[YOHœ›Ø™T]‹^XÝYÝ\OH™š[HŠBˆYˆ›Ý]Ú\×ÝÚ][Š›Ø™WÙš[Kœ\ÚXØ[Ü]›Û\‹œ\ÚXØ[Ü]
+N‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠ“Ó“S‘WÔÒT‘WÒS•SQ‹œ›Ø™T]]\Ý™H[œÚYHHÚ\™Y›Û\‹ˆŠBˆYˆX›X×ÜÚ\™WÙš[WÝ\J›Ø™WÙš[Kœ\ÚXØ[Ü]
+HOHš[XYÙ\ÈˆÜˆ
+˜[ˆ›Ý[ˆš[WÝ\\È[™š[XYÙ\Èˆ›Ý[ˆš[WÝ\\ÊN‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠ“Ó“S‘WÔÒT‘WÒS•SQ‹œ›Ø™T]]\Ý™H[ˆ[ÝÙY[XYÙHš[H›ÜˆÜÜ‹››ˆŠBˆ™]\›ˆÛÜšÜÜXÙTÚ\™SÜ[ÛœÊ›Û\‹›Û™K\Jš[WÝ\\ÊKYK›Ø™WÙš[JB‚‚™YˆX›X×ÜÚ\™WÙš[WÝ\J]ˆ]
+HOˆÝŽ‚ˆÝY™š^H]œÝY™š^›ÝÙ\Š
+Bˆ›Üˆ˜[YKÝY™š^\È[ˆP“P×ÔÒT‘WÑ’SWÕTWÔÕQ‘’VTËš][\Ê
+N‚ˆYˆÝY™š^[ˆÝY™š^\Î‚ˆ™]\›ˆ˜[YBˆ™]\›ˆ›Ý\ˆ‚‚‚™YˆX›X×ÜÚ\™WÙ\™XÝÜžWÛ\Ý[™Ê]ˆÝŠHOˆž]\È›Û™N‚ˆˆˆ”™]\›ˆHÛX[œ›ÝÜÙXX›H\Ý[™È›ÜˆH\™XÝÜžHÚ][ˆH›Û\ˆÚ\™Kˆˆˆ‚ˆYˆP“P×ÔÒT‘WÑ“ÓTˆ\È›Û™N‚ˆ™]\›ˆ›Û™Bˆ[˜ÛÙYÜÙYÛY[ÈHÜÙYÛY[›ÜˆÙYÛY[[ˆ]œ™[[Ý™\™Yš^
+‹ÈŠKœÜ]
+‹ÈŠHYˆÙYÛY[BˆžN‚ˆÙYÛY[ÈH\J[œ][ÝJÙYÛY[[˜ÛÙ[™ÏH]‹N‹\œ›ÜœÏHœÝšXÝŠH›ÜˆÙYÛY[[ˆ[˜ÛÙYÜÙYÛY[ÊBˆ^Ù\[šXÛÙQXÛÙQ\œ›ÜŽ‚ˆ™]\›ˆ›Û™BˆYˆ[žJÙYÛY[[ˆÈ‹ˆ‹‹‹ˆŸHÜˆ‹Èˆ[ˆÙYÛY[Üˆ—ˆ[ˆÙYÛY[›ÜˆÙYÛY[[ˆÙYÛY[ÊN‚ˆ™]\›ˆ›Û™Bˆ›Û\—Ü\ËÈHÛÜšÜÜXÙT]™\ÛÛ™\‹›ÙÚXØ[Ü\ÊP“P×ÔÒT‘WÑ“ÓT‹›ÙÚXØ[Ü]šY[Û˜[YOHœÚ\™Y›Û\ˆ‹\œ›Ü—ØÛÙOH”P“P×ÔÒT‘WÓ“ÕÑ“ÕS‘‹[Ý×Ü›ÛÝUYJBˆYˆ\JÙYÛY[ÖÎ›[Š›Û\—Ü\ÊWJHOH›Û\—Ü\Î‚ˆ™]\›ˆ›Û™Bˆ™[]]™WÜ\ÈHÙYÛY[ÖÛ[Š›Û\—Ü\ÊN—BˆØ[™Y]HHP“P×ÔÒT‘WÑ“ÓT‹œ\ÚXØ[Ü]š›Ú[œ]
+
+œ™[]]™WÜ\ÊBˆžN‚ˆ™\ÛÛ™YHØ[™Y]Kœ™\ÛÛ™JÝšXÝUYJBˆ^Ù\ÔÑ\œ›ÜŽ‚ˆ™]\›ˆ›Û™BˆYˆ›Ý]Ú\×ÝÚ][Š™\ÛÛ™YP“P×ÔÒT‘WÑ“ÓT‹œ\ÚXØ[Ü]
+HÜˆ›Ý™\ÛÛ™Yš\×Ù\Š
+HÜˆ™\ÛÛ™Yš\×ÜÞ[[[šÊ
+N‚ˆ™]\›ˆ›Û™Bˆ[šY\Îˆ\ÝÝ\VÜÝ‹›ÛÛWHH×BˆžN‚ˆÚ[™[ˆHÛÜY
+™\ÛÛ™Yš]\™\Š
+KÙ^O[[X™H][Nˆ
+›Ý][Kš\×Ù\Š
+K][K›˜[YK˜Ø\ÙY›Û
+
+JJVÎ“PVÔP“P×ÔÒT‘WÑT‘PÕÔ–WÑS•’QT×Bˆ›ÜˆÚ[[ˆÚ[™[Ž‚ˆ\×Ú[˜Ý[ÛˆHÙ]]ŠÚ[š\×Ú[˜Ý[Ûˆ‹[X™Nˆ˜[ÙJBˆYˆÚ[š\×ÜÞ[[[šÊ
+HÜˆ\×Ú[˜Ý[ÛŠ
+N‚ˆÛÛ[YBˆYˆÚ[š\×Ù\Š
+N‚ˆ[šY\Ë˜\[™
+
+Ú[›˜[YKYJJBˆ[YˆÚ[š\×Ùš[J
+H[™
+˜[ˆ[ˆP“P×ÔÒT‘WÑ’SWÕTTÈÜˆX›X×ÜÚ\™WÙš[WÝ\JÚ[
+H[ˆP“P×ÔÒT‘WÑ’SWÕTTÊN‚ˆ[šY\Ë˜\[™
+
+Ú[›˜[YK˜[ÙJJBˆ^Ù\ÔÑ\œ›ÜŽ‚ˆ™]\›ˆ›Û™Bˆ]HH‹È‹š›Ú[Š
+
+™›Û\—Ü\Ë
+œ™[]]™WÜ\ÊJHÜˆ•ÛÜšÜÜXÙH‚ˆ›ÝÜÈH×BˆYˆ™[]]™WÜ\Î‚ˆ›ÝÜË˜\[™
+	ÏOH™YH‹‹‹È‹‹‹ÏØOÛO‰ÊBˆ›Üˆ˜[YK\×Ù\™XÝÜžH[ˆ[šY\Î‚ˆX™[HˆžÛ˜[Y_KÈˆYˆ\×Ù\™XÝÜžH[ÙH˜[YBˆ™YˆHˆžÜ][ÝJ˜[YKØY™OIÉÊ_KÈˆYˆ\×Ù\™XÝÜžH[ÙH][ÝJ˜[YKØY™OIÉÊBˆ›ÝÜË˜\[™
+‰ÏOH™YHžÚ™YŸHžÙ\ØØ\JX™[
+_OØOÛO‰ÊBˆ›ÙHHˆYØÝ\H[Y]HÚ\œÙ]W]‹N]O’[™^ÙˆÞÙ\ØØ\J]J_OÝ]OO’[™^ÙˆÞÙ\ØØ\J]J_OÚO[žÉÉËš›Ú[Š›ÝÜÊ_OÝ[ˆ‚ˆ™]\›ˆ›ÙK™[˜ÛÙJ]‹NŠB‚‚™YˆX›X×ÜÚ\™WÙš[J]ˆÝŠHOˆ\VÔ]Ý—N‚ˆˆˆ”™\ÛÛ™HÛ™HX›XÈT“ÚÜÙH]™YÚ[œÈÚ]HÚ\™Y›Û\ˆ]ˆˆˆ‚ˆYˆP“P×ÔÒT‘WÑ“ÓTˆ\È›Û™H[™P“P×ÔÒT‘WÑ’SH\È›Û™N‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠ”P“P×ÔÒT‘WÓ“ÕÐPÕU‘H‹“›ÈÛÜšÜÜXÙH][H\ÈÝ\œ™[HÚ\™YˆŠBˆ[˜ÛÙYÜÙYÛY[ÈH]œ™[[Ý™\™Yš^
+‹ÈŠKœÜ]
+‹ÈŠBˆYˆ›Ý[˜ÛÙYÜÙYÛY[ÈÜˆ[žJ›ÝÙYÛY[›ÜˆÙYÛY[[ˆ[˜ÛÙYÜÙYÛY[ÊN‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠ”P“P×ÔÒT‘WÓ“ÕÑ“ÕS‘‹•H™\]Y\ÝYÚ\™Yš[HØ\È›Ý›Ý[™ˆŠBˆžN‚ˆÙYÛY[ÈH\J[œ][ÝJÙYÛY[[˜ÛÙ[™ÏH]‹N‹\œ›ÜœÏHœÝšXÝŠH›ÜˆÙYÛY[[ˆ[˜ÛÙYÜÙYÛY[ÊBˆ^Ù\[šXÛÙQXÛÙQ\œ›Üˆ\È\œ›ÜŽ‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠ”P“P×ÔÒT‘WÓ“ÕÑ“ÕS‘‹•H™\]Y\ÝYÚ\™Yš[HØ\È›Ý›Ý[™ˆŠHœ›ÛH\œ›Ü‚ˆYˆ[žJ›ÝÙYÛY[ÜˆÙYÛY[[ˆÈ‹ˆ‹‹‹ˆŸHÜˆ‹Èˆ[ˆÙYÛY[Üˆ—ˆ[ˆÙYÛY[›ÜˆÙYÛY[[ˆÙYÛY[ÊN‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠ”P“P×ÔÒT‘WÓ“ÕÑ“ÕS‘‹•H™\]Y\ÝYÚ\™Yš[HØ\È›Ý›Ý[™ˆŠBˆYˆP“P×ÔÒT‘WÑ’SH\È›Ý›Û™N‚ˆš[WÜ\ËÈHÛÜšÜÜXÙT]™\ÛÛ™\‹›ÙÚXØ[Ü\ÊP“P×ÔÒT‘WÑ’SK›ÙÚXØ[Ü]šY[Û˜[YOHœÚ\™Yš[H‹\œ›Ü—ØÛÙOH”P“P×ÔÒT‘WÓ“ÕÑ“ÕS‘ŠBˆYˆ\JÙYÛY[ÊHOHš[WÜ\Î‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠ”P“P×ÔÒT‘WÓ“ÕÑ“ÕS‘‹•H™\]Y\ÝYÚ\™Yš[HØ\È›Ý›Ý[™ˆŠBˆZ[YWÝ\HHZ[Y]\\Ë™ÝY\Ü×Ý\JP“P×ÔÒT‘WÑ’SKœ\ÚXØ[Ü]›˜[YJVÌHÜˆ˜\XØ][Û‹ÛØÝ]\Ý™X[H‚ˆ™]\›ˆP“P×ÔÒT‘WÑ’SKœ\ÚXØ[Ü]Z[YWÝ\Bˆ\ÜÙ\P“P×ÔÒT‘WÑ“ÓTˆ\È›Ý›Û™Bˆ›Û\—Ü\ËÈHÛÜšÜÜXÙT]™\ÛÛ™\‹›ÙÚXØ[Ü\ÊˆP“P×ÔÒT‘WÑ“ÓT‹›ÙÚXØ[Ü]šY[Û˜[YOHœÚ\™Y›Û\ˆ‹\œ›Ü—ØÛÙOH”P“P×ÔÒT‘WÓ“ÕÑ“ÕS‘‹[Ý×Ü›ÛÝUYKˆ
+BˆYˆ\JÙYÛY[ÖÎ›[Š›Û\—Ü\ÊWJHOH›Û\—Ü\Î‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠ”P“P×ÔÒT‘WÓ“ÕÑ“ÕS‘‹•H™\]Y\ÝYÚ\™Yš[HØ\È›Ý›Ý[™ˆŠBˆ™[]]™WÜ\ÈHÙYÛY[ÖÛ[Š›Û\—Ü\ÊN—BˆYˆ›Ý™[]]™WÜ\Î‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠ”P“P×ÔÒT‘WÓ“ÕÑ“ÕS‘‹•H™\]Y\ÝYÚ\™Yš[HØ\È›Ý›Ý[™ˆŠBˆØ[™Y]HHP“P×ÔÒT‘WÑ“ÓT‹œ\ÚXØ[Ü]ˆ›ÜˆÙYÛY[[ˆ™[]]™WÜ\Î‚ˆØ[™Y]HHØ[™Y]HÈÙYÛY[ˆ\×Ú[˜Ý[ÛˆHÙ]]ŠØ[™Y]Kš\×Ú[˜Ý[Ûˆ‹[X™Nˆ˜[ÙJBˆYˆØ[™Y]Kš\×ÜÞ[[[šÊ
+HÜˆ\×Ú[˜Ý[ÛŠ
+N‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠ”P“P×ÔÒT‘WÓ“ÕÑ“ÕS‘‹•H™\]Y\ÝYÚ\™Yš[HØ\È›Ý›Ý[™ˆŠBˆžN‚ˆ™\ÛÛ™YHØ[™Y]Kœ™\ÛÛ™JÝšXÝUYJBˆ^Ù\ÔÑ\œ›Üˆ\È\œ›ÜŽ‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠ”P“P×ÔÒT‘WÓ“ÕÑ“ÕS‘‹•H™\]Y\ÝYÚ\™Yš[HØ\È›Ý›Ý[™ˆŠHœ›ÛH\œ›Ü‚ˆYˆ›Ý]Ú\×ÝÚ][Š™\ÛÛ™YP“P×ÔÒT‘WÑ“ÓT‹œ\ÚXØ[Ü]
+HÜˆ›Ý™\ÛÛ™Yš\×Ùš[J
+N‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠ”P“P×ÔÒT‘WÓ“ÕÑ“ÕS‘‹•H™\]Y\ÝYÚ\™Yš[HØ\È›Ý›Ý[™ˆŠBˆš[WÝ\HHX›X×ÜÚ\™WÙš[WÝ\J™\ÛÛ™Y
+BˆYˆ˜[ˆ›Ý[ˆP“P×ÔÒT‘WÑ’SWÕTTÈ[™š[WÝ\H›Ý[ˆP“P×ÔÒT‘WÑ’SWÕTTÎ‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠ”P“P×ÔÒT‘WÓ“ÕÑ“ÕS‘‹•H™\]Y\ÝYÚ\™Yš[HØ\È›Ý›Ý[™ˆŠBˆZ[YWÝ\HHZ[Y]\\Ë™ÝY\Ü×Ý\J™\ÛÛ™Y›˜[YJVÌHÜˆ˜\XØ][Û‹ÛØÝ]\Ý™X[H‚ˆ™]\›ˆ™\ÛÛ™YZ[YWÝ\B‚‚˜\Þ[˜ÈYˆ[™WÜX›X×ÜÚ\™WØÛY[
+™XY\Žˆ\Þ[˜Ú[Ë”Ý™X[T™XY\‹Üš]\Žˆ\Þ[˜Ú[Ë”Ý™X[UÜš]\ŠHOˆ›Û™N‚ˆžN‚ˆY]Ù]Ü]Y\žK›ÙKÚXY\œÈH]ØZ]™XYÜ™\]Y\Ý
+™XY\ŠBˆYˆY]Ù›Ý[ˆÈ‘ÑU‹’PQŸHÜˆ›ÙN‚ˆÜš]\‹Üš]J[XYÙWÜ™\ÜÛœÙJ›Ý›Ý[™ŠJBˆ[ÙN‚ˆ\™XÝÜžWÛ\Ý[™ÈHX›X×ÜÚ\™WÙ\™XÝÜžWÛ\Ý[™Ê]
+BˆYˆ\™XÝÜžWÛ\Ý[™È\È›Ý›Û™N‚ˆÜš]\‹Üš]JX›X×Ùš[WÜ™\ÜÛœÙWÚXY\œÊŒŒÒÈ‹[Š\™XÝÜžWÛ\Ý[™ÊK^Ú[ÈÚ\œÙ]]]‹NŠJBˆYˆY]ÙOH‘ÑUŽ‚ˆÜš]\‹Üš]J\™XÝÜžWÛ\Ý[™ÊBˆ[ÙN‚ˆÚ\™YÙš[KZ[YWÝ\HHX›X×ÜÚ\™WÙš[J]
+BˆÚ^™HHÚ\™YÙš[KœÝ]
+
+KœÝÜÚ^™BˆÜš]\‹Üš]JX›X×Ùš[WÜ™\ÜÛœÙWÚXY\œÊŒŒÒÈ‹Ú^™KZ[YWÝ\JJBˆYˆY]ÙOH‘ÑUŽ‚ˆÚ]Ú\™YÙš[K›Ü[Šœ˜ˆŠH\ÈÛÝ\˜ÙN‚ˆÚ[HÚ[šÈHÛÝ\˜ÙKœ™XY
+
+ˆL
+N‚ˆÜš]\‹Üš]JÚ[šÊBˆ]ØZ]Üš]\‹™˜Z[Š
+Bˆ]ØZ]Üš]\‹™˜Z[Š
+Bˆ^Ù\
+YÙ[\Q\œ›Ü‹ÔÑ\œ›Ü‹[šXÛÙQXÛÙQ\œ›Ü‹\Þ[˜Ú[Ë•[Y[Ý]\œ›Ü‹\Þ[˜Ú[Ë’[˜ÛÛ\]T™XY\œ›ÜŠN‚ˆžN‚ˆÜš]\‹Üš]J[XYÙWÜ™\ÜÛœÙJ›Ý›Ý[™ŠJBˆ]ØZ]Üš]\‹™˜Z[Š
+Bˆ^Ù\ÛÛ›™XÝ[Û‘\œ›ÜŽ‚ˆ\ÜÂˆš[˜[N‚ˆ›ÜˆX[˜YÙ\ˆ[ˆ
+TÒÔËÔQPÒÕTÒÔË’TÕPSÓPTÕTÒÔËÐSQTWÔ‘PÓÔ‘ÕTÒÔËÐTT‘WÑ”SQWÕTÒÔËQQPWÐÓTÕTÒÔËÕÔ–P“ÐT‘ÕTÒÔËSQT—ÕTÒÔÊN‚ˆX[˜YÙ\‹\ÚÜËœ[™J
+BˆÜš]\‹˜ÛÜÙJ
+BˆžN‚ˆ]ØZ]Üš]\‹ØZ]ØÛÜÙY
+
+Bˆ^Ù\ÛÛ›™XÝ[Û‘\œ›ÜŽ‚ˆ\ÜÂ‚‚˜\Þ[˜ÈYˆØ]ÚØÛÝY›\™YÜÝ™X[JÝ™X[Nˆ\Þ[˜Ú[Ë”Ý™X[T™XY\ˆ›Û™JHOˆ›Û™N‚ˆÛØ˜[P“P×ÕS“‘SÕT“ˆYˆÝ™X[H\È›Û™N‚ˆ™]\›‚ˆžN‚ˆÚ[H[™HH]ØZ]Ý™X[Kœ™XY[™J
+N‚ˆY\ÜØYÙHH[™K™XÛÙJ]‹N‹\œ›ÜœÏHœ™\XÙHŠKœÝš\
+
+BˆX]ÚH™KœÙX\˜Ú
+ˆšÎ‹ËÖÐKV˜K^ŒNKWJ×žXÛÝY›\™W˜ÛÛH‹Y\ÜØYÙJBˆYˆX]Ú[™P“P×ÕS“‘SÕT“\È›Û™N‚ˆP“P×ÕS“‘SÕT“HX]Ú™Ü›Ý\
+
+BˆP“P×ÕS“‘SÔ‘PQKœÙ]
+
+BˆÙÊˆ”X›XÈÛÜšÜÜXÙH[›™[ˆÔP“P×ÕS“‘SÕT“HŠBˆ^Ù\
+ÔÑ\œ›Ü‹\Þ[˜Ú[ËØ[˜Ù[Y\œ›ÜŠN‚ˆ™]\›‚‚‚˜\Þ[˜ÈYˆÝ\ÜX›X×ÜÚ\™WÝ[›™[
+Üˆ[
+HOˆ›Û™N‚ˆÛØ˜[P“P×ÕS“‘SÔ“ÐÑTÔËP“P×ÕS“‘SÕÐUÒT”ÂˆÛÝY›\™YHš[™ØÛÛ\Û™[
+˜ÛÝY›\™Y‹ÓÓTÓ‘S•ÖÈ˜ÛÝY›\™Y—VÌJBˆYˆÛÝY›\™Y™\œ›ÜŽ‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠÓÕQ“T‘QÑTÐÓÕ‘T–WÑT”“Ôˆ‹˜ÛÝY›\™Y\ØÛÝ™\žH\È[XšYÝ[Ý\Ëˆ‹ÛÝY›\™Y™\œ›ÜŠBˆYˆ›ÝÛÝY›\™Y™^XÝ]X›N‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠÓÕQ“T‘QÓ“ÕÐURSP“H‹˜ÛÝY›\™Y\È›Ý]˜Z[X›Kˆ^˜XÝ][™\ˆÛÛËØÛÝY›\™YÜˆ[œÝ[]ÛˆUˆŠBˆžN‚ˆP“P×ÕS“‘SÔ“ÐÑTÔÈH]ØZ]\Þ[˜Ú[Ë˜Ü™X]WÜÝXœ›ØÙ\Ü×Ù^XÊˆÛÝY›\™Y™^XÝ]X›K[›™[‹‹K]\›‹ˆš‹ËÌLËŒŒŒNžÜÜH‹ˆÝÝ]X\Þ[˜Ú[ËœÝXœ›ØÙ\ÜË”TKÝ\œX\Þ[˜Ú[ËœÝXœ›ØÙ\ÜË”TKˆ
+Bˆ^Ù\ÔÑ\œ›Üˆ\È\œ›ÜŽ‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠÓÕQ“T‘QÔÕT•ÑRSQ‹˜ÛÝY›\™YÛÝ[›ÝÝ\ˆŠHœ›ÛH\œ›Ü‚ˆP“P×ÕS“‘SÕÐUÒT”ÈHÂˆ\Þ[˜Ú[Ë˜Ü™X]WÝ\ÚÊØ]ÚØÛÝY›\™YÜÝ™X[JP“P×ÕS“‘SÔ“ÐÑTÔËœÝÝ]
+JKˆ\Þ[˜Ú[Ë˜Ü™X]WÝ\ÚÊØ]ÚØÛÝY›\™YÜÝ™X[JP“P×ÕS“‘SÔ“ÐÑTÔËœÝ\œŠJKˆB‚‚™YˆX›X×ÜÚ\™WÙš[WÝ\›
+Ú\™YÙš[Nˆ™\ÛÛ™YÛÜšÜÜXÙT]
+HOˆÝˆ›Û™N‚ˆYˆP“P×ÕS“‘SÕT“\È›Û™N‚ˆ™]\›ˆ›Û™Bˆ\ËÈHÛÜšÜÜXÙT]™\ÛÛ™\‹›ÙÚXØ[Ü\ÊÚ\™YÙš[K›ÙÚXØ[Ü]šY[Û˜[YOHœÚ\™Yš[H‹\œ›Ü—ØÛÙOH”P“P×ÔÒT‘WÓ“ÕÑ“ÕS‘ŠBˆ™]\›ˆˆžÔP“P×ÕS“‘SÕT“KÞÉËÉËš›Ú[Š][ÝJ\ØY™OIÉÊH›Üˆ\[ˆ\Ê_H‚‚‚™YˆÜÜ—Ù^\›˜[Ü›Ø™WÜÞ[˜ÊX›X×Ý\›ˆÝŠHOˆXÝÜÝ‹[žWN‚ˆ›Ø™WÝ\›HˆšÎ‹ËÝÜÜ‹››ÏÝ\›^Ü][ÝJX›X×Ý\›ØY™OIÉÊ_IÏLIšLI›Ý]]\™È‚ˆžN‚ˆ™\]Y\ÝH™\]Y\Ý
+›Ø™WÝ\›XY\œÏ^È•\Ù\‹PYÙ[Žˆˆ”™\ÙX\˜ÚX™KÞÐQÑS•Õ‘T”ÒSÓŸHŸJBˆÚ]\›Ü[Š™\]Y\Ý[Y[Ý]LŒ
+H\È™\ÜÛœÙN‚ˆÛÛ[Ý\HH™\ÜÛœÙKšXY\œË™Ù]ØÛÛ[Ý\J
+K›ÝÙ\Š
+Bˆ™\ÜÛœÙKœ™XY
+JBˆ™]\›ˆÈœÝ]HŽˆœ\ÜÙYˆYˆŒH™\ÜÛœÙKœÝ]\ÈÌ[™ÛÛ[Ý\KœÝ\ÝÚ]
+š[XYÙKÈŠH[ÙH™˜Z[Y‹œ›ÝšY\ˆŽˆÜÜ‹››‹šÝ]\ÈŽˆ™\ÜÛœÙKœÝ]\Ë˜ÛÛ[\HŽˆÛÛ[Ý\_Bˆ^Ù\\œ›Üˆ\È\œ›ÜŽ‚ˆ™]\›ˆÈœÝ]HŽˆ™˜Z[Y‹œ›ÝšY\ˆŽˆÜÜ‹››‹šÝ]\ÈŽˆ\œ›Ü‹˜ÛÙK˜ÛÛ[\HŽˆ\œ›Ü‹šXY\œË™Ù]ØÛÛ[Ý\J
+K›ÝÙ\Š
+HYˆ\œ›Ü‹šXY\œÈ[ÙH›Û™_Bˆ^Ù\
+T“\œ›Ü‹ÔÑ\œ›Ü‹[Y[Ý]\œ›Ü‹˜[YQ\œ›ÜŠN‚ˆ™]\›ˆÈœÝ]HŽˆ™˜Z[Y‹œ›ÝšY\ˆŽˆÜÜ‹››‹šÝ]\ÈŽˆ›Û™K˜ÛÛ[\HŽˆ›Û™_B‚‚˜\Þ[˜ÈYˆ[—Ù^\›˜[ÜÚ\™WÜ›Ø™J›Ø™WÙš[Nˆ™\ÛÛ™YÛÜšÜÜXÙT]›Û™JHOˆ›Û™N‚ˆÛØ˜[P“P×ÔÒT‘WÑVT“SÔ“Ð‘BˆYˆ›Ø™WÙš[H\È›Û™N‚ˆP“P×ÔÒT‘WÑVT“SÔ“Ð‘HHÈœÝ]HŽˆ››ÝÜ™\]Y\ÝY‹œ›ÝšY\ˆŽˆÜÜ‹››‹œ›Ø™T]Žˆ›Û™KšÝ]\ÈŽˆ›Û™K˜ÛÛ[\HŽˆ›Û™_Bˆ™]\›‚ˆX›X×Ý\›HX›X×ÜÚ\™WÙš[WÝ\›
+›Ø™WÙš[JBˆYˆX›X×Ý\›\È›Û™N‚ˆP“P×ÔÒT‘WÑVT“SÔ“Ð‘HHÈœÝ]HŽˆ™˜Z[Y‹œ›ÝšY\ˆŽˆÜÜ‹››‹œ›Ø™T]Žˆ›Ø™WÙš[K›ÙÚXØ[Ü]šÝ]\ÈŽˆ›Û™K˜ÛÛ[\HŽˆ›Û™_Bˆ™]\›‚ˆ™\Ý[H]ØZ]\Þ[˜Ú[Ë×Ý™XY
+ÜÜ—Ù^\›˜[Ü›Ø™WÜÞ[˜ËX›X×Ý\›
+BˆP“P×ÔÒT‘WÑVT“SÔ“Ð‘HHÊŠœ™\Ý[œ›Ø™T]Žˆ›Ø™WÙš[K›ÙÚXØ[Ü]B‚‚˜\Þ[˜ÈYˆÝÜÜX›X×ÜÚ\™WÝ[›ØÚÙY
+
+HOˆ›ÛÛ‚ˆÛØ˜[P“P×ÔÒT‘WÔÑT•‘T‹P“P×ÔÒT‘WÑ“ÓT‹P“P×ÔÒT‘WÑ’SKP“P×ÔÒT‘WÑ’SWÕTTËP“P×ÔÒT‘WÑVT“SÔ“Ð‘KP“P×ÕS“‘SÔ“ÐÑTÔËP“P×ÕS“‘SÕT“P“P×ÕS“‘SÕÐUÒT”ÂˆØ\×ØXÝ]™HHP“P×ÔÒT‘WÔÑT•‘Tˆ\È›Ý›Û™HÜˆP“P×ÕS“‘SÔ“ÐÑTÔÈ\È›Ý›Û™BˆYˆP“P×ÔÒT‘WÔÑT•‘Tˆ\È›Ý›Û™N‚ˆP“P×ÔÒT‘WÔÑT•‘T‹˜ÛÜÙJ
+Bˆ]ØZ]P“P×ÔÒT‘WÔÑT•‘T‹ØZ]ØÛÜÙY
+
+BˆP“P×ÔÒT‘WÔÑT•‘TˆH›Û™BˆP“P×ÔÒT‘WÑ“ÓTˆH›Û™BˆP“P×ÔÒT‘WÑ’SHH›Û™BˆP“P×ÔÒT‘WÑ’SWÕTTÈH
+
+BˆP“P×ÔÒT‘WÑVT“SÔ“Ð‘HHÈœÝ]HŽˆ››ÝÜ™\]Y\ÝY‹œ›ÝšY\ˆŽˆÜÜ‹››‹œ›Ø™T]Žˆ›Û™KšÝ]\ÈŽˆ›Û™K˜ÛÛ[\HŽˆ›Û™_Bˆ›ÜˆØ]Ú\ˆ[ˆP“P×ÕS“‘SÕÐUÒT”Î‚ˆØ]Ú\‹˜Ø[˜Ù[
+
+BˆYˆP“P×ÕS“‘SÕÐUÒT”Î‚ˆ]ØZ]\Þ[˜Ú[Ë™Ø]\Š
+”P“P×ÕS“‘SÕÐUÒT”Ë™]\›—Ù^Ù\[ÛœÏUYJBˆP“P×ÕS“‘SÕÐUÒT”ÈH×BˆYˆP“P×ÕS“‘SÔ“ÐÑTÔÈ\È›Ý›Û™H[™P“P×ÕS“‘SÔ“ÐÑTÔËœ™]\›˜ÛÙH\È›Û™N‚ˆP“P×ÕS“‘SÔ“ÐÑTÔË\›Z[˜]J
+BˆžN‚ˆ]ØZ]\Þ[˜Ú[ËØZ]Ù›ÜŠP“P×ÕS“‘SÔ“ÐÑTÔËØZ]
+
+K[Y[Ý]MJBˆ^Ù\\Þ[˜Ú[Ë•[Y[Ý]\œ›ÜŽ‚ˆP“P×ÕS“‘SÔ“ÐÑTÔËšÚ[
+
+Bˆ]ØZ]P“P×ÕS“‘SÔ“ÐÑTÔËØZ]
+
+BˆP“P×ÕS“‘SÔ“ÐÑTÔÈH›Û™BˆP“P×ÕS“‘SÕT“H›Û™BˆP“P×ÕS“‘SÔ‘PQK˜ÛX\Š
+Bˆ™]\›ˆØ\×ØXÝ]™B‚‚˜\Þ[˜ÈYˆÛÜšÜÜXÙWÜÚ\™WÜÝ\
+^[ØYˆ[žJHOˆXÝÜÝ‹[žWN‚ˆÜ[ÛœÈHÛÜšÜÜXÙWÜÚ\™WÛÜ[ÛœÊ^[ØY
+Bˆ\Þ[˜ÈÚ]P“P×ÔÒT‘WÓÐÒÎ‚ˆ]ØZ]ÝÜÜX›X×ÜÚ\™WÝ[›ØÚÙY
+
+BˆÛØ˜[P“P×ÔÒT‘WÔÑT•‘T‹P“P×ÔÒT‘WÑ“ÓT‹P“P×ÔÒT‘WÑ’SKP“P×ÔÒT‘WÑ’SWÕTTÂˆÙ\™\ˆH]ØZ]\Þ[˜Ú[ËœÝ\ÜÙ\™\Š[™WÜX›X×ÜÚ\™WØÛY[ÜÝHŒLËŒŒŒH‹ÜL
+BˆÛØÚÙ]H™^
+]\ŠÙ\™\‹œÛØÚÙ]ÈÜˆ
+
+JK›Û™JBˆYˆÛØÚÙ]\È›Û™N‚ˆÙ\™\‹˜ÛÜÙJ
+Bˆ]ØZ]Ù\™\‹ØZ]ØÛÜÙY
+
+Bˆ˜Z\ÙHYÙ[\Q\œ›ÜŠ”P“P×ÔÒT‘WÔÕT•ÑRSQ‹•HØØ[ÛÜšÜÜXÙHÚ\š[™ÈÙ\™\ˆY›Ý™XÙZ]™HHÜˆŠBˆP“P×ÔÒT‘WÔÑT•‘TˆHÙ\™\‚ˆP“P×ÔÒT‘WÑ“ÓTˆHÜ[ÛœË™›Û\‚ˆP“P×ÔÒT‘WÑ’SHHÜ[ÛœË™š[BˆP“P×ÔÒT‘WÑ’SWÕTTÈHÜ[ÛœË™š[WÝ\\ÂˆžN‚ˆ]ØZ]Ý\ÜX›X×ÜÚ\™WÝ[›™[
+ÛØÚÙ]™Ù]ÛØÚÛ˜[YJ
+VÌWJBˆ]ØZ]\Þ[˜Ú[ËØZ]Ù›ÜŠP“P×ÕS“‘SÔ‘PQKØZ]
+
+K[Y[Ý]LMJBˆYˆP“P×ÕS“‘SÕT“\È›Û™N‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠ”P“P×ÔÒT‘WÔÕT•ÑRSQ‹˜ÛÝY›\™YY›Ý›ÝšYHHX›XÈT“ˆŠBˆ^Ù\
+YÙ[\Q\œ›Ü‹\Þ[˜Ú[Ë•[Y[Ý]\œ›ÜŠH\È\œ›ÜŽ‚ˆ]ØZ]ÝÜÜX›X×ÜÚ\™WÝ[›ØÚÙY
+
+BˆYˆ\Ú[œÝ[˜ÙJ\œ›Ü‹YÙ[\Q\œ›ÜŠN‚ˆ˜Z\ÙBˆ˜Z\ÙHYÙ[\Q\œ›ÜŠ”P“P×ÔÒT‘WÔÕT•ÑRSQ‹˜ÛÝY›\™YY›Ý›ÝšYHHX›XÈT“Ú][ˆMHÙXÛÛ™ËˆŠHœ›ÛH\œ›Ü‚ˆ]ØZ][—Ù^\›˜[ÜÚ\™WÜ›Ø™JÜ[ÛœËœ›Ø™WÙš[JBˆ\™Ù]HÜ[ÛœË™š[K›ÙÚXØ[Ü]YˆÜ[ÛœË™š[H\È›Ý›Û™H[ÙH
+Ü[ÛœË™›Û\‹›ÙÚXØ[Ü]Üˆ›ÛÝˆŠBˆÙÊˆÛÜšÜÜXÙWÜÚ\™WÜÝ\\™Ù]^Ý\™Ù]H[ÙO^ÉÙš[IÈYˆÜ[ÛœË™š[H\È›Ý›Û™H[ÙH	Ù›Û\‰ßH™\šYžQ^\›˜[^ÜÝŠÜ[ÛœË™\šYžWÙ^\›˜[
+K›ÝÙ\Š
+_HŠBˆ™]\›ˆÛÜšÜÜXÙWÜÚ\™WÜÝ]\×ÙØÝ[Y[
+
+B‚‚™YˆX›X×ÜÚ\™WØ˜\ÙWÝ\›
+
+HOˆÝˆ›Û™N‚ˆYˆP“P×ÕS“‘SÕT“\È›Û™HÜˆP“P×ÔÒT‘WÑ“ÓTˆ\È›Û™N‚ˆ™]\›ˆ›Û™Bˆ\ËÈHÛÜšÜÜXÙT]™\ÛÛ™\‹›ÙÚXØ[Ü\ÊˆP“P×ÔÒT‘WÑ“ÓT‹›ÙÚXØ[Ü]šY[Û˜[YOHœÚ\™Y›Û\ˆ‹\œ›Ü—ØÛÙOH”P“P×ÔÒT‘WÓ“ÕÑ“ÕS‘‹[Ý×Ü›ÛÝUYKˆ
+Bˆ›Ý]HH‹È‹š›Ú[Š][ÝJ\ØY™OHˆŠH›Üˆ\[ˆ\ÊBˆ™]\›ˆˆžÔP“P×ÕS“‘SÕT“KÞÜ›Ý]_KÈˆYˆ›Ý]H[ÙHˆžÔP“P×ÕS“‘SÕT“KÈ‚‚‚™YˆÛÜšÜÜXÙWÜÚ\™WÜÝ]\×ÙØÝ[Y[
+
+HOˆXÝÜÝ‹[žWN‚ˆXÝ]™HHP“P×ÔÒT‘WÔÑT•‘Tˆ\È›Ý›Û™H[™P“P×ÕS“‘SÔ“ÐÑTÔÈ\È›Ý›Û™H[™P“P×ÕS“‘SÔ“ÐÑTÔËœ™]\›˜ÛÙH\È›Û™H[™P“P×ÕS“‘SÕT“\È›Ý›Û™Bˆ^\›˜[Ü›Ø™HHP“P×ÔÒT‘WÑVT“SÔ“Ð‘HYˆXÝ]™H[ÙHÈœÝ]HŽˆ››ÝÜ™\]Y\ÝY‹œ›ÝšY\ˆŽˆÜÜ‹››‹œ›Ø™T]Žˆ›Û™KšÝ]\ÈŽˆ›Û™K˜ÛÛ[\HŽˆ›Û™_Bˆ™]\›ˆÂˆœÝ]HŽˆ˜XÝ]™HˆYˆXÝ]™H[ÙHš[˜XÝ]™H‹ˆ™›Û\ˆŽˆP“P×ÔÒT‘WÑ“ÓT‹›ÙÚXØ[Ü]YˆXÝ]™H[™P“P×ÔÒT‘WÑ“ÓTˆ\È›Ý›Û™H[ÙH›Û™Kˆ™š[HŽˆP“P×ÔÒT‘WÑ’SK›ÙÚXØ[Ü]YˆXÝ]™H[™P“P×ÔÒT‘WÑ’SH\È›Ý›Û™H[ÙH›Û™Kˆ™š[U\\ÈŽˆ\Ý
+P“P×ÔÒT‘WÑ’SWÕTTÊHYˆXÝ]™H[ÙH×KˆœX›XÐ˜\ÙU\›ŽˆX›X×ÜÚ\™WØ˜\ÙWÝ\›
+
+HYˆXÝ]™H[ÙH›Û™KˆœX›XÑš[U\›ŽˆX›X×ÜÚ\™WÙš[WÝ\›
+P“P×ÔÒT‘WÑ’SJHYˆXÝ]™H[™P“P×ÔÒT‘WÑ’SH\È›Ý›Û™H[ÙH›Û™Kˆ›Y]ÙÈŽˆÈ‘ÑU‹’PQ—HYˆXÝ]™H[ÙH×Kˆ™^\›˜[T™XXÚX›HŽˆYHYˆ^\›˜[Ü›Ø™VÈœÝ]H—HOHœ\ÜÙYˆ[ÙH˜[ÙHYˆ^\›˜[Ü›Ø™VÈœÝ]H—HOH™˜Z[Yˆ[ÙH›Û™Kˆ™^\›˜[›Ø™HŽˆ^\›˜[Ü›Ø™KˆB‚‚˜\Þ[˜ÈYˆÛÜšÜÜXÙWÜÚ\™WÜÝ]\Ê^[ØYˆ[žJHOˆXÝÜÝ‹[žWN‚ˆYˆ›Ý\Ú[œÝ[˜ÙJ^[ØYXÝ
+HÜˆÙ]
+^[ØY
+HHÈ™\šYžQ^\›˜[ŸN‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠ“Ó“S‘WÔÒT‘WÒS•SQ‹›Û›[™WÜÚ\™WÜÝ]\È™XÙZ]™Y[œÝ\ÜYšY[ËˆŠBˆ™\šYžWÙ^\›˜[H^[ØY™Ù]
+™\šYžQ^\›˜[‹˜[ÙJBˆYˆ›Ý\Ú[œÝ[˜ÙJ™\šYžWÙ^\›˜[›ÛÛ
+N‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠ“Ó“S‘WÔÒT‘WÒS•SQ‹™\šYžQ^\›˜[]\Ý™HH›ÛÛX[‹ˆŠBˆ\Þ[˜ÈÚ]P“P×ÔÒT‘WÓÐÒÎ‚ˆYˆ™\šYžWÙ^\›˜[[™
+P“P×ÔÒT‘WÑ“ÓTˆ\È›Ý›Û™HÜˆP“P×ÔÒT‘WÑ’SH\È›Ý›Û™JN‚ˆYˆP“P×ÔÒT‘WÑ’SH\È›Ý›Û™N‚ˆ›Ø™WÙš[HHP“P×ÔÒT‘WÑ’SBˆ[ÙN‚ˆ›Ø™WÜ]HP“P×ÔÒT‘WÑVT“SÔ“Ð‘K™Ù]
+œ›Ø™T]ŠBˆ›Ø™WÙš[HHÛÜšÜÜXÙT]™\ÛÛ™\Š
+Kœ™\ÛÛ™WÙ^\Ý[™Ê›Ø™WÜ]šY[Û˜[YOHœ›Ø™T]‹^XÝYÝ\OH™š[HŠHYˆ\Ú[œÝ[˜ÙJ›Ø™WÜ]ÝŠH[ÙH›Û™BˆYˆ›Ø™WÙš[H\È›Û™N‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠ“Ó“S‘WÔÒT‘WÒS•SQ‹•\ÈÚ\™H\È›È[XYÙH›Ø™T]ˆ™\Ý\]Ú]™\šYžQ^\›˜[[™H›Ø™T]ˆŠBˆ]ØZ][—Ù^\›˜[ÜÚ\™WÜ›Ø™J›Ø™WÙš[JBˆ™]\›ˆÛÜšÜÜXÙWÜÚ\™WÜÝ]\×ÙØÝ[Y[
+
+B‚‚˜\Þ[˜ÈYˆÛÜšÜÜXÙWÜÚ\™WÜÝÜ
+
+HOˆXÝÜÝ‹[žWN‚ˆ\Þ[˜ÈÚ]P“P×ÔÒT‘WÓÐÒÎ‚ˆÝÜYH]ØZ]ÝÜÜX›X×ÜÚ\™WÝ[›ØÚÙY
+
+BˆÙÊˆÛÜšÜÜXÙWÜÚ\™WÜÝÜÝÜY^ÜÝŠÝÜY
+K›ÝÙ\Š
+_HŠBˆ™]\›ˆÈœÝ]HŽˆœÝÜY‹œÝÜYŽˆÝÜYB‚‚™Yˆ\œÙWÚœÛÛ—Ø›ÙJ›ÙNˆž]\ÊHOˆ[žN‚ˆYˆ›Ý›ÙN‚ˆ™]\›ˆßBˆžN‚ˆ™]\›ˆœÛÛ‹›ØYÊ›ÙK™XÛÙJ]‹NŠJBˆ^Ù\
+[šXÛÙQXÛÙQ\œ›Ü‹œÛÛ‹’”ÓÓ‘XÛÙQ\œ›ÜŠH\È\œ›ÜŽ‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠ’S•SQÒ”ÓÓˆ‹•H™\]Y\Ý›ÙH]\Ý™H˜[YU‹N”ÓÓ‹ˆŠHœ›ÛH\œ›Ü‚‚‚™Yˆ™\ÜÛœÙWÛÙ×ÜÝY™š^
+]ˆÝ‹›ÙNˆXÝÜÝ‹[žWH›Û™JHOˆÝŽ‚ˆˆˆYHÛÛ\XÝ\Ù\‹]š\ÚX›HÝ]HÈ\ÚÈ[™PÔÙÈ[™\Ëˆˆˆ‚ˆYˆ›Ý\Ú[œÝ[˜ÙJ›ÙKXÝ
+N‚ˆ™]\›ˆˆ‚ˆYˆ]œÝ\ÝÚ]
+‹ØÝ\ÝÛK]ÛÛËÈŠN‚ˆYˆ›ÙK™Ù]
+šÚ[™ŠHOHœ™\Ý[Ž‚ˆ™]\›ˆˆÛÛ\]Y‚ˆØÝ[Y[H›ÙK™Ù]
+\ÚÈ‹›ÙJBˆYˆ›Ý\Ú[œÝ[˜ÙJØÝ[Y[XÝ
+N‚ˆ™]\›ˆˆ‚ˆ›ÙÜ™\ÜÈHØÝ[Y[™Ù]
+œ›ÙÜ™\ÜÔ\˜Ù[ŠBˆ\˜Ù[YÙHHˆˆÜ›ÙÜ™\ÜÎ™ßIHˆYˆ\Ú[œÝ[˜ÙJ›ÙÜ™\ÜË
+[›Ø]
+JH[™›Ý\Ú[œÝ[˜ÙJ›ÙÜ™\ÜË›ÛÛ
+H[™X]š\Ùš[š]J›ÙÜ™\ÜÊH[™H›ÙÜ™\ÜÈHL[ÙHˆ‚ˆÝ]\ÈHØÝ[Y[™Ù]
+œÝ]\È‹ˆŠBˆÝ]HHˆˆÜÝ]\ßHˆYˆ\Ú[œÝ[˜ÙJÝ]\ËÝŠH[™Ý]\È[ˆÈÛÜšÚ[™È‹˜ÛÛ\]Y‹™˜Z[Y‹˜Ø[˜Ù[YŸH[ÙHˆ‚ˆ™]\›ˆÝ]H
+È\˜Ù[YÙBˆYˆ]œÝ\ÝÚ]
+‹ÛXÜÛÙËÈŠH[™\Ú[œÝ[˜ÙJ›ÙK™Ù]
+œÝ]\ÈŠKÝŠN‚ˆ›ÙÜ™\ÜÈH›ÙK™Ù]
+œ›ÙÜ™\ÜÔ\˜Ù[ŠBˆ\˜Ù[YÙHHˆˆÜ›ÙÜ™\ÜÎ™ßIHˆYˆ\Ú[œÝ[˜ÙJ›ÙÜ™\ÜË
+[›Ø]
+JH[™›Ý\Ú[œÝ[˜ÙJ›ÙÜ™\ÜË›ÛÛ
+H[™H›ÙÜ™\ÜÈHL[ÙHˆ‚ˆ™]\›ˆˆˆØ›ÙVÉÜÝ]\É×_^Ü\˜Ù[YÙ_H‚ˆYˆ›Ý]œÝ\ÝÚ]
+‹Ý\ÚÜËÈŠHÜˆ\ÚÒYˆ›Ý[ˆ›ÙN‚ˆ™]\›ˆˆ‚ˆ›ÙÜ™\ÜÈH›ÙK™Ù]
+œ›ÙÜ™\ÜÔ\˜Ù[ŠBˆYˆ\Ú[œÝ[˜ÙJ›ÙÜ™\ÜË
+[›Ø]
+JH[™›Ý\Ú[œÝ[˜ÙJ›ÙÜ™\ÜË›ÛÛ
+H[™H›ÙÜ™\ÜÈHL‚ˆ\˜Ù[YÙHHˆžÜ›ÙÜ™\ÜÎ‹ŒYŸH‹œœÝš\
+ŒŠKœœÝš\
+‹ˆŠBˆ™]\›ˆˆˆÜ\˜Ù[YÙ_IH‚ˆ™]\›ˆˆ‚‚‚™Yˆ[\›˜[ÙÛÛÙÛWÝ˜[œÛ]WÜÜYXÚÜ]
+]ˆÝŠHOˆ›ÛÛ‚ˆˆˆ‘ÛÛÙÛH˜[œÛ]HØ[˜XÚÜÈ\™H[\›˜[\ÚÈ[Xš[™Ë›Ý\Ù\‹Y˜XÚ[™ÈXÝ[ÛœËˆˆˆ‚ˆ™]\›ˆ›ÛÛ
+™K™[X]Ú
+ˆˆ‹Ý\ÚÜËÜÞ\Ý[K\ÜYXÚÝÚ×ÖÐKV˜K^ŒNWËW^ÌLKÙÛÛÙÛK]˜[œÛ]KJÎœ›ÙÜ™\ÜßÛÛ\]_˜Z[]Y[ÊH‹ˆ]ˆ
+JB‚‚™YˆÛÛ\XÝØÝ\ÝÛWÝÛÛÛÙ×Ü]
+]ˆÝ‹›ÙNˆXÝÜÝ‹[žWH›Û™JHOˆÝŽ‚ˆˆˆ”™\ÛÛ™HHX[šY™\Ý˜[YH›ÜˆÝ\Ý]\È[™Ø[˜Ù[][Ûˆ™\]Y\ÝËˆˆˆ‚ˆYˆ›Ý]œÝ\ÝÚ]
+‹ØÝ\ÝÛK]ÛÛËÈŠHÜˆ›Ý\Ú[œÝ[˜ÙJ›ÙKXÝ
+N‚ˆ™]\›ˆ]ˆØÝ[Y[H›ÙK™Ù]
+\ÚÈ‹›ÙJBˆYˆ›Ý\Ú[œÝ[˜ÙJØÝ[Y[XÝ
+N‚ˆ™]\›ˆ]ˆÛÛHØÝ[Y[™Ù]
+ÛÛŠBˆYˆ›Ý\Ú[œÝ[˜ÙJÛÛÝŠHÜˆ›Ý™K™[X]Ú
+ˆ–ØK^—VØK^ŒNW×^ÌÎ_H‹ÛÛ
+N‚ˆ™]\›ˆ]ˆ\Ú×ÚYHØÝ[Y[™Ù]
+\ÚÒYŠBˆÝY™š^Hˆ‹ÞÝ\Ú×ÚYHˆYˆ\Ú[œÝ[˜ÙJ\Ú×ÚYÝŠH[™™K™[X]Ú
+ˆÚ×ÖÐKV˜K^ŒNWËW^ÌLH‹\Ú×ÚY
+H[ÙHˆ‚ˆYˆ]™[™ÝÚ]
+‹ØØ[˜Ù[ŠN‚ˆÝY™š^
+ÏH‹ØØ[˜Ù[‚ˆ™]\›ˆˆ‹ØÝ\ÝÛK]ÛÛËÞÝÛÛ^ÜÝY™š^H‚‚‚™YˆÛÛ\XÝÙÛÛÙÛWÝ˜[œÛ]WÜÜYXÚÛÙ×Ü]
+]ˆÝ‹›ÙNˆXÝÜÝ‹[žWH›Û™JHOˆÝŽ‚ˆˆˆ”ÚÝÈ]™\žHÛÛÙÛHÈ™\]Y\ÝÚ]Ý]™\X][™È]ÈÛ™È[\›˜[›Ý]Kˆˆˆ‚ˆØ[˜XÚÈH™K™[X]Ú
+ˆˆ‹Ý\ÚÜËÜÞ\Ý[K\ÜYXÚÊÚ×ÖÐKV˜K^ŒNWËW^ÌLJKÙÛÛÙÛK]˜[œÛ]KJ›ÙÜ™\ÜßÛÛ\]_˜Z[]Y[ÊH‹ˆ]ˆ
+BˆYˆØ[˜XÚÎ‚ˆ\Ú×ÚYØXÝ[ÛˆHØ[˜XÚË™Ü›Ý\Ê
+Bˆ™]\›ˆˆ‹Ý\ÚÜËÞÝ\Ú×ÚYH‚ˆYˆ™K™[X]Ú
+ˆ‹Ý\ÚÜËÜÞ\Ý[K\ÜYXÚÝÚ×ÖÐKV˜K^ŒNWËW^ÌLH‹]
+H[™\Ú[œÝ[˜ÙJ›ÙKXÝ
+H[™›ÙK™Ù]
+™[™Ú[™HŠHOH™ÛÛÙÛU˜[œÛ]HŽ‚ˆ™]\›ˆˆ‹Ý\ÚÜËÞØ›ÙVÉÝ\ÚÒY	×_H‚ˆ™]\›ˆ]‚‚™YˆXÜÝÛÛÛÙÊÛÛˆÝ‹^[ØYˆ[žJHOˆXÝÜÝ‹[žWN‚ˆYˆ›Ý™K™[X]Ú
+ˆ–ØK^ŒNW×^ÌKH‹ÛÛ
+N‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠ“PÔÓÑ×ÒS•SQ‹•HPÔÛÛ˜[YH\È[˜[YˆŠBˆYˆ›Ý\Ú[œÝ[˜ÙJ^[ØYXÝ
+HÜˆœÝ]\Èˆ›Ý[ˆ^[ØYÜˆÙ]
+^[ØY
+HHÈœÝ]\È‹œ›ÙÜ™\ÜÔ\˜Ù[ŸHÜˆ›Ý\Ú[œÝ[˜ÙJ^[ØYÈœÝ]\È—KÝŠN‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠ“PÔÓÑ×ÒS•SQ‹•HPÔÙÈ™\]Y\Ý™\]Z\™\ÈÝ]\È[™Ü[Û˜[›ÙÜ™\ÜÔ\˜Ù[ˆŠBˆÝ]\ÈH^[ØYÈœÝ]\È—KœÝš\
+
+BˆYˆ›Ý™K™[X]Ú
+ˆ–ØK^ŒNWËW^ÌKH‹Ý]\ÊN‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠ“PÔÓÑ×ÒS•SQ‹•HPÔÙÈÝ]\È\È[˜[YˆŠBˆ›ÙÜ™\ÜÈH^[ØY™Ù]
+œ›ÙÜ™\ÜÔ\˜Ù[ŠBˆYˆœ›ÙÜ™\ÜÔ\˜Ù[ˆ[ˆ^[ØY[™
+\Ú[œÝ[˜ÙJ›ÙÜ™\ÜË›ÛÛ
+HÜˆ›Ý\Ú[œÝ[˜ÙJ›ÙÜ™\ÜË
+[›Ø]
+JHÜˆ›ÝX]š\Ùš[š]J›ÙÜ™\ÜÊHÜˆ›ÝH›ÙÜ™\ÜÈHL
+N‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠ“PÔÓÑ×ÒS•SQ‹œ›ÙÜ™\ÜÔ\˜Ù[]\Ý™HHš[š]H[X™\ˆœ›ÛHÈLˆŠBˆ™]\›ˆÈœÝ]\ÈŽˆÝ]\Ë
+ŠŠÈœ›ÙÜ™\ÜÔ\˜Ù[Žˆ›ÙÜ™\ÜßHYˆ›ÙÜ™\ÜÈ\È›Ý›Û™H[ÙHßJ_B‚‚žN‚ˆœ›ÛHœÝÜžX›Ø\™È[\ÜÝÜžX›Ø\™Ù\šXÙB™^Ù\[\Ü\œ›ÜŽˆÈ\™XÝ]Ûˆ™\ÙX\˜ÚX™WØYÙ[œH][˜Ú‚ˆœ›ÛHÝÜžX›Ø\™È[\ÜÝÜžX›Ø\™Ù\šXÙB‚žN‚ˆœ›ÛH[Y\œÈ[\Ü[Y\”Ù\šXÙB™^Ù\[\Ü\œ›ÜŽ‚ˆœ›ÛH[Y\œÈ[\Ü[Y\”Ù\šXÙB‚•SQT—ÕTÒÔÈH[Y\”Ù\šXÙJÞ\Ë›[Ù[\Ö××Û˜[YW××JB‚”ÕÔ–P“ÐT‘ÕTÒÔÈHÝÜžX›Ø\™Ù\šXÙJÞ\Ë›[Ù[\Ö××Û˜[YW××JB‚‚˜\Þ[˜ÈYˆ[™WØÛY[
+™XY\Žˆ\Þ[˜Ú[Ë”Ý™X[T™XY\‹Üš]\Žˆ\Þ[˜Ú[Ë”Ý™X[UÜš]\ŠHOˆ›Û™N‚ˆY]Ù]Hˆ‹ˆ‚ˆžN‚ˆY]Ù]]Y\žK›ÙKXY\œÈH]ØZ]™XYÜ™\]Y\Ý
+™XY\ŠBˆYˆY]ÙOH“ÔSÓ”ÈŽ‚ˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒ›ÈÛÛ[‹›Û™Bˆ[YˆY]ÙOH‘ÑUˆ[™]OH‹ÚX[Ž‚ˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒÒÈ‹ØXÚYÜX›X×ÚX[
+
+Bˆ[YˆY]ÙOH‘ÑUˆ[™]OH‹Ú[\›˜[ÝÛÛ[[Z]ÈŽ‚ˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒÒÈ‹È›[Z]ÈŽˆÛÛ™šYÝ\™YÝÛÛÛ[Z]Ê
+K›™]ÕÛÛÑ[˜X›YžQY˜][ŽˆÛÛ™šYÝ\™YÛ™]×ÝÛÛ×ÙY˜][
+
+K›YYXUÚYÙ][™ÚZÙU[Y[Ý]ÙXÛÛ™ÈŽˆÛÛ™šYÝ\™YÛYYXWÝÚYÙ]Ú[™ÚZÙWÝ[Y[Ý]
+
+K˜œ›ÝÜÙ\”ÝYQÜ›Ý\XœÈŽˆÛÛ™šYÝ\™YØœ›ÝÜÙ\—ÜÝYWÙÜ›Ý\ÝXœÊ
+K˜œ›ÝÜÙ\”ÝYQ]Z[YÙÙÚ[™ÈŽˆÛÛ™šYÝ\™YØœ›ÝÜÙ\—ÜÝYWÙ]Z[YÛÙÙÚ[™Ê
+K˜œ›ÝÜÙ\”ÝYSØœÙ\˜][ÛˆŽˆÛÛ™šYÝ\™YØœ›ÝÜÙ\—ÜÝYWÛØœÙ\˜][ÛŠ
+K˜ÛÛ\ÜÙ\“YYXT™]žHŽˆÛÛ™šYÝ\™YØÛÛ\ÜÙ\—ÛYYXWÜ™]žJ
+K˜ÛÛ\ÜÙ\]]ÔÙ[™[Y[Ý]ÙXÛÛ™ÈŽˆÛÛ™šYÝ\™YØÛÛ\ÜÙ\—Ø]]×ÜÙ[™Ý[Y[Ý]
+
+_Bˆ[YˆY]ÙOH‘ÑUˆ[™]OH‹ØÝ\ÝÛK]ÛÛÈŽ‚ˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒÒÈ‹ÕTÕÓWÕÓÓË˜Ø][ÙÊ
+Bˆ[YˆY]ÙOH”ÔÕˆ[™]OH‹ØÝ\ÝÛK]ÛÛËØØ[Ž‚ˆ^[ØYH\œÙWÚœÛÛ—Ø›ÙJ›ÙJBˆYˆ›Ý\Ú[œÝ[˜ÙJ^[ØYXÝ
+HÜˆÙ]
+^[ØY
+HOHÈ›˜[YH‹˜\™Ý[Y[ÈŸHÜˆ›Ý\Ú[œÝ[˜ÙJ^[ØY™Ù]
+›˜[YHŠKÝŠN‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠÕTÕÓWÕÓÓÔ‘TUQTÕÒS•SQ‹Ý\ÝÛHÛÛØ[È™\]Z\™H˜[YH[™\™Ý[Y[ËˆŠBˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒÒÈ‹]ØZ]ÕTÕÓWÕÓÓË˜Ø[
+^[ØYÈ›˜[YH—K^[ØYÈ˜\™Ý[Y[È—JBˆ[YˆY]ÙOH‘ÑUˆ[™™K™[X]Ú
+ˆ‹ØÝ\ÝÛK]ÛÛËÝ\ÚÜËÝÚ×ÖÐKV˜K^ŒNWËW^ÌLH‹]
+N‚ˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒÒÈ‹ÕTÕÓWÕÓÓËœÝ]\Ê]œ™[[Ý™\™Yš^
+‹ØÝ\ÝÛK]ÛÛËÝ\ÚÜËÈŠJBˆ[YˆY]ÙOH”ÔÕˆ[™™K™[X]Ú
+ˆ‹ØÝ\ÝÛK]ÛÛËÝ\ÚÜËÝÚ×ÖÐKV˜K^ŒNWËW^ÌLKØØ[˜Ù[‹]
+N‚ˆYˆ\œÙWÚœÛÛ—Ø›ÙJ›ÙJHOHßN‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠÕTÕÓWÕÓÓÔ‘TUQTÕÒS•SQ‹Ý\ÝÛHÛÛØ[˜Ù[][ÛˆXØÙ\È[ˆ[\H›ÙKˆŠBˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒÒÈ‹]ØZ]ÕTÕÓWÕÓÓË˜Ø[˜Ù[
+]œ™[[Ý™\™Yš^
+‹ØÝ\ÝÛK]ÛÛËÝ\ÚÜËÈŠKœ™[[Ý™\ÝY™š^
+‹ØØ[˜Ù[ŠJBˆ[YˆY]ÙOH”ÔÕˆ[™]OH‹Ý[Y\‹ÜÝ\Ž‚ˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒÒÈ‹]ØZ]SQT—ÕTÒÔË˜Ü™X]J\œÙWÚœÛÛ—Ø›ÙJ›ÙJJBˆ[YˆY]ÙOH‘ÑUˆ[™™K™[X]Ú
+ˆ‹Ý\ÚÜËÝ[Y\‹Ö×‹×JÈ‹]
+N‚ˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒÒÈ‹]ØZ]SQT—ÕTÒÔËœÝ]\Ê]œ™[[Ý™\™Yš^
+‹Ý\ÚÜËÝ[Y\‹ÈŠJBˆ[YˆY]ÙOH”ÔÕˆ[™™K™[X]Ú
+ˆ‹Ý\ÚÜËÝ[Y\‹Ö×‹×JËØØ[˜Ù[‹]
+N‚ˆYˆ\œÙWÚœÛÛ—Ø›ÙJ›ÙJHOHßN‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠ•SQT—ÒS•SQ‹•[Y\ˆØ[˜Ù[][ÛˆXØÙ\È[ˆ[\H›ÙKˆŠBˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒÒÈ‹]ØZ]SQT—ÕTÒÔË˜Ø[˜Ù[
+]œ™[[Ý™\™Yš^
+‹Ý\ÚÜËÝ[Y\‹ÈŠKœ™[[Ý™\ÝY™š^
+‹ØØ[˜Ù[ŠJBˆ[YˆY]ÙOH”ÔÕˆ[™]OH‹ÝÛÜšÜÜXÙKÛ\ÝŽ‚ˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒÒÈ‹ÛÜšÜÜXÙWÛ\Ý
+\œÙWÚœÛÛ—Ø›ÙJ›ÙJJBˆ[YˆY]ÙOH”ÔÕˆ[™]OH‹ÝÛÜšÜÜXÙKÜÝ]Ž‚ˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒÒÈ‹ÛÜšÜÜXÙWÜÝ]
+\œÙWÚœÛÛ—Ø›ÙJ›ÙJJBˆ[YˆY]ÙOH”ÔÕˆ[™]OH‹ÝÛÜšÜÜXÙKÛZÙ\ˆŽ‚ˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒÒÈ‹ÛÜšÜÜXÙWÛZÙ\Š\œÙWÚœÛÛ—Ø›ÙJ›ÙJJBˆ[YˆY]ÙOH”ÔÕˆ[™]OH‹ÝÛÜšÜÜXÙKÛ[Ý™HŽ‚ˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒÒÈ‹ÛÜšÜÜXÙWÛ[Ý™J\œÙWÚœÛÛ—Ø›ÙJ›ÙJJBˆ[YˆY]ÙOH”ÔÕˆ[™]OH‹ÝÛÜšÜÜXÙKÙ[]HŽ‚ˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒÒÈ‹ÛÜšÜÜXÙWÙ[]J\œÙWÚœÛÛ—Ø›ÙJ›ÙJJBˆ[YˆY]ÙOH”ÔÕˆ[™]OH‹ÝÛÜšÜÜXÙKÜÚ\™KÜÝ\Ž‚ˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒÒÈ‹]ØZ]ÛÜšÜÜXÙWÜÚ\™WÜÝ\
+\œÙWÚœÛÛ—Ø›ÙJ›ÙJJBˆ[YˆY]ÙOH”ÔÕˆ[™]OH‹ÝÛÜšÜÜXÙKÜÚ\™KÜÝ]\ÈŽ‚ˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒÒÈ‹]ØZ]ÛÜšÜÜXÙWÜÚ\™WÜÝ]\Ê\œÙWÚœÛÛ—Ø›ÙJ›ÙJJBˆ[YˆY]ÙOH”ÔÕˆ[™]OH‹ÝÛÜšÜÜXÙKÜÚ\™KÜÝÜŽ‚ˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒÒÈ‹]ØZ]ÛÜšÜÜXÙWÜÚ\™WÜÝÜ
+
+Bˆ[YˆY]ÙOH”ÔÕˆ[™]OH‹ÛYYXKÜ›Ø™HŽ‚ˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒÒÈ‹]ØZ]YYXWÜ›Ø™J\œÙWÚœÛÛ—Ø›ÙJ›ÙJJBˆ[YˆY]ÙOH”ÔÕˆ[™]OH‹ÜÞ\Ý[KÜÜYXÚÝ›ÚXÙ\ÈŽ‚ˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒÒÈ‹]ØZ]Þ\Ý[WÜÜYXÚÛ\ÝÝ›ÚXÙ\Ê\œÙWÚœÛÛ—Ø›ÙJ›ÙJJBˆ[YˆY]ÙOH”ÔÕˆ[™]OH‹Ý\ÚÜËÜÞ\Ý[K\ÜYXÚŽ‚ˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒHÜ™X]Y‹]ØZ]ÔQPÒÕTÒÔË˜Ü™X]J\œÙWÚœÛÛ—Ø›ÙJ›ÙJJBˆ[YˆY]ÙOH”ÔÕˆ[™™K™[X]Ú
+ˆ‹Ý\ÚÜËÜÞ\Ý[K\ÜYXÚÝÚ×ÖÐKV˜K^ŒNWËW^ÌLKÙÛÛÙÛK]˜[œÛ]K\›ÙÜ™\ÜÈ‹]
+N‚ˆ\Ú×ÚYH]œ™[[Ý™\™Yš^
+‹Ý\ÚÜËÜÞ\Ý[K\ÜYXÚÈŠKœ™[[Ý™\ÝY™š^
+‹ÙÛÛÙÛK]˜[œÛ]K\›ÙÜ™\ÜÈŠBˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒÒÈ‹ÔQPÒÕTÒÔË™ÛÛÙÛWÜ›ÙÜ™\ÜÊ\Ú×ÚY\œÙWÚœÛÛ—Ø›ÙJ›ÙJJBˆ[YˆY]ÙOH”ÔÕˆ[™™K™[X]Ú
+ˆ‹Ý\ÚÜËÜÞ\Ý[K\ÜYXÚÝÚ×ÖÐKV˜K^ŒNWËW^ÌLKÙÛÛÙÛK]˜[œÛ]KXÛÛ\]H‹]
+N‚ˆ\Ú×ÚYH]œ™[[Ý™\™Yš^
+‹Ý\ÚÜËÜÞ\Ý[K\ÜYXÚÈŠKœ™[[Ý™\ÝY™š^
+‹ÙÛÛÙÛK]˜[œÛ]KXÛÛ\]HŠBˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒÒÈ‹ÔQPÒÕTÒÔË™ÛÛÙÛWØÛÛ\]J\Ú×ÚY\œÙWÚœÛÛ—Ø›ÙJ›ÙJJBˆ[YˆY]ÙOH”ÔÕˆ[™™K™[X]Ú
+ˆ‹Ý\ÚÜËÜÞ\Ý[K\ÜYXÚÝÚ×ÖÐKV˜K^ŒNWËW^ÌLKÙÛÛÙÛK]˜[œÛ]KY˜Z[‹]
+N‚ˆ\Ú×ÚYH]œ™[[Ý™\™Yš^
+‹Ý\ÚÜËÜÞ\Ý[K\ÜYXÚÈŠKœ™[[Ý™\ÝY™š^
+‹ÙÛÛÙÛK]˜[œÛ]KY˜Z[ŠBˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒÒÈ‹ÔQPÒÕTÒÔË™ÛÛÙÛWÙ˜Z[
+\Ú×ÚY\œÙWÚœÛÛ—Ø›ÙJ›ÙJJBˆ[YˆY]ÙOH”ÔÕˆ[™™K™[X]Ú
+ˆ‹Ý\ÚÜËÜÞ\Ý[K\ÜYXÚÝÚ×ÖÐKV˜K^ŒNWËW^ÌLKÙÛÛÙÛK]˜[œÛ]KX]Y[È‹]
+N‚ˆ\Ú×ÚYH]œ™[[Ý™\™Yš^
+‹Ý\ÚÜËÜÞ\Ý[K\ÜYXÚÈŠKœ™[[Ý™\ÝY™š^
+‹ÙÛÛÙÛK]˜[œÛ]KX]Y[ÈŠBˆÚÙ[œÈH]Y\žK™Ù]
+ÚÙ[ˆŠBˆYˆ›Ý\Ú[œÝ[˜ÙJÚÙ[œË\Ý
+HÜˆ[ŠÚÙ[œÊHOHN‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠ‘ÓÓÑÓWÕS”ÓUWÕTÒ×ÒS•SQ‹•HÛÛÙÛH˜[œÛ]HÜYXÚ\ÚÈ\È[˜[YˆŠBˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒÒÈ‹]ØZ]ÔQPÒÕTÒÔË™ÛÛÙÛWØ]Y[Ê\Ú×ÚYÚÙ[œÖÌK›ÙJBˆ[YˆY]ÙOH”ÔÕˆ[™]OH‹Ý\ÚÜËØØ\\™KYœ˜[YHŽ‚ˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒHÜ™X]Y‹]ØZ]ÐTT‘WÑ”SQWÕTÒÔË˜Ü™X]J\œÙWÚœÛÛ—Ø›ÙJ›ÙJJBˆ[YˆY]ÙOH”ÔÕˆ[™]OH‹Ý\ÚÜËÛYYXKXÛ\Ž‚ˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒHÜ™X]Y‹]ØZ]QQPWÐÓTÕTÒÔË˜Ü™X]J\œÙWÚœÛÛ—Ø›ÙJ›ÙJJBˆ[YˆY]ÙOH”ÔÕˆ[™]OH‹ÛYYXKØØ[Y\˜KÛ\ÝŽ‚ˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒÒÈ‹È˜Ø[Y\˜\ÈŽˆØØ[Y\˜WÜX›X×Ù]šXÙJ]šXÙJH›Üˆ]šXÙH[ˆ]ØZ]Ø[Y\˜WÙ]šXÙ\Ê
+W_Bˆ[YˆY]ÙOH”ÔÕˆ[™]OH‹ÛYYXKØØ[Y\˜KØØ\\™KYœ˜[YHŽ‚ˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒÒÈ‹]ØZ]Ø[Y\˜WØØ\\™WÙœ˜[YJ\œÙWÚœÛÛ—Ø›ÙJ›ÙJJBˆ[YˆY]ÙOH”ÔÕˆ[™]OH‹Ý\ÚÜËØØ[Y\˜K\™XÛÜ™Ž‚ˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒHÜ™X]Y‹]ØZ]ÐSQTWÔ‘PÓÔ‘ÕTÒÔË˜Ü™X]J\œÙWÚœÛÛ—Ø›ÙJ›ÙJJBˆ[YˆY]ÙOH”ÔÕˆ[™]OH‹Ý\ÚÜËØØ[Y\˜K\™XÛÜ™X]Y[ÈŽ‚ˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒHÜ™X]Y‹]ØZ]ÐSQTWÔ‘PÓÔ‘ÕTÒÔË˜Ü™X]J\œÙWÚœÛÛ—Ø›ÙJ›ÙJK™XÛÜ™[™×ÚÚ[™H˜]Y[ÈŠBˆ[YˆY]ÙOH”ÔÕˆ[™][ˆÈ‹Þ[Ý]X™KÜÝÜžX›Ø\™ËÚ[™›È‹‹Þ[Ý]X™KÜÝÜžX›Ø\™ËÙÝÛ›ØY‹‹Þ[Ý]X™KÜÝÜžX›Ø\™ËÜÝ]\È‹‹Þ[Ý]X™KÜÝÜžX›Ø\™ËØØ[˜Ù[ŸN‚ˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒÒÈ‹]ØZ]ÕÔ–P“ÐT‘ÕTÒÔË™\Ü]Ú
+]œœÜ]
+‹È‹JVÌWK\œÙWÚœÛÛ—Ø›ÙJ›ÙJJBˆ[YˆY]ÙOH”ÔÕˆ[™]OH‹Ý\ÚÜËÝš\ÝX[[X\Ž‚ˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒHÜ™X]Y‹]ØZ]’TÕPSÓPTÕTÒÔË˜Ü™X]J\œÙWÚœÛÛ—Ø›ÙJ›ÙJJBˆ[YˆY]ÙOH”ÔÕˆ[™]OH‹ÛYYXKØØ\\™K\ØÜ™Y[ˆŽ‚ˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒÒÈ‹]ØZ]Ø\\™WÜØÜ™Y[Š\œÙWÚœÛÛ—Ø›ÙJ›ÙJJBˆ[YˆY]ÙOH”ÔÕˆ[™]OH‹ÛYYXKÚ[XYÙKXÜ›ÜŽ‚ˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒÒÈ‹]ØZ][XYÙWØÜ›Ü
+\œÙWÚœÛÛ—Ø›ÙJ›ÙJJBˆ[YˆY]ÙOH”ÔÕˆ[™]OH‹ÛYYXKÝÛÜšÜÜXÙKZ[XYÙKZ[™›ÈŽ‚ˆÚ][K™\ÜÛœÙWØ›ÙHHÛÜšÜÜXÙWÚ[XYÙWÛY]Y]J\œÙWÚœÛÛ—Ø›ÙJ›ÙJJBˆ™\ÜÛœÙWÜÝ]\ÈHŒŒÒÈ‚ˆ[YˆY]ÙOH”ÔÕˆ[™]OH‹ÛYYXKÚ[œÜXÝZ[XYÙHŽ‚ˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒÒÈ‹]ØZ][œÜXÝÝÛÜšÜÜXÙWÚ[XYÙJ\œÙWÚœÛÛ—Ø›ÙJ›ÙJJBˆ[YˆY]ÙOH”ÔÕˆ[™]OH‹ØÛ\›Ø\™ÜÝ]\ÈŽ‚ˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒÒÈ‹Û\›Ø\™ÜÝ]\Ê\œÙWÚœÛÛ—Ø›ÙJ›ÙJJBˆ[YˆY]ÙOH”ÔÕˆ[™]OH‹ØÛ\›Ø\™ÙÙ]Ž‚ˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒÒÈ‹]ØZ]Û\›Ø\™ÙÙ]
+\œÙWÚœÛÛ—Ø›ÙJ›ÙJJBˆ[YˆY]ÙOH”ÔÕˆ[™]OH‹ØÛ\›Ø\™ÜÙ]Ž‚ˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒÒÈ‹]ØZ]Û\›Ø\™ÜÙ]
+\œÙWÚœÛÛ—Ø›ÙJ›ÙJJBˆ[YˆY]ÙOH”ÔÕˆ[™]OH‹Ú[\›˜[ÛXœ˜\žK\ÝÜ™KYš[\ÈŽ‚ˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒÒÈ‹Xœ˜\žWÜÝÜ™WÙš[\Ê\œÙWÚœÛÛ—Ø›ÙJ›ÙJJBˆ[YˆY]ÙOH”ÔÕˆ[™]OH‹Ú[\›˜[Øœ›ÝÜÙ\‹\™\ÛÝ\˜ÙHŽ‚ˆYˆÙ]
+]Y\žJHOHÈ\ÚÒY‹œ™\ÛÝ\˜ÙRYŸHÜˆ[žJ[Š˜[Y\ÊHOHH›Üˆ˜[Y\È[ˆ]Y\žK˜[Y\Ê
+JN‚ˆ˜Z\ÙHYÙ[\Q\œ›ÜŠ”“ÕÔÑT—ÒS•SQ‹œ›ÝÜÙ\ˆš[H[™Ù\Ý[Ûˆ™\]Z\™\ÈÛ™H\ÚÒY[™™\ÛÝ\˜ÙRYˆŠBˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒHÜ™X]Y‹Ø]™WØœ›ÝÜÙ\—Ü™\ÛÝ\˜ÙJˆ›ÙK]Y\žVÈ\ÚÒY—VÌKXY\œË™Ù]
+˜ÛÛ[]\H‹˜\XØ][Û‹ÛØÝ]\Ý™X[HŠKˆÛÛ™šYÝ\™YÝÛÛÛ[Z]Ê
+VÈ›YYXUÐÚ]X^š[TÚ^™SZPˆ—H
+ˆLMÍ‹ÛÜšÜÜXÙT]™\ÛÛ™\Š
+KYÙ[\Q\œ›Ü‹ˆ™\ÛÝ\˜ÙWÚY\]Y\žVÈœ™\ÛÝ\˜ÙRY—VÌKˆ
+Bˆ[YˆY]ÙOH”ÔÕˆ[™]OH‹Ú[\›˜[ÛYYXK]ËXÚ]Yš[\ÈŽ‚ˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒÒÈ‹YYXWÝ×ØÚ]Ùš[\Ê\œÙWÚœÛÛ—Ø›ÙJ›ÙJJBˆ[YˆY]ÙOH”ÔÕˆ[™]œÝ\ÝÚ]
+‹ÛXÜÛÙËÈŠN‚ˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒÒÈ‹XÜÝÛÛÛÙÊ]œ™[[Ý™\™Yš^
+‹ÛXÜÛÙËÈŠK\œÙWÚœÛÛ—Ø›ÙJ›ÙJJBˆ[YˆY]ÙOH”ÔÕˆ[™]OH‹Þ[Ý]X™KÙÝÛ›ØYY›Ü›X]ÈŽ‚ˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒÒÈ‹]ØZ][Ý]X™WÙÝÛ›ØYÙ›Ü›X]Ê\œÙWÚœÛÛ—Ø›ÙJ›ÙJJBˆ[YˆY]ÙOH”ÔÕˆ[™]OH‹Ý\ÚÜËÞ[Ý]X™KYÝÛ›ØYŽ‚ˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒHÜ™X]Y‹]ØZ]TÒÔË˜Ü™X]WÙÝÛ›ØY
+\œÙWÚœÛÛ—Ø›ÙJ›ÙJJBˆ[YˆY]ÙOH”ÔÕˆ[™]œÝ\ÝÚ]
+‹Ý\ÚÜËÝš\ÝX[[X\ÈŠH[™]™[™ÝÚ]
+‹ØØ[˜Ù[ŠN‚ˆ\Ú×ÚYH]œ™[[Ý™\™Yš^
+‹Ý\ÚÜËÝš\ÝX[[X\ÈŠKœ™[[Ý™\ÝY™š^
+‹ØØ[˜Ù[ŠKœœÝš\
+‹ÈŠBˆ]ØZ]’TÕPSÓPTÕTÒÔË˜Ø[˜Ù[
+\Ú×ÚY
+Bˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒˆXØÙ\Y‹È˜XØÙ\YŽˆY_Bˆ[YˆY]ÙOH”ÔÕˆ[™]œÝ\ÝÚ]
+‹Ý\ÚÜËÜÞ\Ý[K\ÜYXÚÈŠH[™]™[™ÝÚ]
+‹ØØ[˜Ù[ŠN‚ˆ\Ú×ÚYH]œ™[[Ý™\™Yš^
+‹Ý\ÚÜËÜÞ\Ý[K\ÜYXÚÈŠKœ™[[Ý™\ÝY™š^
+‹ØØ[˜Ù[ŠKœœÝš\
+‹ÈŠBˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒÒÈ‹]ØZ]ÔQPÒÕTÒÔË˜Ø[˜Ù[
+\Ú×ÚY
+Bˆ[YˆY]ÙOH”ÔÕˆ[™]œÝ\ÝÚ]
+‹Ý\ÚÜËØØ\\™KYœ˜[YKÈŠH[™]™[™ÝÚ]
+‹ØØ[˜Ù[ŠN‚ˆ\Ú×ÚYH]œ™[[Ý™\™Yš^
+‹Ý\ÚÜËØØ\\™KYœ˜[YKÈŠKœ™[[Ý™\ÝY™š^
+‹ØØ[˜Ù[ŠKœœÝš\
+‹ÈŠBˆ]ØZ]ÐTT‘WÑ”SQWÕTÒÔË˜Ø[˜Ù[
+\Ú×ÚY
+Bˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒˆXØÙ\Y‹È˜XØÙ\YŽˆY_Bˆ[YˆY]ÙOH”ÔÕˆ[™]œÝ\ÝÚ]
+‹Ý\ÚÜËÛYYXKXÛ\ÈŠH[™]™[™ÝÚ]
+‹ØØ[˜Ù[ŠN‚ˆ\Ú×ÚYH]œ™[[Ý™\™Yš^
+‹Ý\ÚÜËÛYYXKXÛ\ÈŠKœ™[[Ý™\ÝY™š^
+‹ØØ[˜Ù[ŠKœœÝš\
+‹ÈŠBˆ]ØZ]QQPWÐÓTÕTÒÔË˜Ø[˜Ù[
+\Ú×ÚY
+Bˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒˆXØÙ\Y‹È˜XØÙ\YŽˆY_Bˆ[YˆY]ÙOH”ÔÕˆ[™]œÝ\ÝÚ]
+‹Ý\ÚÜËØØ\\™KYœ˜[YKÈŠH[™]™[™ÝÚ]
+‹ÙXYÛ›ÜÝXÜÈŠN‚ˆ\Ú×ÚYH]œ™[[Ý™\™Yš^
+‹Ý\ÚÜËØØ\\™KYœ˜[YKÈŠKœ™[[Ý™\ÝY™š^
+‹ÙXYÛ›ÜÝXÜÈŠKœœÝš\
+‹ÈŠBˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒÒÈ‹ÐTT‘WÑ”SQWÕTÒÔË™XYÛ›ÜÝXÜ×ÜÛ˜\ÚÝ
+\Ú×ÚY
+Bˆ[YˆY]ÙOH”ÔÕˆ[™]œÝ\ÝÚ]
+‹Ý\ÚÜËØØ[Y\˜K\™XÛÜ™ÈŠH[™]™[™ÝÚ]
+‹ÜÝÜŠN‚ˆ\Ú×ÚYH]œ™[[Ý™\™Yš^
+‹Ý\ÚÜËØØ[Y\˜K\™XÛÜ™ÈŠKœ™[[Ý™\ÝY™š^
+‹ÜÝÜŠKœœÝš\
+‹ÈŠBˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒˆXØÙ\Y‹]ØZ]ÐSQTWÔ‘PÓÔ‘ÕTÒÔËœÝÜ
+\Ú×ÚY
+Bˆ[YˆY]ÙOH”ÔÕˆ[™]œÝ\ÝÚ]
+‹Ý\ÚÜËÈŠH[™]™[™ÝÚ]
+‹ÙXYÛ›ÜÝXÜÈŠN‚ˆ\Ú×ÚYH]œ™[[Ý™\™Yš^
+‹Ý\ÚÜËÈŠKœ™[[Ý™\ÝY™š^
+‹ÙXYÛ›ÜÝXÜÈŠKœœÝš\
+‹ÈŠBˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒÒÈ‹TÒÔË™XYÛ›ÜÝXÜ×ÜÛ˜\ÚÝ
+\Ú×ÚY\œÙWÚœÛÛ—Ø›ÙJ›ÙJJBˆ[YˆY]ÙOH”ÔÕˆ[™]œÝ\ÝÚ]
+‹Ý\ÚÜËÈŠH[™]™[™ÝÚ]
+‹ØØ[˜Ù[ŠN‚ˆ\Ú×ÚYH]œ™[[Ý™\™Yš^
+‹Ý\ÚÜËÈŠKœ™[[Ý™\ÝY™š^
+‹ØØ[˜Ù[ŠKœœÝš\
+‹ÈŠBˆ]ØZ]TÒÔË˜Ø[˜Ù[
+\Ú×ÚY
+Bˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒˆXØÙ\Y‹È˜XØÙ\YŽˆY_Bˆ[YˆY]ÙOH‘ÑUˆ[™]œÝ\ÝÚ]
+‹Ý\ÚÜËÝš\ÝX[[X\ÈŠN‚ˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒÒÈ‹’TÕPSÓPTÕTÒÔËœÛ˜\ÚÝ
+’TÕPSÓPTÕTÒÔË™Ù]
+]œ™[[Ý™\™Yš^
+‹Ý\ÚÜËÝš\ÝX[[X\ÈŠJJBˆ[YˆY]ÙOH‘ÑUˆ[™]œÝ\ÝÚ]
+‹Ý\ÚÜËÜÞ\Ý[K\ÜYXÚÈŠN‚ˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒÒÈ‹ÔQPÒÕTÒÔËœÛ˜\ÚÝ
+ÔQPÒÕTÒÔË™Ù]
+]œ™[[Ý™\™Yš^
+‹Ý\ÚÜËÜÞ\Ý[K\ÜYXÚÈŠJJBˆ[YˆY]ÙOH‘ÑUˆ[™]œÝ\ÝÚ]
+‹Ý\ÚÜËØØ\\™KYœ˜[YKÈŠN‚ˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒÒÈ‹ÐTT‘WÑ”SQWÕTÒÔËœÛ˜\ÚÝ
+ÐTT‘WÑ”SQWÕTÒÔË™Ù]
+]œ™[[Ý™\™Yš^
+‹Ý\ÚÜËØØ\\™KYœ˜[YKÈŠJJBˆ[YˆY]ÙOH‘ÑUˆ[™]œÝ\ÝÚ]
+‹Ý\ÚÜËÛYYXKXÛ\ÈŠN‚ˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒÒÈ‹QQPWÐÓTÕTÒÔËœÛ˜\ÚÝ
+QQPWÐÓTÕTÒÔË™Ù]
+]œ™[[Ý™\™Yš^
+‹Ý\ÚÜËÛYYXKXÛ\ÈŠJJBˆ[YˆY]ÙOH‘ÑUˆ[™]œÝ\ÝÚ]
+‹Ý\ÚÜËØØ[Y\˜K\™XÛÜ™ÈŠN‚ˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒÒÈ‹ÐSQTWÔ‘PÓÔ‘ÕTÒÔËœÛ˜\ÚÝ
+ÐSQTWÔ‘PÓÔ‘ÕTÒÔË™Ù]
+]œ™[[Ý™\™Yš^
+‹Ý\ÚÜËØØ[Y\˜K\™XÛÜ™ÈŠJJBˆ[YˆY]ÙOH‘ÑUˆ[™]œÝ\ÝÚ]
+‹Ý\ÚÜËÈŠN‚ˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHHŒŒÒÈ‹TÒÔËœÛ˜\ÚÝ
+TÒÔË™Ù]
+]œ™[[Ý™\™Yš^
+‹Ý\ÚÜËÈŠJJBˆ[YˆY]ÙOH”ÔÕŽ‚ˆÙÚXØ[Ü]H[œ][ÝJ]œ™[[Ý™\™Yš^
+‹ÈŠJBˆ™\ÜÛœÙWØ›ÙHH]ØZ]ÛÜWÝÚYÙ]ÝÛÜšÜÜXÙWÜ]
+ÙÚXØ[Ü]
+BˆÜš]\‹Üš]JÜ™\ÜÛœÙJŒŒÒÈ‹™\ÜÛœÙWØ›ÙJJBˆ]ØZ]Üš]\‹™˜Z[Š
+BˆÙÊ”ÔÕÏÛÜšÜÜXÙKZ[XYÙOˆOˆŒÛÜYYŠBˆ™]\›‚ˆ[YˆY]ÙOH‘ÑUŽ‚ˆ[XYÙWÙš[KZ[YWÝ\HHÚYÙ]Ú[XYÙWÙš[J[œ][ÝJ]œ™[[Ý™\™Yš^
+‹ÈŠJJBˆÚ^™HH[XYÙWÙš[KœÝ]
+
+KœÝÜÚ^™Bˆž]WÜ˜[™ÙHHÚYÙ]ÛYYXWØž]WÜ˜[™ÙJXY\œË™Ù]
+œ˜[™ÙHŠKÚ^™JBˆYˆž]WÜ˜[™ÙH\È›Û™N‚ˆÜš]\‹Üš]JÚYÙ]Ú[XYÙWÜ™\ÜÛœÙWÚXY\œÊMˆ˜[™ÙH›ÝØ]\ÙšXX›H‹Z[YWÝ\KÛÛ[Ü˜[™ÙOYˆ˜ž]\È
+‹ÞÜÚ^™_HŠJBˆ]ØZ]Üš]\‹™˜Z[Š
+BˆÙÊ‘ÑUÏÛÜšÜÜXÙKZ[XYÙOˆOˆMˆŠBˆ™]\›‚ˆÝ\[™Hž]WÜ˜[™ÙBˆ[™ÝH[™HÝ\
+ÈBˆ\X[HXY\œË™Ù]
+œ˜[™ÙHŠH\È›Ý›Û™BˆÜš]\‹Üš]JÚYÙ]Ú[XYÙWÜ™\ÜÛœÙWÚXY\œÊŒŒˆ\X[ÛÛ[ˆYˆ\X[[ÙHŒŒÒÈ‹[™ÝZ[YWÝ\KÛÛ[Ü˜[™ÙOYˆ˜ž]\ÈÜÝ\K^Ù[™KÞÜÚ^™_HˆYˆ\X[[ÙH›Û™JJBˆÚ][XYÙWÙš[K›Ü[Šœ˜ˆŠH\ÈÛÝ\˜ÙN‚ˆÛÝ\˜ÙKœÙYZÊÝ\
+Bˆ™[XZ[š[™ÈH[™ÝˆÚ[H™[XZ[š[™Èˆ[™
+Ú[šÈHÛÝ\˜ÙKœ™XY
+Z[Š
+ˆL™[XZ[š[™ÊJJN‚ˆÜš]\‹Üš]JÚ[šÊBˆ]ØZ]Üš]\‹™˜Z[Š
+Bˆ™[XZ[š[™ÈOH[ŠÚ[šÊBˆ]ØZ]Üš]\‹™˜Z[Š
+BˆÙÊˆ‘ÑUÏÛÜšÜÜXÙKZ[XYÙOˆOˆÉÌŒ‰ÈYˆ\X[[ÙH	ÌŒ	ßHŠBˆ™]\›‚ˆ[Yˆ›ÝY]Ù‚ˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHH˜Y™\]Y\Ý‹\œ›Ü—ÙØÝ[Y[
+YÙ[\Q\œ›ÜŠQÔ‘TUQTÕ‹’[˜[Y™\]Y\ÝˆŠJBˆ[ÙN‚ˆ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙHH›Ý›Ý[™‹\œ›Ü—ÙØÝ[Y[
+YÙ[\Q\œ›ÜŠ““ÕÑ“ÕS‘‹•[šÛ›ÝÛˆØØ[YÙ[[™Ú[ˆŠJBˆÜš]\‹Üš]JÜ™\ÜÛœÙJ™\ÜÛœÙWÜÝ]\Ë™\ÜÛœÙWØ›ÙJJBˆ]ØZ]Üš]\‹™˜Z[Š
+BˆÙ×Ü]HÛÛ\XÝÙÛÛÙÛWÝ˜[œÛ]WÜÜYXÚÛÙ×Ü]
+]™\ÜÛœÙWØ›ÙJBˆÙ×Ü]HÛÛ\XÝØÝ\ÝÛWÝÛÛÛÙ×Ü]
+Ù×Ü]™\ÜÛœÙWØ›ÙJBˆÙÊˆžÛY]ÙÜˆ	ÒS•SQ	ßHÛÙ×Ü]Üˆ	ËÉßHOˆÜ™\ÜÛœÙWÜÝ]\ËœÜ]
+
+VÌ_^Ü™\ÜÛœÙWÛÙ×ÜÝY™š^
+]™\ÜÛœÙWØ›ÙJ_HŠBˆ^Ù\YÙ[\Q\œ›Üˆ\È\œ›ÜŽ‚ˆÝ]\ÈH›Ý›Ý[™ˆYˆ\œ›Ü‹˜ÛÙH[ˆÈ•TÒ×Ó“ÕÑ“ÕS‘‹•’TÕPSÓPTÕTÒ×Ó“ÕÑ“ÕS‘‹ÐSQTWÔ‘PÓÔ‘ÕTÒ×Ó“ÕÑ“ÕS‘‹ÐTT‘WÑ”SQWÕTÒ×Ó“ÕÑ“ÕS‘‹“QQPWÐÓTÕTÒ×Ó“ÕÑ“ÕS‘‹•SQT—Ó“ÕÑ“ÕS‘‹ÕTÕÓWÕÓÓÓ“ÕÑ“ÕS‘‹ÕTÕÓWÕÓÓÕTÒ×Ó“ÕÑ“ÕS‘ŸH[ÙH˜Y™\]Y\Ý‚ˆÜš]\‹Üš]JÜ™\ÜÛœÙJÝ]\Ë\œ›Ü—ÙØÝ[Y[
+\œ›ÜŠJJBˆ]ØZ]Üš]\‹™˜Z[Š
+BˆÙÊˆžÛY]ÙÜˆ	ÒS•SQ	ßHÜ]Üˆ	ËÉßHOˆÜÝ]\ËœÜ]
+
+VÌ_HŠBˆ^Ù\
+ÛÛ›™XÝ[Û‘\œ›Ü‹\Þ[˜Ú[Ë•[Y[Ý]\œ›Ü‹[šXÛÙQXÛÙQ\œ›Ü‹\Þ[˜Ú[Ë’[˜ÛÛ\]T™XY\œ›ÜŠH\È\œ›ÜŽ‚ˆÙÊˆœ™\]Y\Ý˜Z[YˆÙ\œ›Ü‹—×ØÛ\Ü××Ë—×Û˜[YW×ßH‹\œ›ÜUYJBˆš[˜[N‚ˆÈX[Û[™ÈÛ›H™XYÈHÝ\\Û˜\ÚÝˆ\ÚÈ[š[™È™XYÂˆÈ\Ù\ˆÛÛ™šYÝ\˜][Ûˆ[™™[Û™ÜÈÈ\ÚËÛÝ\ˆ™\]Y\ÝÈ[™Û™HØ[˜XÚÜË‚ˆYˆ›Ý
+Y]ÙOH‘ÑUˆ[™]OH‹ÚX[ŠN‚ˆ›ÜˆX[˜YÙ\ˆ[ˆ
+TÒÔËÔQPÒÕTÒÔË’TÕPSÓPTÕTÒÔËÐSQTWÔ‘PÓÔ‘ÕTÒÔËÐTT‘WÑ”SQWÕTÒÔËQQPWÐÓTÕTÒÔËÕÔ–P“ÐT‘ÕTÒÔËSQT—ÕTÒÔÊN‚ˆX[˜YÙ\‹\ÚÜËœ[™J
+BˆÜš]\‹˜ÛÜÙJ
+BˆžN‚ˆ]ØZ]Üš]\‹ØZ]ØÛÜÙY
+
+Bˆ^Ù\ÛÛ›™XÝ[Û‘\œ›ÜŽ‚ˆ\ÜÂ‚‚˜\Þ[˜ÈYˆÙ\™JÜˆ[
+HOˆ›Û™N‚ˆÛØ˜[ÓÔ’ÔÔPÑWÔUˆÈœ™Y^™HH›ÛÝ›Üˆ\È[Žˆ]™HY]È]\Ý›Ý™Y\™XÝXÝ]™H\ÚÜËˆÈYYXHšY]Ù\œÈÜˆÚ\™\È[ÈHY™™\™[\™XÝÜžHZY[Ü\˜][Û‹‚ˆÓÔ’ÔÔPÑWÔUHÝ\\ÝÛÜšÜÜXÙWÜ]
+
+Bˆ[š]X[ÚX[H[š]X[^™WÚX[ÜÛ˜\ÚÝ
+
+BˆÙ\™\ˆH]ØZ]\Þ[˜Ú[ËœÝ\ÜÙ\™\Š[™WØÛY[ÜÝHŒLËŒŒŒH‹Ü\Ü
+BˆÙ×ÜÝ\\ÚX[
+[š]X[ÚX[Ü
+BˆXYÛ›ÜÝXÜÈH\Þ[˜Ú[Ë˜Ü™X]WÝ\ÚÊÛÛXÝÜÝ\\ÚX[
+[š]X[ÚX[
+K˜[YOHœÝ\\ZX[ŠBˆžN‚ˆ\Þ[˜ÈÚ]Ù\™\Ž‚ˆ]ØZ]Ù\™\‹œÙ\™WÙ›Ü™]™\Š
+Bˆš[˜[N‚ˆXYÛ›ÜÝXÜË˜Ø[˜Ù[
+
+Bˆ]ØZ]\Þ[˜Ú[Ë™Ø]\ŠXYÛ›ÜÝXÜË™]\›—Ù^Ù\[ÛœÏUYJBˆ\Þ[˜ÈÚ]P“P×ÔÒT‘WÓÐÒÎ‚ˆ]ØZ]ÝÜÜX›X×ÜÚ\™WÝ[›ØÚÙY
+
+Bˆ]ØZ]SQT—ÕTÒÔËœÚ]ÝÛŠ
+Bˆ]ØZ]ÐTT‘WÑ”SQWÕTÒÔËœÚ]ÝÛŠ
+Bˆ]ØZ]QQPWÐÓTÕTÒÔËœÚ]ÝÛŠ
+Bˆ]ØZ]ÔQPÒÕTÒÔËœÚ]ÝÛŠ
+Bˆ]ØZ]ÕÔ–P“ÐT‘ÕTÒÔËœÚ]ÝÛŠ
+Bˆ]ØZ]’TÕPSÓPTÕTÒÔËœÚ]ÝÛŠ
+Bˆ]ØZ]ÐSQTWÔ‘PÓÔ‘ÕTÒÔËœÚ]ÝÛŠ
+Bˆ]ØZ]TÒÔËœÚ]ÝÛŠ
+Bˆ]ØZ]ÕTÕÓWÕÓÓËœÚ]ÝÛŠ
+B‚‚™Yˆ\œÙWØ\™ÜÊ
+HOˆ\™Ü\œÙK“˜[Y\ÜXÙN‚ˆ\œÙ\ˆH\™Ü\œÙK\™Ý[Y[\œÙ\Š\ØÜš\[ÛH”[ˆH™\ÙX\˜ÚX™HØØ[YÙ[\ÚÈÙ\šXÙKˆŠBˆ\œÙ\‹˜YØ\™Ý[Y[
+‹K\Ü‹\OZ[[H“Ý™\œšYHYÙ[XÛÛ™šYËšœÛÛˆ›Üˆ\È[‹ˆŠBˆ\™ÜÈH\œÙ\‹œ\œÙWØ\™ÜÊ
+BˆYˆ\™ÜËœÜ\È›Ý›Û™H[™›ÝHH\™ÜËœÜHMLÍN‚ˆ\œÙ\‹™\œ›ÜŠ‹K\Ü]\Ý™H™]ÙY[ˆH[™MLÍHŠBˆ™]\›ˆ\™ÜÂ‚‚™YˆXZ[Š
+HOˆ[‚ˆYˆÞ\Ë˜\™Ý–ÌNŒ—HOHÈ‹K]Ú[™ÝÜË\ÜYXÚZ[\ˆ—N‚ˆžN‚ˆœ›ÛHÚ[™ÝÜ×ÜÜYXÚ[\ÜXZ[ˆ\ÈÜYXÚÛXZ[‚ˆ^Ù\[\Ü\œ›ÜŽ‚ˆœ›ÛHÚ[™ÝÜ×ÜÜYXÚ[\ÜXZ[ˆ\ÈÜYXÚÛXZ[‚ˆ™]\›ˆÜYXÚÛXZ[ŠÞ\Ë˜\™Ý–ÌŽ—JBˆ\™ÜÈH\œÙWØ\™ÜÊ
+BˆÛX\—ØÛÛœÛÛJ
+BˆžN‚ˆÈR[œÝ[\‰ÜÈÙX\˜Ú\™XÝÜžH]\Ý›ÝXZÈ[È‘›\YËÞ]Y‚ˆÈÜYXÚ[œÈ[ˆHœ™\ÚÙ[‹Y^XÈ[\ˆ[™™\ÝÜ™\È]ÈÝÛˆ[™K‚ˆYˆÙ]]ŠÞ\Ë™œ›Þ™[ˆ‹˜[ÙJH[™Þ\Ëœ]›Ü›HOHÚ[ŒÌˆŽ‚ˆYˆ›ÝÝ\\ËÚ[™šÙ\›™[Ì‹”Ù]\™XÝÜžUÊ›Û™JN‚ˆ˜Z\ÙHÔÑ\œ›ÜŠÛÝ[›Ý™\ÝÜ™HHÚ[™ÝÜÈ^\›˜[\›ÙÜ˜[HÙX\˜Ú]ˆŠBˆ\Þ[˜Ú[Ëœ[ŠÙ\™J\™ÜËœÜYˆ\™ÜËœÜ\È›Ý›Û™H[ÙHÛÛ™šYÝ\™YÜÜ
+
+JJBˆ^Ù\Ù^X›Ø\™[\œ\‚ˆ™]\›ˆˆ^Ù\YÙ[\Q\œ›Üˆ\È\œ›ÜŽ‚ˆÙÊˆ”™\ÙX\˜ÚX™HØØ[YÙ[ÛÝ[›ÝÝ\ˆÙ\œ›Ü‹˜ÛÙ_NˆÙ\œ›Ü‹›Y\ÜØYÙ_H‹\œ›ÜUYJBˆ™]\›ˆBˆ^Ù\ÔÑ\œ›Üˆ\È\œ›ÜŽ‚ˆÙÊˆ”™\ÙX\˜ÚX™HØØ[YÙ[ÛÝ[›ÝÝ\ˆÙ\œ›ÜŸH‹\œ›ÜUYJBˆ™]\›ˆBˆ™]\›ˆ‚‚šYˆ×Û˜[YW×ÈOH—×ÛXZ[—×ÈŽ‚ˆ˜Z\ÙHÞ\Ý[Q^]
+XZ[Š
+JB

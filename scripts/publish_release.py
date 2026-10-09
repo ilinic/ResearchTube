@@ -1,4 +1,4 @@
-"""Publish a tested ZIP under its Extension/Agent version pair, once."""
+"""Publish tested platform archives under their Extension/Agent version pair, once."""
 import argparse
 import hashlib
 import json
@@ -12,6 +12,13 @@ try:
     from .release_metadata import ROOT, release_metadata
 except ImportError:
     from release_metadata import ROOT, release_metadata
+
+PLATFORMS = {
+    'windows-x64': 'ResearchTube-Windows-x64.zip',
+    'linux-x64': 'ResearchTube-Linux-x64.zip',
+    'macos-arm64': 'ResearchTube-macOS-ARM64.zip',
+    'macos-x64': 'ResearchTube-macOS-x64.zip',
+}
 
 
 def gh(*args):
@@ -33,14 +40,23 @@ def find_release(repo, tag):
     return json.loads(result.stdout)
 
 
-def publish(archive, repo, commit, root=ROOT):
+def publish(archives, repo, commit, root=ROOT):
     if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repo) or not re.fullmatch(r'[0-9a-f]{40}', commit):
         raise ValueError('Use a repository owner/name and an exact commit SHA.')
     metadata = release_metadata(root, commit)
-    # Only consume the archive produced and smoke-tested by this workflow run.
-    with zipfile.ZipFile(archive) as content:
-        if json.loads(content.read('ResearchTube/release-info.json')) != metadata:
-            raise ValueError('ZIP release metadata does not match this source commit.')
+    if isinstance(archives, (str, Path)):
+        archives = [Path(archives)]
+    archives = [Path(path) for path in archives]
+    if {path.name for path in archives} != set(PLATFORMS.values()) or len(archives) != len(PLATFORMS):
+        raise ValueError('Provide exactly one archive for Windows x64, Linux x64 and both macOS architectures.')
+    archive_by_platform = {platform: next(path for path in archives if path.name == filename)
+                           for platform, filename in PLATFORMS.items()}
+    # Only consume archives produced and smoke-tested by this exact workflow run.
+    for platform, archive in archive_by_platform.items():
+        expected = {**metadata, 'platform': platform}
+        with zipfile.ZipFile(archive) as content:
+            if json.loads(content.read('ResearchTube/release-info.json')) != expected:
+                raise ValueError(f'{archive.name} metadata does not match this source commit and platform.')
     tag = metadata['tag']
     release = find_release(repo, tag)
     if release is not None and not release['draft']:
@@ -53,21 +69,26 @@ def publish(archive, repo, commit, root=ROOT):
 
     with tempfile.TemporaryDirectory(prefix='researchtube-release-') as folder:
         directory = Path(folder)
-        checksum = directory / 'ResearchTube.zip.sha256'
-        digest = hashlib.sha256(archive.read_bytes()).hexdigest()
-        checksum.write_text(digest + '  ResearchTube.zip\n', encoding='utf-8')
+        checksums = []
+        for archive in archives:
+            checksum = directory / (archive.name + '.sha256')
+            digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+            checksum.write_text(digest + '  ' + archive.name + '\n', encoding='utf-8')
+            checksums.append(checksum)
         notes = directory / 'notes.md'
         phase = 'Pre-release for testing.' if metadata['prerelease'] else 'Stable release.'
-        download = f'https://github.com/{repo}/releases/download/{tag}/ResearchTube.zip'
-        notes.write_text(f"**[Download ResearchTube.zip]({download})**\n\n"
-                         f"{phase}\n\nExtension: {metadata['extensionVersion']}\nAgent: {metadata['agentVersion']}\n\n"
-                         'Extract the complete archive. '
-                         'It includes the Agent (Windows EXE and Python launch mode for Linux/macOS), '
-                         'the Chrome Extension, documentation and demo.\n\n'
-                         'Windows: open `agent/ResearchTubeAgent.exe`. '
-                         'Linux/macOS: run `python3 agent/researchtube_agent.py`. '
-                         'If the Workspace setting is empty, press Enter at the folder prompt to accept the default.\n\n'
-                         f'Source commit: `{commit}`. SHA-256 is included in `ResearchTube.zip.sha256`.\n', encoding='utf-8')
+        asset_lines = []
+        for platform, filename in PLATFORMS.items():
+            url = f'https://github.com/{repo}/releases/download/{tag}/{filename}'
+            asset_lines.append(f'- **{platform}**: [Download {filename}]({url}) · `{filename}.sha256`')
+        notes.write_text(f"{phase}\n\nExtension: {metadata['extensionVersion']}\nAgent: {metadata['agentVersion']}\n\n"
+                         'Choose the archive for your operating system and processor. Every archive includes '
+                         'the Agent, Chrome Extension, documentation, demo, FFmpeg/ffprobe, yt-dlp, Deno and cloudflared.\n\n'
+                         + '\n'.join(asset_lines) + '\n\n'
+                         'Windows: open `agent/ResearchTubeAgent.exe`. Linux/macOS: run '
+                         '`python3 agent/researchtube_agent.py`. If Workspace is not configured, press Enter '
+                         'to accept the suggested folder.\n\n'
+                         f'Source commit: `{commit}`. Each archive has a matching SHA-256 file.\n', encoding='utf-8')
         latest = '--latest=false' if metadata['prerelease'] else '--latest=true'
         title = f"ResearchTube — Extension {metadata['extensionVersion']} / Agent {metadata['agentVersion']}"
         if release is None:
@@ -84,7 +105,7 @@ def publish(archive, repo, commit, root=ROOT):
             # retarget a draft that already contains another build's assets.
             gh('release', 'edit', tag, '--repo', repo, '--target', commit,
                '--title', title, '--notes-file', str(notes))
-        for asset in (archive, checksum):
+        for asset in (*archives, *checksums):
             previous = next((item for item in release['assets'] if item['name'] == asset.name), None)
             if previous:
                 expected = 'sha256:' + hashlib.sha256(asset.read_bytes()).hexdigest()
@@ -92,8 +113,7 @@ def publish(archive, repo, commit, root=ROOT):
                     raise ValueError('An existing draft asset differs: ' + asset.name)
             else:
                 gh('release', 'upload', tag, str(asset), '--repo', repo)
-        # Publish only after both files have been uploaded. A failed upload
-        # leaves a resumable draft; rerun this job with the same build artifact.
+        # Publish only after all eight files have been uploaded.
         gh('release', 'edit', tag, '--repo', repo, '--draft=false',
            '--prerelease=' + str(metadata['prerelease']).lower(), latest)
     url = f'https://github.com/{repo}/releases/tag/{tag}'
@@ -103,12 +123,10 @@ def publish(archive, repo, commit, root=ROOT):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--zip', type=Path, required=True)
+    parser.add_argument('--zip', type=Path, action='append', required=True)
     parser.add_argument('--repo', required=True)
     parser.add_argument('--commit', required=True)
     args = parser.parse_args()
-    if args.zip.name != 'ResearchTube.zip':
-        parser.error('The release asset must be named ResearchTube.zip.')
     publish(args.zip, args.repo, args.commit)
 
 

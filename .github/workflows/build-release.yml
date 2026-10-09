@@ -18,9 +18,21 @@ concurrency:
   group: researchtube-release
   cancel-in-progress: false
 jobs:
-  windows-release:
-    runs-on: windows-latest
-    timeout-minutes: 20
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-x64
+            runner: windows-latest
+          - platform: linux-x64
+            runner: ubuntu-24.04
+          - platform: macos-arm64
+            runner: macos-15
+          - platform: macos-x64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
@@ -28,25 +40,49 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-          architecture: x64
-      - name: Install build and Windows speech dependencies
+      - name: Install Windows EXE build dependencies
+        if: matrix.platform == 'windows-x64'
         run: python -m pip install -r agent/requirements-build.txt
-      - name: Test release publication behavior
-        run: python -m unittest discover -s scripts/tests -p 'test_*.py'
-      - name: Check packaged component versions
-        run: node extension/tests/release-version-consistency.test.mjs
-      - name: Build shared ZIP
-        run: python scripts/build_release.py
-      - name: Test Python and EXE from the extracted ZIP
-        run: python scripts/smoke_agent.py --zip dist/ResearchTube.zip --windows-speech
+      - name: Test release publisher and component versions
+        run: |
+          python -m unittest discover -s scripts/tests -p 'test_*.py'
+          node extension/tests/release-version-consistency.test.mjs
+      - name: Download and verify pinned platform tools
+        run: python scripts/bundle_tools.py --platform ${{ matrix.platform }}
+      - name: Run every bundled tool
+        run: python scripts/smoke_bundle_tools.py --platform ${{ matrix.platform }}
+      - name: Build platform archive
+        id: package
+        shell: bash
+        run: |
+          if [[ "${{ matrix.platform }}" == "windows-x64" ]]; then
+            python scripts/build_release.py --platform windows-x64
+            archive=ResearchTube-Windows-x64.zip
+          elif [[ "${{ matrix.platform }}" == "linux-x64" ]]; then
+            python scripts/build_release.py --platform linux-x64
+            archive=ResearchTube-Linux-x64.zip
+          elif [[ "${{ matrix.platform }}" == "macos-arm64" ]]; then
+            python scripts/build_release.py --platform macos-arm64
+            archive=ResearchTube-macOS-ARM64.zip
+          else
+            python scripts/build_release.py --platform macos-x64
+            archive=ResearchTube-macOS-x64.zip
+          fi
+          echo "archive=$archive" >> "$GITHUB_OUTPUT"
+      - name: Test Agent from extracted archive
+        if: matrix.platform == 'windows-x64'
+        run: python scripts/smoke_agent.py --zip dist/${{ steps.package.outputs.archive }} --windows-speech
+      - name: Test Agent from extracted archive
+        if: matrix.platform != 'windows-x64'
+        run: python scripts/smoke_agent.py --zip dist/${{ steps.package.outputs.archive }}
       - uses: actions/upload-artifact@v4
         with:
-          name: ResearchTube-shared-release
-          path: dist/ResearchTube.zip
+          name: ResearchTube-${{ matrix.platform }}-release
+          path: dist/${{ steps.package.outputs.archive }}
           if-no-files-found: error
           retention-days: 30
   publish:
-    needs: windows-release
+    needs: build
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
@@ -60,11 +96,19 @@ jobs:
           python-version: '3.12'
       - uses: actions/download-artifact@v4
         with:
-          name: ResearchTube-shared-release
+          pattern: ResearchTube-*-release
           path: dist
+          merge-multiple: true
       - name: Publish version pair to GitHub Releases
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_REPOSITORY: ${{ github.repository }}
           RELEASE_COMMIT: ${{ github.sha }}
-        run: python scripts/publish_release.py --zip dist/ResearchTube.zip --repo "$RELEASE_REPOSITORY" --commit "$RELEASE_COMMIT"
+        shell: bash
+        run: |
+          python scripts/publish_release.py \
+            --zip dist/ResearchTube-Windows-x64.zip \
+            --zip dist/ResearchTube-Linux-x64.zip \
+            --zip dist/ResearchTube-macOS-ARM64.zip \
+            --zip dist/ResearchTube-macOS-x64.zip \
+            --repo "$RELEASE_REPOSITORY" --commit "$RELEASE_COMMIT"

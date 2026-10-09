@@ -182,24 +182,23 @@ When behavior changes:
 
 ## Packaging
 
-Package the repository with generated bundles and the bundled Workspace demo, excluding `.git`, `node_modules`, Python caches, user-created Workspace files and prior archives. Verify the ZIP with `unzip -t` or an equivalent archive tester.
+The release workflow builds four platform archives with checksum-pinned copies of FFmpeg/ffprobe, yt-dlp, Deno and cloudflared. Mac archives preserve FFmpeg's adjacent libraries and license files. Each runner invokes every bundled tool, packages the source Agent and tests it from the extracted archive; the Windows runner also builds and tests the frozen EXE and Windows speech.
 
-Build the shared release on Windows (Python 3.12 x64 is used in CI):
+To reproduce a platform package locally, first download its locked dependencies and verify/run them, then package and smoke test:
 
 ```sh
-python -m pip install -r agent/requirements-build.txt
-python scripts/build_release.py
-python scripts/smoke_agent.py --zip dist/ResearchTube.zip --windows-speech
+python scripts/bundle_tools.py --platform linux-x64
+python scripts/smoke_bundle_tools.py --platform linux-x64
+python scripts/build_release.py --platform linux-x64
+python scripts/smoke_agent.py --zip dist/ResearchTube-Linux-x64.zip
 python -m unittest discover -s scripts/tests -p 'test_*.py'
 ```
 
-`agent/ResearchTubeAgent.spec` builds a console EXE with Python and WinRT speech dependencies. `scripts/build_release.py` packages it beside cross-platform sources, external config, tools, Custom Tools, Extension, docs and demo. Only the archived config's Workspace value is reset to empty; a developer's config is unchanged. Existing output archives are rejected. `--exe <Windows EXE>` packages a previously built executable on any OS. Build Windows binaries on Windows; Linux/macOS users run the included source with Python. Optional component binaries still need to match the host OS.
+Use `windows-x64`, `macos-arm64` or `macos-x64` as appropriate. The Windows build additionally needs `python -m pip install -r agent/requirements-build.txt`; it runs on a Windows x64 host and includes `agent/ResearchTubeAgent.exe`. Only the archived config's Workspace value is reset to empty; the developer's config is unchanged. Existing output archives are rejected. Each `agent/tools/tools-manifest.json` records binary versions, SHA-256 digests, source URLs and platform; `THIRD-PARTY-NOTICES.txt` and FFmpeg's license files are shipped alongside them.
 
-The **Build and publish ResearchTube release** GitHub Actions workflow runs on release-content changes pushed to main or manually. It builds and tests both launch modes from the extracted ZIP, including default/custom Workspace choice, persistence, unrelated terminal directory, existing file preservation, public path exclusion, external Custom Tools and actual Windows speech WAV output. The ZIP remains available in its **ResearchTube-shared-release** artifact.
+The **Build and publish ResearchTube release** GitHub Actions workflow builds all four archives on matching GitHub-hosted runners and uploads those tested artifacts to the publishing job. The publisher attaches each archive and its SHA-256 sidecar to one Extension/Agent version pair. It uses the built-in `GITHUB_TOKEN` with `contents: write` only in the publishing job; no personal token is needed. The tag targets the source commit recorded inside each `release-info.json`. Prereleases are not marked Latest; stable releases become Latest. An already published pair is skipped, so documentation edits and repeated runs never replace an old download. A failed upload retains a draft; rerunning the workflow resumes missing identical assets and rejects any conflicting draft asset. To publish the next build, increment the changed component's implementation version and push to main. Keep the prerelease flag true until the stable release is intended. Version numbers remain developer decisions.
 
-After the Windows job succeeds, a separate job downloads that exact run's ZIP and publishes the version pair to [GitHub Releases](https://github.com/ilinic/ResearchTube/releases). It uses the built-in `GITHUB_TOKEN` with `contents: write` only in the publishing job; no personal token is needed. The tag targets the source commit recorded inside `release-info.json`. Both `ResearchTube.zip` and its SHA-256 file are attached before the draft is published. Prereleases are not marked Latest; stable releases become Latest. An already published pair is skipped, so documentation edits and repeated runs never replace an old download. A failed upload retains a draft; rerun the failed publishing job to reuse the same build artifact. A draft asset that differs is rejected instead of replaced. To publish the next build, increment the changed component's implementation version and push to main. Keep the prerelease flag true until the stable release is intended. Version numbers remain developer decisions.
-
-Native Windows verification is separate from Linux frozen smoke checks. Custom Tools remain external Python modules; additional third-party imports must be included when rebuilding the EXE, or installed for Python source mode. Runtime pip installation does not extend a frozen interpreter.
+Native Windows verification is separate from Linux/macOS source smoke checks. Custom Tools remain external Python modules; additional third-party imports must be included when rebuilding the EXE, or installed for Python source mode. Runtime pip installation does not extend a frozen interpreter.
 
 Do not commit, push or publish unless the user explicitly requests it.
 

@@ -10,16 +10,15 @@ This guide installs the Chrome Extension, Local Agent and private ChatGPT MCP co
 - An OpenAI Platform organisation with Secure MCP Tunnel access.
 - ChatGPT Plus or a higher supported plan with access to Developer Mode and private MCP connections. This installation path assumes those controls are available; account/workspace policy also applies.
 
-Optional local components enable additional tools:
+The platform archive includes all runtime tools:
 
 - FFmpeg and ffprobe: media probe, frames, maps, clips, screen and camera operations.
-- yt-dlp: YouTube formats, downloads and Agent-side metadata fallback.
-- Deno plus a ready YouTube PO-token provider: required by current local YouTube yt-dlp operations.
+- yt-dlp and Deno plus the ready YouTube PO-token provider: local YouTube formats, downloads and metadata fallback.
 - cloudflared: explicit temporary online sharing only.
 
 ## 1. Extract the complete release
 
-Open [GitHub Releases](https://github.com/ilinic/ResearchTube/releases) and download **ResearchTube.zip** from **Assets**. Titles identify both the Extension and Agent versions. **Pre-release** identifies a preliminary build. The ZIP contains the Windows EXE and Python sources; GitHub's automatic source archives contain the repository source.
+Open [GitHub Releases](https://github.com/ilinic/ResearchTube/releases) and download the archive for your operating system and processor from **Assets**: Windows x64, Linux x64, macOS Apple silicon (ARM64) or macOS Intel (x64). Titles identify both the Extension and Agent versions. **Pre-release** identifies a preliminary build. Each ZIP contains the matching platform tools, Python Agent sources, Chrome Extension, documentation and demo. The Windows archive also includes the Windows Agent EXE. GitHub's automatic source archives contain repository source, not these ready-to-run platform packages.
 
 Extract ResearchTube into a permanent directory. Do not load the Extension from inside the ZIP. Keep `extension/`, `agent/`, `docs/` and the bundled Workspace demo together. `release-info.json` records the packaged component versions and source commit.
 
@@ -35,7 +34,7 @@ Open ResearchTube **Settings** from the toolbar popup or Chrome's extension deta
 
 ## 3. Start the Local Agent
 
-On Windows, open `agent/ResearchTubeAgent.exe` from the extracted shared release ZIP. Keep its console open. The same ZIP includes Python sources for Linux/macOS and for Windows users who prefer Python.
+On Windows, open `agent/ResearchTubeAgent.exe` from the extracted Windows archive. Keep its console open. On Linux/macOS, use the Python source in the matching platform archive.
 
 On Linux/macOS, from a terminal in the release root:
 
@@ -63,23 +62,21 @@ You can also edit `workspacePath.value` directly. Relative paths resolve beside 
 
 Restart the Agent after changing it. A missing directory is created when accessible. Existing files remain in the old location; copy/move them yourself while the Agent is stopped if you want them in the new Workspace. Tools continue using logical paths such as `downloads/video.mp4`.
 
-## 4. Install optional media components
+## 4. Verify the included media tools
 
-The Agent searches its dedicated folder first, then system `PATH`.
-
-Optional executables must match your operating system. The Windows Agent EXE does not make FFmpeg, yt-dlp or other component binaries cross-platform. Python-mode Windows speech additionally requires `python -m pip install -r agent/requirements-windows.txt`; the EXE includes these speech dependencies.
+Each platform archive includes matching FFmpeg/ffprobe, yt-dlp, Deno and cloudflared executables. The Agent checks its `agent/tools/` directory first, then system `PATH`. Keep the complete extracted directory together so FFmpeg support libraries remain beside the executable. Python-mode Windows speech additionally requires `python -m pip install -r agent/requirements-windows.txt`; the Windows EXE includes these speech dependencies.
 
 Typical bundled layouts are:
 
 ```text
-agent/tools/ffmpeg/.../bin/ffmpeg.exe
-agent/tools/ffmpeg/.../bin/ffprobe.exe
-agent/tools/yt-dlp/yt-dlp.exe
-agent/tools/deno/deno.exe
-agent/tools/cloudflared/cloudflared.exe
+agent/tools/ffmpeg/**/ffmpeg[.exe]
+agent/tools/ffmpeg/**/ffprobe[.exe]
+agent/tools/yt-dlp/yt-dlp[.exe]
+agent/tools/deno/deno[.exe]
+agent/tools/cloudflared/cloudflared[.exe]
 ```
 
-Do not leave an unextracted archive in a tool directory. Do not place multiple candidate executables in one dedicated component tree; ambiguous discovery is reported as an error rather than choosing unpredictably.
+The included third-party notices and FFmpeg license files are under `agent/tools/`. Do not place additional copies in these component folders; ambiguous discovery is reported instead of choosing unpredictably.
 
 Restart the Agent after adding or replacing a component, then test the Agent again. Use `system_agent_status` in ChatGPT to verify public status without exposing installation paths.
 

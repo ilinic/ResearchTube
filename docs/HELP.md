@@ -28,15 +28,15 @@ Browser-based YouTube research works with the Agent stopped. Local media require
 - Chrome/Chromium on Windows, macOS or Linux; **Study this site** needs Chrome 125 or newer for nested iframe support.
 - This private-connection setup assumes **ChatGPT Plus or higher**, with access to private MCP connections and **Developer Mode**. Account/workspace permissions also matter; a subscription alone does not guarantee that the controls are available.
 - An OpenAI Platform account/organization allowed to create/use Secure MCP Tunnels. ChatGPT subscription settings and Platform tunnel permissions are separate.
-- Python 3.10 or newer for source-mode Agent on Linux/macOS or Windows. The shared release includes a Windows EXE with Python inside. Node.js is needed for development, not a prebuilt release.
+- Python 3.10 or newer for source-mode Agent on Linux/macOS or Windows. The Windows archive includes an EXE with Python inside; every platform archive includes matching runtime tools. Node.js is needed for development, not a prebuilt release.
 
 Windows-only operations include the built-in clipboard, desktop capture and Windows speech engine. Some camera/media capabilities depend on the platform and installed components; inspect status before assuming support.
 
 ### 2. Extract and load the Extension
 
-Download **ResearchTube.zip** under **Assets** on [GitHub Releases](https://github.com/ilinic/ResearchTube/releases). Release titles list the Extension and Agent versions. Preliminary builds are marked **Pre-release**. The archive includes the Windows EXE and Python sources for Linux/macOS; its `release-info.json` records the included versions.
+Download the matching platform archive under **Assets** on [GitHub Releases](https://github.com/ilinic/ResearchTube/releases): Windows x64, Linux x64, macOS Apple silicon (ARM64) or macOS Intel (x64). Each archive includes its matching FFmpeg/ffprobe, yt-dlp, Deno and cloudflared binaries; the Windows archive also includes the Agent EXE. Release titles list the Extension and Agent versions. Preliminary builds are marked **Pre-release**.
 
-1. Download the complete [ResearchTube release](https://github.com/ilinic/ResearchTube/releases) and extract it to a permanent folder. Keep the `extension/`, `agent/` and `docs/` directories. Do not run from inside the ZIP or delete/move that folder afterwards.
+1. Download the [ResearchTube release](https://github.com/ilinic/ResearchTube/releases) for your platform and extract it to a permanent folder. Keep the `extension/`, `agent/` and `docs/` directories. Do not run from inside the ZIP or delete/move that folder afterwards.
 2. Open `chrome://extensions` in Chrome's address bar.
 3. Turn on Chrome's **Developer mode** at the top of that page. This is different from ChatGPT Developer Mode.
 4. Click **Load unpacked** and select the `extension/` folder, not the release root.
@@ -74,7 +74,7 @@ Open a terminal in the extracted release root and run:
 python agent/researchtube_agent.py
 ```
 
-On Windows, simply open `agent/ResearchTubeAgent.exe` from the fully extracted shared release ZIP; no separate Python is needed. `py agent/researchtube_agent.py` is an alternative with Python installed; on Linux/macOS use `python3`. Keep the console open. In Extension **Settings → Local Agent**, select **Test connection**. The default port is `17843`; the Agent configuration and Extension must use the same port. Implementation versions may differ; **interface versions must match**.
+On Windows, simply open `agent/ResearchTubeAgent.exe` from the fully extracted Windows archive; no separate Python is needed. `py agent/researchtube_agent.py` is an alternative with Python installed; on Linux/macOS use `python3`. Keep the console open. In Extension **Settings → Local Agent**, select **Test connection**. The default port is `17843`; the Agent configuration and Extension must use the same port. Implementation versions may differ; **interface versions must match**.
 
 The Agent checks components once at startup. `Checking…` means a startup check is still running. Restart it after changing components or Chrome launch flags; pressing Test connection reads the saved status and does not repeat the checks.
 
