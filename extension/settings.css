@@ -34,7 +34,7 @@ footer { display: flex; justify-content: space-between; gap: 14px; font-size: 13
 .setup-step { padding-top:17px;margin-top:20px;border-top:1px solid var(--border); }
 .setup-step h3 { margin:0 0 8px;font-size:16px;line-height:1.3; }
 .setup-step p { margin:7px 0; }
-.setup-image { width:100%;max-width:100%;margin:15px auto 10px; }
+.setup-image { width:50%;max-width:100%;margin:15px auto 10px; }
 .setup-image img { display:block;width:100%;max-width:100%;height:auto;border:0;border-radius:8px;background:transparent; }
 @media(max-width:560px) { .setup-guide > summary { padding:18px; } .setup-guide-body { padding:0 18px 20px; } }
 
