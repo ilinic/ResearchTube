@@ -99,6 +99,8 @@ Do not use an organisation-owner, administrator or unrestricted key. The key is 
 
 ## 6. Add ResearchTube to ChatGPT
 
+Before continuing, keep the Local Agent running and the ResearchTube Extension enabled. Open the popup and check **Local Agent: Ready**; this confirms the Extension–Agent connection. Keep ResearchTube connected while ChatGPT discovers its tools.
+
 1. Open [ChatGPT Plugins](https://chatgpt.com/plugins), select **+ → Add custom MCP server** (older labels: Create app/connector).
 2. Choose **Tunnel** under Connection and select/paste the same Tunnel ID.
 3. Name it **ResearchTube** and upload `icons/researchtube-64.png` from the extracted ResearchTube folder as the plugin icon. Where server authentication is requested, choose **No authentication**; the restricted runtime key belongs only in Extension Settings. Review and create/install the connection.

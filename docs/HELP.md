@@ -58,6 +58,8 @@ The popup's tunnel row updates when saved settings or connection results change.
 
 ### 4. Create the ResearchTube connection in ChatGPT
 
+Before continuing, keep the Local Agent running and the ResearchTube Extension enabled. Open the popup and check **Local Agent: Ready**; this confirms the Extension–Agent connection. Keep ResearchTube connected while ChatGPT discovers its tools.
+
 1. Open [ChatGPT Plugins](https://chatgpt.com/plugins). Choose **+ → Add custom MCP server** (older interfaces may say **Create app/connector**).
 2. Name it **ResearchTube** and upload `icons/researchtube-64.png` from the extracted ResearchTube folder as the plugin icon. Choose **Tunnel** under **Connection**. Select/paste the same tunnel identifier used in Extension Settings.
 3. ResearchTube's tunnel runtime key belongs in the Extension, not this form. Where server authentication is requested, use **No authentication**: ResearchTube does not provide a separate OAuth login. Review the connection notice and create/install the private connection.
@@ -75,7 +77,7 @@ python agent/researchtube_agent.py
 
 On Windows, simply open `agent/ResearchTubeAgent.exe` from the fully extracted Windows archive; no separate Python is needed. `py agent/researchtube_agent.py` is an alternative with Python installed; on Linux/macOS use `python3`. Keep the console open. In Extension **Settings → Local Agent**, select **Test connection**. The default port is `17843`; the Agent configuration and Extension must use the same port. Implementation versions may differ; **interface versions must match**.
 
-For your first test, expand **Settings → How to Set Up ResearchTube** and follow **Step 5 — Verify the connection**. Start the Agent and check the OpenAI Tunnel, Local Agent and interface compatibility in the popup. The optional **Silent file automation** instructions are immediately below the guide. Use **Copy example prompt** in Step 5, open a new ChatGPT chat with its link, select ResearchTube and send the example.
+For your first test, expand **Settings → How to Set Up ResearchTube** and follow **Step 5 — Try ResearchTube**. Start the Agent and check the OpenAI Tunnel, Local Agent and interface compatibility in the popup. The optional **Silent file automation** instructions are immediately below the guide. Use the new-chat link and **Copy example prompt** in Step 5, select ResearchTube, then paste and send the example. **Step 6 — Troubleshooting** points to the popup's **Help** button, which opens a dedicated ChatGPT help conversation.
 
 The Agent checks components once at startup. `Checking…` means a startup check is still running. Restart it after changing components or Chrome launch flags; pressing Test connection reads the saved status and does not repeat the checks.
 

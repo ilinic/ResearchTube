@@ -16,18 +16,23 @@ assert.match(guide,/scrollIntoView/);
 assert.match(style,/\.setup-image img/);
 const paths=[...settings.matchAll(/src="(images\/setup-[^"]+\.png)"/g)].map(x=>x[1]);
 assert.equal(paths.length,4);
-assert.deepEqual([...settings.matchAll(/<h3>Step (\d+) —/g)].map(x=>Number(x[1])),[1,2,3,4,5]);
+assert.deepEqual([...settings.matchAll(/<h3>Step (\d+) —/g)].map(x=>Number(x[1])),[1,2,3,4,5,6]);
 assert.doesNotMatch(settings,/<h3>[^<]*Developer Mode/);
 assert.doesNotMatch(settings,/setup-04-developer-mode\.png/);
 assert.match(settings,/<h3>Step 4 — Add ResearchTube as a custom MCP plugin<\/h3>/);
-assert.match(settings,/<h3>Step 5 — Verify the connection<\/h3>/);
-const stepFive = settings.slice(settings.indexOf("<h3>Step 5 —"), settings.indexOf("</details>"));
+assert.match(settings,/<h3>Step 5 — Try ResearchTube<\/h3>/);
+const stepFive = settings.slice(settings.indexOf("<h3>Step 5 —"), settings.indexOf("<h3>Step 6 —"));
 assert.match(stepFive,/id="example-prompt"/);
 assert.match(stepFive,/id="copy-prompt"/);
 assert.match(stepFive,/data-open="chatgptNewChat"/);
-assert.match(stepFive,/Local Agent is running/);
-assert.match(stepFive,/ResearchTube popup/);
-assert.match(stepFive,/Silent file automation/);
+assert.doesNotMatch(stepFive,/Troubleshooting|Local Agent|Silent file automation/);
+assert.ok(stepFive.indexOf('data-open="chatgptNewChat"') < stepFive.indexOf('id="example-prompt"'));
+assert.match(stepFive,/paste and send this prompt/);
+const troubleshootingStep = settings.slice(settings.indexOf("<h3>Step 6 —"), settings.indexOf("</details>"));
+assert.match(troubleshootingStep,/Troubleshooting/);
+assert.match(troubleshootingStep,/<strong>Help<\/strong>/);
+assert.match(troubleshootingStep,/ResearchTube popup/);
+assert.match(troubleshootingStep,/dedicated ChatGPT help chat/);
 assert.doesNotMatch(settings,/<h2>3\. Try ResearchTube<\/h2>/);
 assert.equal((settings.match(/id="example-prompt"/g)||[]).length,1);
 assert.equal((settings.match(/id="copy-prompt"/g)||[]).length,1);
@@ -49,6 +54,29 @@ for (const hash of ["","#setup-guide"]) {
   assert.equal(element.open,hash==="#setup-guide");
   assert.equal(scrolled,hash==="#setup-guide"?1:0);
 }
+
+
+const installationStep = settings.slice(settings.indexOf("<h3>Step 3 —"), settings.indexOf("<h3>Step 4 —"));
+assert.match(installationStep,/id="open-chrome-extensions"/);
+assert.match(installationStep,/Developer mode/);
+assert.match(installationStep,/Load unpacked/);
+assert.match(installationStep,/<code>extension<\/code>/);
+assert.match(installationStep,/agent\/ResearchTubeAgent\.exe/);
+assert.match(installationStep,/python researchtube_agent\.py/);
+assert.match(installationStep,/Local Agent<\/strong> shows <strong>Ready/);
+const pluginStep = settings.slice(settings.indexOf("<h3>Step 4 —"), settings.indexOf("<h3>Step 5 —"));
+assert.ok(pluginStep.indexOf("Local Agent is running") < pluginStep.indexOf("ChatGPT Plugins"));
+assert.match(guide,/chrome\.tabs\.create\(\{ url: "chrome:\/\/extensions\/", active: true \}\)/);
+const extensionsHandler = guide.slice(guide.indexOf('$("open-chrome-extensions").addEventListener'), guide.indexOf('$("test-connection").addEventListener'));
+let prevented = false;
+let opened = null;
+new Function("$", "chrome", "console", extensionsHandler)(
+  () => ({ addEventListener(type, handler) { assert.equal(type, "click"); handler({ preventDefault() { prevented = true; } }); } }),
+  { tabs: { create(options) { opened = options; return Promise.resolve(); } } },
+  console
+);
+assert.equal(prevented, true);
+assert.deepEqual(opened, { url: "chrome://extensions/", active: true });
 
 console.log("Setup guide: ok");
 

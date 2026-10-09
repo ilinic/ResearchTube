@@ -94,6 +94,10 @@ async function saveAndTest() {
     button.disabled = false; button.textContent = "Save and test connection";
   }
 }
+$("open-chrome-extensions").addEventListener("click", (event) => {
+  event.preventDefault();
+  void chrome.tabs.create({ url: "chrome://extensions/", active: true }).catch((error) => console.info("[ResearchTube] Could not open Chrome Extensions", error));
+});
 $("test-connection").addEventListener("click", saveAndTest);
 $("test-agent").addEventListener("click", testAgentConnection);
 document.querySelectorAll("[data-open]").forEach((link) => link.addEventListener("click", (event) => { event.preventDefault(); call({ type: "open-external", target: link.dataset.open }); }));

@@ -46,22 +46,32 @@
           <figure class="setup-image"><img src="images/setup-02-api-key.png" loading="lazy" alt="Placeholder: Set restricted key permissions to Tunnels Read + Use"></figure>
         </div>
         <div class="setup-step">
-          <h3>Step 3 — Connect ResearchTube to the tunnel</h3>
+          <h3>Step 3 — Install and connect ResearchTube</h3>
+          <ol>
+            <li>Open <a href="chrome://extensions/" id="open-chrome-extensions">Chrome Extensions <svg class="external-link-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7M21 3l-9 9M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg></a> and turn on <strong>Developer mode</strong>.</li>
+            <li>Click <strong>Load unpacked</strong> and select the <code>extension</code> folder inside your extracted <strong>ResearchTube</strong> folder. Keep the Extension enabled and pin it to Chrome's toolbar.</li>
+            <li>Start the Local Agent. On Windows, open <code>agent/ResearchTubeAgent.exe</code> — no Python installation is needed. If you have Python installed, open a terminal in the <code>agent</code> folder and run <code>python researchtube_agent.py</code> (on macOS/Linux, use <code>python3 researchtube_agent.py</code>). Keep the Agent window open.</li>
+          </ol>
+          <p>Open the ResearchTube popup and check that <strong>Local Agent</strong> shows <strong>Ready</strong>. This confirms that the Extension is connected to the Local Agent.</p>
+          <p>We also recommend enabling <strong>Silent file automation</strong>; see the instructions in the next block below.</p>
           <p>In <strong>1. Set up OpenAI connection</strong> above, enter your API key and Tunnel ID, then click <strong>Save and test connection</strong>. Look for <strong>Connection successful</strong>. The API key stays in ResearchTube; do not enter it again in ChatGPT.</p>
           <figure class="setup-image"><img src="images/setup-03-researchtube.png" loading="lazy" alt="Placeholder: Enter both values in ResearchTube Settings"></figure>
         </div>
         <div class="setup-step">
           <h3>Step 4 — Add ResearchTube as a custom MCP plugin</h3>
-          <p>Visit <a href="#" data-open="chatgpt">ChatGPT Plugins <svg class="external-link-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7M21 3l-9 9M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg></a>, click <strong>+</strong> → <strong>Add custom MCP server</strong>. Name it <strong>ResearchTube</strong><button id="copy-app-name" class="copy-inline" type="button">Copy name</button>. Upload <code>icons/researchtube-64.png</code> from your extracted ResearchTube folder as the plugin icon. Under <strong>Connection</strong>, choose <strong>Tunnel</strong> and select or paste your Tunnel ID. Review any permissions/security prompts and create the plugin. ResearchTube must be connected while ChatGPT discovers tools.</p>
+          <p>Before continuing, make sure the <strong>Local Agent is running</strong> and the <strong>ResearchTube Extension is enabled</strong>. Keep ResearchTube connected while ChatGPT discovers its tools.</p>
+          <p>Visit <a href="#" data-open="chatgpt">ChatGPT Plugins <svg class="external-link-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7M21 3l-9 9M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg></a>, click <strong>+</strong> → <strong>Add custom MCP server</strong>. Name it <strong>ResearchTube</strong><button id="copy-app-name" class="copy-inline" type="button">Copy name</button>. Upload <code>icons/researchtube-64.png</code> from your extracted ResearchTube folder as the plugin icon. Under <strong>Connection</strong>, choose <strong>Tunnel</strong> and select or paste your Tunnel ID. Review any permissions/security prompts and create the plugin.</p>
           <figure class="setup-image"><img src="images/setup-05-chatgpt-plugin.png" loading="lazy" alt="Placeholder: Choose Tunnel when adding a custom MCP server"></figure>
         </div>
         <div class="setup-step">
-          <h3>Step 5 — Verify the connection</h3>
-          <p>Make sure the <strong>Local Agent is running</strong>. Open the ResearchTube popup and check that the <strong>OpenAI Tunnel</strong> is connected, the <strong>Local Agent</strong> is <strong>Ready</strong>, and there are no connection or version compatibility errors.</p>
-          <p>We also recommend enabling <strong>Silent file automation</strong>; see the instructions in the next block below.</p>
+          <h3>Step 5 — Try ResearchTube</h3>
+          <p>Open a new <a href="#" data-open="chatgptNewChat">ChatGPT chat <svg class="external-link-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7M21 3l-9 9M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg></a>, select <strong>@ResearchTube</strong>, then paste and send this prompt:</p>
           <div class="example-row"><blockquote id="example-prompt">@ResearchTube Search YouTube for recent videos about quantum computing. Read the relevant transcripts and summarize the main ideas.</blockquote><button id="copy-prompt" class="secondary" type="button">Copy example prompt</button></div>
-          <p class="field-help">Open a new <a href="#" data-open="chatgptNewChat">ChatGPT chat <svg class="external-link-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7M21 3l-9 9M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg></a> when the checks pass. Select or mention <strong>@ResearchTube</strong>, then paste and send the example prompt.</p>
-          <p class="field-help"><strong>Troubleshooting:</strong> Check the Tunnel ID, key permissions, Platform organization/workspace association, and that ResearchTube is running. To update the tool list, select ResearchTube → Manage → Refresh in ChatGPT Plugins.</p>
+        </div>
+        <div class="setup-step">
+          <h3>Step 6 — Troubleshooting</h3>
+          <p>If something does not work, check the setup steps above and the connection statuses in the ResearchTube popup. <strong>Local Agent: Ready</strong> confirms that the Extension is connected to the Agent.</p>
+          <p>For questions or help, click <strong>Help</strong> in the ResearchTube popup. It opens a dedicated ChatGPT help chat where you can describe the problem and get setup or troubleshooting guidance in your language.</p>
         </div>
       </div>
     </details>
