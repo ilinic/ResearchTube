@@ -48,9 +48,10 @@ class ReleaseTests(unittest.TestCase):
                 self.config.write_text(json.dumps({'prerelease': prerelease}))
                 self.write_archive()
                 self.calls.clear()
-                with patch('scripts.publish_release.find_release', side_effect=[None, self.draft()]), \
+                with patch('scripts.publish_release.find_release', side_effect=[None]) as find, \
                      patch('scripts.publish_release.gh', side_effect=self.record):
                     url = publish(self.archive, 'owner/repo', self.commit, self.root)
+                find.assert_called_once_with('owner/repo', 'ext-2.2.101_agent-2.2.71')
                 self.assertTrue(url.endswith('/ext-2.2.101_agent-2.2.71'))
                 self.assertEqual([call[1] for call in self.calls], ['create', 'upload', 'upload', 'edit'])
                 create, edit = self.calls[0], self.calls[-1]
@@ -82,7 +83,7 @@ class ReleaseTests(unittest.TestCase):
             self.record(*args)
             if args[1] == 'upload':
                 raise RuntimeError('upload failed')
-        with patch('scripts.publish_release.find_release', side_effect=[None, self.draft()]), \
+        with patch('scripts.publish_release.find_release', side_effect=[None]), \
              patch('scripts.publish_release.gh', side_effect=fail):
             with self.assertRaisesRegex(RuntimeError, 'upload failed'):
                 publish(self.archive, 'owner/repo', self.commit, self.root)

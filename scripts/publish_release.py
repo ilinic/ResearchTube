@@ -74,9 +74,9 @@ def publish(archive, repo, commit, root=ROOT):
             if metadata['prerelease']:
                 args.append('--prerelease')
             gh(*args)
-            release = find_release(repo, tag)
-            if release is None:
-                raise RuntimeError('The release draft was not created.')
+            # Creation succeeded with no assets. The release collection can
+            # briefly lag behind creation; do not depend on an immediate read.
+            release = {'assets': []}
         elif retarget:
             # An empty unpublished draft can follow a corrected build. Never
             # retarget a draft that already contains another build's assets.
