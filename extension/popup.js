@@ -5,12 +5,14 @@ function version(value) { return value ? `v${String(value).replace(/^v/i, "")}` 
 let connectionReadRevision = 0;
 function renderConnectionStatus(state) {
   const errorLabels = {
-    NOT_CONFIGURED: "Not configured", API_KEY_MISSING: "API key missing", TUNNEL_ID_MISSING: "Tunnel ID missing",
+    NOT_CONFIGURED: "Not Configured", API_KEY_MISSING: "API key missing", TUNNEL_ID_MISSING: "Tunnel ID missing",
     API_KEY_INVALID: "API key rejected", TUNNEL_PERMISSION_DENIED: "Access denied", TUNNEL_NOT_FOUND: "Tunnel not found", NETWORK_ERROR: "Network error"
   };
   const connection = state.connection || (state.configured ? { state: "unchecked" } : { state: "not-configured", errorCode: "NOT_CONFIGURED" });
   const element = $("tunnel-status");
-  element.textContent = connection.state === "ready" ? shortTunnel(state.tunnelId) : connection.state === "unchecked" ? "Not tested" : errorLabels[connection.errorCode] || "Connection failed";
+  const notConfigured = !state.configured || connection.state === "not-configured";
+  $("tunnel-status-value").textContent = notConfigured ? "Not Configured" : connection.state === "ready" ? shortTunnel(state.tunnelId) : connection.state === "unchecked" ? "Not tested" : errorLabels[connection.errorCode] || "Connection failed";
+  $("tunnel-help").hidden = !notConfigured;
   element.className = connection.state === "ready" ? "good" : connection.state === "unchecked" || connection.errorCode === "NOT_CONFIGURED" ? "warn" : "bad";
 }
 async function loadConnectionStatus() {
@@ -106,6 +108,7 @@ $("describe-video").addEventListener("click", async () => {
   window.close();
 });
 $("settings").addEventListener("click", () => chrome.runtime.openOptionsPage());
+$("tunnel-help").addEventListener("click", () => chrome.tabs.create({ url: chrome.runtime.getURL("onboarding.html") + "#setup-guide" }));
 $("help").addEventListener("click", () => {
   // The worker owns startup after this popup closes, including with no Agent
   // or tunnel configured: help must be available during initial installation.
