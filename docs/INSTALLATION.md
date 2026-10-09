@@ -112,7 +112,9 @@ If **Add custom MCP server** is missing, check your plan and workspace permissio
 
 ## 7. Verify the installation
 
-Ask:
+Make sure the Local Agent is running, then check the tunnel connection, Local Agent readiness and interface compatibility in the ResearchTube popup. **Settings → How to Set Up ResearchTube → Step 5** contains **Copy example prompt** and a link to a new ChatGPT chat. Select ResearchTube there, paste the example and send it. We also recommend the optional **Silent file automation** setup in the block immediately below the Settings guide.
+
+To check Agent components, ask:
 
 ```text
 @ResearchTube Check the ResearchTube Local Agent status and explain any unavailable components.

@@ -21,6 +21,16 @@ assert.doesNotMatch(settings,/<h3>[^<]*Developer Mode/);
 assert.doesNotMatch(settings,/setup-04-developer-mode\.png/);
 assert.match(settings,/<h3>Step 4 — Add ResearchTube as a custom MCP plugin<\/h3>/);
 assert.match(settings,/<h3>Step 5 — Verify the connection<\/h3>/);
+const stepFive = settings.slice(settings.indexOf("<h3>Step 5 —"), settings.indexOf("</details>"));
+assert.match(stepFive,/id="example-prompt"/);
+assert.match(stepFive,/id="copy-prompt"/);
+assert.match(stepFive,/data-open="chatgptNewChat"/);
+assert.match(stepFive,/Local Agent is running/);
+assert.match(stepFive,/ResearchTube popup/);
+assert.match(stepFive,/Silent file automation/);
+assert.doesNotMatch(settings,/<h2>3\. Try ResearchTube<\/h2>/);
+assert.equal((settings.match(/id="example-prompt"/g)||[]).length,1);
+assert.equal((settings.match(/id="copy-prompt"/g)||[]).length,1);
 for (const path of paths) {const img=await readFile(root(path));assert.equal(img.subarray(0,8).toString("hex"),"89504e470d0a1a0a");}
 
 assert.equal(JSON.parse(await readFile(root("manifest.json"),"utf8")).options_page,"settings.html");
