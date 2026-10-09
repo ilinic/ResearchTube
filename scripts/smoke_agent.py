@@ -125,7 +125,7 @@ def main():
     parser.add_argument('--windows-speech', action='store_true')
     args = parser.parse_args()
     if args.zip:
-        with tempfile.TemporaryDirectory(prefix='researchtube-smoke-') as folder:
+        with tempfile.TemporaryDirectory(prefix='researchtube-smoke-', ignore_cleanup_errors=sys.platform == 'win32') as folder:
             with zipfile.ZipFile(args.zip) as archive:
                 archive.extractall(folder)
             agent = Path(folder) / 'ResearchTube/agent'
