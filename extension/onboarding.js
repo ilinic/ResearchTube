@@ -91,4 +91,13 @@ $("copy-prompt").addEventListener("click", async () => { await navigator.clipboa
 $("copy-diagnostics").addEventListener("click", async () => { const button = $("copy-diagnostics"); const result = await call({ type: "get-diagnostics" }); if (!result?.ok) { $("diagnostics-summary").textContent = "Could not export diagnostics."; return; } await navigator.clipboard.writeText(result.text); button.textContent = "Copied"; setTimeout(() => { button.textContent = "Copy diagnostics log"; }, 1400); });
 $("clear-diagnostics").addEventListener("click", async () => { const result = await call({ type: "clear-diagnostics" }); if (result?.ok) { $("diagnostics-summary").textContent = "No diagnostic events captured yet."; } else { $("diagnostics-summary").textContent = "Could not clear diagnostics."; } });
 async function init() { const state = await call({ type: "status" }); $("tunnel-id").value = state.tunnelId || ""; $("agent-port").value = state.agentPort || 17843; if (state.apiKeyPresent) $("api-key").placeholder = "••••••••••••••••"; await refreshDiagnostics(); await loadMcpToolSettings(); }
+function openSetupGuideFromHash() {
+  if (window.location.hash !== "#setup-guide") return;
+  const guide = $("setup-guide");
+  guide.open = true;
+  // Expand first, then scroll to the new element height.
+  requestAnimationFrame(() => requestAnimationFrame(() => guide.scrollIntoView({ block: "start", behavior: "instant" })));
+}
+window.addEventListener("hashchange", openSetupGuideFromHash);
+openSetupGuideFromHash();
 init();
