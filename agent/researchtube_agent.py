@@ -35,13 +35,15 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 from urllib.request import Request, urlopen
 
 try:
+    from .runtime_paths import installation_root
     from .task_history import TaskHistory
     from .browser_resources import save_browser_resource
 except ImportError:
+    from runtime_paths import installation_root
     from task_history import TaskHistory
     from browser_resources import save_browser_resource
 
-AGENT_VERSION = "2.2.69"
+AGENT_VERSION = "2.2.70"
 INTERFACE_VERSION = 78
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
@@ -54,7 +56,7 @@ MAX_DIAGNOSTIC_LINE_LENGTH = 240
 MAX_TASK_EVENTS = 250
 MAX_TASK_EVENT_MESSAGE_LENGTH = 240
 YTDLP_FORMATS_TIMEOUT_SECONDS = 30
-ROOT = Path(__file__).resolve().parent
+ROOT = installation_root(__file__)
 CONFIG_PATH = ROOT / "agent-config.json"
 WORKSPACE_PATH = ROOT / "workspace"
 TOOLS_PATH = ROOT / "tools"
@@ -281,6 +283,41 @@ def configured_workspace_path() -> Path:
         return (path if path.is_absolute() else ROOT / path).resolve()
     except (OSError, ValueError, RuntimeError) as error:
         raise AgentApiError("CONFIG_INVALID", "workspacePath could not be resolved.") from error
+
+
+def startup_workspace_path() -> Path:
+    """Ask only for an explicitly unset root and persist the choice locally."""
+    config = read_agent_config()
+    value = config.get("workspacePath", "workspace")
+    if not isinstance(value, str):
+        raise AgentApiError("CONFIG_INVALID", "workspacePath must be text.")
+    if value.strip():
+        return configured_workspace_path()
+    default = (ROOT / "workspace").resolve()
+    try:
+        chosen = input(f"Workspace folder [{default}]: ").strip() or "workspace"
+    except (EOFError, KeyboardInterrupt) as error:
+        raise AgentApiError("WORKSPACE_SETUP_REQUIRED", "Set workspacePath in agent-config.json or start the Agent in an interactive terminal.") from error
+    if "\0" in chosen:
+        raise AgentApiError("CONFIG_INVALID", "workspacePath must be a valid directory path.")
+    path = Path(chosen)
+    path = (path if path.is_absolute() else ROOT / path).resolve()
+    path.mkdir(parents=True, exist_ok=True)
+    document = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    entry = document.get("workspacePath", {})
+    document["workspacePath"] = {**entry, "value": chosen}
+    # Replace only the configuration after writing a complete JSON document.
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=CONFIG_PATH.parent, prefix=".agent-config-", suffix=".tmp", delete=False) as stream:
+            temporary = Path(stream.name)
+            json.dump(document, stream, ensure_ascii=False, indent=2)
+            stream.write("\n")
+        temporary.replace(CONFIG_PATH)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    return path
 
 
 def configured_tool_limits() -> dict[str, int]:
@@ -2367,9 +2404,18 @@ async def media_create_visual_map(payload: Any, progress: VisualMapProgressRepor
 def windows_speech_python() -> str:
     if sys.platform != "win32":
         raise AgentApiError("SPEECH_NOT_SUPPORTED", "Windows text-to-speech is available only on Windows.")
-    if not WINDOWS_SPEECH_SCRIPT_PATH.is_file():
+    if not getattr(sys, "frozen", False) and not WINDOWS_SPEECH_SCRIPT_PATH.is_file():
         raise AgentApiError("SPEECH_NOT_AVAILABLE", "The Windows text-to-speech helper is not installed.")
     return sys.executable
+
+
+def windows_speech_command(executable: str) -> list[str]:
+    return [executable, "--windows-speech-helper"] if getattr(sys, "frozen", False) else [executable, str(WINDOWS_SPEECH_SCRIPT_PATH)]
+
+
+def windows_speech_environment() -> dict[str, str] | None:
+    # A one-file helper owns its extraction lifetime even if the parent exits.
+    return {**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"} if getattr(sys, "frozen", False) else None
 
 
 def speech_options(payload: Any) -> dict[str, Any]:
@@ -2440,7 +2486,7 @@ async def system_speech_list_voices(payload: Any) -> dict[str, Any]:
         raise AgentApiError("SPEECH_INVALID", "system_speech_list_voices does not accept arguments.")
     executable = windows_speech_python()
     try:
-        process = await asyncio.create_subprocess_exec(executable, str(WINDOWS_SPEECH_SCRIPT_PATH), "--action", "list-voices", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        process = await asyncio.create_subprocess_exec(*windows_speech_command(executable), "--action", "list-voices", env=windows_speech_environment(), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=15)
     except asyncio.TimeoutError as error:
         process.kill(); await process.communicate()
@@ -2464,9 +2510,9 @@ async def system_speech_voice_name(executable: str, voice_id: str | None) -> str
     process: asyncio.subprocess.Process | None = None
     try:
         process = await asyncio.create_subprocess_exec(
-            executable, str(WINDOWS_SPEECH_SCRIPT_PATH), "--action", "voice-info",
+            *windows_speech_command(executable), "--action", "voice-info",
             "--voice-id-base64", speech_base64(voice_id),
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            env=windows_speech_environment(), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
         stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=15)
     except asyncio.TimeoutError as error:
@@ -2674,11 +2720,11 @@ class SpeechTaskManager:
                     raise AgentApiError("DESTINATION_EXISTS", "The temporary speech output destination already exists. Try again.")
             task.phase = "synthesizing"; task.touch("Synthesizing speech.")
             task.process = await asyncio.create_subprocess_exec(
-                executable, str(WINDOWS_SPEECH_SCRIPT_PATH), "--action", "speak",
+                *windows_speech_command(executable), "--action", "speak",
                 "--text-base64", "__STDIN__", "--voice-id-base64", speech_base64(task.voice_id),
                 "--output-path-base64", speech_base64(str(temporary_output) if temporary_output is not None else None),
                 "--play-through-speakers", "true" if task.output_mode in {"speakers", "both"} else "false",
-                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                env=windows_speech_environment(), stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
             assert task.process.stdin is not None
             task.process.stdin.write(speech_base64(task.text).encode("ascii"))
@@ -6146,7 +6192,7 @@ async def serve(port: int) -> None:
     global WORKSPACE_PATH
     # Freeze the root for this run: live edits must not redirect active tasks,
     # media viewers or shares into a different directory mid-operation.
-    WORKSPACE_PATH = configured_workspace_path()
+    WORKSPACE_PATH = startup_workspace_path()
     initial_health = initialize_health_snapshot()
     server = await asyncio.start_server(handle_client, host="127.0.0.1", port=port)
     log_startup_health(initial_health, port)
@@ -6180,9 +6226,20 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    if sys.argv[1:2] == ["--windows-speech-helper"]:
+        try:
+            from .windows_speech import main as speech_main
+        except ImportError:
+            from windows_speech import main as speech_main
+        return speech_main(sys.argv[2:])
     args = parse_args()
     clear_console()
     try:
+        # PyInstaller's DLL search directory must not leak into FFmpeg/yt-dlp.
+        # Speech runs in a fresh self-exec helper and restores its own bundle.
+        if getattr(sys, "frozen", False) and sys.platform == "win32":
+            if not ctypes.windll.kernel32.SetDllDirectoryW(None):
+                raise OSError("Could not restore the Windows external-program DLL search path.")
         asyncio.run(serve(args.port if args.port is not None else configured_port()))
     except KeyboardInterrupt:
         return 0

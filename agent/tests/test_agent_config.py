@@ -46,7 +46,7 @@ class AgentConfigTests(unittest.TestCase):
         self.assertEqual(agent.configured_tool_limits()['mediaClipMaxSegments'], 7)
 
     def test_workspace_default_relative_and_absolute_paths(self):
-        self.assertEqual(self.original['workspacePath']['value'], 'workspace')
+        self.assertEqual(self.original['workspacePath']['value'], '')
         with patch.object(agent, 'ROOT', Path(self.folder.name)):
             self.write({})
             self.assertEqual(agent.configured_workspace_path(), Path(self.folder.name) / 'workspace')
@@ -67,7 +67,7 @@ class AgentConfigTests(unittest.TestCase):
                 self.assertIn('workspacePath', raised.exception.message)
 
     def test_invalid_workspace_config_stops_startup_before_binding(self):
-        self.write({'workspacePath': {'value': ''}})
+        self.write({'workspacePath': {'value': 12}})
         with patch.object(agent, 'parse_args', return_value=type('Args', (), {'port': 17843})()), \
              patch.object(agent, 'clear_console'), patch.object(agent, 'log') as logged, \
              patch.object(agent.asyncio, 'start_server') as bind:
@@ -75,6 +75,35 @@ class AgentConfigTests(unittest.TestCase):
             bind.assert_not_called()
             self.assertIn('CONFIG_INVALID', logged.call_args.args[0])
             self.assertIn('workspacePath', logged.call_args.args[0])
+
+    def test_empty_workspace_prompts_once_and_saves_enter_default(self):
+        with patch.object(agent, 'ROOT', Path(self.folder.name)), patch('builtins.input', return_value='') as prompt:
+            self.assertEqual(agent.startup_workspace_path(), Path(self.folder.name) / 'workspace')
+            self.assertTrue((Path(self.folder.name) / 'workspace').is_dir())
+            prompt.assert_called_once_with(f'Workspace folder [{Path(self.folder.name) / "workspace"}]: ')
+            saved = json.loads(self.path.read_text(encoding='utf-8'))
+            self.assertEqual(saved['workspacePath']['value'], 'workspace')
+            self.assertEqual(saved['workspacePath']['comment'], self.original['workspacePath']['comment'])
+            self.assertEqual(saved['limits'], self.original['limits'])
+            agent.startup_workspace_path()
+            prompt.assert_called_once()
+
+    def test_prompt_custom_existing_folder_keeps_files(self):
+        selected = Path(self.folder.name) / 'Другой Workspace'
+        selected.mkdir()
+        (selected / 'keep.txt').write_text('keep', encoding='utf-8')
+        with patch('builtins.input', return_value=str(selected)):
+            self.assertEqual(agent.startup_workspace_path(), selected)
+        self.assertEqual((selected / 'keep.txt').read_text(encoding='utf-8'), 'keep')
+        self.assertEqual(agent.read_agent_config()['workspacePath'], str(selected))
+
+    def test_empty_workspace_without_console_does_not_guess_or_save(self):
+        with patch('builtins.input', side_effect=EOFError), patch.object(agent, 'ROOT', Path(self.folder.name)):
+            with self.assertRaises(agent.AgentApiError) as raised:
+                agent.startup_workspace_path()
+        self.assertEqual(raised.exception.code, 'WORKSPACE_SETUP_REQUIRED')
+        self.assertEqual(agent.read_agent_config()['workspacePath'], '')
+        self.assertFalse((Path(self.folder.name) / 'workspace').exists())
 
     def test_invalid_structure_reports_setting_name(self):
         cases = [([], 'object'), ({'port': 17843}, 'port'),

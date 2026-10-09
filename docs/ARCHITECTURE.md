@@ -70,7 +70,7 @@ The Agent console may show physical installation paths for the local user. Norma
 
 ## Workspace model
 
-`workspacePath` in `agent/agent-config.json` selects the physical root. It defaults to `workspace`, resolved relative to the directory containing `researchtube_agent.py`; an absolute local path selects another location. The root is resolved once before startup health/server initialization and stays fixed until restart. Missing settings in older configurations retain the default; invalid values stop startup rather than silently selecting a different folder. Existing files are not migrated. MCP uses only logical POSIX-style paths such as `downloads/example.mp4`, never the configured physical path.
+`workspacePath` in external `agent/agent-config.json` selects the physical root. Empty text prompts at startup with the absolute `workspace` folder beside the Agent in square brackets; Enter accepts and saves the relative default. A missing chosen directory is created; existing files are preserved. `runtime_paths.installation_root()` selects the script directory in Python mode and `sys.executable`'s directory in frozen mode, never PyInstaller's extraction directory. Config, tools and Custom Tools share this external root. Relative Workspace paths resolve there; absolute local paths select another location. The root is resolved once before startup health/server initialization and stays fixed until restart. Missing settings in older configurations retain the legacy default; invalid values stop startup. Empty config without interactive input requires explicit setup. Existing files are not migrated. MCP uses only logical POSIX-style paths such as `downloads/example.mp4`, never the configured physical path.
 
 `WorkspacePathResolver` rejects:
 
@@ -121,7 +121,7 @@ uses the shared Custom Tool status/cancel lifecycle.
 - `yt-dlp` resolves formats and downloads complete or partial public YouTube media.
 - YouTube storyboards download ready-made JPEG sheets rather than video.
 - Google Translate TTS is driven in a retained background tab. Source text is inserted by script, the listen control is clicked with CDP browser input, and file output is collected from CDP network response bodies.
-- Windows TTS uses Windows speech voices and produces WAV output.
+- Windows TTS uses Windows speech voices and produces WAV output. Source mode starts the helper script; frozen mode starts the same EXE with `--windows-speech-helper`, dispatched before normal Agent setup. WinRT dependencies are bundled; each frozen helper resets PyInstaller's environment for its own extraction lifetime.
 
 Media creation tools return Workspace metadata and normally do not render a widget. `media_show` is the explicit presentation action.
 

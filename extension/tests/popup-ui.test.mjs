@@ -86,7 +86,7 @@ const popupContext = {
 vm.runInNewContext(script, popupContext);
 await new Promise((resolve) => setImmediate(resolve));
 assert.equal(element("extension-status").textContent, "v2.2.52", "local status renders before Agent responds");
-assert.equal(element("tunnel-status").textContent, "tunnel_test");
+assert.equal(element("tunnel-status-value").textContent, "tunnel_test");
 assert.equal(element("interface-version").textContent, "v73");
 assert.equal(element("agent-status").textContent, "Checking…");
 assert.equal(messages[0].includeAgent, false);

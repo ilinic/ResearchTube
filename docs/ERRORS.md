@@ -10,7 +10,8 @@ ResearchTube uses stable public error codes so an assisting chat can distinguish
 | `AGENT_INTERFACE_INCOMPATIBLE` | Extension and Agent interface versions differ | Install matching components, reload/restart, refresh MCP schema |
 | `AGENT_INVALID_RESPONSE` | Agent response violated the Extension's allowlisted contract | Record versions and report a compatibility/implementation defect |
 | `AGENT_REQUEST_FAILED` | Loopback request failed after connection | Check Agent console and bounded diagnostics; do not expose paths |
-| `CONFIG_INVALID` | A configured limit in `agent-config.json` is invalid | Use an integer within the documented range in `agent/README.md` |
+| `CONFIG_INVALID` | A value or structure in `agent-config.json` is invalid | Correct its type/range or Workspace path; retain the `value`/`comment` structure |
+| `WORKSPACE_SETUP_REQUIRED` | Workspace config is empty and startup cannot obtain interactive input | Start the Agent in a terminal and answer the folder prompt, or set `workspacePath.value` before launching |
 | `API_KEY_MISSING` | Tunnel API key absent | Enter a dedicated restricted key in Settings |
 | `API_KEY_INVALID` | OpenAI rejected the key | Replace/check the key locally |
 | `TUNNEL_ID_MISSING` | Tunnel ID absent | Enter the `tunnel_...` identifier |

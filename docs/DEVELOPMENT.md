@@ -182,11 +182,23 @@ When behavior changes:
 
 Package the repository with generated bundles and the bundled Workspace demo, excluding `.git`, `node_modules`, Python caches, user-created Workspace files and prior archives. Verify the ZIP with `unzip -t` or an equivalent archive tester.
 
+Build the shared release on Windows (Python 3.12 x64 is used in CI):
+
+```sh
+python -m pip install -r agent/requirements-build.txt
+python scripts/build_release.py
+python scripts/smoke_agent.py --zip dist/ResearchTube.zip --windows-speech
+```
+
+`agent/ResearchTubeAgent.spec` builds a console EXE with Python and WinRT speech dependencies. `scripts/build_release.py` packages it beside cross-platform sources, external config, tools, Custom Tools, Extension, docs and demo. Only the archived config's Workspace value is reset to empty; a developer's config is unchanged. Existing output archives are rejected. `--exe <Windows EXE>` packages a previously built executable on any OS. Build Windows binaries on Windows; Linux/macOS users run the included source with Python. Optional component binaries still need to match the host OS.
+
+The **Build shared Python and Windows release** GitHub Actions workflow runs on Agent/build changes to main or manually. It builds and tests both launch modes from the extracted ZIP, including default/custom Workspace choice, persistence, unrelated terminal directory, existing file preservation, public path exclusion, external Custom Tools and actual Windows speech WAV output. The ZIP is available in its **ResearchTube-shared-release** artifact. Native Windows verification is separate from Linux frozen smoke checks. Custom Tools remain external Python modules; additional third-party imports must be included when rebuilding the EXE, or installed for Python source mode. Runtime pip installation does not extend a frozen interpreter.
+
 Do not commit, push or publish unless the user explicitly requests it.
 
 ## Workspace configuration
 
-`workspacePath` in the single `agent-config.json` uses the same `value`/`comment` layout as other settings. `configured_workspace_path()` validates and resolves it from `ROOT`, not the process working directory; native absolute paths are allowed in this trusted local configuration only. Missing settings retain the legacy `workspace` default. Invalid values fail startup with `CONFIG_INVALID`, without creating a fallback Workspace. `serve()` sets `WORKSPACE_PATH` before health initialization or server binding and freezes it for that run; do not reload the root for each operation or expose it through public HTTP/MCP status. Existing resolver/media/share routes must continue using that root and validating logical paths. Changing config requires restart and does not move/delete existing files. Test configuration compatibility, real loopback file creation under the chosen root, run stability after edits, restart selection, traversal rejection and public path exclusion.
+`workspacePath` in the single `agent-config.json` uses the same `value`/`comment` layout as other settings. `startup_workspace_path()` reads it first; empty text prompts with `[absolute default]`, Enter selects relative `workspace`, and the chosen value is saved atomically while retaining config fields/comments. Create the directory with `exist_ok=True`, preserving files. EOF/cancel reports `WORKSPACE_SETUP_REQUIRED` without silently accepting the default. Nonempty values use `configured_workspace_path()`, resolved from external installation `ROOT`, not the process working directory or frozen extraction directory. Native absolute paths are allowed in this trusted local configuration only. Missing settings retain the legacy `workspace` default. Invalid values fail startup with `CONFIG_INVALID`. `serve()` sets `WORKSPACE_PATH` before health/server initialization and freezes it for that run; do not reload the root per operation or expose it through public HTTP/MCP status. Existing resolver/media/share routes continue validating logical paths. Changing config requires restart and does not move/delete files. Test prompt/default/custom persistence, source/frozen roots, compatibility, real loopback creation, run stability, restart selection, traversal rejection and public path exclusion.
 
 ## Task history and developer configuration
 

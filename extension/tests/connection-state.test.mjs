@@ -145,10 +145,10 @@ assert.equal(s.element("test-connection").disabled, false);
 let state = { configured: false, connection: { state: "not-configured", errorCode: "NOT_CONFIGURED" } };
 const p = ui(popup, async message => message.type === "status" ? state : { available: false });
 await new Promise(resolve => setImmediate(resolve));
-assert.equal(p.element("tunnel-status").textContent, "Not configured");
+assert.equal(p.element("tunnel-status-value").textContent, "Not Configured");
 for (const [connection, text, style] of [
-  [{ state: "not-configured", errorCode: "API_KEY_MISSING" }, "API key missing", "bad"],
-  [{ state: "not-configured", errorCode: "TUNNEL_ID_MISSING" }, "Tunnel ID missing", "bad"],
+  [{ state: "not-configured", errorCode: "API_KEY_MISSING" }, "Not Configured", "bad"],
+  [{ state: "not-configured", errorCode: "TUNNEL_ID_MISSING" }, "Not Configured", "bad"],
   [{ state: "unchecked", errorCode: null }, "Not tested", "warn"],
   [{ state: "error", errorCode: "API_KEY_INVALID" }, "API key rejected", "bad"],
   [{ state: "error", errorCode: "NETWORK_ERROR" }, "Network error", "bad"],
@@ -156,7 +156,7 @@ for (const [connection, text, style] of [
 ]) {
   state = { configured: true, tunnelId: "tunnel_test", connection };
   p.notify({ lastTunnelConnection: {} }); await new Promise(resolve => setImmediate(resolve));
-  assert.equal(p.element("tunnel-status").textContent, text); assert.equal(p.element("tunnel-status").className, style);
+  assert.equal(p.element("tunnel-status-value").textContent, text); assert.equal(p.element("tunnel-status").className, style);
 }
 const pendingReads = [];
 const stalePopup = ui(popup, message => message.type === "status" ? new Promise(resolve => pendingReads.push(resolve)) : Promise.resolve({ available: false }));
@@ -166,12 +166,12 @@ pendingReads[1]({ configured: false, connection: { state: "not-configured", erro
 await new Promise(resolve => setImmediate(resolve));
 pendingReads[0]({ configured: true, tunnelId: "tunnel_old", connection: { state: "ready" } });
 await new Promise(resolve => setImmediate(resolve));
-assert.equal(stalePopup.element("tunnel-status").textContent, "API key missing", "initial popup read cannot overwrite newer saved state");
+assert.equal(stalePopup.element("tunnel-status-value").textContent, "Not Configured", "initial popup read cannot overwrite newer saved state");
 stalePopup.notify({ lastTunnelConnection: {} });
 stalePopup.notify({ lastTunnelConnection: {} });
 pendingReads[3]({ configured: false, connection: { state: "not-configured", errorCode: "NOT_CONFIGURED" } });
 await new Promise(resolve => setImmediate(resolve));
 pendingReads[2]({ configured: true, tunnelId: "tunnel_old", connection: { state: "ready" } });
 await new Promise(resolve => setImmediate(resolve));
-assert.equal(stalePopup.element("tunnel-status").textContent, "Not configured", "older notification read cannot overwrite a newer reset");
+assert.equal(stalePopup.element("tunnel-status-value").textContent, "Not Configured", "older notification read cannot overwrite a newer reset");
 console.log("Connection state: explicit clears, masked key editing, save before test, status/badge recovery, stale polls, credential replacement, source/shipped worker and live popup updates: ok");

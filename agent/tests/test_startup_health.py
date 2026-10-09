@@ -16,6 +16,7 @@ class StartupHealthTests(unittest.IsolatedAsyncioTestCase):
             patch.object(agent, "public_platform_metadata", return_value={
                 "operatingSystem": "Windows", "release": "11", "version": "test", "architecture": "AMD64"}),
             patch.object(agent, "workspace_health", return_value={"status": "available", "availableBytes": 123}),
+            patch.object(agent, "startup_workspace_path", return_value=agent.WORKSPACE_PATH),
             patch.object(agent, "log"),
         ]
         for item in self.patches:

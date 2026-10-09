@@ -54,7 +54,7 @@ The Extension could not reach the configured loopback port.
 
 User checks:
 
-- start `python agent/researchtube_agent.py`;
+- open `agent/ResearchTubeAgent.exe` on Windows, or start `python3 agent/researchtube_agent.py` on Linux/macOS (Windows source mode: `py agent/researchtube_agent.py`);
 - keep its console open;
 - confirm the startup summary completed;
 - confirm Extension Settings uses the same port as `agent-config.json`;
@@ -68,7 +68,9 @@ The Extension and Agent come from different incompatible releases. Record both i
 
 ### Workspace unavailable
 
-Check `workspacePath.value` in `agent/agent-config.json` and whether the user can create files in that directory. The default `workspace` is relative to the Agent script's folder; an absolute path can select another drive. Restart the Agent after editing. Empty/non-text/invalid path settings report `CONFIG_INVALID` and stop startup without falling back. An inaccessible directory reports Workspace unavailable. The actual root appears only in the local startup console. Changing the setting does not move files: preserve the old Workspace and copy/move its contents while the Agent is stopped if needed. Child symlinks or unsupported reparse points remain prohibited. Do not delete user media.
+Check `workspacePath.value` in `agent/agent-config.json` and whether the user can create files in that directory. Empty text prompts for a folder; Enter accepts the default `workspace` beside the script or EXE and saves it. Without interactive input, an empty setting stops startup with `WORKSPACE_SETUP_REQUIRED`: open the Agent in a terminal or set the path directly. Non-text/invalid settings report `CONFIG_INVALID`. An inaccessible configured directory reports Workspace unavailable; a first-time choice must also allow saving the config. Relative paths are independent of the terminal directory; absolute paths can select another drive. Restart after editing. The actual root appears only in the local console. Changing the setting does not move files: preserve the old Workspace and copy/move its contents while stopped if needed. Child symlinks or unsupported reparse points remain prohibited. Do not delete user media.
+
+Extract the complete release ZIP before starting the EXE. Keep it beside `agent-config.json`, `tools/` and `custom-tools/`; do not copy the EXE alone. Python mode on Windows needs `agent/requirements-windows.txt` for Windows speech; those dependencies are already inside the EXE. Optional media executables must match the operating system.
 
 ## Tunnel connection failures
 

@@ -16,7 +16,7 @@ ResearchTube connects ChatGPT to public YouTube research, local media tools and 
 | --- | --- | --- |
 | Chrome Extension | Publishes the MCP tools, runs the private OpenAI tunnel connection, reads YouTube and controls browser tasks | Keep Chrome open and the Extension enabled when using tools |
 | OpenAI Secure MCP Tunnel | Connects ChatGPT to the Extension without opening an inbound port | Required for ChatGPT to call ResearchTube tools |
-| Local Agent | Python process serving local media tools and Workspace on `127.0.0.1`, normally port `17843` | Required for downloads, local files/media and other Agent-backed operations |
+| Local Agent | Windows EXE or Python process serving local media tools and Workspace on `127.0.0.1`, normally port `17843` | Required for downloads, local files/media and other Agent-backed operations |
 | Workspace | Local files in the configured directory, default `agent/workspace/` | Use logical paths such as `downloads/example.mp4` in chat |
 
 Browser-based YouTube research works with the Agent stopped. Local media requires it. Reading this Help guide needs neither. OpenAI Secure MCP Tunnel and optional cloudflared online sharing are different features; cloudflared is not needed to connect ResearchTube to ChatGPT.
@@ -28,7 +28,7 @@ Browser-based YouTube research works with the Agent stopped. Local media require
 - Chrome/Chromium on Windows, macOS or Linux; **Study this site** needs Chrome 125 or newer for nested iframe support.
 - This private-connection setup assumes **ChatGPT Plus or higher**, with access to private MCP connections and **Developer Mode**. Account/workspace permissions also matter; a subscription alone does not guarantee that the controls are available.
 - An OpenAI Platform account/organization allowed to create/use Secure MCP Tunnels. ChatGPT subscription settings and Platform tunnel permissions are separate.
-- Python 3.10 or newer if using the Local Agent. Node.js is needed for development, not a prebuilt release.
+- Python 3.10 or newer for source-mode Agent on Linux/macOS or Windows. The shared release includes a Windows EXE with Python inside. Node.js is needed for development, not a prebuilt release.
 
 Windows-only operations include the built-in clipboard, desktop capture and Windows speech engine. Some camera/media capabilities depend on the platform and installed components; inspect status before assuming support.
 
@@ -72,11 +72,11 @@ Open a terminal in the extracted release root and run:
 python agent/researchtube_agent.py
 ```
 
-On Windows, `py agent/researchtube_agent.py` is an alternative if the Python launcher is installed. Keep the console open. In Extension **Settings → Local Agent**, select **Test connection**. The default port is `17843`; the Agent configuration and Extension must use the same port. Implementation versions may differ; **interface versions must match**.
+On Windows, simply open `agent/ResearchTubeAgent.exe` from the fully extracted shared release ZIP; no separate Python is needed. `py agent/researchtube_agent.py` is an alternative with Python installed; on Linux/macOS use `python3`. Keep the console open. In Extension **Settings → Local Agent**, select **Test connection**. The default port is `17843`; the Agent configuration and Extension must use the same port. Implementation versions may differ; **interface versions must match**.
 
 The Agent checks components once at startup. `Checking…` means a startup check is still running. Restart it after changing components or Chrome launch flags; pressing Test connection reads the saved status and does not repeat the checks.
 
-To choose where files are stored, edit `workspacePath.value` in `agent/agent-config.json`. The default `workspace` is relative to the Agent script's folder. An absolute path such as `D:/ResearchTubeWorkspace` on Windows selects another location; use forward slashes in JSON or escape backslashes. Restart the Agent to apply it. It creates a missing accessible folder but does not move existing files. Preserve the old folder, or copy/move its files while the Agent is stopped. Chat tools still use logical paths, and do not need your computer's physical path. See [Workspace directory setup](INSTALLATION.md#choose-the-workspace-directory).
+The Agent first reads `workspacePath.value` in `agent/agent-config.json`. If empty, it asks for a folder and shows the absolute default beside the Agent in square brackets. Press **Enter** to accept `workspace`, or type another path. It saves the choice, creates a missing folder and preserves existing files. Later launches do not ask again. Relative paths resolve beside the script or EXE; an absolute path such as `D:/ResearchTubeWorkspace` selects another location. You can edit the config directly and restart; use forward slashes in JSON or escape backslashes. Changing location does not move files. Chat tools use logical paths, and do not need your computer's physical path. See [Workspace directory setup](INSTALLATION.md#choose-the-workspace-directory).
 
 | Component | Enables |
 | --- | --- |
@@ -128,7 +128,7 @@ On a YouTube video or Short, the popup offers **Describe this video**. On other 
 | Extension missing | `chrome://extensions`: enabled, correct `extension/` folder, no load errors. Keep the extracted installation folder. |
 | ResearchTube absent from ChatGPT | Test tunnel in Settings; verify ChatGPT Developer Mode/permissions, correct workspace and same tunnel; create/install the private connection and select it in a new chat. |
 | Tunnel test fails | `API_KEY_INVALID`: check/create the restricted key in Settings. `TUNNEL_PERMISSION_DENIED`: check runtime Read + Use. `TUNNEL_NOT_FOUND`: verify ID and organization. `NETWORK_ERROR`: check connectivity/proxy. |
-| Agent unavailable | Start its Python process, keep console open, match the port, then Test connection. Do not open its port publicly. |
+| Agent unavailable | Start its Windows EXE or Python script, answer the Workspace prompt if shown, keep the console open, match the port, then Test connection. Do not open its port publicly. |
 | Version mismatch | Use compatible components from the release; reload Extension, restart changed Agent, refresh ChatGPT catalog. Version numbers need not be equal; interfaces must match. |
 | Tool missing or `TOOL_DISABLED` | Enable that tool in Extension Settings; in ChatGPT open ResearchTube's management and **Refresh**, then use a new chat. |
 | Component missing or stale | Check `system_agent_status`; install/extract only the relevant component, remove ambiguous duplicate executables, restart Agent. |

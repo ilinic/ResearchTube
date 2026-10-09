@@ -54,7 +54,7 @@ Workspace + ffmpeg + ffprobe + yt-dlp + optional cloudflared
 ```
 
 - `extension/` is the unpacked Manifest V3 Chrome extension and MCP server.
-- `agent/` is the Python 3.10+ loopback Local Agent.
+- `agent/` is the loopback Local Agent: Windows EXE in the shared release ZIP, or Python 3.10+ source on Windows, Linux and macOS.
 - `agent/workspace/` is the default Workspace; `workspacePath` in `agent/agent-config.json` can select another directory.
 - `docs/` contains the public user, troubleshooting and development documentation.
 
@@ -64,7 +64,7 @@ The Extension can still perform browser-based public YouTube research while the 
 
 1. Extract the complete release into a permanent directory.
 2. Open `chrome://extensions`, enable **Developer mode**, choose **Load unpacked**, and select `extension/`.
-3. Start the Agent with `python agent/researchtube_agent.py`.
+3. On Windows, open `agent/ResearchTubeAgent.exe` from the release ZIP; on Linux/macOS, run `python3 agent/researchtube_agent.py`. If the configured Workspace is empty, press Enter at the folder prompt to accept and save `agent/workspace/`.
 4. Open ResearchTube **Settings** and test the Local Agent.
 5. Configure the OpenAI Secure MCP Tunnel and a restricted API key with only the required tunnel permissions.
 6. Add the tunnel as a ChatGPT MCP app named **ResearchTube**.
