@@ -34,6 +34,8 @@ Windows-only operations include the built-in clipboard, desktop capture and Wind
 
 ### 2. Extract and load the Extension
 
+Download **ResearchTube.zip** under **Assets** on [GitHub Releases](https://github.com/ilinic/ResearchTube/releases). Release titles list the Extension and Agent versions. Preliminary builds are marked **Pre-release**. The archive includes the Windows EXE and Python sources for Linux/macOS; its `release-info.json` records the included versions.
+
 1. Download the complete [ResearchTube release](https://github.com/ilinic/ResearchTube/releases) and extract it to a permanent folder. Keep the `extension/`, `agent/` and `docs/` directories. Do not run from inside the ZIP or delete/move that folder afterwards.
 2. Open `chrome://extensions` in Chrome's address bar.
 3. Turn on Chrome's **Developer mode** at the top of that page. This is different from ChatGPT Developer Mode.

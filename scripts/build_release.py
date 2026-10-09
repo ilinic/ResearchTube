@@ -1,11 +1,17 @@
 """Build one Windows EXE plus cross-platform Python sources in one ZIP."""
 import argparse
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import zipfile
+
+try:
+    from .release_metadata import release_metadata
+except ImportError:
+    from release_metadata import release_metadata
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,7 +22,7 @@ def release_files(root):
     # Explicit roots exclude legacy nested checkouts and user-created Workspace.
     roots = [root / 'docs', root / 'icons', root / 'extension', root / 'agent/tools', root / 'agent/custom-tools',
              root / 'agent/workspace/demo']
-    files = [root / 'README.md', root / 'AGENTS.md']
+    files = [root / 'README.md', root / 'AGENTS.md', root / 'release.json']
     files += [p for p in (root / 'agent').iterdir() if p.is_file() and (p.suffix in {'.py', '.json', '.txt'} or p.name == 'README.md')]
     for directory in roots:
         if directory.exists():
@@ -37,6 +43,7 @@ def release_files(root):
 def package_release(root, executable, output):
     if executable.read_bytes()[:2] != b'MZ':
         raise ValueError('The shared release must contain a Windows executable built on Windows.')
+    metadata = release_metadata(root, os.environ.get('GITHUB_SHA'))
     output.parent.mkdir(parents=True, exist_ok=True)
     # Refuse to overwrite an existing release or any user Workspace files.
     with zipfile.ZipFile(output, 'x', compression=zipfile.ZIP_DEFLATED) as archive:
@@ -49,6 +56,7 @@ def package_release(root, executable, output):
             else:
                 archive.write(path, name)
         archive.write(executable, 'ResearchTube/agent/ResearchTubeAgent.exe')
+        archive.writestr('ResearchTube/release-info.json', json.dumps(metadata, indent=2) + '\n')
     with zipfile.ZipFile(output) as archive:
         bad = archive.testzip()
         if bad:

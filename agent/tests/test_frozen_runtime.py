@@ -44,7 +44,9 @@ class FrozenRuntimeTests(unittest.TestCase):
     def test_zip_has_both_launches_and_no_user_workspace_or_cache(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
-            for name, data in {'README.md': 'guide', 'agent/researchtube_agent.py': '# code',
+            for name, data in {'README.md': 'guide', 'agent/researchtube_agent.py': 'AGENT_VERSION = "1.0.2"\n',
+                               'extension/manifest.json': '{"version":"1.0.3"}',
+                               'release.json': '{"prerelease":true}',
                                'agent/runtime_paths.py': '# paths', 'agent/windows_speech.py': '# speech',
                                'agent/agent-config.json': json.dumps({'workspacePath': {'value': 'PRIVATE', 'comment': 'keep'}}),
                                'agent/workspace/demo/demo.mp4': 'demo', 'agent/workspace/secret.txt': 'private',
@@ -65,6 +67,10 @@ class FrozenRuntimeTests(unittest.TestCase):
                 names = archive.namelist()
                 self.assertIn('ResearchTube/agent/ResearchTubeAgent.exe', names)
                 self.assertIn('ResearchTube/agent/researchtube_agent.py', names)
+                metadata = json.loads(archive.read('ResearchTube/release-info.json'))
+                self.assertEqual(metadata['agentVersion'], '1.0.2')
+                self.assertEqual(metadata['extensionVersion'], '1.0.3')
+                self.assertTrue(metadata['prerelease'])
                 self.assertIn('ResearchTube/agent/tools/timezones/zoneinfo.zip', names)
                 self.assertIn('ResearchTube/agent/tools/yt-dlp/yt-dlp-plugins/bgutil-ytdlp-pot-provider.zip', names)
                 self.assertFalse(any('secret' in name or '__pycache__' in name or 'node_modules' in name or '/agent/agent/' in name for name in names))

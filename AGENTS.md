@@ -42,6 +42,7 @@ Do not implement a fix only in a generated file. Change the source and run `npm 
 
 ## Version policy
 
+- GitHub Releases use the existing Extension/Agent version pair in their title and tag; there is no shared product version. `release.json` selects prerelease/stable status. The build workflow publishes each new pair once after building and smoke-testing the shared ZIP; published pairs and their assets are not overwritten. See Packaging in `docs/DEVELOPMENT.md`.
 - Extension implementation version: `extension/package.json`, `extension/package-lock.json`, `extension/manifest.json` and `EXTENSION_VERSION` in `extension/background.js` must agree.
 - Agent implementation version: `AGENT_VERSION` in `agent/researchtube_agent.py` is independent of the Extension implementation version. Increment only the component whose behavior changes; MCP tool descriptions that change model behavior belong to the Extension. Do not bump an unchanged Agent or Extension to match the other. Synchronize implementation versions only when the user explicitly requests it.
 - Compatibility version: `INTERFACE_VERSION` in the Agent must equal `REQUIRED_AGENT_INTERFACE_VERSION` in the Extension.

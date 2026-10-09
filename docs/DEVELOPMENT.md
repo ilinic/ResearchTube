@@ -142,6 +142,8 @@ There are three separate concepts:
 
 Agent and Extension implementation versions are independent. Increment a component's version only when its behavior changes; behavior-driving MCP descriptions count as an Extension change. Leave the other component's version unchanged. Documentation/test-only edits do not by themselves require implementation-version bumps. Synchronize implementation versions only when the user explicitly requests it, such as before a chosen public release. Matching interface versions determine compatibility, not matching implementation versions.
 
+GitHub Releases have no additional shared version. Their title lists both implementation versions; the tag is `ext-<Extension version>_agent-<Agent version>`. Each new pair identifies one release in chronological publication history. No comparison of component version numbers or automatic synchronization is performed. `release.json` contains `prerelease: true` for preliminary builds; change it to `false` when publishing the first stable version pair. Published pairs and their assets are preserved.
+
 Change the interface version only for a required compatibility change. A new required Agent endpoint or response contract normally increments it. Documentation-only and Extension-only behavior does not.
 
 When the Extension version changes, update:
@@ -188,11 +190,16 @@ Build the shared release on Windows (Python 3.12 x64 is used in CI):
 python -m pip install -r agent/requirements-build.txt
 python scripts/build_release.py
 python scripts/smoke_agent.py --zip dist/ResearchTube.zip --windows-speech
+python -m unittest discover -s scripts/tests -p 'test_*.py'
 ```
 
 `agent/ResearchTubeAgent.spec` builds a console EXE with Python and WinRT speech dependencies. `scripts/build_release.py` packages it beside cross-platform sources, external config, tools, Custom Tools, Extension, docs and demo. Only the archived config's Workspace value is reset to empty; a developer's config is unchanged. Existing output archives are rejected. `--exe <Windows EXE>` packages a previously built executable on any OS. Build Windows binaries on Windows; Linux/macOS users run the included source with Python. Optional component binaries still need to match the host OS.
 
-The **Build shared Python and Windows release** GitHub Actions workflow runs on Agent/build changes to main or manually. It builds and tests both launch modes from the extracted ZIP, including default/custom Workspace choice, persistence, unrelated terminal directory, existing file preservation, public path exclusion, external Custom Tools and actual Windows speech WAV output. The ZIP is available in its **ResearchTube-shared-release** artifact. Native Windows verification is separate from Linux frozen smoke checks. Custom Tools remain external Python modules; additional third-party imports must be included when rebuilding the EXE, or installed for Python source mode. Runtime pip installation does not extend a frozen interpreter.
+The **Build and publish ResearchTube release** GitHub Actions workflow runs on release-content changes pushed to main or manually. It builds and tests both launch modes from the extracted ZIP, including default/custom Workspace choice, persistence, unrelated terminal directory, existing file preservation, public path exclusion, external Custom Tools and actual Windows speech WAV output. The ZIP remains available in its **ResearchTube-shared-release** artifact.
+
+After the Windows job succeeds, a separate job downloads that exact run's ZIP and publishes the version pair to [GitHub Releases](https://github.com/ilinic/ResearchTube/releases). It uses the built-in `GITHUB_TOKEN` with `contents: write` only in the publishing job; no personal token is needed. The tag targets the source commit recorded inside `release-info.json`. Both `ResearchTube.zip` and its SHA-256 file are attached before the draft is published. Prereleases are not marked Latest; stable releases become Latest. An already published pair is skipped, so documentation edits and repeated runs never replace an old download. A failed upload retains a draft; rerun the failed publishing job to reuse the same build artifact. A draft asset that differs is rejected instead of replaced. To publish the next build, increment the changed component's implementation version and push to main. Keep the prerelease flag true until the stable release is intended. Version numbers remain developer decisions.
+
+Native Windows verification is separate from Linux frozen smoke checks. Custom Tools remain external Python modules; additional third-party imports must be included when rebuilding the EXE, or installed for Python source mode. Runtime pip installation does not extend a frozen interpreter.
 
 Do not commit, push or publish unless the user explicitly requests it.
 

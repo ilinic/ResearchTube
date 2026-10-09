@@ -28,6 +28,8 @@ ResearchTube uses an OpenAI Secure MCP Tunnel for the private ChatGPT connection
 
 ## Start here
 
+[Download ResearchTube](https://github.com/ilinic/ResearchTube/releases): choose **ResearchTube.zip** under **Assets**. Release titles show the Extension and Agent versions; preliminary builds are marked **Pre-release**.
+
 | Goal | Document |
 | --- | --- |
 | Get user help in ChatGPT | [User help](docs/HELP.md) (also available from popup **Help**) |

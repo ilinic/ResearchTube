@@ -19,7 +19,9 @@ Optional local components enable additional tools:
 
 ## 1. Extract the complete release
 
-Extract ResearchTube into a permanent directory. Do not load the Extension from inside the ZIP. Keep `extension/`, `agent/`, `docs/` and the bundled Workspace demo together.
+Open [GitHub Releases](https://github.com/ilinic/ResearchTube/releases) and download **ResearchTube.zip** from **Assets**. Titles identify both the Extension and Agent versions. **Pre-release** identifies a preliminary build. The ZIP contains the Windows EXE and Python sources; GitHub's automatic source archives contain the repository source.
+
+Extract ResearchTube into a permanent directory. Do not load the Extension from inside the ZIP. Keep `extension/`, `agent/`, `docs/` and the bundled Workspace demo together. `release-info.json` records the packaged component versions and source commit.
 
 ## 2. Load the Chrome Extension
 
