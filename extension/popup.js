@@ -12,7 +12,7 @@ function renderConnectionStatus(state) {
   const element = $("tunnel-status");
   const notConfigured = !state.configured || connection.state === "not-configured";
   $("tunnel-status-value").textContent = notConfigured ? "Not Configured" : connection.state === "ready" ? shortTunnel(state.tunnelId) : connection.state === "unchecked" ? "Not tested" : errorLabels[connection.errorCode] || "Connection failed";
-  $("tunnel-help").hidden = !notConfigured;
+  $("tunnel-help").hidden = connection.state === "ready";
   element.className = connection.state === "ready" ? "good" : connection.state === "unchecked" || connection.errorCode === "NOT_CONFIGURED" ? "warn" : "bad";
 }
 async function loadConnectionStatus() {
