@@ -64,7 +64,7 @@ Open a terminal in the extracted release root and run:
 python agent/researchtube_agent.py
 ```
 
-On Windows, simply open `agent/ResearchTubeAgent.exe` from the fully extracted Windows archive; no separate Python is needed. `py agent/researchtube_agent.py` is an alternative with Python installed; on Linux/macOS use `python3`. Keep the console open. In Extension **Settings → How to Set Up ResearchTube → Step 4**, select **Test connection**. The default port is `17843`; the Agent configuration and Extension must use the same port. Implementation versions may differ; **interface versions must match**.
+On Windows, simply open `agent/ResearchTubeAgent.exe` from the fully extracted Windows archive; no separate Python is needed. `py agent/researchtube_agent.py` is an alternative with Python installed; on Linux/macOS use `python3`. Keep the console open. In Extension **Settings → How to Set Up ResearchTube → Step 5**, select **Test connection**. The default port is `17843`; the Agent configuration and Extension must use the same port. Implementation versions may differ; **interface versions must match**.
 
 The Agent checks components once at startup. `Checking…` means a startup check is still running. Restart it after changing components or Chrome launch flags; pressing Test connection reads the saved status and does not repeat the checks.
 
@@ -80,7 +80,7 @@ Use bundled component locations under `agent/tools/` or system `PATH`. Extract a
 
 ### 5. Enable Silent file automation (optional)
 
-In **Settings → How to Set Up ResearchTube → Step 5**, copy `--silent-debugger-extension-api` and follow the Chrome launcher instructions. See [where to put the Chrome flag](#where-to-put-the-chrome-flag) below for details. Exit Chrome completely, relaunch with the flag, then restart the Local Agent to refresh its saved Chrome check.
+In **Settings → How to Set Up ResearchTube → Step 6**, copy `--silent-debugger-extension-api` and follow the Chrome launcher instructions. See [where to put the Chrome flag](#where-to-put-the-chrome-flag) below for details. Exit Chrome completely, relaunch with the flag, then restart the Local Agent to refresh its saved Chrome check.
 
 Before adding the MCP plugin, open the ResearchTube popup: verify the OpenAI Tunnel connection, **Local Agent: Ready**, compatible interfaces, and **Silent file automation: Enabled** if the flag was added. Wait for unfinished startup checks. The flag is optional; **Disabled** does not prevent the tunnel or Agent connection.
 
@@ -95,7 +95,7 @@ Before continuing, keep the Local Agent running and the ResearchTube Extension e
 
 If **Add custom MCP server** is missing, check your plan, signed-in account and workspace permissions. Some interfaces still require enabling **Developer Mode** in ChatGPT Settings before showing this control. If a tunnel is missing from the selector, check its workspace association and your **Read + Use** permissions. Do not substitute a public URL or paste the runtime key into chat. Interface labels change; consult OpenAI's [connection guide](https://developers.openai.com/apps-sdk/deploy/connect-chatgpt/) when labels differ.
 
-For your first test, expand **Settings → How to Set Up ResearchTube → Step 7 — Try ResearchTube**. Use **Copy example prompt**, open a new ChatGPT chat with the link below it, then paste and send the example. The prompt already includes `@ResearchTube`. **Step 8 — Troubleshooting** points to the popup's **Help** button, which opens a dedicated ChatGPT help conversation. Agent port/testing controls are inside Step 4, and the Chrome flag/Copy button inside Step 5; Diagnostics follows the single setup guide.
+For your first test, expand **Settings → How to Set Up ResearchTube → Step 8 — Try ResearchTube**. Use **Copy example prompt**, open a new ChatGPT chat with the link below it, then paste and send the example. The prompt already includes `@ResearchTube`. **Step 9 — Troubleshooting** points to the popup's **Help** button, which opens a dedicated ChatGPT help conversation. Agent port/testing controls are inside Step 5, and the Chrome flag/Copy button inside Step 6; Diagnostics follows the single setup guide.
 
 ## Where to put the Chrome flag
 

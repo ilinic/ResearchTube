@@ -52,7 +52,7 @@ Both launch modes read the same external `agent/agent-config.json`, `tools/` and
 
 The Agent starts listening and prints its version/interface and Workspace summary before its background diagnostics finish. Component results appear in the console as each one-time startup check completes; health initially reports `checking` for unfinished checks. Repeated status requests read the saved startup snapshot. Restart the Agent after changing tools or Chrome launch flags to refresh it. Physical paths appear only in this local console.
 
-In Extension Settings, select **Test connection** under **How to Set Up ResearchTube → Step 4 — Start the Local Agent**. A successful result should show compatible Extension/Agent interface versions and component statuses.
+In Extension Settings, select **Test connection** under **How to Set Up ResearchTube → Step 5 — Start the Local Agent**. A successful result should show compatible Extension/Agent interface versions and component statuses.
 
 ### Choose the Workspace directory
 
@@ -114,7 +114,7 @@ If **Add custom MCP server** is missing, check your plan and workspace permissio
 
 ## 7. Verify the installation
 
-Make sure the Local Agent is running, then check the tunnel connection, Local Agent readiness and interface compatibility in the ResearchTube popup. **Settings → How to Set Up ResearchTube → Step 7** contains **Copy example prompt** and a link to a new ChatGPT chat. Copy the example first, open a new ChatGPT chat with the link below it, then paste and send the prompt. It already includes `@ResearchTube`. The optional **Silent file automation** flag and Copy button are in Step 5 of the same guide, after the Agent port and Test connection controls in Step 4. Verify the popup statuses before adding the MCP plugin in Step 6.
+Make sure the Local Agent is running, then check the tunnel connection, Local Agent readiness and interface compatibility in the ResearchTube popup. **Settings → How to Set Up ResearchTube → Step 8** contains **Copy example prompt** and a link to a new ChatGPT chat. Copy the example first, open a new ChatGPT chat with the link below it, then paste and send the prompt. It already includes `@ResearchTube`. The optional **Silent file automation** flag and Copy button are in Step 6 of the same guide, after the Agent port and Test connection controls in Step 5. Verify the popup statuses before adding the MCP plugin in Step 7.
 
 To check Agent components, ask:
 
