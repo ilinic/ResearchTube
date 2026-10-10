@@ -1,0 +1,188 @@
+{
+  "daily_snapshots": {
+    "2026-10-10": {
+      "forks": 0,
+      "releases": [
+        {
+          "assets": [
+            {
+              "downloads": 0,
+              "id": 628125524,
+              "name": "ResearchTube-Linux-x64.zip"
+            },
+            {
+              "downloads": 0,
+              "id": 628126898,
+              "name": "ResearchTube-Linux-x64.zip.sha256"
+            },
+            {
+              "downloads": 0,
+              "id": 628126235,
+              "name": "ResearchTube-macOS-ARM64.zip"
+            },
+            {
+              "downloads": 0,
+              "id": 628126924,
+              "name": "ResearchTube-macOS-ARM64.zip.sha256"
+            },
+            {
+              "downloads": 0,
+              "id": 628126565,
+              "name": "ResearchTube-macOS-x64.zip"
+            },
+            {
+              "downloads": 0,
+              "id": 628126963,
+              "name": "ResearchTube-macOS-x64.zip.sha256"
+            },
+            {
+              "downloads": 0,
+              "id": 628125116,
+              "name": "ResearchTube-Windows-x64.zip"
+            },
+            {
+              "downloads": 0,
+              "id": 628126865,
+              "name": "ResearchTube-Windows-x64.zip.sha256"
+            }
+          ],
+          "prerelease": true,
+          "tag": "ext-2.3.1_agent-2.3.0"
+        }
+      ],
+      "stars": 0,
+      "traffic": {
+        "clones_14d": {
+          "count": 895,
+          "uniques": 309
+        },
+        "popular_paths_14d": [
+          {
+            "count": 11,
+            "path": "/ilinic/ResearchTube/releases",
+            "title": "/releases",
+            "uniques": 1
+          },
+          {
+            "count": 2,
+            "path": "/ilinic/ResearchTube/tags",
+            "title": "/tags",
+            "uniques": 1
+          },
+          {
+            "count": 1,
+            "path": "/ilinic/ResearchTube",
+            "title": "Overview",
+            "uniques": 1
+          },
+          {
+            "count": 1,
+            "path": "/ilinic/ResearchTube/commit/1176dd16a1c5a4a207e03e7fe2eec7f4a51ad57f",
+            "title": "/commit/1176dd16a1c5a4a207e03e7fe2eec7f4a51ad57f",
+            "uniques": 1
+          },
+          {
+            "count": 1,
+            "path": "/ilinic/ResearchTube/releases/tag/ext-2.2.103_agent-2.2.71",
+            "title": "/releases/tag/ext-2.2.103_agent-2.2.71",
+            "uniques": 1
+          }
+        ],
+        "referrers_14d": [],
+        "status": "ok",
+        "views_14d": {
+          "count": 16,
+          "uniques": 1
+        }
+      },
+      "watchers": 0
+    }
+  },
+  "schema_version": 1,
+  "traffic_days": {
+    "2026-09-26": {
+      "clones": 47,
+      "clones_unique": 24,
+      "views": 0,
+      "views_unique": 0
+    },
+    "2026-09-27": {
+      "clones": 7,
+      "clones_unique": 4,
+      "views": 0,
+      "views_unique": 0
+    },
+    "2026-09-28": {
+      "clones": 24,
+      "clones_unique": 13,
+      "views": 0,
+      "views_unique": 0
+    },
+    "2026-09-29": {
+      "clones": 17,
+      "clones_unique": 10,
+      "views": 0,
+      "views_unique": 0
+    },
+    "2026-09-30": {
+      "clones": 4,
+      "clones_unique": 1,
+      "views": 1,
+      "views_unique": 1
+    },
+    "2026-10-01": {
+      "clones": 8,
+      "clones_unique": 2,
+      "views": 0,
+      "views_unique": 0
+    },
+    "2026-10-02": {
+      "clones": 1,
+      "clones_unique": 1,
+      "views": 0,
+      "views_unique": 0
+    },
+    "2026-10-03": {
+      "clones": 9,
+      "clones_unique": 4,
+      "views": 0,
+      "views_unique": 0
+    },
+    "2026-10-04": {
+      "clones": 7,
+      "clones_unique": 4,
+      "views": 0,
+      "views_unique": 0
+    },
+    "2026-10-05": {
+      "clones": 0,
+      "clones_unique": 0,
+      "views": 0,
+      "views_unique": 0
+    },
+    "2026-10-06": {
+      "clones": 56,
+      "clones_unique": 30,
+      "views": 0,
+      "views_unique": 0
+    },
+    "2026-10-07": {
+      "clones": 161,
+      "clones_unique": 77,
+      "views": 0,
+      "views_unique": 0
+    },
+    "2026-10-08": {
+      "clones": 115,
+      "clones_unique": 55,
+      "views": 0,
+      "views_unique": 0
+    },
+    "2026-10-09": {
+      "clones": 439,
+      "clones_unique": 143,
+      "views": 15,
+      "views_unique": 1
+    }
+  }
+}
