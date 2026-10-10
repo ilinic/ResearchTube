@@ -30,7 +30,7 @@ Extract ResearchTube into a permanent directory. Do not load the Extension from 
 4. Select the release's `extension/` directory, not the repository root.
 5. Pin ResearchTube to the toolbar if desired.
 
-Open ResearchTube **Settings** from the toolbar popup or Chrome's extension details page. In **How to Set Up ResearchTube**, Step 1 confirms installation from the extracted platform ZIP under **Assets** on **GitHub Releases**, not a **Source code** archive and reminds you to enable and pin the Extension and keep its folder in place.
+Open ResearchTube **Settings** from the toolbar popup or Chrome's extension details page. In **How to Set Up ResearchTube**, Step 1 lists the download, extraction and Chrome setup sequence using the platform ZIP from **GitHub Releases → Assets**, not a **Source code** archive. Select “`ResearchTube/extension`” with **Load unpacked**, check it is loaded and enabled, keep the extracted folder in place and pin the Extension.
 
 ## 3. Start the Local Agent
 
@@ -56,7 +56,7 @@ In Extension Settings, select **Test connection** under **How to Set Up Research
 
 ### Choose the Workspace directory
 
-The shipped `workspacePath.value` is empty. At startup the Agent asks `Workspace folder [<absolute path to agent/workspace>]:`. Press **Enter** to accept that folder, or type another relative or absolute path. It creates a missing folder, preserves an existing folder and its files, and saves the choice in `agent-config.json`. Accepting the default saves `workspace`, so the installation remains portable. Later launches use the saved value without asking.
+The shipped `workspacePath.value` is empty. At startup the Agent asks `Workspace folder [<absolute path to agent/workspace>]:`. Press **Enter** to accept that folder, or type another relative or absolute path. The Workspace can grow large, so choose a location on a drive with enough free space. It creates a missing folder, preserves an existing folder and its files, and saves the choice in `agent-config.json`. Accepting the default saves `workspace`, so the installation remains portable. Later launches use the saved value without asking.
 
 You can also edit `workspacePath.value` directly. Relative paths resolve beside `researchtube_agent.py` or `ResearchTubeAgent.exe`; an absolute path selects another location, for example `"value": "D:/ResearchTubeWorkspace"`. Forward slashes avoid JSON backslash escaping. For a noninteractive launch, set a nonempty value beforehand. Clearing the value requests the folder again on the next launch.
 

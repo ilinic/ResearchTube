@@ -2626,7 +2626,7 @@ var MCP_TOOL_SETTINGS = Object.freeze({
   custom_tool_status: { group: "custom" },
   custom_tool_cancel: { group: "custom" }
 });
-var EXTENSION_VERSION = "2.2.109";
+var EXTENSION_VERSION = "2.2.110";
 globalThis.addEventListener?.("fetch", createMediaStreamHandler({
   extensionUrl: chrome.runtime.getURL("/"),
   getClient: (id) => globalThis.clients.get(id),

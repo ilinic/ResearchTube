@@ -37,8 +37,15 @@
 
         <div class="setup-step">
           <h3>Step 1 — Confirm the Chrome Extension is installed</h3>
-          <p>Make sure you installed ResearchTube from the extracted platform ZIP under <strong>Assets</strong> on <a href="https://github.com/ilinic/ResearchTube/releases" target="_blank" rel="noreferrer">GitHub Releases</a>, not a <strong>Source code</strong> archive. Use <strong>Load unpacked</strong> with its <code>extension</code> folder.</p>
-          <p>Open <a href="chrome://extensions/" id="open-chrome-extensions">Chrome Extensions <svg class="external-link-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7M21 3l-9 9M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg></a> and confirm <strong>Developer mode</strong> is on and <strong>ResearchTube is enabled</strong>. Pin it to Chrome's toolbar. Keep the extracted folder in place.</p>
+          <p>Make sure you have completed these steps:</p>
+          <ul>
+            <li>Download the ZIP for your operating system from <strong>Assets</strong> on <a href="https://github.com/ilinic/ResearchTube/releases" target="_blank" rel="noreferrer">GitHub Releases</a>, not a <strong>Source code</strong> archive.</li>
+            <li>Extract the ZIP to a convenient place on your computer.</li>
+            <li>Open <a href="chrome://extensions/" id="open-chrome-extensions">Chrome Extensions <svg class="external-link-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7M21 3l-9 9M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg></a> and enable <strong>Developer mode</strong>.</li>
+            <li>Click <strong>Load unpacked</strong>, select “<code>ResearchTube/extension</code>”, and check that the ResearchTube extension is loaded and enabled.</li>
+            <li>Keep the extracted ResearchTube folder in place. Do not move, rename or delete it.</li>
+            <li>Pin the extension to Chrome's toolbar.</li>
+          </ul>
         </div>
         <div class="setup-step">
           <h3>Step 2 — Create an OpenAI Tunnel</h3>
@@ -59,7 +66,7 @@
           <h3>Step 5 — Start the Local Agent (optional)</h3>
           <p>Basic YouTube features work without the Local Agent. It adds downloads, local media, Workspace and Custom Tools. Start it before ChatGPT discovers the tools.</p>
           <p>On Windows, open <code>agent/ResearchTubeAgent.exe</code> from the extracted release — no Python installation is needed. With Python installed, open a terminal in the <code>agent</code> folder and run “<code>python researchtube_agent.py</code>” (on macOS/Linux, use “<code>python3 researchtube_agent.py</code>”). Keep the Agent window open.</p>
-          <p>On the first launch, press <strong>Enter</strong> at the Workspace prompt to accept the default folder, or choose another folder.</p>
+          <p>On the first launch, press <strong>Enter</strong> at the Workspace prompt to accept the default folder, or choose another folder. The Workspace can grow large, so choose a location on a drive with enough free space.</p>
           <p>Use the same port as in <code>agent/agent-config.json</code>; the default is <code>17843</code>. Click <strong>Test connection</strong> to check the Agent.</p>
           <label for="agent-port">Port</label>
           <div class="copy-row"><input id="agent-port" type="number" min="1" max="65535" inputmode="numeric" value="17843" required><button id="test-agent" class="secondary" type="button">Test connection</button></div>

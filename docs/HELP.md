@@ -42,7 +42,7 @@ Download the matching platform archive under **Assets** on [GitHub Releases](htt
 4. Click **Load unpacked** and select the `extension/` folder, not the release root.
 5. Pin ResearchTube using Chrome's Extensions menu. Open its popup, then **Settings**.
 
-**Settings → How to Set Up ResearchTube → Step 1** confirms that you downloaded and extracted the platform ZIP under **Assets** on **GitHub Releases**, not a **Source code** archive, loaded its `extension/` folder, enabled ResearchTube and pinned it to the toolbar. Keep that extracted folder in place. The next steps create the tunnel and restricted key.
+**Settings → How to Set Up ResearchTube → Step 1** lists the setup sequence: download the platform ZIP from **GitHub Releases → Assets**, not **Source code**; extract it to a convenient place; open Chrome Extensions, enable Developer mode and load “`ResearchTube/extension`” using **Load unpacked**. Check the Extension is loaded and enabled, keep the extracted folder in place and pin it to the toolbar. The next steps create the tunnel and restricted key.
 
 ### 3. Set up the OpenAI connection
 
@@ -70,7 +70,7 @@ On Windows, simply open `agent/ResearchTubeAgent.exe` from the fully extracted W
 
 The Agent checks components once at startup. `Checking…` means a startup check is still running. Restart it after changing components or Chrome launch flags; pressing Test connection reads the saved status and does not repeat the checks.
 
-The Agent first reads `workspacePath.value` in `agent/agent-config.json`. If empty, it asks for a folder and shows the absolute default beside the Agent in square brackets. Press **Enter** to accept `workspace`, or type another path. It saves the choice, creates a missing folder and preserves existing files. Later launches do not ask again. Relative paths resolve beside the script or EXE; an absolute path such as `D:/ResearchTubeWorkspace` selects another location. You can edit the config directly and restart; use forward slashes in JSON or escape backslashes. Changing location does not move files. Chat tools use logical paths, and do not need your computer's physical path. See [Workspace directory setup](INSTALLATION.md#choose-the-workspace-directory).
+The Agent first reads `workspacePath.value` in `agent/agent-config.json`. If empty, it asks for a folder and shows the absolute default beside the Agent in square brackets. Press **Enter** to accept `workspace`, or type another path. The Workspace can grow large; choose a drive with enough free space. It saves the choice, creates a missing folder and preserves existing files. Later launches do not ask again. Relative paths resolve beside the script or EXE; an absolute path such as `D:/ResearchTubeWorkspace` selects another location. You can edit the config directly and restart; use forward slashes in JSON or escape backslashes. Changing location does not move files. Chat tools use logical paths, and do not need your computer's physical path. See [Workspace directory setup](INSTALLATION.md#choose-the-workspace-directory).
 
 | Component | Enables |
 | --- | --- |
