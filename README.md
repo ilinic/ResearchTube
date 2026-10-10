@@ -1,112 +1,77 @@
-# ResearchTube
+<div align="center">
+  <img src="icons/researchtube-64.png" alt="ResearchTube logo" width="72">
 
-![ResearchTube icon](icons/researchtube-64.png)
+  # ResearchTube
 
-**Turn public YouTube videos and local media into research material for ChatGPT.**
+  ## Turn YouTube into Answers. And Much More.
 
-ResearchTube is a local-first Chrome extension and companion Local Agent. It gives ChatGPT structured access to public YouTube search, metadata, transcripts, comments, playlists, downloads and storyboards, plus a sandboxed workspace for images, video, audio, screenshots, camera capture, speech synthesis and media editing.
+  **Give ChatGPT the power to explore websites, investigate videos and discussions, and work with media on your computer — just by asking.**
 
-ResearchTube uses an OpenAI Secure MCP Tunnel for the private ChatGPT connection. Local files remain on the user's computer: large media is streamed directly from the loopback Agent through an extension-owned viewer rather than uploaded through MCP.
+  **Free & Open Source · Local-first · Windows · macOS · Linux**
 
-> ResearchTube is currently installed as a developer-mode Chrome extension and connected as a private MCP app. It is not a public ChatGPT Store listing.
+  ### [⬇ Download ResearchTube](https://github.com/ilinic/ResearchTube/releases)
 
-## What it can do
+  [See What It Can Do](#what-can-researchtube-do) · [Getting Started](#getting-started)
+</div>
 
-- Search public YouTube and inspect video, channel and playlist metadata.
-- Retrieve timestamped public transcripts, comments and reply threads.
-- Download complete or partial public videos and selected formats.
-- Download YouTube's ready-made storyboard sheets with optional timestamps.
-- Extract frames from Workspace videos or selected YouTube ranges.
-- Build visual maps from uniform samples or detected scene changes.
-- Cut several video or audio intervals in one asynchronous task.
-- Optionally upload created frames, clips, maps, downloads, captures or speech files to the originating ChatGPT conversation using `addToChat` in the same task.
-- Inspect, crop and display local images, video and audio in ChatGPT.
-- Capture the desktop, a screen region, camera video or camera audio.
-- Synthesize speech with Google Translate or Windows voices.
-- Read and write the Windows clipboard explicitly.
-- Keep all built-in filesystem operations inside a path-safe Workspace.
+---
 
-## Start here
+## What Can ResearchTube Do?
 
-[Download ResearchTube](https://github.com/ilinic/ResearchTube/releases): choose the archive matching your operating system and processor under **Assets** (Windows x64, Linux x64, macOS Apple silicon or macOS Intel). Release titles show the Extension and Agent versions; preliminary builds are marked **Pre-release**.
+ResearchTube turns everyday ChatGPT conversations into hands-on research and media workflows. You describe what you want; ChatGPT uses ResearchTube to investigate and get things done.
 
-| Goal | Document |
-| --- | --- |
-| Get user help in ChatGPT | [User help](docs/HELP.md) (also available from popup **Help**) |
-| Install ResearchTube | [Installation](docs/INSTALLATION.md) |
-| Fix a problem with help from ChatGPT | [Troubleshooting](docs/TROUBLESHOOTING.md) |
-| See a guided demonstration | [Demo playbook](docs/DEMO.md) |
-| Understand the system | [Architecture](docs/ARCHITECTURE.md) |
-| Continue development | [Development guide](docs/DEVELOPMENT.md) |
-| Inspect the MCP tool set | [Tool reference](docs/TOOLS.md) |
-| Navigate all documentation | [Documentation index](docs/README.md) |
+### 🎬 Explore YouTube beyond the transcript
 
-Coding agents should read [AGENTS.md](AGENTS.md) before modifying the repository.
+**Go beyond what people say and see what actually happens.** Search videos, inspect frames, find important moments, build visual storyboards, and work with entire videos or selected sections.
 
-## Components
+### 💬 Understand what viewers think
 
-```text
-ChatGPT
-  ↕ OpenAI Secure MCP Tunnel
-Chrome Extension
-  ↕ 127.0.0.1
-Local Agent
-  ↕
-Workspace + ffmpeg/ffprobe + yt-dlp + Deno + cloudflared (included in platform archives)
-```
+**Dig into real conversations, not just video summaries.** Explore public YouTube comments and replies, discover recurring opinions, and compare different viewpoints across discussions.
 
-- `extension/` is the unpacked Manifest V3 Chrome extension and MCP server.
-- `agent/` is the loopback Local Agent: Windows EXE in the Windows archive, or Python 3.10+ source in each platform archive.
-- `agent/workspace/` is the default Workspace; `workspacePath` in `agent/agent-config.json` can select another directory.
-- `docs/` contains the public user, troubleshooting and development documentation.
+### 🌐 Let ChatGPT investigate real websites
 
-The Extension can still perform browser-based public YouTube research while the Agent is stopped. Downloads, Workspace operations and local media processing require the Agent.
+**Study the pages you're already browsing.** ResearchTube's Browser Agent can explore page content, inspect images, and interact with website controls — including pages you can access while signed in to Chrome websites. You stay in control of the browser session.
 
-## Quick installation outline
+### 🎥 Turn research into videos, images, and audio
 
-1. Extract the complete release into a permanent directory.
-2. Open `chrome://extensions`, enable **Developer mode**, choose **Load unpacked**, and select `extension/`.
-3. On Windows, open `agent/ResearchTubeAgent.exe` from the release ZIP; on Linux/macOS, run `python3 agent/researchtube_agent.py`. If the configured Workspace is empty, press Enter at the folder prompt to accept and save `agent/workspace/`.
-4. Open ResearchTube **Settings** and test the Local Agent.
-5. Configure the OpenAI Secure MCP Tunnel and a restricted API key with only the required tunnel permissions.
-6. Add the tunnel as a ChatGPT MCP app named **ResearchTube**.
+**Don't stop at an answer — create something useful.** Download supported YouTube media, extract frames, make visual maps, cut and combine clips, inspect local files, capture your screen or camera, and generate speech. Media processing happens on your own computer through the Local Agent.
 
-Follow [Installation](docs/INSTALLATION.md) for the complete procedure and component setup.
+## Just Ask ChatGPT
 
-## Guided demo
+No special command language to learn. For example:
 
-The release includes `demo/researchtube-demo.mp4` inside the Agent Workspace. It contains video and audio and is safe to use for frame extraction, visual maps, clipping and audio extraction. Ask ChatGPT:
+> **@ResearchTube** Study this YouTube video, examine the important visual moments, and explain what happens.
 
-```text
-@ResearchTube Give me the guided ResearchTube demo using the bundled demo media.
-```
+> **@ResearchTube** Explore the comments on this video and summarize the main opinions and disagreements.
 
-The exact non-destructive sequence is documented in [docs/DEMO.md](docs/DEMO.md).
+> **@ResearchTube** Study this webpage and its images, then explain what's useful here.
 
-## Privacy and security
+> **@ResearchTube** Find the relevant moments in this video and create a short clip from them.
 
-- YouTube research uses public data and does not perform account actions.
-- ResearchTube does not request Chrome's cookies permission.
-- The OpenAI key and Tunnel ID remain in local extension storage and are never sent to YouTube.
-- The Agent binds only to `127.0.0.1`.
-- Built-in Workspace paths are logical POSIX paths; host paths never enter normal MCP results.
-- Built-in filesystem tools reject traversal, absolute paths, redirects and silent overwrites.
-- Developer-defined Custom Tools are trusted local programs and are not covered by the built-in Workspace sandbox.
+Want to try the included sample? [Follow the guided ResearchTube demo](docs/DEMO.md).
 
-See [Architecture](docs/ARCHITECTURE.md) for the complete trust-boundary model.
+## Getting Started
 
-## Development and verification
+1. **Download ResearchTube.** Open [GitHub Releases](https://github.com/ilinic/ResearchTube/releases) and choose the ZIP for your operating system under **Assets** (Windows x64, Linux x64, macOS Apple silicon, or macOS Intel). **Do not download a "Source code" archive** — it does not contain the ready-to-use package.
+2. **Extract the ZIP** to a permanent folder on your computer. Keep the extracted folder in place; Chrome loads the extension from it.
+3. **Install the Chrome extension.** Open `chrome://extensions`, enable **Developer mode**, click **Load unpacked**, and select the `extension` folder inside ResearchTube. Make sure it's enabled, then pin ResearchTube to your Chrome toolbar.
+4. **Finish setup inside ResearchTube.** Click the ResearchTube toolbar icon, open **Settings**, and expand **How to Set Up ResearchTube**. Follow the built-in illustrated guide to connect ChatGPT, start the Local Agent when needed, and configure optional features.
 
-```sh
-python -m unittest discover -s agent/tests -p 'test_*.py'
-npm ci --prefix extension
-npm test --prefix extension
-```
+**Requirements:** Google Chrome and a compatible paid ChatGPT subscription with private MCP access (tested with ChatGPT Plus), plus access to OpenAI Secure MCP Tunnels. ResearchTube itself is free; a ChatGPT subscription is separate. Feature availability can depend on your platform and account.
 
-The generated Extension bundles are committed for installation. After changing their sources, rebuild before packaging. See [Development](docs/DEVELOPMENT.md) for the complete workflow and release checklist.
+Need extra help? See the [full installation guide](docs/INSTALLATION.md) or open **Help** in the ResearchTube extension.
 
-## Status
+## Free, Open Source, and Local-first
 
-ResearchTube is an open-source personal research and local-media tool. YouTube content, transcripts and comments remain external sources that should be evaluated rather than treated as automatically verified facts.
+ResearchTube has **no ResearchTube subscription or hosted processing fee**. The extension and its companion Agent run on your computer. Local video and audio processing stays local unless you choose to share results with ChatGPT or another service. The OpenAI Secure MCP Tunnel connects your extension to ChatGPT without requiring you to run a public server.
 
-Use **Study this site** in the Extension popup to open a Browser Agent copy of the current page and a dedicated ChatGPT conversation. It reads Accessibility Tree/DOM, operates ordinary page controls and delivers selected resources as real chat attachments. See [Browser Agent](docs/features/BROWSER_AGENT.md).
+ResearchTube is not currently distributed through the Chrome Web Store; download the packaged release from GitHub using the link above.
+
+## Help, Documentation, and Source Code
+
+- **[Download the latest release](https://github.com/ilinic/ResearchTube/releases)**
+- [User help](docs/HELP.md) · [Troubleshooting](docs/TROUBLESHOOTING.md) · [All documentation](docs/README.md)
+- [Guided demo](docs/DEMO.md) · [Tool reference](docs/TOOLS.md)
+- [Architecture](docs/ARCHITECTURE.md) · [Development and contributions](docs/DEVELOPMENT.md) · [Source code](https://github.com/ilinic/ResearchTube)
+
+ResearchTube is an independent open-source project, not an official OpenAI or YouTube product. External video and website content should be evaluated critically.
