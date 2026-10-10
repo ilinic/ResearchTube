@@ -34,7 +34,7 @@ assert.match(script, /ResearchTube → Manage → Refresh/);
 assert.match(script, /tools\.sort\(\(left, right\) => left\.name\.localeCompare\(right\.name\)\)/, "each Settings group must be ordered by MCP command name");
 assert.match(script, /tool-heading/, "tool titles and MCP names must share a heading line");
 assert.match(script, /heading\.append\(title, name\)/, "the MCP name must follow the bold tool title");
-assert.ok(html.indexOf('id="silent-automation-heading"') < html.indexOf('<h2>Local Agent (optional)</h2>'), "silent file automation instructions must precede the Local Agent section");
+assert.ok(html.indexOf('<h3>Step 4 — Start the Local Agent') < html.indexOf('id="silent-automation-heading"'), "Local Agent setup must precede silent file automation inside the guide");
 assert.match(html, /<code id="silent-automation-flag">--silent-debugger-extension-api<\/code><button id="copy-silent-automation-flag" class="copy-inline" type="button">Copy<\/button>/, "the Chrome flag must have a matching inline Copy button");
 assert.match(html, /Properties → Shortcut → Target/, "Settings must explain where to add the flag in the Chrome shortcut");
 assert.match(script, /navigator\.clipboard\.writeText\(\$\("silent-automation-flag"\)\.textContent\.trim\(\)\)/, "Copy must put only the displayed flag on the clipboard");

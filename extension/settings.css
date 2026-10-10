@@ -28,6 +28,7 @@ footer { display: flex; justify-content: space-between; gap: 14px; font-size: 13
 /* Only the installation guide is a collapsible top-level Settings section. */
 .setup-guide { display:block;margin:16px 0;padding:0;border:1px solid var(--border);border-radius:10px;background:var(--card);color:var(--text);scroll-margin-top:18px; }
 .setup-guide > summary { display:list-item;padding:23px 26px;cursor:pointer;font-size:19px;line-height:1.2;font-weight:700; }
+.setup-guide > summary::marker { color:#ff0000; }
 .setup-guide > summary:hover { color:var(--blue); }
 .setup-guide > summary:focus-visible { outline:3px solid #0969da55;outline-offset:-4px; }
 .setup-guide-body { padding:0 26px 24px; }

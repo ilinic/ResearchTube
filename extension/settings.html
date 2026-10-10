@@ -50,47 +50,47 @@
           <ol>
             <li>Open <a href="chrome://extensions/" id="open-chrome-extensions">Chrome Extensions <svg class="external-link-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7M21 3l-9 9M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg></a> and turn on <strong>Developer mode</strong>.</li>
             <li>Click <strong>Load unpacked</strong> and select the <code>extension</code> folder inside your extracted <strong>ResearchTube</strong> folder. Keep the Extension enabled and pin it to Chrome's toolbar.</li>
-            <li>Start the Local Agent. On Windows, open <code>agent/ResearchTubeAgent.exe</code> — no Python installation is needed. If you have Python installed, open a terminal in the <code>agent</code> folder and run “<code>python researchtube_agent.py</code>” (on macOS/Linux, use “<code>python3 researchtube_agent.py</code>”). Keep the Agent window open.</li>
           </ol>
-          <p>Open the ResearchTube popup and check that <strong>Local Agent</strong> shows <strong>Ready</strong>. This confirms that the Extension is connected to the Local Agent.</p>
-          <p>We also recommend enabling <strong>Silent file automation</strong>; see the instructions in the next block below.</p>
           <p>In <strong>1. Set up OpenAI connection</strong> above, enter your API key and Tunnel ID, then click <strong>Save and test connection</strong>. Look for <strong>Connection successful</strong>. The API key stays in ResearchTube; do not enter it again in ChatGPT.</p>
           <figure class="setup-image"><img src="images/setup-03-researchtube.png" loading="lazy" alt="Placeholder: Enter both values in ResearchTube Settings"></figure>
         </div>
         <div class="setup-step">
-          <h3>Step 4 — Add ResearchTube as a custom MCP plugin</h3>
+          <h3>Step 4 — Start the Local Agent (optional)</h3>
+          <p>The Local Agent handles downloads, local files and media in a private Workspace. It listens only on <code>127.0.0.1</code>; browser-based YouTube research works without it. Start it now so ChatGPT can discover the Agent's tools, including Custom Tools.</p>
+          <p>On Windows, open <code>agent/ResearchTubeAgent.exe</code> from the extracted release — no Python installation is needed. With Python installed, open a terminal in the <code>agent</code> folder and run <code>python researchtube_agent.py</code> (on macOS/Linux, use <code>python3 researchtube_agent.py</code>). Keep the Agent window open.</p>
+          <p>On the first launch, press <strong>Enter</strong> at the Workspace prompt to accept the default folder, or choose another folder.</p>
+          <p>Use the same port as in <code>agent/agent-config.json</code>; the default is <code>17843</code>. Click <strong>Test connection</strong> to check the Agent.</p>
+          <label for="agent-port">Port</label>
+          <div class="copy-row"><input id="agent-port" type="number" min="1" max="65535" inputmode="numeric" value="17843" required><button id="test-agent" class="secondary" type="button">Test connection</button></div>
+          <div id="agent-result" hidden role="status"></div>
+        </div>
+        <div class="setup-step">
+          <h3 id="silent-automation-heading">Step 5 — Enable Silent file automation (optional)</h3>
+          <p>This optional Chrome launch flag hides the debugging banner during ResearchTube automation.</p>
+          <p>On Windows, right-click your Chrome shortcut and open <strong>Properties → Shortcut → Target</strong>. Keep the existing path and quotes; add a space and this flag after the closing quote:</p>
+          <p class="field-help"><code id="silent-automation-flag">--silent-debugger-extension-api</code><button id="copy-silent-automation-flag" class="copy-inline" type="button">Copy</button></p>
+          <p>Click <strong>Apply</strong>, exit Chrome completely, then reopen it using that shortcut. On macOS/Linux, add the same flag to your Chrome launch command.</p>
+          <p>Restart the Local Agent to refresh its Chrome check. Open the ResearchTube popup and verify the <strong>OpenAI Tunnel</strong> is connected, <strong>Local Agent</strong> shows <strong>Ready</strong>, the <strong>Interface</strong> is compatible, and <strong>Silent file automation</strong> shows <strong>Enabled</strong> if you added the flag. Wait for any startup checks to finish.</p>
+        </div>
+        <div class="setup-step">
+          <h3>Step 6 — Add ResearchTube as a custom MCP plugin</h3>
           <p>Before continuing, make sure the <strong>Local Agent is running</strong> and the <strong>ResearchTube Extension is enabled</strong>. Keep ResearchTube connected while ChatGPT discovers its tools.</p>
           <p>Visit <a href="#" data-open="chatgpt">ChatGPT Plugins <svg class="external-link-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7M21 3l-9 9M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg></a>, click <strong>+</strong> → <strong>Add custom MCP server</strong>. Name it <strong>ResearchTube</strong><button id="copy-app-name" class="copy-inline" type="button">Copy name</button>. Upload <code>icons/researchtube-64.png</code> from your extracted ResearchTube folder as the plugin icon. Under <strong>Connection</strong>, choose <strong>Tunnel</strong> and select or paste your Tunnel ID. Review any permissions/security prompts and create the plugin.</p>
           <figure class="setup-image"><img src="images/setup-05-chatgpt-plugin.png" loading="lazy" alt="Placeholder: Choose Tunnel when adding a custom MCP server"></figure>
         </div>
         <div class="setup-step">
-          <h3>Step 5 — Try ResearchTube</h3>
+          <h3>Step 7 — Try ResearchTube</h3>
           <p>Copy the example prompt below.</p>
           <div class="example-row"><blockquote id="example-prompt">@ResearchTube Search YouTube for recent videos about quantum computing. Read the relevant transcripts and summarize the main ideas.</blockquote><button id="copy-prompt" class="secondary" type="button">Copy example prompt</button></div>
           <p><a href="#" data-open="chatgptNewChat">Open a new ChatGPT chat <svg class="external-link-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7M21 3l-9 9M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg></a>. Paste and send this prompt.</p>
         </div>
         <div class="setup-step">
-          <h3>Step 6 — Troubleshooting</h3>
+          <h3>Step 8 — Troubleshooting</h3>
           <p>If something does not work, check the setup steps above and the connection statuses in the ResearchTube popup. <strong>Local Agent: Ready</strong> confirms that the Extension is connected to the Agent.</p>
           <p>For questions or help, click <strong>Help</strong> in the ResearchTube popup. It opens a dedicated ChatGPT help chat where you can describe the problem and get setup or troubleshooting guidance in your language.</p>
         </div>
       </div>
     </details>
-
-    <section aria-labelledby="silent-automation-heading">
-      <h2 id="silent-automation-heading">Silent file automation (optional)</h2>
-      <p>To hide Chrome's debugging banner during ResearchTube automation, right-click your Chrome shortcut and open <strong>Properties → Shortcut → Target</strong>. Add a space and this flag at the end of Target:</p>
-      <p class="field-help"><code id="silent-automation-flag">--silent-debugger-extension-api</code><button id="copy-silent-automation-flag" class="copy-inline" type="button">Copy</button></p>
-      <p class="field-help">Exit Chrome completely, then reopen it using that shortcut.</p>
-    </section>
-
-    <section>
-      <h2>Local Agent (optional)</h2>
-      <p class="intro">The Local Agent prepares a private workspace for future local media features. It listens only on <code>127.0.0.1</code>; YouTube research works normally when it is stopped.</p>
-      <label for="agent-port">Port</label>
-      <div class="copy-row"><input id="agent-port" type="number" min="1" max="65535" inputmode="numeric" value="17843" required><button id="test-agent" class="secondary" type="button">Test connection</button></div>
-      <div id="agent-result" hidden role="status"></div>
-    </section>
 
     <section>
       <h2>Diagnostics</h2>

@@ -52,7 +52,7 @@ Both launch modes read the same external `agent/agent-config.json`, `tools/` and
 
 The Agent starts listening and prints its version/interface and Workspace summary before its background diagnostics finish. Component results appear in the console as each one-time startup check completes; health initially reports `checking` for unfinished checks. Repeated status requests read the saved startup snapshot. Restart the Agent after changing tools or Chrome launch flags to refresh it. Physical paths appear only in this local console.
 
-In Extension Settings, select **Test connection** in the Local Agent section. A successful result should show compatible Extension/Agent interface versions and component statuses.
+In Extension Settings, select **Test connection** under **How to Set Up ResearchTube → Step 4 — Start the Local Agent**. A successful result should show compatible Extension/Agent interface versions and component statuses.
 
 ### Choose the Workspace directory
 
@@ -106,7 +106,7 @@ Before continuing, keep the Local Agent running and the ResearchTube Extension e
 3. Name it **ResearchTube** and upload `icons/researchtube-64.png` from the extracted ResearchTube folder as the plugin icon. Where server authentication is requested, choose **No authentication**; the restricted runtime key belongs only in Extension Settings. Review and create/install the connection.
 4. Open a new conversation and select or mention ResearchTube.
 
-If **Add custom MCP server** is missing, check your plan and workspace permissions; some interfaces still require enabling **Developer Mode** in ChatGPT Settings. ChatGPT's interface labels can change. The essential operation is adding the private MCP connection backed by the configured Tunnel ID. See [User help](HELP.md#4-create-the-researchtube-connection-in-chatgpt) for missing controls/workspace association and links to current official OpenAI instructions. ResearchTube itself implements the tunnel connection; no separate OpenAI `tunnel-client` or cloudflared installation is needed for this route.
+If **Add custom MCP server** is missing, check your plan and workspace permissions; some interfaces still require enabling **Developer Mode** in ChatGPT Settings. ChatGPT's interface labels can change. The essential operation is adding the private MCP connection backed by the configured Tunnel ID. See [User help](HELP.md#6-create-the-researchtube-connection-in-chatgpt) for missing controls/workspace association and links to current official OpenAI instructions. ResearchTube itself implements the tunnel connection; no separate OpenAI `tunnel-client` or cloudflared installation is needed for this route.
 
 ## Optional Chrome launch flag
 
@@ -114,7 +114,7 @@ If **Add custom MCP server** is missing, check your plan and workspace permissio
 
 ## 7. Verify the installation
 
-Make sure the Local Agent is running, then check the tunnel connection, Local Agent readiness and interface compatibility in the ResearchTube popup. **Settings → How to Set Up ResearchTube → Step 5** contains **Copy example prompt** and a link to a new ChatGPT chat. Copy the example first, open a new ChatGPT chat with the link below it, then paste and send the prompt. It already includes `@ResearchTube`. We also recommend the optional **Silent file automation** setup in the block immediately below the Settings guide.
+Make sure the Local Agent is running, then check the tunnel connection, Local Agent readiness and interface compatibility in the ResearchTube popup. **Settings → How to Set Up ResearchTube → Step 7** contains **Copy example prompt** and a link to a new ChatGPT chat. Copy the example first, open a new ChatGPT chat with the link below it, then paste and send the prompt. It already includes `@ResearchTube`. The optional **Silent file automation** flag and Copy button are in Step 5 of the same guide, after the Agent port and Test connection controls in Step 4. Verify the popup statuses before adding the MCP plugin in Step 6.
 
 To check Agent components, ask:
 
