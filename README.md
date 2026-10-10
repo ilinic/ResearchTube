@@ -12,7 +12,19 @@
 
 [See What It Can Do](#what-can-researchtube-do) · [Getting Started](#getting-started)
 
+
 ---
+
+### ResearchTube in Action
+
+<p align="center">
+  <a href="docs/picSite.png">
+    <img src="docs/picSite.png" width="48%" alt="ChatGPT exploring a website with ResearchTube">
+  </a>
+  <a href="docs/picVideo.png">
+    <img src="docs/picVideo.png" width="48%" alt="ChatGPT analyzing a YouTube video with ResearchTube">
+  </a>
+</p>
 
 ## What Can ResearchTube Do?
 
