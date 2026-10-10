@@ -30,7 +30,7 @@ Extract ResearchTube into a permanent directory. Do not load the Extension from 
 4. Select the release's `extension/` directory, not the repository root.
 5. Pin ResearchTube to the toolbar if desired.
 
-Open ResearchTube **Settings** from the toolbar popup or Chrome's extension details page.
+Open ResearchTube **Settings** from the toolbar popup or Chrome's extension details page. In **How to Set Up ResearchTube**, Step 1 confirms installation from the extracted platform ZIP under **Assets** on **GitHub Releases**, not a **Source code** archive and reminds you to enable and pin the Extension and keep its folder in place.
 
 ## 3. Start the Local Agent
 

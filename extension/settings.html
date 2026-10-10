@@ -36,21 +36,19 @@
         <p class="field-help setup-requirements"><strong>Requirements:</strong> The latest version of Google Chrome and a paid ChatGPT subscription. ResearchTube is tested with ChatGPT Plus.</p>
 
         <div class="setup-step">
-          <h3>Step 1 — Create an OpenAI Tunnel</h3>
+          <h3>Step 1 — Confirm the Chrome Extension is installed</h3>
+          <p>Make sure you installed ResearchTube from the extracted platform ZIP under <strong>Assets</strong> on <a href="https://github.com/ilinic/ResearchTube/releases" target="_blank" rel="noreferrer">GitHub Releases</a>, not a <strong>Source code</strong> archive. Use <strong>Load unpacked</strong> with its <code>extension</code> folder.</p>
+          <p>Open <a href="chrome://extensions/" id="open-chrome-extensions">Chrome Extensions <svg class="external-link-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7M21 3l-9 9M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg></a> and confirm <strong>Developer mode</strong> is on and <strong>ResearchTube is enabled</strong>. Pin it to Chrome's toolbar. Keep the extracted folder in place.</p>
+        </div>
+        <div class="setup-step">
+          <h3>Step 2 — Create an OpenAI Tunnel</h3>
           <p>Open <a href="#" data-open="tunnels">OpenAI Platform → Tunnels <svg class="external-link-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7M21 3l-9 9M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg></a>. Create a new tunnel or select an existing one. Use the Platform organization and ChatGPT workspace that should access it. Copy the <code>tunnel_…</code> ID. Creating a tunnel requires <strong>Tunnels: Read + Manage</strong> permission.</p>
           <figure class="setup-image"><img src="images/setup-01-tunnel.png" loading="lazy" alt="Placeholder: Create a tunnel and copy its Tunnel ID"></figure>
         </div>
         <div class="setup-step">
-          <h3>Step 2 — Create a restricted API key</h3>
+          <h3>Step 3 — Create a restricted API key</h3>
           <p>Open <a href="#" data-open="apiKeys">OpenAI Platform → API Keys <svg class="external-link-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7M21 3l-9 9M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg></a>, create a <strong>Restricted</strong> key, and grant <strong>Tunnels: Read + Use</strong>. Copy the key when it appears. Never disclose it in a ChatGPT message, screenshot, or support request.</p>
           <figure class="setup-image"><img src="images/setup-02-api-key.png" loading="lazy" alt="Placeholder: Set restricted key permissions to Tunnels Read + Use"></figure>
-        </div>
-        <div class="setup-step">
-          <h3>Step 3 — Install the Chrome Extension</h3>
-          <ol>
-            <li>Open <a href="chrome://extensions/" id="open-chrome-extensions">Chrome Extensions <svg class="external-link-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3h7v7M21 3l-9 9M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/></svg></a> and turn on <strong>Developer mode</strong>.</li>
-            <li>Click <strong>Load unpacked</strong> and select the <code>extension</code> folder inside your extracted <strong>ResearchTube</strong> folder. Keep the Extension enabled and pin it to Chrome's toolbar.</li>
-          </ol>
         </div>
         <div class="setup-step">
           <h3>Step 4 — Connect to OpenAI</h3>

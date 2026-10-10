@@ -42,6 +42,8 @@ Download the matching platform archive under **Assets** on [GitHub Releases](htt
 4. Click **Load unpacked** and select the `extension/` folder, not the release root.
 5. Pin ResearchTube using Chrome's Extensions menu. Open its popup, then **Settings**.
 
+**Settings → How to Set Up ResearchTube → Step 1** confirms that you downloaded and extracted the platform ZIP under **Assets** on **GitHub Releases**, not a **Source code** archive, loaded its `extension/` folder, enabled ResearchTube and pinned it to the toolbar. Keep that extracted folder in place. The next steps create the tunnel and restricted key.
+
 ### 3. Set up the OpenAI connection
 
 1. Use Settings' **OpenAI Tunnels** link to [Platform tunnel settings](https://platform.openai.com/settings/organization/tunnels). Create/select a tunnel in the intended organization. Creation requires **Tunnels Read + Manage**; runtime use needs **Read + Use**. Associate it with the ChatGPT workspace that should use it.

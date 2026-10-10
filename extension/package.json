@@ -1,5 +1,5 @@
 {
-  "version": "2.2.108",
+  "version": "2.2.109",
   "scripts": {
     "build": "esbuild background.js --bundle --format=esm --target=chrome120 --outfile=dist/background.js && esbuild youtube-page-bridge.src.js --bundle --format=iife --target=chrome120 --outfile=youtube-page-bridge.js && node scripts/replace-youtubei-api-keys.mjs youtube-page-bridge.js && esbuild task-chat-page.js --bundle --format=iife --target=chrome120 --outfile=dist/task-chat-page.js",
     "check": "npm run build && node --check background.js && node --check youtube-content.js && node --check dist/background.js && node --check youtube-page-bridge.js && node --check task-chat.js && node --check task-chat-page.js && node --check dist/task-chat-page.js",

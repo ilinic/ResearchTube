@@ -59,7 +59,7 @@ for (const hash of ["","#setup-guide"]) {
 }
 
 
-const installationStep = settings.slice(settings.indexOf("<h3>Step 3 —"), settings.indexOf("<h3>Step 4 —"));
+const installationStep = settings.slice(settings.indexOf("<h3>Step 1 —"), settings.indexOf("<h3>Step 2 —"));
 assert.match(installationStep,/id="open-chrome-extensions"/);
 assert.match(installationStep,/Developer mode/);
 assert.match(installationStep,/Load unpacked/);
@@ -67,7 +67,17 @@ assert.match(installationStep,/<code>extension<\/code>/);
 assert.match(settings, /<h2>Set up OpenAI connection<\/h2>/);
 assert.match(settings, /<summary>How to Set Up ResearchTube<\/summary>/);
 assert.doesNotMatch(settings, /<(?:h2|summary)>\d+\./);
-assert.match(installationStep, /Install the Chrome Extension/);
+assert.match(installationStep, /Confirm the Chrome Extension is installed/);
+assert.match(installationStep, /GitHub Releases/);
+assert.match(installationStep, /platform ZIP/);
+assert.match(installationStep, /<strong>Assets<\/strong>/);
+assert.match(installationStep, /not a <strong>Source code<\/strong> archive/);
+assert.match(installationStep, /extracted platform ZIP/);
+assert.match(installationStep, /ResearchTube is enabled/);
+assert.match(installationStep, /Pin it to Chrome's toolbar/);
+assert.match(installationStep, /Keep the extracted folder in place/);
+assert.match(settings, /Step 2 — Create an OpenAI Tunnel/);
+assert.match(settings, /Step 3 — Create a restricted API key/);
 assert.doesNotMatch(installationStep, /Save and test connection/);
 const connectionStep = settings.slice(settings.indexOf("<h3>Step 4 —"), settings.indexOf("<h3>Step 5 —"));
 assert.match(connectionStep, /API key and Tunnel ID/);
