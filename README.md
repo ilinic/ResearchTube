@@ -78,8 +78,6 @@ Study this page and its images. Summarize the important information, explain wha
 @ResearchTube Inspect demo/researchtube-demo.mp4, create a visual map of the video, and extract two frames. Keep the original file unchanged.
 ```
 
-For a full guided walkthrough, see the [ResearchTube demo](docs/DEMO.md).
-
 ## Getting Started
 
 1. **Download ResearchTube.** Open [GitHub Releases](https://github.com/ilinic/ResearchTube/releases) and choose the ZIP for your operating system under **Assets** (Windows x64, Linux x64, macOS Apple silicon, or macOS Intel). **Do not download a "Source code" archive** — it does not contain the ready-to-use package.
