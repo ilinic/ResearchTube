@@ -1,18 +1,20 @@
-<div align="center">
-  <img src="icons/researchtube-64.png" alt="ResearchTube logo" width="72">
+<table>
+  <tr>
+    <td valign="middle"><img src="icons/researchtube-64.png" alt="ResearchTube logo" width="64"></td>
+    <td valign="middle">
+      <h1>ResearchTube</h1>
+      <h2>Turn YouTube into Answers. And Much More.</h2>
+    </td>
+  </tr>
+</table>
 
-  # ResearchTube
+**Give ChatGPT the power to explore websites, investigate videos and discussions, and work with media on your computer — just by asking.**
 
-  ## Turn YouTube into Answers. And Much More.
+**Free & Open Source · Local-first · Windows · macOS · Linux**
 
-  **Give ChatGPT the power to explore websites, investigate videos and discussions, and work with media on your computer — just by asking.**
+### [⬇ Download ResearchTube](https://github.com/ilinic/ResearchTube/releases)
 
-  **Free & Open Source · Local-first · Windows · macOS · Linux**
-
-  ### [⬇ Download ResearchTube](https://github.com/ilinic/ResearchTube/releases)
-
-  [See What It Can Do](#what-can-researchtube-do) · [Getting Started](#getting-started)
-</div>
+[See What It Can Do](#what-can-researchtube-do) · [Getting Started](#getting-started)
 
 ---
 
@@ -38,17 +40,35 @@ ResearchTube turns everyday ChatGPT conversations into hands-on research and med
 
 ## Just Ask ChatGPT
 
-No special command language to learn. For example:
+No special command language to learn. **Each example has a Copy button in the top-right corner** — copy the entire prompt and paste it into ChatGPT after connecting ResearchTube.
 
-> **@ResearchTube** Study this YouTube video, examine the important visual moments, and explain what happens.
+**Explore the visuals in an iconic YouTube video** — [OK Go: *Here It Goes Again*](https://www.youtube.com/watch?v=dTAAsCNK7RA).
 
-> **@ResearchTube** Explore the comments on this video and summarize the main opinions and disagreements.
+```text
+@ResearchTube Analyze this video: https://www.youtube.com/watch?v=dTAAsCNK7RA
+Explain the choreography and interesting visual moments. Show representative frames with timestamps.
+```
 
-> **@ResearchTube** Study this webpage and its images, then explain what's useful here.
+**Explore what people are saying** — [*Me at the zoo*](https://www.youtube.com/watch?v=jNQXAC9IVRw), the first video uploaded to YouTube.
 
-> **@ResearchTube** Find the relevant moments in this video and create a short clip from them.
+```text
+@ResearchTube Investigate the public comments on https://www.youtube.com/watch?v=jNQXAC9IVRw
+Identify recurring themes, contrasting opinions, and unusual discussion patterns. Base the summary on comments actually retrieved.
+```
 
-Want to try the included sample? [Follow the guided ResearchTube demo](docs/DEMO.md).
+**Study a real website** — open [Wikipedia's SpaceX page](https://en.wikipedia.org/wiki/SpaceX) in Chrome and click **ResearchTube → Study this site** to start the Browser Agent session. You can then ask in that session:
+
+```text
+Study this page and its images. Summarize the important information, explain what is useful here, and identify any details worth checking further.
+```
+
+**Turn a local video into useful media** — try the included example file `demo/researchtube-demo.mp4` in the ResearchTube Workspace.
+
+```text
+@ResearchTube Inspect demo/researchtube-demo.mp4, create a visual map of the video, and extract two frames. Keep the original file unchanged.
+```
+
+For a full guided walkthrough, see the [ResearchTube demo](docs/DEMO.md).
 
 ## Getting Started
 
