@@ -89,6 +89,12 @@ Study this page and its images. Summarize the important information, explain wha
 
 Need extra help? See the [full installation guide](docs/INSTALLATION.md) or open **Help** in the ResearchTube extension.
 
+## MCP Tools
+
+**See everything ResearchTube can do.** Browse the tools by group, with plain-language descriptions of each capability.
+
+### [Explore the ResearchTube tool catalog →](docs/MCP_TOOLS.md)
+
 ## Free, Open Source, and Local-first
 
 ResearchTube has **no ResearchTube subscription or hosted processing fee**. The extension and its companion Agent run on your computer. Local video and audio processing stays local unless you choose to share results with ChatGPT or another service. The OpenAI Secure MCP Tunnel connects your extension to ChatGPT without requiring you to run a public server.

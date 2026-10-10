@@ -9,7 +9,8 @@ This directory is the canonical documentation set for ResearchTube. Source code 
 1. [User help](HELP.md): one starting guide for setup, use and common problems. Popup **Help** opens it in a new ChatGPT help conversation.
 2. [Installation](INSTALLATION.md)
 3. [Guided demo](DEMO.md)
-4. [Tool reference](TOOLS.md)
+4. [MCP Tools](MCP_TOOLS.md): browse every tool by Settings group, with plain-language descriptions.
+5. [Tool reference](TOOLS.md): detailed operational behavior.
 
 ### Something is not working
 
@@ -29,6 +30,7 @@ This directory is the canonical documentation set for ResearchTube. Source code 
 | Document | Purpose |
 | --- | --- |
 | [User help](HELP.md) | Self-contained user/ChatGPT entry guide: setup, tools, Chrome switches and common failures |
+| [MCP Tools](MCP_TOOLS.md) | User-friendly catalog of capabilities, grouped and ordered like Settings |
 | [Architecture](ARCHITECTURE.md) | Components, boundaries, data flows, task lifecycle and security model |
 | [Development](DEVELOPMENT.md) | Adding tools, changing contracts, testing, versions and releases |
 | [Tools](TOOLS.md) | Public MCP inventory and operational behavior |

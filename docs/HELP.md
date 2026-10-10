@@ -115,7 +115,7 @@ This flag is not a `chrome://flags` option, not an Extension setting and not a r
 
 ## Everyday use and tool families
 
-The [tool reference](TOOLS.md) contains the full current inventory. Tool schemas in the connected catalog define exact parameters. You normally describe the result you want instead of naming tools.
+Browse [MCP Tools](MCP_TOOLS.md) for plain-language descriptions of every tool, grouped like Settings. The [tool reference](TOOLS.md) explains detailed behavior; the connected catalog defines exact parameters. You normally describe the result you want instead of naming tools.
 
 | Goal | Tool families / example |
 | --- | --- |
