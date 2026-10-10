@@ -15,8 +15,8 @@
       "version": "9.0.2",
       "license": "GPL-3.0-or-later",
       "source": "https://github.com/BtbN/FFmpeg-Builds",
-      "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n9.0-latest-win64-gpl-9.0.zip",
-      "sha256": "5e274c6691a6ada269d244f05b30e324e21454a2cabc69cd65ad3fa3c0b07440",
+      "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-30-13-08/ffmpeg-n9.0.2-17-g2a571b6068-win64-gpl-9.0.zip",
+      "sha256": "a0e45723c72141975f51d8666302e614711745f3102b704ca3f82c897a58d278",
       "archive": "zip"
     },
     "cloudflared": {
@@ -41,8 +41,8 @@
       "version": "9.0.2",
       "license": "GPL-3.0-or-later",
       "source": "https://github.com/BtbN/FFmpeg-Builds",
-      "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n9.0-latest-linux64-gpl-9.0.tar.xz",
-      "sha256": "cec27b5b68ce92fa8eab239f14b5846b3a8b5eb3dbd84a21dff235d10f001451",
+      "url": "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-30-13-08/ffmpeg-n9.0.2-17-g2a571b6068-linux64-gpl-9.0.tar.xz",
+      "sha256": "68ee646831adaae2495618346f3bba94ff207ff83bbd34d643e7004730d66269",
       "archive": "tar.xz"
     },
     "cloudflared": {

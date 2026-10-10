@@ -24,9 +24,12 @@ def download(entry, destination):
         while chunk := response.read(1024 * 1024):
             digest.update(chunk)
             output.write(chunk)
-    if digest.hexdigest() != entry['sha256']:
+    actual = digest.hexdigest()
+    if actual != entry['sha256']:
         destination.unlink(missing_ok=True)
-        raise ValueError('SHA-256 mismatch for ' + entry['url'])
+        raise ValueError(
+            f"SHA-256 mismatch for {entry['url']}: expected {entry['sha256']}, got {actual}"
+        )
 
 
 def safe_member(name):

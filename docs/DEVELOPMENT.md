@@ -184,6 +184,8 @@ When behavior changes:
 
 The release workflow builds four platform archives with checksum-pinned copies of FFmpeg/ffprobe, yt-dlp, Deno and cloudflared. Mac archives preserve FFmpeg's adjacent libraries and license files. Each runner invokes every bundled tool, packages the source Agent and tests it from the extracted archive; the Windows runner also builds and tests the frozen EXE and Windows speech.
 
+`scripts/tool-bundles.json` must pin versioned download URLs together with their SHA-256 digests; rolling `latest` URLs change their contents and break checksum verification. For BtbN FFmpeg, choose the last build of a completed month, retained upstream for two years, rather than a daily build retained for only 14 builds. Refresh these pins before upstream retention expires, using the release asset's published SHA-256 digest. Never bypass a checksum mismatch; the download error reports both expected and actual digests.
+
 To reproduce a platform package locally, first download its locked dependencies and verify/run them, then package and smoke test:
 
 ```sh
