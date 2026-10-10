@@ -72,7 +72,7 @@ const MCP_TOOL_SETTINGS = Object.freeze({
   library_store_start: { group: "library" }, library_store_status: { group: "library" }, library_store_cancel: { group: "library" }, online_share_start: { group: "online" }, online_share_status: { group: "online" }, online_share_stop: { group: "online" },
   custom_tool_status: { group: "custom" }, custom_tool_cancel: { group: "custom" }
 });
-const EXTENSION_VERSION = "2.2.104";
+const EXTENSION_VERSION = "2.2.105";
 // Chrome dispatches this for requests made by our Extension-owned viewer.
 // Packaged assets and unrelated requests fall through without interception.
 globalThis.addEventListener?.("fetch", createMediaStreamHandler({
@@ -82,7 +82,7 @@ globalThis.addEventListener?.("fetch", createMediaStreamHandler({
   fetchMedia: (url, options) => fetch(url, options),
   log: (stage, details = {}) => consoleAction(`[ResearchTube media stream ${EXTENSION_VERSION}]`, stage, details)
 }));
-const REQUIRED_AGENT_INTERFACE_VERSION = 78;
+const REQUIRED_AGENT_INTERFACE_VERSION = 79;
 // A UI resource URI is a cache key in MCP Apps. Increment it whenever the
 // rendered template changes so ChatGPT does not reuse a stale iframe bundle.
 const MEDIA_TO_CHAT_WIDGET_URI = "ui://researchtube/chat-target-v7.html";
@@ -723,7 +723,7 @@ const mediaClipTaskSchema = {
   type: "object", additionalProperties: false,
   properties: {
     taskId: { type: "string", minLength: 1 }, sourcePath: { type: "string", minLength: 1 },
-    outputKind: { type: "string", enum: ["video", "audio"] }, cutMode: { type: "string", enum: ["copy", "accurate"] },
+    outputFormat: { anyOf: [{ type: "string", pattern: "^[a-z0-9][a-z0-9_]{0,31}$" }, { type: "null" }] }, cutMode: { type: "string", enum: ["copy", "accurate"] },
     status: { type: "string", enum: ["working", "completed", "failed", "cancelled"] },
     phase: { type: "string", enum: ["preparing", "processing", "completed", "failed", "cancelled"] },
     statusMessage: { type: "string" }, progressPercent: { type: "number", minimum: 0, maximum: 100 },
@@ -733,7 +733,7 @@ const mediaClipTaskSchema = {
     error: { type: "object", additionalProperties: false, properties: { code: { type: "string" }, message: { type: "string" } }, required: ["code", "message"] },
     createdAt: { type: "string" }, lastUpdatedAt: { type: "string" }, pollIntervalMs: { type: "integer", minimum: 100 }
   },
-  required: ["taskId", "sourcePath", "outputKind", "cutMode", "status", "phase", "statusMessage", "progressPercent", "completedClips", "totalClips", "clips", "createdAt", "lastUpdatedAt", "pollIntervalMs"]
+  required: ["taskId", "sourcePath", "outputFormat", "cutMode", "status", "phase", "statusMessage", "progressPercent", "completedClips", "totalClips", "clips", "createdAt", "lastUpdatedAt", "pollIntervalMs"]
 };
 const mediaClipCancelTaskSchema = { type: "object", additionalProperties: false, properties: { taskId: { type: "string" }, accepted: { type: "boolean" }, message: { type: "string" } }, required: ["taskId", "accepted", "message"] };
 const captureFrameTaskDiagnosticsSchema = {
@@ -1136,25 +1136,29 @@ function toolDefinitions() {
     },
     {
       name: "media_clip",
-      title: "Cut video or audio clips",
-      description: "Cut ordered video/audio intervals into separate files under clips/. Omit segments for the full source; video can yield audio. copy keeps encoded streams; accurate re-encodes for precise cuts. Configured segment limit applies; source and completed clips remain.",
+      title: "Cut and Convert Media",
+      description: "Cut or convert video/audio to clips/. Set outputFormat to convert; required without segments. With segments, omit it to copy the source format (video cuts may align to keyframes). Each interval creates a separate file in caller order.",
       annotations: localWorkspaceWriteAnnotations,
       inputSchema: {
         type: "object", additionalProperties: false,
         properties: {
           path: { type: "string", minLength: 1, description: "Existing logical workspace-relative video or audio path." },
-          outputKind: { type: "string", enum: ["video", "audio"], description: "video cuts video; audio extracts or cuts an audio stream." },
+          outputFormat: { type: "string", pattern: "^[a-z0-9][a-z0-9_]{0,31}$", description: "Output format, such as mp4, mkv, webm, mp3, m4a, wav, flac or ogg. Required without segments; omit with segments to keep the source format. Available formats depend on installed FFmpeg. Audio formats select sound only; video containers retain supported source video/audio." },
           segments: { type: "array", minItems: 1, items: mediaClipSegmentInputSchema, description: "Optional intervals in caller order, subject to the configured maximum. Omit to process the entire source." },
-          cutMode: { type: "string", enum: ["copy", "accurate"], default: "copy", description: "copy avoids transcoding; accurate re-encodes for precise boundaries." },
-          includeAudio: { type: "boolean", default: true, description: "Include an audio stream in video output. Available only with outputKind=video." },
-          videoStreamIndex: { type: "integer", minimum: 0, description: "Optional ffprobe streams[].index for video output." },
-          audioStreamIndex: { type: "integer", minimum: 0, description: "Optional ffprobe streams[].index for audio output or included video audio." },
+          includeAudio: { type: "boolean", default: true, description: "Include source audio when supported by outputFormat. Set false to make silent video." },
+          videoStreamIndex: { type: "integer", minimum: 0, description: "Optional ffprobe streams[].index; requires video support in outputFormat." },
+          audioStreamIndex: { type: "integer", minimum: 0, description: "Optional ffprobe streams[].index for selected audio; requires includeAudio=true." },
+          videoCodec: { type: "string", pattern: "^[A-Za-z0-9_]{1,64}$", description: "Optional FFmpeg video encoder name. Omit to use the output-format default. Requires outputFormat and selected video." },
+          audioCodec: { type: "string", pattern: "^[A-Za-z0-9_]{1,64}$", description: "Optional FFmpeg audio encoder name. Omit to use the output-format default. Requires outputFormat and selected audio." },
+          videoBitrate: { type: "string", pattern: "^[1-9][0-9]{0,9}[kKmM]?$", description: "Optional target video bitrate, such as 2M. Requires outputFormat and selected video." },
+          audioBitrate: { type: "string", pattern: "^[1-9][0-9]{0,9}[kKmM]?$", description: "Optional target audio bitrate, such as 192k. Requires outputFormat and selected audio." },
           outputDir: { type: "string", default: "clips", description: "Logical workspace-relative output directory." }
         },
-        required: ["path", "outputKind"]
+        required: ["path"],
+        anyOf: [{ required: ["segments"] }, { required: ["outputFormat"] }]
       },
       outputSchema: mediaClipTaskSchema,
-      _meta: { "openai/toolInvocation/invoking": "Starting media clipping…", "openai/toolInvocation/invoked": "Media-clip task started." }
+      _meta: { "openai/toolInvocation/invoking": "Cutting or converting media…", "openai/toolInvocation/invoked": "Media cut/conversion task started." }
     },
     {
       name: "media_clip_get_task",
@@ -5378,17 +5382,16 @@ function mediaClipInvalid(message) {
 }
 
 function normalizeMediaClipInput(argumentsValue = {}) {
-  const allowed = new Set(["path", "outputKind", "segments", "cutMode", "includeAudio", "videoStreamIndex", "audioStreamIndex", "outputDir"]);
+  const allowed = new Set(["path", "outputFormat", "segments", "includeAudio", "videoStreamIndex", "audioStreamIndex", "outputDir", "videoCodec", "audioCodec", "videoBitrate", "audioBitrate"]);
   if (!argumentsValue || typeof argumentsValue !== "object" || Array.isArray(argumentsValue) || Object.keys(argumentsValue).some((key) => !allowed.has(key))) mediaClipInvalid("media_clip accepts only documented fields.");
   const args = argumentsValue;
   if (typeof args.path !== "string" || !args.path) mediaClipInvalid("path must be a non-empty logical workspace media path.");
   const path = normalizeWorkspacePath(args.path, "path");
-  if (!new Set(["video", "audio"]).has(args.outputKind)) mediaClipInvalid("outputKind must be video or audio.");
-  const cutMode = args.cutMode === undefined ? "copy" : args.cutMode;
-  if (!new Set(["copy", "accurate"]).has(cutMode)) mediaClipInvalid("cutMode must be copy or accurate.");
+  if (args.outputFormat !== undefined && (typeof args.outputFormat !== "string" || !/^[a-z0-9][a-z0-9_]{0,31}$/.test(args.outputFormat.trim().toLowerCase()))) mediaClipInvalid("outputFormat must name an output media format, such as mp4, webm, mp3 or flac.");
+  const outputFormat = args.outputFormat === undefined ? undefined : args.outputFormat.trim().toLowerCase();
+
   const includeAudio = args.includeAudio === undefined ? true : args.includeAudio;
   if (typeof includeAudio !== "boolean") mediaClipInvalid("includeAudio must be a boolean.");
-  if (args.outputKind === "audio" && args.includeAudio !== undefined) mediaClipInvalid("includeAudio is available only for video output.");
   const streamIndex = (value, field) => {
     if (value === undefined) return undefined;
     if (!Number.isInteger(value) || value < 0) mediaClipInvalid(`${field} must be a non-negative ffprobe stream index.`);
@@ -5396,8 +5399,16 @@ function normalizeMediaClipInput(argumentsValue = {}) {
   };
   const videoStreamIndex = streamIndex(args.videoStreamIndex, "videoStreamIndex");
   const audioStreamIndex = streamIndex(args.audioStreamIndex, "audioStreamIndex");
-  if (args.outputKind === "audio" && videoStreamIndex !== undefined) mediaClipInvalid("videoStreamIndex is available only for video output.");
-  if (args.outputKind === "video" && !includeAudio && audioStreamIndex !== undefined) mediaClipInvalid("audioStreamIndex requires includeAudio=true.");
+  if (!includeAudio && audioStreamIndex !== undefined) mediaClipInvalid("audioStreamIndex requires includeAudio=true.");
+  const encoding = {};
+  for (const name of ["videoCodec", "audioCodec", "videoBitrate", "audioBitrate"]) {
+    if (args[name] === undefined) continue;
+    const pattern = name.endsWith("Codec") ? /^[A-Za-z0-9_]{1,64}$/ : /^[1-9][0-9]{0,9}[kKmM]?$/;
+    if (typeof args[name] !== "string" || !pattern.test(args[name]) || args[name] === "copy") mediaClipInvalid(`${name} must be a codec name or positive bitrate; omit outputFormat with segments for stream copying.`);
+    encoding[name] = args[name];
+  }
+  if (outputFormat === undefined && Object.keys(encoding).length) mediaClipInvalid("Codec and bitrate settings require outputFormat.");
+  if (!includeAudio && (encoding.audioCodec !== undefined || encoding.audioBitrate !== undefined)) mediaClipInvalid("Audio encoding settings require includeAudio=true.");
   let segments;
   if (args.segments !== undefined) {
     if (!Array.isArray(args.segments) || args.segments.length < 1) mediaClipInvalid("segments must contain at least one interval; the configured maximum is checked by the Local Agent.");
@@ -5413,10 +5424,10 @@ function normalizeMediaClipInput(argumentsValue = {}) {
       return { startSeconds, endSeconds };
     });
   }
+  if (segments === undefined && outputFormat === undefined) mediaClipInvalid("outputFormat is required when segments is omitted. With segments, omit it to keep the source format.");
   const outputDir = normalizeWorkspacePath(args.outputDir === undefined ? "clips" : args.outputDir, "outputDir");
   return {
-    path, outputKind: args.outputKind, ...(segments === undefined ? {} : { segments }), cutMode,
-    ...(args.outputKind === "video" ? { includeAudio } : {}),
+    path, ...(outputFormat === undefined ? {} : { outputFormat }), ...(segments === undefined ? {} : { segments }), includeAudio, ...encoding,
     ...(videoStreamIndex === undefined ? {} : { videoStreamIndex }), ...(audioStreamIndex === undefined ? {} : { audioStreamIndex }), outputDir
   };
 }
@@ -5425,7 +5436,7 @@ function normalizeMediaClipTask(document, input = null) {
   const statuses = new Set(["working", "completed", "failed", "cancelled"]);
   const phases = new Set(["preparing", "processing", "completed", "failed", "cancelled"]);
   if (!document || typeof document !== "object" || Array.isArray(document) || typeof document.taskId !== "string" || !document.taskId
-    || typeof document.sourcePath !== "string" || !document.sourcePath || !new Set(["video", "audio"]).has(document.outputKind)
+    || typeof document.sourcePath !== "string" || !document.sourcePath || !(document.outputFormat === null || typeof document.outputFormat === "string" && /^[a-z0-9][a-z0-9_]{0,31}$/.test(document.outputFormat))
     || !new Set(["copy", "accurate"]).has(document.cutMode) || !statuses.has(document.status) || !phases.has(document.phase)
     || typeof document.statusMessage !== "string" || !Number.isFinite(document.progressPercent) || document.progressPercent < 0 || document.progressPercent > 100
     || !Number.isInteger(document.completedClips) || document.completedClips < 0 || !Number.isInteger(document.totalClips) || document.totalClips < 1
@@ -5433,27 +5444,28 @@ function normalizeMediaClipTask(document, input = null) {
     || typeof document.createdAt !== "string" || typeof document.lastUpdatedAt !== "string" || !Number.isInteger(document.pollIntervalMs) || document.pollIntervalMs < 100) {
     throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid media-clip task.");
   }
-  if (input && (document.sourcePath !== input.path || document.outputKind !== input.outputKind || document.cutMode !== input.cutMode || document.totalClips !== (input.segments?.length ?? 1))) {
+  if (input && (document.sourcePath !== input.path || (input.outputFormat !== undefined && document.outputFormat !== input.outputFormat) || document.cutMode !== (input.outputFormat === undefined ? "copy" : "accurate") || document.totalClips !== (input.segments?.length ?? 1))) {
     throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an unexpected media-clip task.");
   }
   const clips = document.clips.map((clip, index) => {
-    if (!clip || typeof clip !== "object" || Array.isArray(clip) || clip.index !== index || clip.sourcePath !== document.sourcePath || clip.outputKind !== document.outputKind
+    if (!clip || typeof clip !== "object" || Array.isArray(clip) || clip.index !== index || clip.sourcePath !== document.sourcePath || !new Set(["video", "audio"]).has(clip.outputKind)
       || !Number.isFinite(clip.startSeconds) || clip.startSeconds < 0 || !Number.isFinite(clip.endSeconds) || clip.endSeconds <= clip.startSeconds
       || !Number.isFinite(clip.durationSeconds) || clip.durationSeconds <= 0
       || !(clip.selectedVideoStreamIndex === null || Number.isInteger(clip.selectedVideoStreamIndex) && clip.selectedVideoStreamIndex >= 0)
       || !(clip.selectedAudioStreamIndex === null || Number.isInteger(clip.selectedAudioStreamIndex) && clip.selectedAudioStreamIndex >= 0)
       || typeof clip.hasAudio !== "boolean" || typeof clip.reencoded !== "boolean" || clip.reencoded !== (document.cutMode === "accurate")
-      || typeof clip.format !== "string" || !clip.format || typeof clip.mimeType !== "string" || !clip.mimeType
+      || clip.format !== document.outputFormat || typeof clip.mimeType !== "string" || !clip.mimeType
       || !Number.isInteger(clip.fileSizeBytes) || clip.fileSizeBytes < 1 || typeof clip.workspacePath !== "string" || !clip.workspacePath) {
       throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid media-clip metadata.");
     }
-    if ((document.outputKind === "video" && clip.selectedVideoStreamIndex === null) || (document.outputKind === "audio" && (clip.selectedVideoStreamIndex !== null || clip.selectedAudioStreamIndex === null || !clip.hasAudio))) {
+    if ((clip.outputKind === "video" && clip.selectedVideoStreamIndex === null) || (clip.outputKind === "audio" && (clip.selectedVideoStreamIndex !== null || clip.selectedAudioStreamIndex === null || !clip.hasAudio))) {
       throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned inconsistent media-clip stream metadata.");
     }
-    return { ...clip, workspacePath: normalizeWorkspacePath(clip.workspacePath, "clip.workspacePath") };
+    const fields = ["index", "sourcePath", "outputKind", "startSeconds", "endSeconds", "durationSeconds", "selectedVideoStreamIndex", "selectedAudioStreamIndex", "hasAudio", "reencoded", "format", "mimeType", "fileSizeBytes"];
+    return { ...Object.fromEntries(fields.map(name => [name, clip[name]])), workspacePath: normalizeWorkspacePath(clip.workspacePath, "clip.workspacePath") };
   });
   const task = {
-    taskId: document.taskId, sourcePath: normalizeWorkspacePath(document.sourcePath, "sourcePath"), outputKind: document.outputKind,
+    taskId: document.taskId, sourcePath: normalizeWorkspacePath(document.sourcePath, "sourcePath"), outputFormat: document.outputFormat,
     cutMode: document.cutMode, status: document.status, phase: document.phase, statusMessage: document.statusMessage,
     progressPercent: document.progressPercent, completedClips: document.completedClips, totalClips: document.totalClips, clips,
     createdAt: document.createdAt, lastUpdatedAt: document.lastUpdatedAt, pollIntervalMs: document.pollIntervalMs
@@ -6869,7 +6881,7 @@ async function executeToolCall(id, tool, input, work, operation = null) {
 
 function summarizeCommandInput(tool, input) {
   if (TIMER_TOOL_NAMES.includes(tool)) return { taskId: input.taskId ?? null, duration: input.duration ?? null, unit: input.unit ?? null, until: input.until ?? null, clockSource: input.clockSource ?? "system", timeZone: input.timeZone ?? null };
-  if (tool === "media_clip") return { path: typeof input.path === "string" ? input.path : null, outputKind: input.outputKind ?? null, segmentCount: Array.isArray(input.segments) ? input.segments.length : null, cutMode: input.cutMode ?? "copy", outputDir: typeof input.outputDir === "string" ? input.outputDir : "clips" };
+  if (tool === "media_clip") return { workspacePath: typeof input.path === "string" ? input.path : null, outputFormat: input.outputFormat ?? null, segmentCount: Array.isArray(input.segments) ? input.segments.length : null, cutMode: input.outputFormat === undefined ? "copy" : "accurate", outputWorkspaceDirectory: typeof input.outputDir === "string" ? input.outputDir : "clips" };
   if (tool === "media_clip_get_task" || tool === "media_clip_cancel_task") return { taskId: typeof input.taskId === "string" ? input.taskId : null };
   if (tool === "media_capture_frame") return { path: typeof input.path === "string" ? input.path : null, youtube: input.youtube && typeof input.youtube === "object" ? { videoId: input.youtube.videoId ?? null, formatId: input.youtube.formatId ?? null } : null, timestampSeconds: input.timestampSeconds ?? null, videoStreamIndex: input.videoStreamIndex ?? null, seekMode: input.seekMode ?? null, outputPath: typeof input.outputPath === "string" ? input.outputPath : null };
   if (tool === "visual_map_create") return { workspacePath: typeof input.workspacePath === "string" ? input.workspacePath : null, columns: input.columns ?? null, rows: input.rows ?? null, maxTotalFrames: input.maxTotalFrames ?? null, selection: input.selection ?? "uniform" };

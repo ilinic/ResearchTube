@@ -76,8 +76,7 @@ Call `media_clip` with:
 ```json
 {
   "workspacePath": "demo/researchtube-demo.mp4",
-  "outputKind": "video",
-  "cutMode": "accurate",
+  "outputFormat": "mp4",
   "segments": [
     {"startSeconds": 1, "endSeconds": 3.5},
     {"startSeconds": 7, "endSeconds": 10}
@@ -85,7 +84,7 @@ Call `media_clip` with:
 }
 ```
 
-Poll `media_task_status`. Report actual FFmpeg progress and confirm two independent output files in caller order. Show the first video clip only after completion. Explain the difference between accurate re-encoding and fast stream-copy boundaries.
+Poll `media_task_status`. Report actual FFmpeg progress and confirm two independent output files in caller order. Show the first video clip only after completion. Explain that specifying outputFormat cuts and converts with precise boundaries; omitting it with segments keeps the source format without transcoding and can align video boundaries to keyframes.
 
 ### 6. Extract complete audio
 
@@ -94,12 +93,11 @@ Call `media_clip` again with:
 ```json
 {
   "workspacePath": "demo/researchtube-demo.mp4",
-  "outputKind": "audio",
-  "cutMode": "copy"
+  "outputFormat": "mp3"
 }
 ```
 
-Omit `segments` intentionally so the complete source audio is extracted without transcoding. Poll status and show the resulting audio file. Explain that the same tool cuts audio-only sources and can produce several independent intervals in one request.
+Omit `segments` intentionally so the complete source audio is extracted and converted to MP3. Poll status and show the resulting audio file. Explain that the same tool cuts audio-only sources and can produce several independent intervals in one request.
 
 ### 7. Summarize value
 

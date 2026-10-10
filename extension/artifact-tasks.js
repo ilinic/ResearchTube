@@ -9,7 +9,7 @@ export const ARTIFACT_TOOLS = Object.freeze([
 ]);
 export const ARTIFACT_OPERATION_NAMES = Object.freeze({
   youtube_download:'YouTube download', youtube_storyboard_download:'Storyboard download',
-  media_capture_frame:'Frame extraction', visual_map_create:'Visual map', media_clip:'Media clipping',
+  media_capture_frame:'Frame extraction', visual_map_create:'Visual map', media_clip:'Media cutting/conversion',
   camera_record_video:'Video recording', camera_record_audio:'Audio recording', system_speech_speak:'Speech',
   media_capture_screen:'Screen capture', media_image_crop:'Image crop', camera_capture_frame:'Camera capture', clipboard_get:'Clipboard read'
 });

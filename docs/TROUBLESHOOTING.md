@@ -131,6 +131,8 @@ Keep a normal YouTube tab available and retry once. ResearchTube already perform
 6. Check for `DESTINATION_EXISTS` or a more specific destination conflict.
 7. Use `media_probe` on a local source before assuming it contains video/audio streams.
 
+For `media_clip`, specify `outputFormat` when converting the whole file. With intervals, omit it to keep the source format without transcoding; specify it for conversion and precise cuts. `outputKind` and input `cutMode` are obsolete. If FFmpeg rejects a format or codec, check the installed build and choose compatible encoding settings.
+
 Do not delete output directories as a generic fix. ResearchTube intentionally refuses silent overwrite. Choose a new output name/directory or move the existing file deliberately.
 
 ## Blank media card, Refresh failure or Copy failure

@@ -78,7 +78,9 @@ ResearchTube uses stable public error codes so an assisting chat can distinguish
 | `YOUTUBE_CAPTURE_FRAME_FAILED` | Partial YouTube range/frame extraction failed | Preserve completed frames and request frame diagnostics |
 | `VISUAL_MAP_INVALID` | Grid, range, selection or timestamp options invalid | Correct options using source duration |
 | `VISUAL_MAP_NO_SCENES` | Selected scene mode found no usable frames | Use uniform/hybrid selection or adjust range/threshold |
-| `MEDIA_CLIP_INVALID` | Clip fields or interval list invalid | Correct output kind, streams, intervals and output directory |
+| `MEDIA_CLIP_INVALID` | Clip fields or interval list invalid | Correct output format, streams, encoding settings, intervals and output directory |
+| `MEDIA_CLIP_FORMAT_UNSUPPORTED` | Installed FFmpeg cannot write the requested or inferred format | Choose a supported outputFormat; update FFmpeg if needed |
+| `MEDIA_CLIP_COPY_FAILED` | Source-preserving stream copying failed | Specify outputFormat to convert compatible media, or inspect source/container integrity |
 | `MEDIA_CLIP_RANGE_INVALID` | Interval exceeds source duration | Probe the source and keep every end within duration |
 | `MEDIA_CLIP_STREAM_NOT_FOUND` | Requested video/audio stream is absent | Inspect streams and choose a returned index |
 | `MEDIA_CLIP_DURATION_UNAVAILABLE` | Whole-source operation needs unavailable duration | Supply explicit valid segments or repair the media |

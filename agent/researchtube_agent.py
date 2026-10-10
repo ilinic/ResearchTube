@@ -43,8 +43,8 @@ except ImportError:
     from task_history import TaskHistory
     from browser_resources import save_browser_resource
 
-AGENT_VERSION = "2.2.72"
-INTERFACE_VERSION = 78
+AGENT_VERSION = "2.2.73"
+INTERFACE_VERSION = 79
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
 MAX_GOOGLE_TRANSLATE_AUDIO_BYTES = 16 * 1024 * 1024
@@ -1558,24 +1558,22 @@ def image_crop_options(payload: Any) -> dict[str, Any]:
 
 def media_clip_options(payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict) or set(payload) - {
-        "path", "outputKind", "segments", "cutMode", "includeAudio",
+        "path", "outputFormat", "segments", "includeAudio",
         "videoStreamIndex", "audioStreamIndex", "outputDir",
+        "videoCodec", "audioCodec", "videoBitrate", "audioBitrate",
     }:
         raise AgentApiError("MEDIA_CLIP_INVALID", "media_clip accepts only documented fields.")
     path = payload.get("path")
     if not isinstance(path, str) or not path.strip():
         raise AgentApiError("MEDIA_CLIP_INVALID", "path must be a non-empty logical workspace media path.")
-    output_kind = payload.get("outputKind")
-    if output_kind not in {"video", "audio"}:
-        raise AgentApiError("MEDIA_CLIP_INVALID", "outputKind must be video or audio.")
-    cut_mode = payload.get("cutMode", "copy")
-    if cut_mode not in {"copy", "accurate"}:
-        raise AgentApiError("MEDIA_CLIP_INVALID", "cutMode must be copy or accurate.")
+    output_format = payload.get("outputFormat")
+    if "outputFormat" in payload and (not isinstance(output_format, str) or not re.fullmatch(r"[a-z0-9][a-z0-9_]{0,31}", output_format.strip().lower())):
+        raise AgentApiError("MEDIA_CLIP_INVALID", "outputFormat must name an output media format, such as mp4, webm, mp3 or flac.")
+    output_format = output_format.strip().lower() if output_format is not None else None
+    cut_mode = "accurate" if output_format is not None else "copy"
     include_audio = payload.get("includeAudio", True)
     if not isinstance(include_audio, bool):
         raise AgentApiError("MEDIA_CLIP_INVALID", "includeAudio must be a boolean.")
-    if output_kind == "audio" and "includeAudio" in payload:
-        raise AgentApiError("MEDIA_CLIP_INVALID", "includeAudio is available only for video output.")
 
     def stream_index(name: str) -> int | None:
         value = payload.get(name)
@@ -1587,12 +1585,25 @@ def media_clip_options(payload: Any) -> dict[str, Any]:
 
     video_stream_index = stream_index("videoStreamIndex")
     audio_stream_index = stream_index("audioStreamIndex")
-    if output_kind == "audio" and video_stream_index is not None:
-        raise AgentApiError("MEDIA_CLIP_INVALID", "videoStreamIndex is available only for video output.")
-    if output_kind == "video" and not include_audio and audio_stream_index is not None:
+    if not include_audio and audio_stream_index is not None:
         raise AgentApiError("MEDIA_CLIP_INVALID", "audioStreamIndex requires includeAudio=true.")
+    encoding: dict[str, str] = {}
+    for name in ("videoCodec", "audioCodec", "videoBitrate", "audioBitrate"):
+        if name not in payload:
+            continue
+        value = payload[name]
+        pattern = r"[a-zA-Z0-9_]{1,64}" if name.endswith("Codec") else r"[1-9][0-9]{0,9}[kKmM]?"
+        if not isinstance(value, str) or not re.fullmatch(pattern, value) or value == "copy":
+            raise AgentApiError("MEDIA_CLIP_INVALID", f"{name} must be a codec name or positive bitrate; omit outputFormat with segments for stream copying.")
+        encoding[name] = value
+    if cut_mode == "copy" and encoding:
+        raise AgentApiError("MEDIA_CLIP_INVALID", "Codec and bitrate settings require outputFormat.")
+    if not include_audio and any(name in encoding for name in ("audioCodec", "audioBitrate")):
+        raise AgentApiError("MEDIA_CLIP_INVALID", "Audio encoding settings require includeAudio=true.")
 
     raw_segments = payload.get("segments")
+    if "segments" in payload and raw_segments is None:
+        raise AgentApiError("MEDIA_CLIP_INVALID", "segments must be a non-empty interval array when supplied.")
     segments: list[dict[str, float]] | None = None
     if raw_segments is not None:
         maximum = configured_tool_limits()["mediaClipMaxSegments"]
@@ -1614,15 +1625,18 @@ def media_clip_options(payload: Any) -> dict[str, Any]:
             seen.add(pair)
             segments.append({"startSeconds": pair[0], "endSeconds": pair[1]})
 
+    if segments is None and output_format is None:
+        raise AgentApiError("MEDIA_CLIP_INVALID", "outputFormat is required when segments is omitted. With segments, omit it to keep the source format.")
+
     output_dir_value = payload.get("outputDir", DEFAULT_MEDIA_CLIP_DIRECTORY)
     output_dir = WorkspacePathResolver().resolve_destination(
         output_dir_value, field_name="outputDir", error_code="MEDIA_CLIP_INVALID",
     )
     return {
-        "path": path.strip(), "outputKind": output_kind, "segments": segments,
+        "path": path.strip(), "outputFormat": output_format, "segments": segments,
         "cutMode": cut_mode, "includeAudio": include_audio,
         "videoStreamIndex": video_stream_index, "audioStreamIndex": audio_stream_index,
-        "outputDir": output_dir.logical_path,
+        "outputDir": output_dir.logical_path, **encoding,
     }
 
 
@@ -4099,35 +4113,77 @@ def media_clip_number_tag(value: float) -> str:
     return f"{value:.3f}".rstrip("0").rstrip(".") or "0"
 
 
-def media_clip_audio_extension(codec_name: str | None, cut_mode: str) -> str:
-    if cut_mode == "accurate":
-        return "m4a"
-    return {
-        "aac": "m4a", "alac": "m4a", "mp3": "mp3", "opus": "opus",
-        "vorbis": "ogg", "flac": "flac", "pcm_s16le": "wav",
-        "pcm_s24le": "wav", "pcm_s32le": "wav", "pcm_f32le": "wav",
-    }.get(codec_name or "", "mka")
+# Extension-like aliases are conveniences, not a closed list of formats.
+MEDIA_CLIP_MUXER_ALIASES = {
+    "mkv": "matroska", "mka": "matroska", "m4a": "ipod", "m4v": "mp4",
+    "oga": "ogg", "ogv": "ogg", "aif": "aiff", "wma": "asf", "aac": "adts",
+    "mpg": "mpeg", "ts": "mpegts", "m2ts": "mpegts",
+}
+MEDIA_CLIP_AUDIO_FORMATS = frozenset({
+    "mp3", "wav", "flac", "m4a", "mka", "ogg", "oga", "opus", "aac",
+    "aiff", "aif", "wma", "ac3", "eac3", "caf", "au", "amr", "alac",
+})
 
 
-def media_clip_video_extension(source: Path, cut_mode: str) -> str:
-    if cut_mode == "accurate":
-        return "mp4"
-    suffix = source.suffix.lower().removeprefix(".")
-    return suffix if suffix in {"avi", "m4v", "mkv", "mov", "mp4", "mpeg", "mpg", "ogv", "webm"} else "mkv"
+async def media_clip_format_info(output_format: str, executable: str) -> dict[str, Any]:
+    """Read capabilities from the installed FFmpeg; never expose its help text."""
+    muxer = MEDIA_CLIP_MUXER_ALIASES.get(output_format, output_format)
+    process = None
+    try:
+        process = await asyncio.create_subprocess_exec(
+            executable, "-hide_banner", "-h", f"muxer={muxer}",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=MEDIA_PROBE_TIMEOUT_SECONDS)
+    except (asyncio.TimeoutError, asyncio.CancelledError) as error:
+        if process is not None and process.returncode is None:
+            process.kill()
+            await process.communicate()
+        if isinstance(error, asyncio.CancelledError):
+            raise
+        raise AgentApiError("MEDIA_CLIP_FORMAT_UNSUPPORTED", "FFmpeg timed out while checking the output format.") from error
+    except OSError as error:
+        raise AgentApiError("FFMPEG_NOT_AVAILABLE", "FFmpeg could not be started.") from error
+    text = (stdout + stderr).decode("utf-8", errors="replace")
+    if process.returncode != 0 or not re.search(r"^Muxer ", text, re.MULTILINE):
+        raise AgentApiError("MEDIA_CLIP_FORMAT_UNSUPPORTED", "The installed FFmpeg does not support this output format.")
+    def field(label: str) -> str | None:
+        match = re.search(rf"^\s*{label}: ([^.\n]+)\.", text, re.MULTILINE)
+        return match.group(1) if match else None
+    video_codec, audio_codec = field("Default video codec"), field("Default audio codec")
+    # MP3/FLAC advertise cover-art image codecs, not moving-video support.
+    audio_only = output_format in MEDIA_CLIP_AUDIO_FORMATS or bool(audio_codec and video_codec in {None, "png", "mjpeg", "bmp"})
+    if not video_codec and not audio_codec:
+        raise AgentApiError("MEDIA_CLIP_FORMAT_UNSUPPORTED", "The output format has no supported video or audio codec.")
+    return {"muxer": muxer, "video": bool(video_codec) and not audio_only, "audio": bool(audio_codec), "defaultVideoCodec": video_codec,
+            "mimeType": field("Mime type") or "application/octet-stream"}
 
 
 def media_clip_mime_type(extension: str, output_kind: str) -> str:
-    if output_kind == "video":
-        return {"mp4": "video/mp4", "m4v": "video/mp4", "mov": "video/quicktime", "webm": "video/webm", "ogv": "video/ogg", "mkv": "video/x-matroska", "avi": "video/x-msvideo", "mpeg": "video/mpeg", "mpg": "video/mpeg"}.get(extension, "application/octet-stream")
-    return {"m4a": "audio/mp4", "mp3": "audio/mpeg", "opus": "audio/ogg", "ogg": "audio/ogg", "flac": "audio/flac", "wav": "audio/wav", "mka": "audio/x-matroska"}.get(extension, "application/octet-stream")
+    known = {"mp4": "video/mp4", "m4v": "video/mp4", "mov": "video/quicktime", "webm": "video/webm", "ogv": "video/ogg", "mkv": "video/x-matroska",
+             "avi": "video/x-msvideo", "mpeg": "video/mpeg", "mpg": "video/mpeg", "m4a": "audio/mp4", "mp3": "audio/mpeg", "opus": "audio/ogg",
+             "ogg": "audio/ogg", "oga": "audio/ogg", "flac": "audio/flac", "wav": "audio/wav", "mka": "audio/x-matroska", "aac": "audio/aac"}
+    mime = known.get(extension, "application/octet-stream")
+    if output_kind == "audio" and extension in {"mp4", "m4v", "mov"}:
+        return "audio/mp4"
+    if output_kind == "audio" and extension == "webm":
+        return "audio/webm"
+    if output_kind == "video" and extension in {"ogg", "oga"}:
+        return "video/ogg"
+    return mime
 
 
-async def media_clip_probe_file(path: Path, executable: str) -> tuple[list[dict[str, Any]], float | None]:
+async def media_clip_probe_file(path: Path, executable: str, format_details: dict[str, Any] | None = None) -> tuple[list[dict[str, Any]], float | None]:
     command = [executable, "-v", "error", "-show_streams", "-show_format", "-of", "json", str(path)]
     process: asyncio.subprocess.Process | None = None
     try:
         process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         stdout, _stderr = await asyncio.wait_for(process.communicate(), timeout=MEDIA_PROBE_TIMEOUT_SECONDS)
+    except asyncio.CancelledError:
+        if process is not None and process.returncode is None:
+            process.kill()
+            await process.communicate()
+        raise
     except asyncio.TimeoutError as error:
         if process is not None:
             process.kill()
@@ -4144,6 +4200,8 @@ async def media_clip_probe_file(path: Path, executable: str) -> tuple[list[dict[
     streams = document.get("streams")
     if not isinstance(streams, list):
         raise AgentApiError("MEDIA_CLIP_PROBE_FAILED", "ffprobe returned no usable clip-media streams.")
+    if format_details is not None and isinstance(document.get("format"), dict):
+        format_details["formatName"] = document["format"].get("format_name")
     duration: float | None = None
     candidates: list[Any] = []
     if isinstance(document.get("format"), dict):
@@ -4173,16 +4231,24 @@ def media_clip_select_stream(streams: list[dict[str, Any]], codec_type: str, req
     return None
 
 
-def media_clip_select_output_streams(streams: list[dict[str, Any]], payload: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-    """Select only streams that will actually be mapped into the output."""
-    output_kind = payload["outputKind"]
+def media_clip_select_output_streams(streams: list[dict[str, Any]], payload: dict[str, Any], format_info: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Select source streams supported by the requested output container."""
     video_stream = None
-    if output_kind == "video":
-        video_stream = media_clip_select_stream(streams, "video", payload["videoStreamIndex"], required=True)
-    require_audio = output_kind == "audio" or payload["audioStreamIndex"] is not None
-    audio_stream = media_clip_select_stream(streams, "audio", payload["audioStreamIndex"], required=require_audio)
-    if output_kind == "video" and not payload["includeAudio"]:
-        audio_stream = None
+    if format_info["video"]:
+        video_stream = media_clip_select_stream(streams, "video", payload["videoStreamIndex"], required=False)
+    elif payload["videoStreamIndex"] is not None or any(name in payload for name in ("videoCodec", "videoBitrate")):
+        raise AgentApiError("MEDIA_CLIP_INVALID", "Video settings cannot be used with an audio-only output format.")
+    audio_stream = None
+    if format_info["audio"] and payload["includeAudio"]:
+        audio_stream = media_clip_select_stream(streams, "audio", payload["audioStreamIndex"], required=payload["audioStreamIndex"] is not None)
+    elif payload["audioStreamIndex"] is not None or any(name in payload for name in ("audioCodec", "audioBitrate")):
+        raise AgentApiError("MEDIA_CLIP_INVALID", "Audio settings cannot be used without output audio support.")
+    if video_stream is None and any(name in payload for name in ("videoCodec", "videoBitrate")):
+        raise AgentApiError("MEDIA_CLIP_STREAM_NOT_FOUND", "The source contains no selected video stream.")
+    if audio_stream is None and any(name in payload for name in ("audioCodec", "audioBitrate")):
+        raise AgentApiError("MEDIA_CLIP_STREAM_NOT_FOUND", "The source contains no selected audio stream.")
+    if video_stream is None and audio_stream is None:
+        raise AgentApiError("MEDIA_CLIP_STREAM_NOT_FOUND", "The source contains no selected stream supported by the output format.")
     return video_stream, audio_stream
 
 
@@ -4228,7 +4294,7 @@ class MediaClipTaskManager:
 
     def snapshot(self, task: MediaClipTask) -> dict[str, Any]:
         document: dict[str, Any] = {
-            "taskId": task.task_id, "sourcePath": task.payload["path"], "outputKind": task.payload["outputKind"],
+            "taskId": task.task_id, "sourcePath": task.payload["path"], "outputFormat": task.payload["outputFormat"],
             "cutMode": task.payload["cutMode"], "status": task.status, "phase": task.phase,
             "statusMessage": task.status_message, "progressPercent": task.progress_percent,
             "completedClips": task.completed_clips, "totalClips": task.total_clips, "clips": task.clips,
@@ -4271,8 +4337,9 @@ class MediaClipTaskManager:
     ) -> dict[str, Any]:
         start, end = segment["startSeconds"], segment["endSeconds"]
         duration = end - start
-        output_kind, cut_mode = task.payload["outputKind"], task.payload["cutMode"]
-        extension = media_clip_video_extension(source.physical_path, cut_mode) if output_kind == "video" else media_clip_audio_extension(audio_stream.get("codec_name") if audio_stream else None, cut_mode)
+        output_kind = "video" if video_stream is not None else "audio"
+        cut_mode, extension = task.payload["cutMode"], task.payload["outputFormat"]
+        format_info = task.payload["formatInfo"]
         source_stem = safe_capture_title(source.physical_path.stem)[:150].rstrip(" .") or "ResearchTube media"
         range_tag = f"clip_{media_clip_number_tag(start)}_{media_clip_number_tag(end)}"
         file_name = f"{source_stem} [{range_tag}] [{task.task_id}].{extension}"
@@ -4287,26 +4354,24 @@ class MediaClipTaskManager:
             ffmpeg_executable, "-hide_banner", "-nostdin", "-v", "error", "-progress", "pipe:1", "-nostats",
             "-ss", f"{start:.6f}", "-i", str(source.physical_path), "-t", f"{duration:.6f}",
         ]
-        if output_kind == "video":
-            assert video_stream is not None
+        if video_stream is not None:
             command.extend(["-map", f"0:{video_stream['index']}"])
-            if audio_stream is not None:
-                command.extend(["-map", f"0:{audio_stream['index']}"])
-            command.extend(["-sn", "-dn"])
-            if cut_mode == "copy":
-                command.extend(["-c", "copy", "-avoid_negative_ts", "make_zero"])
-            else:
-                command.extend(["-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p"])
-                command.extend(["-c:a", "aac", "-b:a", "192k"] if audio_stream is not None else ["-an"])
-                command.extend(["-movflags", "+faststart"])
         else:
-            assert audio_stream is not None
-            command.extend(["-map", f"0:{audio_stream['index']}", "-vn", "-sn", "-dn"])
-            if cut_mode == "copy":
-                command.extend(["-c:a", "copy", "-avoid_negative_ts", "make_zero"])
-            else:
-                command.extend(["-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"])
-        command.extend(["-n", str(temporary)])
+            command.append("-vn")
+        if audio_stream is not None:
+            command.extend(["-map", f"0:{audio_stream['index']}"])
+        else:
+            command.append("-an")
+        command.extend(["-sn", "-dn"])
+        if cut_mode == "copy":
+            command.extend(["-c", "copy", "-avoid_negative_ts", "make_zero"])
+        else:
+            for name, flag in (("videoCodec", "-c:v"), ("audioCodec", "-c:a"), ("videoBitrate", "-b:v"), ("audioBitrate", "-b:a")):
+                if name in task.payload:
+                    command.extend([flag, task.payload[name]])
+            if format_info["muxer"] in {"mp4", "ipod", "mov"}:
+                command.extend(["-movflags", "+faststart"])
+        command.extend(["-f", format_info["muxer"], "-n", str(temporary)])
         stderr_task: asyncio.Task[bytes] | None = None
         try:
             task.process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
@@ -4315,8 +4380,9 @@ class MediaClipTaskManager:
             await asyncio.gather(self.read_progress(task, segment_index, duration), task.process.wait())
             stderr = await stderr_task
             if task.process.returncode != 0 or not temporary.is_file() or temporary.stat().st_size == 0:
-                detail = bounded_line(stderr.decode("utf-8", errors="replace").splitlines()[-1] if stderr else "")
-                raise AgentApiError("MEDIA_CLIP_FAILED", "FFmpeg could not create the requested media clip.", detail or None)
+                if cut_mode == "copy":
+                    raise AgentApiError("MEDIA_CLIP_COPY_FAILED", "FFmpeg could not copy the selected streams into this format. Specify outputFormat to convert compatible media.")
+                raise AgentApiError("MEDIA_CLIP_FAILED", "FFmpeg could not convert the selected streams. Check format, codec and bitrate compatibility.")
             # Validate the completed temporary file before making it visible in
             # Workspace.  There must be no await between publication and the
             # caller appending the returned metadata: otherwise cancellation
@@ -4324,8 +4390,9 @@ class MediaClipTaskManager:
             result_streams, result_duration = await media_clip_probe_file(temporary, ffprobe_executable)
             has_video = any(stream.get("codec_type") == "video" for stream in result_streams)
             has_audio = any(stream.get("codec_type") == "audio" for stream in result_streams)
-            if (output_kind == "video" and not has_video) or (output_kind == "audio" and not has_audio):
+            if has_video != (video_stream is not None) or has_audio != (audio_stream is not None):
                 raise AgentApiError("MEDIA_CLIP_FAILED", "The completed clip does not contain the requested media stream.")
+            mime_type = media_clip_mime_type(extension, output_kind)
             media_clip_publish_without_overwrite(temporary, destination.physical_path)
             return {
                 "index": segment_index, "sourcePath": source.logical_path, "outputKind": output_kind,
@@ -4333,7 +4400,7 @@ class MediaClipTaskManager:
                 "selectedVideoStreamIndex": video_stream.get("index") if video_stream is not None else None,
                 "selectedAudioStreamIndex": audio_stream.get("index") if audio_stream is not None else None,
                 "hasAudio": has_audio, "reencoded": cut_mode == "accurate", "format": extension,
-                "mimeType": media_clip_mime_type(extension, output_kind),
+                "mimeType": mime_type if mime_type != "application/octet-stream" else format_info["mimeType"],
                 "fileSizeBytes": destination.physical_path.stat().st_size,
                 "workspacePath": WorkspacePathResolver().logical_existing_file(destination.physical_path, error_code="MEDIA_CLIP_FAILED"),
             }
@@ -4365,13 +4432,28 @@ class MediaClipTaskManager:
             if ffmpeg.error or ffprobe.error:
                 raise AgentApiError("FFMPEG_DISCOVERY_ERROR", "ffmpeg or ffprobe discovery is ambiguous.", ffmpeg.error or ffprobe.error)
             if not ffmpeg.executable or not ffprobe.executable:
-                raise AgentApiError("FFMPEG_NOT_AVAILABLE", "ffmpeg and ffprobe are required for media clipping.")
+                raise AgentApiError("FFMPEG_NOT_AVAILABLE", "ffmpeg and ffprobe are required for media cutting/conversion.")
             resolver = WorkspacePathResolver()
             source = resolver.resolve_existing(task.payload["path"], field_name="path", expected_type="file")
             output_directory = resolver.resolve_destination(task.payload["outputDir"], field_name="outputDir", error_code="MEDIA_CLIP_INVALID")
             output_directory.physical_path.mkdir(parents=True, exist_ok=True)
-            streams, source_duration = await media_clip_probe_file(source.physical_path, ffprobe.executable)
-            video_stream, audio_stream = media_clip_select_output_streams(streams, task.payload)
+            source_format: dict[str, Any] = {}
+            streams, source_duration = await media_clip_probe_file(source.physical_path, ffprobe.executable, source_format)
+            if task.payload["outputFormat"] is None:
+                suffix = source.physical_path.suffix.lower().removeprefix(".")
+                format_name = source_format.get("formatName")
+                detected_names = format_name.split(",") if isinstance(format_name, str) else []
+                suffix_container = {"opus": "ogg", "aac": "aac"}.get(suffix, MEDIA_CLIP_MUXER_ALIASES.get(suffix, suffix))
+                detected = detected_names[0] if detected_names else ""
+                task.payload["outputFormat"] = suffix if suffix_container in detected_names else {"matroska": "mkv"}.get(detected, detected)
+                if not re.fullmatch(r"[a-z0-9][a-z0-9_]{0,31}", task.payload["outputFormat"]):
+                    raise AgentApiError("MEDIA_CLIP_FORMAT_UNSUPPORTED", "Cannot determine a writable source format. Specify outputFormat explicitly.")
+            task.payload["formatInfo"] = await media_clip_format_info(task.payload["outputFormat"], ffmpeg.executable)
+            # Source-preserving Ogg/Matroska can contain video even when its
+            # extension is usually used as an audio-only conversion target.
+            if task.payload["cutMode"] == "copy" and task.payload["formatInfo"]["defaultVideoCodec"] not in {None, "png", "mjpeg", "bmp"}:
+                task.payload["formatInfo"]["video"] = True
+            video_stream, audio_stream = media_clip_select_output_streams(streams, task.payload, task.payload["formatInfo"])
             segments = task.payload["segments"]
             if segments is None:
                 if source_duration is None:
@@ -4391,7 +4473,7 @@ class MediaClipTaskManager:
                 task.progress_percent = task.completed_clips * 100.0 / task.total_clips
                 task.touch(f"Created {task.completed_clips} of {task.total_clips} clips.")
             task.status, task.phase, task.progress_percent = "completed", "completed", 100.0
-            task.touch("Media clipping completed.")
+            task.touch("Media cutting/conversion completed.")
         except asyncio.CancelledError:
             task.status, task.phase = "cancelled", "cancelled"
             task.touch("Media-clip task cancelled.")

@@ -206,7 +206,7 @@ class WorkspacePathResolverTests(unittest.TestCase):
                 agent.capture_frames_options({"path": "uploads/video.mp4", "timestampsSeconds": [0, 1, 2]})
             self.assertIn("2 timestamps", raised.exception.message)
             with self.assertRaises(agent.AgentApiError) as raised:
-                agent.media_clip_options({"path": "uploads/video.mp4", "outputKind": "video", "segments": [{"startSeconds": i, "endSeconds": i + 0.5} for i in range(3)]})
+                agent.media_clip_options({"path": "uploads/video.mp4", "outputFormat": "mp4", "segments": [{"startSeconds": i, "endSeconds": i + 0.5} for i in range(3)]})
             self.assertIn("2 intervals", raised.exception.message)
             with self.assertRaises(agent.AgentApiError) as raised:
                 asyncio.run(agent.CameraRecordTaskManager().create({"cameraId": "camera", "durationSeconds": 181}))

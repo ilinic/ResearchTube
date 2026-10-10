@@ -1844,7 +1844,7 @@ var ARTIFACT_OPERATION_NAMES = Object.freeze({
   youtube_storyboard_download: "Storyboard download",
   media_capture_frame: "Frame extraction",
   visual_map_create: "Visual map",
-  media_clip: "Media clipping",
+  media_clip: "Media cutting/conversion",
   camera_record_video: "Video recording",
   camera_record_audio: "Audio recording",
   system_speech_speak: "Speech",
@@ -2626,7 +2626,7 @@ var MCP_TOOL_SETTINGS = Object.freeze({
   custom_tool_status: { group: "custom" },
   custom_tool_cancel: { group: "custom" }
 });
-var EXTENSION_VERSION = "2.2.104";
+var EXTENSION_VERSION = "2.2.105";
 globalThis.addEventListener?.("fetch", createMediaStreamHandler({
   extensionUrl: chrome.runtime.getURL("/"),
   getClient: (id) => globalThis.clients.get(id),
@@ -2634,7 +2634,7 @@ globalThis.addEventListener?.("fetch", createMediaStreamHandler({
   fetchMedia: (url, options) => fetch(url, options),
   log: (stage, details = {}) => consoleAction(`[ResearchTube media stream ${EXTENSION_VERSION}]`, stage, details)
 }));
-var REQUIRED_AGENT_INTERFACE_VERSION = 78;
+var REQUIRED_AGENT_INTERFACE_VERSION = 79;
 var MEDIA_TO_CHAT_WIDGET_URI = "ui://researchtube/chat-target-v7.html";
 var MEDIA_TO_CHAT_WIDGET_ALIASES = /* @__PURE__ */ new Set(["ui://researchtube/chat-target-v4.html", "ui://researchtube/chat-target-v5.html", "ui://researchtube/chat-target-v6.html"]);
 var MEDIA_TO_CHAT_BIND_TIMEOUT_MS = 3e4;
@@ -3364,7 +3364,7 @@ var mediaClipTaskSchema = {
   properties: {
     taskId: { type: "string", minLength: 1 },
     sourcePath: { type: "string", minLength: 1 },
-    outputKind: { type: "string", enum: ["video", "audio"] },
+    outputFormat: { anyOf: [{ type: "string", pattern: "^[a-z0-9][a-z0-9_]{0,31}$" }, { type: "null" }] },
     cutMode: { type: "string", enum: ["copy", "accurate"] },
     status: { type: "string", enum: ["working", "completed", "failed", "cancelled"] },
     phase: { type: "string", enum: ["preparing", "processing", "completed", "failed", "cancelled"] },
@@ -3379,7 +3379,7 @@ var mediaClipTaskSchema = {
     lastUpdatedAt: { type: "string" },
     pollIntervalMs: { type: "integer", minimum: 100 }
   },
-  required: ["taskId", "sourcePath", "outputKind", "cutMode", "status", "phase", "statusMessage", "progressPercent", "completedClips", "totalClips", "clips", "createdAt", "lastUpdatedAt", "pollIntervalMs"]
+  required: ["taskId", "sourcePath", "outputFormat", "cutMode", "status", "phase", "statusMessage", "progressPercent", "completedClips", "totalClips", "clips", "createdAt", "lastUpdatedAt", "pollIntervalMs"]
 };
 var mediaClipCancelTaskSchema = { type: "object", additionalProperties: false, properties: { taskId: { type: "string" }, accepted: { type: "boolean" }, message: { type: "string" } }, required: ["taskId", "accepted", "message"] };
 var captureFrameTaskDiagnosticsSchema = {
@@ -3835,26 +3835,30 @@ function toolDefinitions() {
     },
     {
       name: "media_clip",
-      title: "Cut video or audio clips",
-      description: "Cut ordered video/audio intervals into separate files under clips/. Omit segments for the full source; video can yield audio. copy keeps encoded streams; accurate re-encodes for precise cuts. Configured segment limit applies; source and completed clips remain.",
+      title: "Cut and Convert Media",
+      description: "Cut or convert video/audio to clips/. Set outputFormat to convert; required without segments. With segments, omit it to copy the source format (video cuts may align to keyframes). Each interval creates a separate file in caller order.",
       annotations: localWorkspaceWriteAnnotations,
       inputSchema: {
         type: "object",
         additionalProperties: false,
         properties: {
           path: { type: "string", minLength: 1, description: "Existing logical workspace-relative video or audio path." },
-          outputKind: { type: "string", enum: ["video", "audio"], description: "video cuts video; audio extracts or cuts an audio stream." },
+          outputFormat: { type: "string", pattern: "^[a-z0-9][a-z0-9_]{0,31}$", description: "Output format, such as mp4, mkv, webm, mp3, m4a, wav, flac or ogg. Required without segments; omit with segments to keep the source format. Available formats depend on installed FFmpeg. Audio formats select sound only; video containers retain supported source video/audio." },
           segments: { type: "array", minItems: 1, items: mediaClipSegmentInputSchema, description: "Optional intervals in caller order, subject to the configured maximum. Omit to process the entire source." },
-          cutMode: { type: "string", enum: ["copy", "accurate"], default: "copy", description: "copy avoids transcoding; accurate re-encodes for precise boundaries." },
-          includeAudio: { type: "boolean", default: true, description: "Include an audio stream in video output. Available only with outputKind=video." },
-          videoStreamIndex: { type: "integer", minimum: 0, description: "Optional ffprobe streams[].index for video output." },
-          audioStreamIndex: { type: "integer", minimum: 0, description: "Optional ffprobe streams[].index for audio output or included video audio." },
+          includeAudio: { type: "boolean", default: true, description: "Include source audio when supported by outputFormat. Set false to make silent video." },
+          videoStreamIndex: { type: "integer", minimum: 0, description: "Optional ffprobe streams[].index; requires video support in outputFormat." },
+          audioStreamIndex: { type: "integer", minimum: 0, description: "Optional ffprobe streams[].index for selected audio; requires includeAudio=true." },
+          videoCodec: { type: "string", pattern: "^[A-Za-z0-9_]{1,64}$", description: "Optional FFmpeg video encoder name. Omit to use the output-format default. Requires outputFormat and selected video." },
+          audioCodec: { type: "string", pattern: "^[A-Za-z0-9_]{1,64}$", description: "Optional FFmpeg audio encoder name. Omit to use the output-format default. Requires outputFormat and selected audio." },
+          videoBitrate: { type: "string", pattern: "^[1-9][0-9]{0,9}[kKmM]?$", description: "Optional target video bitrate, such as 2M. Requires outputFormat and selected video." },
+          audioBitrate: { type: "string", pattern: "^[1-9][0-9]{0,9}[kKmM]?$", description: "Optional target audio bitrate, such as 192k. Requires outputFormat and selected audio." },
           outputDir: { type: "string", default: "clips", description: "Logical workspace-relative output directory." }
         },
-        required: ["path", "outputKind"]
+        required: ["path"],
+        anyOf: [{ required: ["segments"] }, { required: ["outputFormat"] }]
       },
       outputSchema: mediaClipTaskSchema,
-      _meta: { "openai/toolInvocation/invoking": "Starting media clipping\u2026", "openai/toolInvocation/invoked": "Media-clip task started." }
+      _meta: { "openai/toolInvocation/invoking": "Cutting or converting media\u2026", "openai/toolInvocation/invoked": "Media cut/conversion task started." }
     },
     {
       name: "media_clip_get_task",
@@ -8016,17 +8020,15 @@ function mediaClipInvalid(message) {
   throw localAgentError("MEDIA_CLIP_INVALID", message);
 }
 function normalizeMediaClipInput(argumentsValue = {}) {
-  const allowed = /* @__PURE__ */ new Set(["path", "outputKind", "segments", "cutMode", "includeAudio", "videoStreamIndex", "audioStreamIndex", "outputDir"]);
+  const allowed = /* @__PURE__ */ new Set(["path", "outputFormat", "segments", "includeAudio", "videoStreamIndex", "audioStreamIndex", "outputDir", "videoCodec", "audioCodec", "videoBitrate", "audioBitrate"]);
   if (!argumentsValue || typeof argumentsValue !== "object" || Array.isArray(argumentsValue) || Object.keys(argumentsValue).some((key) => !allowed.has(key))) mediaClipInvalid("media_clip accepts only documented fields.");
   const args = argumentsValue;
   if (typeof args.path !== "string" || !args.path) mediaClipInvalid("path must be a non-empty logical workspace media path.");
   const path = normalizeWorkspacePath(args.path, "path");
-  if (!(/* @__PURE__ */ new Set(["video", "audio"])).has(args.outputKind)) mediaClipInvalid("outputKind must be video or audio.");
-  const cutMode = args.cutMode === void 0 ? "copy" : args.cutMode;
-  if (!(/* @__PURE__ */ new Set(["copy", "accurate"])).has(cutMode)) mediaClipInvalid("cutMode must be copy or accurate.");
+  if (args.outputFormat !== void 0 && (typeof args.outputFormat !== "string" || !/^[a-z0-9][a-z0-9_]{0,31}$/.test(args.outputFormat.trim().toLowerCase()))) mediaClipInvalid("outputFormat must name an output media format, such as mp4, webm, mp3 or flac.");
+  const outputFormat = args.outputFormat === void 0 ? void 0 : args.outputFormat.trim().toLowerCase();
   const includeAudio = args.includeAudio === void 0 ? true : args.includeAudio;
   if (typeof includeAudio !== "boolean") mediaClipInvalid("includeAudio must be a boolean.");
-  if (args.outputKind === "audio" && args.includeAudio !== void 0) mediaClipInvalid("includeAudio is available only for video output.");
   const streamIndex = (value, field) => {
     if (value === void 0) return void 0;
     if (!Number.isInteger(value) || value < 0) mediaClipInvalid(`${field} must be a non-negative ffprobe stream index.`);
@@ -8034,8 +8036,16 @@ function normalizeMediaClipInput(argumentsValue = {}) {
   };
   const videoStreamIndex = streamIndex(args.videoStreamIndex, "videoStreamIndex");
   const audioStreamIndex = streamIndex(args.audioStreamIndex, "audioStreamIndex");
-  if (args.outputKind === "audio" && videoStreamIndex !== void 0) mediaClipInvalid("videoStreamIndex is available only for video output.");
-  if (args.outputKind === "video" && !includeAudio && audioStreamIndex !== void 0) mediaClipInvalid("audioStreamIndex requires includeAudio=true.");
+  if (!includeAudio && audioStreamIndex !== void 0) mediaClipInvalid("audioStreamIndex requires includeAudio=true.");
+  const encoding = {};
+  for (const name of ["videoCodec", "audioCodec", "videoBitrate", "audioBitrate"]) {
+    if (args[name] === void 0) continue;
+    const pattern = name.endsWith("Codec") ? /^[A-Za-z0-9_]{1,64}$/ : /^[1-9][0-9]{0,9}[kKmM]?$/;
+    if (typeof args[name] !== "string" || !pattern.test(args[name]) || args[name] === "copy") mediaClipInvalid(`${name} must be a codec name or positive bitrate; omit outputFormat with segments for stream copying.`);
+    encoding[name] = args[name];
+  }
+  if (outputFormat === void 0 && Object.keys(encoding).length) mediaClipInvalid("Codec and bitrate settings require outputFormat.");
+  if (!includeAudio && (encoding.audioCodec !== void 0 || encoding.audioBitrate !== void 0)) mediaClipInvalid("Audio encoding settings require includeAudio=true.");
   let segments;
   if (args.segments !== void 0) {
     if (!Array.isArray(args.segments) || args.segments.length < 1) mediaClipInvalid("segments must contain at least one interval; the configured maximum is checked by the Local Agent.");
@@ -8051,13 +8061,14 @@ function normalizeMediaClipInput(argumentsValue = {}) {
       return { startSeconds, endSeconds };
     });
   }
+  if (segments === void 0 && outputFormat === void 0) mediaClipInvalid("outputFormat is required when segments is omitted. With segments, omit it to keep the source format.");
   const outputDir = normalizeWorkspacePath(args.outputDir === void 0 ? "clips" : args.outputDir, "outputDir");
   return {
     path,
-    outputKind: args.outputKind,
+    ...outputFormat === void 0 ? {} : { outputFormat },
     ...segments === void 0 ? {} : { segments },
-    cutMode,
-    ...args.outputKind === "video" ? { includeAudio } : {},
+    includeAudio,
+    ...encoding,
     ...videoStreamIndex === void 0 ? {} : { videoStreamIndex },
     ...audioStreamIndex === void 0 ? {} : { audioStreamIndex },
     outputDir
@@ -8066,25 +8077,26 @@ function normalizeMediaClipInput(argumentsValue = {}) {
 function normalizeMediaClipTask(document2, input = null) {
   const statuses2 = /* @__PURE__ */ new Set(["working", "completed", "failed", "cancelled"]);
   const phases = /* @__PURE__ */ new Set(["preparing", "processing", "completed", "failed", "cancelled"]);
-  if (!document2 || typeof document2 !== "object" || Array.isArray(document2) || typeof document2.taskId !== "string" || !document2.taskId || typeof document2.sourcePath !== "string" || !document2.sourcePath || !(/* @__PURE__ */ new Set(["video", "audio"])).has(document2.outputKind) || !(/* @__PURE__ */ new Set(["copy", "accurate"])).has(document2.cutMode) || !statuses2.has(document2.status) || !phases.has(document2.phase) || typeof document2.statusMessage !== "string" || !Number.isFinite(document2.progressPercent) || document2.progressPercent < 0 || document2.progressPercent > 100 || !Number.isInteger(document2.completedClips) || document2.completedClips < 0 || !Number.isInteger(document2.totalClips) || document2.totalClips < 1 || document2.completedClips > document2.totalClips || !Array.isArray(document2.clips) || document2.clips.length !== document2.completedClips || typeof document2.createdAt !== "string" || typeof document2.lastUpdatedAt !== "string" || !Number.isInteger(document2.pollIntervalMs) || document2.pollIntervalMs < 100) {
+  if (!document2 || typeof document2 !== "object" || Array.isArray(document2) || typeof document2.taskId !== "string" || !document2.taskId || typeof document2.sourcePath !== "string" || !document2.sourcePath || !(document2.outputFormat === null || typeof document2.outputFormat === "string" && /^[a-z0-9][a-z0-9_]{0,31}$/.test(document2.outputFormat)) || !(/* @__PURE__ */ new Set(["copy", "accurate"])).has(document2.cutMode) || !statuses2.has(document2.status) || !phases.has(document2.phase) || typeof document2.statusMessage !== "string" || !Number.isFinite(document2.progressPercent) || document2.progressPercent < 0 || document2.progressPercent > 100 || !Number.isInteger(document2.completedClips) || document2.completedClips < 0 || !Number.isInteger(document2.totalClips) || document2.totalClips < 1 || document2.completedClips > document2.totalClips || !Array.isArray(document2.clips) || document2.clips.length !== document2.completedClips || typeof document2.createdAt !== "string" || typeof document2.lastUpdatedAt !== "string" || !Number.isInteger(document2.pollIntervalMs) || document2.pollIntervalMs < 100) {
     throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid media-clip task.");
   }
-  if (input && (document2.sourcePath !== input.path || document2.outputKind !== input.outputKind || document2.cutMode !== input.cutMode || document2.totalClips !== (input.segments?.length ?? 1))) {
+  if (input && (document2.sourcePath !== input.path || input.outputFormat !== void 0 && document2.outputFormat !== input.outputFormat || document2.cutMode !== (input.outputFormat === void 0 ? "copy" : "accurate") || document2.totalClips !== (input.segments?.length ?? 1))) {
     throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an unexpected media-clip task.");
   }
   const clips = document2.clips.map((clip, index) => {
-    if (!clip || typeof clip !== "object" || Array.isArray(clip) || clip.index !== index || clip.sourcePath !== document2.sourcePath || clip.outputKind !== document2.outputKind || !Number.isFinite(clip.startSeconds) || clip.startSeconds < 0 || !Number.isFinite(clip.endSeconds) || clip.endSeconds <= clip.startSeconds || !Number.isFinite(clip.durationSeconds) || clip.durationSeconds <= 0 || !(clip.selectedVideoStreamIndex === null || Number.isInteger(clip.selectedVideoStreamIndex) && clip.selectedVideoStreamIndex >= 0) || !(clip.selectedAudioStreamIndex === null || Number.isInteger(clip.selectedAudioStreamIndex) && clip.selectedAudioStreamIndex >= 0) || typeof clip.hasAudio !== "boolean" || typeof clip.reencoded !== "boolean" || clip.reencoded !== (document2.cutMode === "accurate") || typeof clip.format !== "string" || !clip.format || typeof clip.mimeType !== "string" || !clip.mimeType || !Number.isInteger(clip.fileSizeBytes) || clip.fileSizeBytes < 1 || typeof clip.workspacePath !== "string" || !clip.workspacePath) {
+    if (!clip || typeof clip !== "object" || Array.isArray(clip) || clip.index !== index || clip.sourcePath !== document2.sourcePath || !(/* @__PURE__ */ new Set(["video", "audio"])).has(clip.outputKind) || !Number.isFinite(clip.startSeconds) || clip.startSeconds < 0 || !Number.isFinite(clip.endSeconds) || clip.endSeconds <= clip.startSeconds || !Number.isFinite(clip.durationSeconds) || clip.durationSeconds <= 0 || !(clip.selectedVideoStreamIndex === null || Number.isInteger(clip.selectedVideoStreamIndex) && clip.selectedVideoStreamIndex >= 0) || !(clip.selectedAudioStreamIndex === null || Number.isInteger(clip.selectedAudioStreamIndex) && clip.selectedAudioStreamIndex >= 0) || typeof clip.hasAudio !== "boolean" || typeof clip.reencoded !== "boolean" || clip.reencoded !== (document2.cutMode === "accurate") || clip.format !== document2.outputFormat || typeof clip.mimeType !== "string" || !clip.mimeType || !Number.isInteger(clip.fileSizeBytes) || clip.fileSizeBytes < 1 || typeof clip.workspacePath !== "string" || !clip.workspacePath) {
       throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid media-clip metadata.");
     }
-    if (document2.outputKind === "video" && clip.selectedVideoStreamIndex === null || document2.outputKind === "audio" && (clip.selectedVideoStreamIndex !== null || clip.selectedAudioStreamIndex === null || !clip.hasAudio)) {
+    if (clip.outputKind === "video" && clip.selectedVideoStreamIndex === null || clip.outputKind === "audio" && (clip.selectedVideoStreamIndex !== null || clip.selectedAudioStreamIndex === null || !clip.hasAudio)) {
       throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned inconsistent media-clip stream metadata.");
     }
-    return { ...clip, workspacePath: normalizeWorkspacePath(clip.workspacePath, "clip.workspacePath") };
+    const fields2 = ["index", "sourcePath", "outputKind", "startSeconds", "endSeconds", "durationSeconds", "selectedVideoStreamIndex", "selectedAudioStreamIndex", "hasAudio", "reencoded", "format", "mimeType", "fileSizeBytes"];
+    return { ...Object.fromEntries(fields2.map((name) => [name, clip[name]])), workspacePath: normalizeWorkspacePath(clip.workspacePath, "clip.workspacePath") };
   });
   const task = {
     taskId: document2.taskId,
     sourcePath: normalizeWorkspacePath(document2.sourcePath, "sourcePath"),
-    outputKind: document2.outputKind,
+    outputFormat: document2.outputFormat,
     cutMode: document2.cutMode,
     status: document2.status,
     phase: document2.phase,
@@ -9424,7 +9436,7 @@ async function executeToolCall(id, tool, input, work, operation = null) {
 }
 function summarizeCommandInput(tool, input) {
   if (TIMER_TOOL_NAMES.includes(tool)) return { taskId: input.taskId ?? null, duration: input.duration ?? null, unit: input.unit ?? null, until: input.until ?? null, clockSource: input.clockSource ?? "system", timeZone: input.timeZone ?? null };
-  if (tool === "media_clip") return { path: typeof input.path === "string" ? input.path : null, outputKind: input.outputKind ?? null, segmentCount: Array.isArray(input.segments) ? input.segments.length : null, cutMode: input.cutMode ?? "copy", outputDir: typeof input.outputDir === "string" ? input.outputDir : "clips" };
+  if (tool === "media_clip") return { workspacePath: typeof input.path === "string" ? input.path : null, outputFormat: input.outputFormat ?? null, segmentCount: Array.isArray(input.segments) ? input.segments.length : null, cutMode: input.outputFormat === void 0 ? "copy" : "accurate", outputWorkspaceDirectory: typeof input.outputDir === "string" ? input.outputDir : "clips" };
   if (tool === "media_clip_get_task" || tool === "media_clip_cancel_task") return { taskId: typeof input.taskId === "string" ? input.taskId : null };
   if (tool === "media_capture_frame") return { path: typeof input.path === "string" ? input.path : null, youtube: input.youtube && typeof input.youtube === "object" ? { videoId: input.youtube.videoId ?? null, formatId: input.youtube.formatId ?? null } : null, timestampSeconds: input.timestampSeconds ?? null, videoStreamIndex: input.videoStreamIndex ?? null, seekMode: input.seekMode ?? null, outputPath: typeof input.outputPath === "string" ? input.outputPath : null };
   if (tool === "visual_map_create") return { workspacePath: typeof input.workspacePath === "string" ? input.workspacePath : null, columns: input.columns ?? null, rows: input.rows ?? null, maxTotalFrames: input.maxTotalFrames ?? null, selection: input.selection ?? "uniform" };

@@ -130,6 +130,36 @@ for(const invalid of [{...args,path:'old.png'},{...args,addToChat:'yes'},{...arg
 }
 const speakers=await w.call('system_speech_speak',{text:'test',addToChat:true});assert.equal(speakers.result.isError,false);assert.equal(speakers.result.structuredContent.error.code,'SPEECH_INVALID');
 
+// The shipped MCP catalog accepts either segments or outputFormat, preserves
+// canonical source names and uses the same public supervisor for conversion.
+const clipTool=definitions.find(t=>t.name==='media_clip');
+assert.equal(clipTool.title,'Cut and Convert Media');
+assert.equal(clipTool.inputSchema.properties.outputKind,undefined);
+assert.equal(clipTool.inputSchema.properties.cutMode,undefined);
+assert.deepEqual(JSON.parse(JSON.stringify(clipTool.inputSchema.required)),['workspacePath']);
+for (const input of [{workspacePath:'source.mp4',outputFormat:'mp3'},
+ {workspacePath:'source.mp4',segments:[{startSeconds:0,endSeconds:1}]}]) {
+ const f=worker(),format=input.outputFormat??'mp4',mode=input.outputFormat?'accurate':'copy';
+ const audio=format==='mp3';
+ const native={taskId:'clip_native',sourcePath:'source.mp4',outputFormat:format,cutMode:mode,status:'completed',phase:'completed',
+  statusMessage:'done',progressPercent:100,completedClips:1,totalClips:1,createdAt:'now',lastUpdatedAt:'now',pollIntervalMs:1000,
+  clips:[{index:0,sourcePath:'source.mp4',outputKind:audio?'audio':'video',startSeconds:0,endSeconds:1,durationSeconds:1,
+   selectedVideoStreamIndex:audio?null:0,selectedAudioStreamIndex:1,hasAudio:true,reencoded:mode==='accurate',format,
+   mimeType:audio?'audio/mpeg':'video/mp4',fileSizeBytes:100,workspacePath:'clips/result.'+format}]};
+ f.context.agentJsonRequest=async(path,options)=>{f.requests.push({path,body:options?.body});return native;};
+ const launch=await f.call('media_clip',input),id=launch.result.structuredContent.taskId;
+ assert.match(id,/^tsk_[A-Za-z0-9_-]{10}$/);assert.equal(f.requests.length,0);
+ await f.context.artifactTaskManager.advance(id);
+ const final=(await f.call('media_task_status',{taskId:id})).result.structuredContent;
+ assert.equal(final.status,'completed',JSON.stringify(final.error));assert.equal(final.files[0].workspacePath,'clips/result.'+format);
+ assert.equal(f.requests[0].body.path,'source.mp4');assert.equal(f.requests[0].body.outputKind,undefined);assert.equal(f.requests[0].body.cutMode,undefined);
+ assertSchema(clipTool.outputSchema,final,'media clip/conversion');
+}
+for (const invalid of [{workspacePath:'source.mp4'}, {workspacePath:'source.mp4',outputKind:'audio'},
+ {workspacePath:'source.mp4',outputFormat:'mp3',cutMode:'copy'}]) {
+ const response=await w.call('media_clip',invalid);assert.equal(response.result.structuredContent.status,'rejected');
+}
+
 // Launch binding survives long creation and focus switches; no upload occurs
 // on binding alone while the child reservation is awaiting artifacts.
 const send=worker();const created=await send.call('media_image_crop',{...args,addToChat:true,composerPolicy:'clear',sendDelaySeconds:60});
@@ -177,7 +207,7 @@ if(process.env.RESEARCHTUBE_LIVE_RESULTS) {
  const live=JSON.parse(await readFile(process.env.RESEARCHTUBE_LIVE_RESULTS,'utf8'));
  const cases=[['media_capture_frame',{workspacePath:'source.mp4',timestampsSeconds:[2,8],image:{format:'png'}},live.frames],
   ['media_image_crop',{workspacePath:live.frames.frames[0].image.workspacePath,crop:{x:10,y:10,width:64,height:48},outputWorkspacePath:'crops/live.png'},live.crop],
-  ['media_clip',{workspacePath:'source.mp4',outputKind:'audio',cutMode:'copy'},live.clips]];
+  ['media_clip',{workspacePath:'source.mp4',outputFormat:'m4a'},live.clips]];
  for(const [name,input,native] of cases){const f=worker();f.context.agentJsonRequest=async()=>native;
   const response=await f.call(name,input);const id=response.result.structuredContent.taskId;
   await f.context.artifactTaskManager.advance(id);const final=(await f.call('media_task_status',{taskId:id})).result.structuredContent;

@@ -1,47 +1,32 @@
-# Media clips
+# Media cutting and conversion
 
+`media_clip` (**Cut and Convert Media**) cuts video/audio into separate files or converts a whole file. It uses the common [artifact workflow](ARTIFACT_TASKS.md): one public task covers creation and optional upload/Send, with `media_task_status` and `media_task_cancel` for follow-up.
 
-All start/status/cancel calls use the common [artifact workflow](ARTIFACT_TASKS.md). Public results expose native task metadata under `creation.data` and created paths under `files`; `addToChat` optionally extends the same task through upload and Send. `media_task_status` and `media_task_cancel` are shared follow-up tools. Specialized status/cancel names are aliases.
+## Source, intervals and format
 
-`media_clip` is the unified asynchronous local cutter for video and audio.
+The source argument is `workspacePath`, an existing logical Workspace file. It is never modified. Output files go to `clips/` unless `outputWorkspaceDirectory` is supplied.
 
-## Supported transformations
+- With `segments` and no `outputFormat`, retain the source container and copy its encoded video/audio streams without transcoding. Video boundaries can align to keyframes.
+- With both `segments` and `outputFormat`, cut and convert each interval, using re-encoding for precise requested boundaries.
+- Without `segments`, `outputFormat` is required; convert the complete source file.
+- Supplying neither is invalid. The obsolete input fields `outputKind` and `cutMode` are rejected.
 
-| Source | Output |
-| --- | --- |
-| Video | Video clip(s) |
-| Video | Extracted audio clip(s) or complete audio |
-| Audio | Audio clip(s) or complete audio |
+Intervals have `startSeconds` and `endSeconds`, must be finite, non-negative, non-empty and within the source duration. Preserve caller order, including a later interval before an earlier one. Each interval creates a separate file; no concatenation occurs. Duplicate intervals are rejected. The configured maximum is `limits.mediaClipMaxSegments` (default 20).
 
-The source is an existing logical Workspace path. It is never modified.
+## Output formats and streams
 
-## Intervals
+`outputFormat` names a format supported by installed FFmpeg, not a closed enum. Common names include `mp4`, `mkv`, `webm`, `mp3`, `m4a`, `wav`, `flac`, `ogg` and `opus`. Extension-like aliases resolve to the corresponding muxer. The Agent queries FFmpeg's muxer capabilities privately and rejects unsupported formats.
 
-`segments` accepts objects with `startSeconds` and `endSeconds`, up to `limits.mediaClipMaxSegments` in `agent/agent-config.json` (default 20). Input order is preserved and every interval creates a separate file. Intervals are not concatenated.
+Audio formats select only sound from video/audio sources. Video containers select supported source video and audio; an audio-only source remains audio-only in MP4/MKV/WebM. `includeAudio: false` creates silent video. Optional `videoStreamIndex` and `audioStreamIndex` select ffprobe stream indexes. Impossible stream selections or incompatible video settings for audio-only formats are rejected.
 
-When `segments` is omitted, the complete source duration is processed. This is useful for extracting the full audio stream from video.
+When converting, FFmpeg selects default encoders for the output format. Optional `videoCodec`, `audioCodec`, `videoBitrate` and `audioBitrate` customize encoding; they require an explicit `outputFormat` and the corresponding selected stream. Example bitrates: `192k`, `2M`. Raw shell commands and arbitrary filesystem targets are never accepted.
 
-Every interval must be finite, non-negative, non-empty and within source duration. Duplicate intervals are rejected.
+## Results, progress and cancellation
 
-## Modes
+Portable generated filenames contain the source title, interval tag and task ID. They use the requested format extension (or detected source format for copying). Existing files are never overwritten. `creation.data.outputFormat` is null only while a source-preserving task is still preparing or has failed before format discovery; completed clips expose their actual `format`, derived `outputKind`, selected source indexes and `reencoded` flag. The internal result `cutMode` describes what happened; callers do not specify it.
 
-- `copy` is the default. Encoded streams are copied without transcoding. It is fast and preserves quality, but video boundaries can align to source keyframes.
-- `accurate` re-encodes H.264/AAC output to honor precise requested boundaries.
+FFmpeg runs with `-progress pipe:1`. Native output time drives monotonic per-interval and overall progress. Working tasks remain below 100%; successful completion is exactly 100%.
 
-For video output, `includeAudio` defaults to true. Specific ffprobe stream indexes can be selected when a source contains multiple tracks.
+Completed outputs are probed before exclusive publication and added to `clips` without an intervening await. Later failure/cancellation preserves already published clips. Cancellation stops FFmpeg/ffprobe/format discovery and removes the active temporary file. Errors contain bounded guidance, never raw process output or physical paths.
 
-## Outputs
-
-The default directory is lowercase `clips/`. Filenames contain the source title, interval tag and opaque task ID. Common native containers/codecs are retained in copy mode; accurate output uses MP4/M4A.
-
-ResearchTube checks the destination before processing and publishes the completed temporary file exclusively. It never silently replaces an existing file.
-
-## Progress and failure
-
-FFmpeg runs with `-progress pipe:1`. Microsecond output time is converted into per-interval progress and then into an overall batch percentage. A working task remains below 100%; successful completion is exactly 100%.
-
-After each output is safely published it is added to `clips` and `completedClips`. If a later interval fails, earlier files remain available and the task identifies the failed segment. Cancellation terminates FFmpeg, removes the active temporary file and retains complete outputs.
-
-Poll with `media_clip_get_task` no faster than `pollIntervalMs`; cancel with `media_clip_cancel_task`.
-
-The authoritative implementation is in `extension/background.js` and `agent/researchtube_agent.py`.
+Poll the common status tool no faster than `pollIntervalMs`. Specialized `media_clip_get_task` and `media_clip_cancel_task` remain aliases of the complete public workflow. `addToChat` optionally extends creation through attachment/Send.
