@@ -1,12 +1,8 @@
-<table>
-  <tr>
-    <td valign="middle"><img src="icons/researchtube-64.png" alt="ResearchTube logo" width="64"></td>
-    <td valign="middle">
-      <h1>ResearchTube</h1>
-      <h2>Turn YouTube into Answers. And Much More.</h2>
-    </td>
-  </tr>
-</table>
+<img src="icons/researchtube-64.png" alt="ResearchTube logo" width="64" align="left">
+
+# ResearchTube
+
+**Turn YouTube into Answers. And Much More.**
 
 **Give ChatGPT the power to explore websites, investigate videos and discussions, and work with media on your computer — just by asking.**
 
