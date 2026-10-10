@@ -43,7 +43,7 @@ except ImportError:
     from task_history import TaskHistory
     from browser_resources import save_browser_resource
 
-AGENT_VERSION = "2.2.73"
+AGENT_VERSION = "2.2.74"
 INTERFACE_VERSION = 79
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
@@ -1592,7 +1592,7 @@ def media_clip_options(payload: Any) -> dict[str, Any]:
         if name not in payload:
             continue
         value = payload[name]
-        pattern = r"[a-zA-Z0-9_]{1,64}" if name.endswith("Codec") else r"[1-9][0-9]{0,9}[kKmM]?"
+        pattern = r"[a-zA-Z0-9_-]{1,64}" if name.endswith("Codec") else r"[1-9][0-9]{0,9}[kKmM]?"
         if not isinstance(value, str) or not re.fullmatch(pattern, value) or value == "copy":
             raise AgentApiError("MEDIA_CLIP_INVALID", f"{name} must be a codec name or positive bitrate; omit outputFormat with segments for stream copying.")
         encoding[name] = value
@@ -4155,8 +4155,152 @@ async def media_clip_format_info(output_format: str, executable: str) -> dict[st
     audio_only = output_format in MEDIA_CLIP_AUDIO_FORMATS or bool(audio_codec and video_codec in {None, "png", "mjpeg", "bmp"})
     if not video_codec and not audio_codec:
         raise AgentApiError("MEDIA_CLIP_FORMAT_UNSUPPORTED", "The output format has no supported video or audio codec.")
-    return {"muxer": muxer, "video": bool(video_codec) and not audio_only, "audio": bool(audio_codec), "defaultVideoCodec": video_codec,
+    return {"muxer": muxer, "video": bool(video_codec) and not audio_only, "audio": bool(audio_codec), "defaultVideoCodec": video_codec, "defaultAudioCodec": audio_codec,
+            "raw": bool(re.search(r"^Muxer .*\[(?:raw |PCM )", text, re.MULTILINE)) or muxer == "mp2",
             "mimeType": field("Mime type") or "application/octet-stream"}
+
+
+async def media_clip_check_command(command: list[str]) -> tuple[int, bytes]:
+    """Bound and cancel private FFmpeg capability checks, including child cleanup."""
+    process = None
+    try:
+        process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        stdout, _stderr = await asyncio.wait_for(process.communicate(), timeout=MEDIA_PROBE_TIMEOUT_SECONDS)
+        return process.returncode, stdout
+    except (asyncio.TimeoutError, asyncio.CancelledError) as error:
+        if process is not None and process.returncode is None:
+            process.kill()
+            await process.communicate()
+        if isinstance(error, asyncio.CancelledError):
+            raise
+        raise AgentApiError("MEDIA_CLIP_PROBE_FAILED", "FFmpeg timed out while checking stream compatibility.") from error
+    except OSError as error:
+        raise AgentApiError("FFMPEG_NOT_AVAILABLE", "FFmpeg could not be started.") from error
+
+
+async def media_clip_can_copy_stream(source: Path, stream: dict[str, Any], muxer: str, executable: str, required_codec: str | None = None) -> bool:
+    # Raw muxers have no header codec validation and can otherwise accept
+    # arbitrary bytes (for example AAC packets into a falsely named MP2 file).
+    if required_codec is not None and stream.get("codec_name") != required_codec:
+        return False
+    # WAV/AIFF are requested as decoded PCM audio. FFmpeg can also put some
+    # compressed codecs into WAVE, but those files are not ordinary PCM WAVs.
+    if muxer in {"wav", "aiff"} and not stream.get("codec_name", "").startswith("pcm_"):
+        return False
+    # Header-only remuxing asks the installed muxer about the actual codec and
+    # extradata, rather than guessing from the source/output filename. No source
+    # packets are encoded and the disposable header never becomes an output.
+    with tempfile.TemporaryDirectory(prefix="researchtube-codec-check-") as directory:
+        result, _ = await media_clip_check_command([
+            executable, "-hide_banner", "-nostdin", "-v", "error", "-i", str(source),
+            "-map", f"0:{stream['index']}", "-t", "0", "-c", "copy", "-f", muxer,
+            "-n", str(Path(directory) / "header"),
+        ])
+        return result == 0
+
+
+async def media_clip_available_encoders(executable: str) -> dict[str, str]:
+    result, stdout = await media_clip_check_command([executable, "-hide_banner", "-encoders"])
+    if result != 0:
+        raise AgentApiError("MEDIA_CLIP_FAILED", "FFmpeg could not list available encoders.")
+    encoders = {}
+    for line in stdout.decode("utf-8", errors="replace").splitlines():
+        match = re.match(r"^\s*[VA][A-Z.]{5}\s+([\w-]+)\s+(.*)$", line)
+        if match:
+            codec = re.search(r"\(codec (\w+)\)", match[2])
+            encoders[match[1]] = codec[1] if codec else match[1]
+    return encoders
+
+
+def media_clip_encoder(codec: str, available: dict[str, str], stream: dict[str, Any]) -> str:
+    preferred = {"h264": "libx264", "hevc": "libx265", "vp9": "libvpx-vp9", "vp8": "libvpx",
+                 "av1": "libaom-av1", "mp3": "libmp3lame", "opus": "libopus", "vorbis": "libvorbis", "theora": "libtheora"}
+    # Avoid implicit 16-bit quantization when a PCM target can retain floating
+    # point or higher integer precision. Explicit encoder overrides bypass this.
+    if codec in {"pcm_s16le", "pcm_s16be"}:
+        sample_format = stream.get("sample_fmt", "")
+        suffix = "be" if codec.endswith("be") else "le"
+        if sample_format.startswith("dbl"):
+            codec = f"pcm_f64{suffix}"
+        elif sample_format.startswith("flt"):
+            codec = f"pcm_f32{suffix}"
+        elif sample_format.startswith("s32") or int(stream.get("bits_per_raw_sample") or 0) > 16:
+            codec = f"pcm_s32{suffix}"
+    if preferred.get(codec) in available:
+        return preferred[codec]
+    if codec in available:
+        return codec
+    return next((name for name, identifier in available.items() if identifier == codec), codec)
+
+
+def media_clip_quality_arguments(encoder: str, kind: str, stream: dict[str, Any], explicit_bitrate: bool) -> list[str]:
+    """Encoder-specific quality policy; never apply one codec's scale to another."""
+    suffix = "v" if kind == "video" else "a"
+    if encoder in {"libx264", "libx264rgb", "libx265"}:
+        args = [f"-preset:{suffix}", "slow"]
+        if not explicit_bitrate:
+            args += ["-x265-params", "lossless=1"] if encoder == "libx265" else [f"-crf:{suffix}", "0"]
+        return args
+    if encoder == "libvpx-vp9":
+        return ["-deadline", "good", "-cpu-used", "0"] + ([] if explicit_bitrate else ["-lossless", "1", "-b:v", "0"])
+    if encoder == "libaom-av1":
+        return ["-cpu-used", "4"] + ([] if explicit_bitrate else ["-crf:v", "0", "-b:v", "0"])
+    if encoder == "libvpx":
+        return ["-deadline", "good", "-cpu-used", "0"] + ([] if explicit_bitrate else ["-crf:v", "4", "-b:v", "10M"])
+    if explicit_bitrate:
+        return []
+    if encoder in {"mpeg4", "libxvid", "mpeg1video", "mpeg2video", "mjpeg"}:
+        return ["-q:v", "1"]
+    if encoder == "libtheora":
+        return ["-q:v", "10"]
+    if encoder == "libmp3lame":
+        return ["-q:a", "0", "-compression_level:a", "0"]
+    if encoder == "libvorbis":
+        return ["-q:a", "10"]
+    if encoder == "libopus":
+        channels = max(1, int(stream.get("channels") or 2))
+        return ["-b:a", str(256000 * channels), "-vbr", "on", "-compression_level:a", "10"]
+    if encoder == "aac":
+        channels = max(1, int(stream.get("channels") or 2))
+        sample_rate = int(stream.get("sample_rate") or 48000)
+        return ["-b:a", str(min(320000, sample_rate * 6) * channels), "-aac_coder", "twoloop"]
+    if encoder == "libfdk_aac":
+        return ["-vbr", "5"]
+    if encoder == "eac3":
+        return ["-b:a", str(min(6144000, int(stream.get("sample_rate") or 48000) * 128))]
+    if encoder in {"ac3", "ac3_fixed", "mp2", "libtwolame"}:
+        return ["-b:a", "384k" if encoder in {"mp2", "libtwolame"} else "640k"]
+    if encoder in {"flac", "alac"}:
+        sample_format = "s16" if stream.get("sample_fmt", "").startswith("s16") else "s32"
+        bits = int(stream.get("bits_per_raw_sample") or 0)
+        return ["-sample_fmt:a", sample_format] + (["-compression_level:a", "12", "-bits_per_raw_sample:a", str(bits or (16 if sample_format == "s16" else 24))] if encoder == "flac" else [])
+    # Lossless codecs already retain samples; unusual encoders keep their own
+    # defaults instead of receiving unsupported quality flags.
+    return []
+
+
+async def media_clip_encoding_plan(source: Path, payload: dict[str, Any], video: dict[str, Any] | None,
+                                   audio: dict[str, Any] | None, executable: str) -> dict[str, Any]:
+    if payload["cutMode"] == "copy":
+        return {"arguments": ["-c", "copy"], "reencoded": False}
+    arguments, reencoded, available = [], False, None
+    for kind, stream, suffix in (("video", video, "v"), ("audio", audio, "a")):
+        if stream is None:
+            continue
+        codec, bitrate = payload.get(f"{kind}Codec"), payload.get(f"{kind}Bitrate")
+        format_info = payload["formatInfo"]
+        default_codec = format_info[f"default{kind.title()}Codec"]
+        if codec is None and bitrate is None and await media_clip_can_copy_stream(source, stream, format_info["muxer"], executable, default_codec if format_info["raw"] else None):
+            arguments += [f"-c:{suffix}", "copy"]
+            continue
+        reencoded = True
+        if available is None:
+            available = await media_clip_available_encoders(executable)
+        encoder = codec or media_clip_encoder(default_codec, available, stream)
+        arguments += [f"-c:{suffix}", encoder, *media_clip_quality_arguments(encoder, kind, stream, bitrate is not None)]
+        if bitrate is not None:
+            arguments += [f"-b:{suffix}", bitrate]
+    return {"arguments": arguments, "reencoded": reencoded}
 
 
 def media_clip_mime_type(extension: str, output_kind: str) -> str:
@@ -4339,6 +4483,7 @@ class MediaClipTaskManager:
         duration = end - start
         output_kind = "video" if video_stream is not None else "audio"
         cut_mode, extension = task.payload["cutMode"], task.payload["outputFormat"]
+        plan = {"arguments": ["-c", "copy"], "reencoded": False} if cut_mode == "copy" else task.payload["encodingPlan"]
         format_info = task.payload["formatInfo"]
         source_stem = safe_capture_title(source.physical_path.stem)[:150].rstrip(" .") or "ResearchTube media"
         range_tag = f"clip_{media_clip_number_tag(start)}_{media_clip_number_tag(end)}"
@@ -4352,8 +4497,14 @@ class MediaClipTaskManager:
         temporary = destination.physical_path.with_name(f".{destination.physical_path.stem}.{secrets.token_urlsafe(5)}.tmp.{extension}")
         command = [
             ffmpeg_executable, "-hide_banner", "-nostdin", "-v", "error", "-progress", "pipe:1", "-nostats",
-            "-ss", f"{start:.6f}", "-i", str(source.physical_path), "-t", f"{duration:.6f}",
         ]
+        # Whole-source extraction must retain priming/tail packets, rather than
+        # implicitly trimming at ffprobe's rounded container duration.
+        if task.payload.get("segments") is not None:
+            command.extend(["-ss", f"{start:.6f}"])
+        command.extend(["-i", str(source.physical_path)])
+        if task.payload.get("segments") is not None:
+            command.extend(["-t", f"{duration:.6f}"])
         if video_stream is not None:
             command.extend(["-map", f"0:{video_stream['index']}"])
         else:
@@ -4363,14 +4514,11 @@ class MediaClipTaskManager:
         else:
             command.append("-an")
         command.extend(["-sn", "-dn"])
-        if cut_mode == "copy":
-            command.extend(["-c", "copy", "-avoid_negative_ts", "make_zero"])
-        else:
-            for name, flag in (("videoCodec", "-c:v"), ("audioCodec", "-c:a"), ("videoBitrate", "-b:v"), ("audioBitrate", "-b:a")):
-                if name in task.payload:
-                    command.extend([flag, task.payload[name]])
-            if format_info["muxer"] in {"mp4", "ipod", "mov"}:
-                command.extend(["-movflags", "+faststart"])
+        command.extend(plan["arguments"])
+        if cut_mode == "copy" and task.payload.get("segments") is not None:
+            command.extend(["-avoid_negative_ts", "make_zero"])
+        if format_info["muxer"] in {"mp4", "ipod", "mov"}:
+            command.extend(["-movflags", "+faststart"])
         command.extend(["-f", format_info["muxer"], "-n", str(temporary)])
         stderr_task: asyncio.Task[bytes] | None = None
         try:
@@ -4399,7 +4547,7 @@ class MediaClipTaskManager:
                 "startSeconds": start, "endSeconds": end, "durationSeconds": result_duration if result_duration is not None else duration,
                 "selectedVideoStreamIndex": video_stream.get("index") if video_stream is not None else None,
                 "selectedAudioStreamIndex": audio_stream.get("index") if audio_stream is not None else None,
-                "hasAudio": has_audio, "reencoded": cut_mode == "accurate", "format": extension,
+                "hasAudio": has_audio, "reencoded": plan["reencoded"], "format": extension,
                 "mimeType": mime_type if mime_type != "application/octet-stream" else format_info["mimeType"],
                 "fileSizeBytes": destination.physical_path.stat().st_size,
                 "workspacePath": WorkspacePathResolver().logical_existing_file(destination.physical_path, error_code="MEDIA_CLIP_FAILED"),
@@ -4454,6 +4602,8 @@ class MediaClipTaskManager:
             if task.payload["cutMode"] == "copy" and task.payload["formatInfo"]["defaultVideoCodec"] not in {None, "png", "mjpeg", "bmp"}:
                 task.payload["formatInfo"]["video"] = True
             video_stream, audio_stream = media_clip_select_output_streams(streams, task.payload, task.payload["formatInfo"])
+            task.payload["encodingPlan"] = await media_clip_encoding_plan(source.physical_path, task.payload, video_stream, audio_stream, ffmpeg.executable)
+            task.payload["cutMode"] = "accurate" if task.payload["encodingPlan"]["reencoded"] else "copy"
             segments = task.payload["segments"]
             if segments is None:
                 if source_duration is None:

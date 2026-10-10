@@ -114,7 +114,7 @@ The [tool reference](TOOLS.md) contains the full current inventory. Tool schemas
 | Search/read YouTube | `youtube_search`, video metadata, transcripts, comments, channels and playlists. Ask for sources, relevant transcripts and a summary. |
 | Download videos/audio | `youtube_download_get_formats`, `youtube_download` and task status/cancel. Specify whole video or intervals and desired audio/video. |
 | Preview a video's timeline | `youtube_storyboard_*` downloads ready-made image sheets; `visual_map_*` creates maps from video. |
-| Inspect/edit local media | `media_probe`, frame capture, `media_image_crop`, `media_clip`, `media_show`. Request frames, ordered clips or format conversion from a Workspace file. `media_clip` uses optional outputFormat with intervals; whole-file conversion requires it. |
+| Inspect/edit local media | `media_probe`, frame capture, `media_image_crop`, `media_clip`, `media_show`. Request frames, ordered clips or format conversion from a Workspace file. `media_clip` uses optional outputFormat with intervals; whole-file conversion/audio extraction requires it. Compatible streams retain original quality; necessary encoding uses automatic quality profiles. Lossless output can be much larger. |
 | Capture or record | Screen/region capture, `camera_*`, and Windows clipboard tools. Request these explicitly. |
 | Read text aloud | `system_speech_*`: Google Translate by default or Windows voices; speakers, saved file, or both. |
 | Manage/share files | `workspace_*`, `media_to_chat`, `library_store_*`, `online_share_*`. Sending/sharing is deliberate, not automatic for every saved file. |

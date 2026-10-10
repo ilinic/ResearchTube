@@ -12,8 +12,8 @@ for (const tool of ["media_clip", "media_clip_get_task", "media_clip_cancel_task
 assert.match(background, /segments: \{ type: "array", minItems: 1/);
 assert.match(background, /required without segments/i);
 assert.match(background, /Cut and Convert Media/);
-assert.match(background, /omit it to copy the source format/);
-assert.match(background, /Set outputFormat to convert/);
+assert.match(background, /omit it with segments to retain the source format/);
+assert.match(background, /Compatible streams are copied without quality loss/);
 assert.match(background, /Read clip task progress and completed files\. Poll at pollIntervalMs/);
 assert.match(background, /function normalizeMediaClipInput\(/);
 assert.match(background, /function normalizeMediaClipTask\(/);
@@ -60,4 +60,7 @@ assert.equal(copying.outputFormat,undefined);assert.equal(copying.cutMode,undefi
 assert.equal(normalizeMediaClipTask({...native,outputFormat:null,cutMode:'copy',status:'working',phase:'preparing',progressPercent:0,completedClips:0,clips:[]},copying).outputFormat,null);
 assert.equal(normalizeMediaClipTask({...native,outputFormat:'webm',cutMode:'copy',clips:[{...clip,format:'webm',reencoded:false}]},copying).clips[0].reencoded,false);
 assert.throws(()=>normalizeMediaClipInput({...copying,audioBitrate:'192k'}),error=>error.code==='MEDIA_CLIP_INVALID');
+
+assert.equal(normalizeMediaClipTask({...native,cutMode:"copy",clips:[{...clip,reencoded:false}]},minimal).clips[0].reencoded,false);
+assert.equal(normalizeMediaClipInput({path:"source.mp4",outputFormat:"webm",videoCodec:"libvpx-vp9"}).videoCodec,"libvpx-vp9");
 console.log("media clip tool: ok");

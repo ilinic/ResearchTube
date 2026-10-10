@@ -72,7 +72,7 @@ const MCP_TOOL_SETTINGS = Object.freeze({
   library_store_start: { group: "library" }, library_store_status: { group: "library" }, library_store_cancel: { group: "library" }, online_share_start: { group: "online" }, online_share_status: { group: "online" }, online_share_stop: { group: "online" },
   custom_tool_status: { group: "custom" }, custom_tool_cancel: { group: "custom" }
 });
-const EXTENSION_VERSION = "2.2.105";
+const EXTENSION_VERSION = "2.2.106";
 // Chrome dispatches this for requests made by our Extension-owned viewer.
 // Packaged assets and unrelated requests fall through without interception.
 globalThis.addEventListener?.("fetch", createMediaStreamHandler({
@@ -1137,21 +1137,21 @@ function toolDefinitions() {
     {
       name: "media_clip",
       title: "Cut and Convert Media",
-      description: "Cut or convert video/audio to clips/. Set outputFormat to convert; required without segments. With segments, omit it to copy the source format (video cuts may align to keyframes). Each interval creates a separate file in caller order.",
+      description: "Cut, convert or extract audio. outputFormat is required without segments. Compatible streams are copied without quality loss; others use codec-specific quality profiles. Copied video cuts may align to keyframes.",
       annotations: localWorkspaceWriteAnnotations,
       inputSchema: {
         type: "object", additionalProperties: false,
         properties: {
           path: { type: "string", minLength: 1, description: "Existing logical workspace-relative video or audio path." },
-          outputFormat: { type: "string", pattern: "^[a-z0-9][a-z0-9_]{0,31}$", description: "Output format, such as mp4, mkv, webm, mp3, m4a, wav, flac or ogg. Required without segments; omit with segments to keep the source format. Available formats depend on installed FFmpeg. Audio formats select sound only; video containers retain supported source video/audio." },
+          outputFormat: { type: "string", pattern: "^[a-z0-9][a-z0-9_]{0,31}$", description: "Output format, such as mp4, mkv, webm, mp3, m4a, wav, flac or ogg. Required without segments; omit it with segments to retain the source format. Available formats depend on installed FFmpeg. Audio formats select sound only; video containers retain supported source video/audio." },
           segments: { type: "array", minItems: 1, items: mediaClipSegmentInputSchema, description: "Optional intervals in caller order, subject to the configured maximum. Omit to process the entire source." },
           includeAudio: { type: "boolean", default: true, description: "Include source audio when supported by outputFormat. Set false to make silent video." },
           videoStreamIndex: { type: "integer", minimum: 0, description: "Optional ffprobe streams[].index; requires video support in outputFormat." },
           audioStreamIndex: { type: "integer", minimum: 0, description: "Optional ffprobe streams[].index for selected audio; requires includeAudio=true." },
-          videoCodec: { type: "string", pattern: "^[A-Za-z0-9_]{1,64}$", description: "Optional FFmpeg video encoder name. Omit to use the output-format default. Requires outputFormat and selected video." },
-          audioCodec: { type: "string", pattern: "^[A-Za-z0-9_]{1,64}$", description: "Optional FFmpeg audio encoder name. Omit to use the output-format default. Requires outputFormat and selected audio." },
-          videoBitrate: { type: "string", pattern: "^[1-9][0-9]{0,9}[kKmM]?$", description: "Optional target video bitrate, such as 2M. Requires outputFormat and selected video." },
-          audioBitrate: { type: "string", pattern: "^[1-9][0-9]{0,9}[kKmM]?$", description: "Optional target audio bitrate, such as 192k. Requires outputFormat and selected audio." },
+          videoCodec: { type: "string", pattern: "^[A-Za-z0-9_-]{1,64}$", description: "Optional FFmpeg video encoder name. Omit for automatic stream copying or maximum-quality encoding. Setting an encoder forces video re-encoding. Requires outputFormat and selected video." },
+          audioCodec: { type: "string", pattern: "^[A-Za-z0-9_-]{1,64}$", description: "Optional FFmpeg audio encoder name. Omit for automatic stream copying or maximum-quality encoding. Setting an encoder forces audio re-encoding. Requires outputFormat and selected audio." },
+          videoBitrate: { type: "string", pattern: "^[1-9][0-9]{0,9}[kKmM]?$", description: "Optional target video bitrate, such as 2M; forces re-encoding and overrides automatic quality. Requires outputFormat and selected video." },
+          audioBitrate: { type: "string", pattern: "^[1-9][0-9]{0,9}[kKmM]?$", description: "Optional target audio bitrate, such as 192k; forces re-encoding and overrides automatic quality. Requires outputFormat and selected audio." },
           outputDir: { type: "string", default: "clips", description: "Logical workspace-relative output directory." }
         },
         required: ["path"],
@@ -5403,7 +5403,7 @@ function normalizeMediaClipInput(argumentsValue = {}) {
   const encoding = {};
   for (const name of ["videoCodec", "audioCodec", "videoBitrate", "audioBitrate"]) {
     if (args[name] === undefined) continue;
-    const pattern = name.endsWith("Codec") ? /^[A-Za-z0-9_]{1,64}$/ : /^[1-9][0-9]{0,9}[kKmM]?$/;
+    const pattern = name.endsWith("Codec") ? /^[A-Za-z0-9_-]{1,64}$/ : /^[1-9][0-9]{0,9}[kKmM]?$/;
     if (typeof args[name] !== "string" || !pattern.test(args[name]) || args[name] === "copy") mediaClipInvalid(`${name} must be a codec name or positive bitrate; omit outputFormat with segments for stream copying.`);
     encoding[name] = args[name];
   }
@@ -5444,7 +5444,7 @@ function normalizeMediaClipTask(document, input = null) {
     || typeof document.createdAt !== "string" || typeof document.lastUpdatedAt !== "string" || !Number.isInteger(document.pollIntervalMs) || document.pollIntervalMs < 100) {
     throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid media-clip task.");
   }
-  if (input && (document.sourcePath !== input.path || (input.outputFormat !== undefined && document.outputFormat !== input.outputFormat) || document.cutMode !== (input.outputFormat === undefined ? "copy" : "accurate") || document.totalClips !== (input.segments?.length ?? 1))) {
+  if (input && (document.sourcePath !== input.path || (input.outputFormat !== undefined && document.outputFormat !== input.outputFormat) || (input.outputFormat === undefined && document.cutMode !== "copy") || document.totalClips !== (input.segments?.length ?? 1))) {
     throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an unexpected media-clip task.");
   }
   const clips = document.clips.map((clip, index) => {
@@ -6881,7 +6881,7 @@ async function executeToolCall(id, tool, input, work, operation = null) {
 
 function summarizeCommandInput(tool, input) {
   if (TIMER_TOOL_NAMES.includes(tool)) return { taskId: input.taskId ?? null, duration: input.duration ?? null, unit: input.unit ?? null, until: input.until ?? null, clockSource: input.clockSource ?? "system", timeZone: input.timeZone ?? null };
-  if (tool === "media_clip") return { workspacePath: typeof input.path === "string" ? input.path : null, outputFormat: input.outputFormat ?? null, segmentCount: Array.isArray(input.segments) ? input.segments.length : null, cutMode: input.outputFormat === undefined ? "copy" : "accurate", outputWorkspaceDirectory: typeof input.outputDir === "string" ? input.outputDir : "clips" };
+  if (tool === "media_clip") return { workspacePath: typeof input.path === "string" ? input.path : null, outputFormat: input.outputFormat ?? null, segmentCount: Array.isArray(input.segments) ? input.segments.length : null, outputWorkspaceDirectory: typeof input.outputDir === "string" ? input.outputDir : "clips" };
   if (tool === "media_clip_get_task" || tool === "media_clip_cancel_task") return { taskId: typeof input.taskId === "string" ? input.taskId : null };
   if (tool === "media_capture_frame") return { path: typeof input.path === "string" ? input.path : null, youtube: input.youtube && typeof input.youtube === "object" ? { videoId: input.youtube.videoId ?? null, formatId: input.youtube.formatId ?? null } : null, timestampSeconds: input.timestampSeconds ?? null, videoStreamIndex: input.videoStreamIndex ?? null, seekMode: input.seekMode ?? null, outputPath: typeof input.outputPath === "string" ? input.outputPath : null };
   if (tool === "visual_map_create") return { workspacePath: typeof input.workspacePath === "string" ? input.workspacePath : null, columns: input.columns ?? null, rows: input.rows ?? null, maxTotalFrames: input.maxTotalFrames ?? null, selection: input.selection ?? "uniform" };

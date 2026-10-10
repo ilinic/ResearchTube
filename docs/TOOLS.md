@@ -82,7 +82,7 @@ by each custom package group with its manifest `groupTitle`. See [Custom Tools](
 | Tool | Behavior |
 | --- | --- |
 | `media_probe` | Returns selected ffprobe format, stream, chapter and program metadata without the physical filename. |
-| `media_clip` | Cuts or converts video/audio. With ordered intervals, omitted `outputFormat` copies the source format; specifying it converts each clip. Without intervals, `outputFormat` is required to convert the whole source. |
+| `media_clip` | Cuts, converts or extracts audio. Uses `workspacePath`, optional ordered `segments` and conditional `outputFormat`. Copies compatible streams without quality loss; encodes incompatible streams with automatic quality profiles. Without intervals, `outputFormat` is required. |
 | `media_clip_get_task` | Returns the complete workflow with native FFmpeg progress and clips in creation.data. |
 | `media_clip_cancel_task` | Cancels cutting/conversion and preserves clips already published. |
 | `media_capture_frame` | Starts extraction of frames from a Workspace video or selected YouTube format/ranges, up to `limits.mediaCaptureFrameMaxFrames`. |

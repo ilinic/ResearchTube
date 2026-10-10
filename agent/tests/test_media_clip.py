@@ -187,6 +187,30 @@ class MediaClipTests(unittest.TestCase):
         )
         self.assertEqual(suffix, " 37.5%")
 
+    def test_cancel_compatibility_check_kills_child_and_removes_header(self) -> None:
+        class WaitingProcess:
+            returncode = None
+            killed = False
+            async def communicate(self):
+                if not self.killed:
+                    raise asyncio.CancelledError
+                return b"", b""
+            def kill(self):
+                self.killed, self.returncode = True, -9
+        process, headers = WaitingProcess(), []
+        async def create_process(*command, **_kwargs):
+            header = Path(command[-1])
+            header.write_bytes(b"private probe header")
+            headers.append(header)
+            return process
+        async def exercise():
+            with patch.object(agent.asyncio, "create_subprocess_exec", side_effect=create_process):
+                with self.assertRaises(asyncio.CancelledError):
+                    await agent.media_clip_can_copy_stream(Path("source.mp4"), {"index": 1}, "ipod", "ffmpeg")
+        asyncio.run(exercise())
+        self.assertTrue(process.killed)
+        self.assertFalse(headers[0].parent.exists())
+
 
 @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "real FFmpeg/ffprobe unavailable")
 class MediaConversionIntegrationTests(unittest.IsolatedAsyncioTestCase):
@@ -228,7 +252,7 @@ class MediaConversionIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 clip = result["clips"][0]
                 self.assertEqual(clip["outputKind"], "audio")
                 self.assertIsNone(clip["selectedVideoStreamIndex"])
-                self.assertTrue(clip["reencoded"])
+                self.assertEqual(clip["reencoded"], output_format not in {"m4a", "aac"})
                 streams, duration = await agent.media_clip_probe_file(agent.WORKSPACE_PATH / clip["workspacePath"], self.ffprobe)
                 self.assertEqual({stream["codec_type"] for stream in streams}, {"audio"})
                 self.assertAlmostEqual(duration, 3, delta=0.2)
@@ -242,7 +266,10 @@ class MediaConversionIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 for clip in result["clips"]:
                     self.assertTrue(clip["hasAudio"])
                     self.assertEqual(clip["format"], output_format)
-                    self.assertAlmostEqual(clip["durationSeconds"], 0.8, delta=0.2)
+                    if clip["reencoded"]:
+                        self.assertAlmostEqual(clip["durationSeconds"], 0.8, delta=0.2)
+                    else:
+                        self.assertGreaterEqual(clip["durationSeconds"], 0.7)
 
     async def test_audio_only_source_in_video_container_and_explicit_encoding(self) -> None:
         first = await self.convert({"path": "source.mp4", "outputFormat": "wav"})
@@ -280,6 +307,86 @@ class MediaConversionIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result["clips"], [])
             self.assertNotIn(self.temp.name, str(result))
         self.assertFalse(any(path.name.startswith(".") for path in (agent.WORKSPACE_PATH / "clips").iterdir()))
+
+    def packet_hashes(self, path: Path, selector: str) -> list[str]:
+        import json
+        document = json.loads(subprocess.check_output([
+            self.ffprobe, "-v", "error", "-select_streams", selector, "-show_packets",
+            "-show_data_hash", "sha256", "-of", "json", str(path),
+        ]))
+        return [packet["data_hash"] for packet in document["packets"]]
+
+    def decoded_audio(self, path: Path, codec: str = "pcm_f32le", fmt: str = "f32le") -> bytes:
+        return subprocess.check_output([self.ffmpeg, "-v", "error", "-i", str(path), "-map", "0:a:0",
+                                        "-c:a", codec, "-f", fmt, "pipe:1"])
+
+    def decoded_frames(self, path: Path) -> list[str]:
+        output = subprocess.check_output([self.ffmpeg, "-v", "error", "-i", str(path), "-map", "0:v:0",
+                                          "-f", "framehash", "pipe:1"]).decode()
+        return [line.rsplit(",", 1)[-1].strip() for line in output.splitlines() if not line.startswith("#")]
+
+    async def test_aac_and_opus_extraction_preserves_every_encoded_packet(self) -> None:
+        result = await self.convert({"path": "source.mp4", "outputFormat": "m4a"})
+        self.assertEqual(result["status"], "completed", result.get("error"))
+        self.assertFalse(result["clips"][0]["reencoded"])
+        self.assertEqual(self.packet_hashes(self.source, "a"),
+                         self.packet_hashes(agent.WORKSPACE_PATH / result["clips"][0]["workspacePath"], "a"))
+        webm = await self.convert({"path": "source.mp4", "outputFormat": "webm"})
+        webm_path = webm["clips"][0]["workspacePath"]
+        result = await self.convert({"path": webm_path, "outputFormat": "opus"})
+        self.assertEqual(result["status"], "completed", result.get("error"))
+        self.assertFalse(result["clips"][0]["reencoded"])
+        self.assertEqual(self.packet_hashes(agent.WORKSPACE_PATH / webm_path, "a"),
+                         self.packet_hashes(agent.WORKSPACE_PATH / result["clips"][0]["workspacePath"], "a"))
+
+    async def test_lossless_video_encoding_copies_compatible_audio(self) -> None:
+        result = await self.convert({"path": "source.mp4", "outputFormat": "mp4", "videoCodec": "libx264"})
+        self.assertEqual(result["status"], "completed", result.get("error"))
+        output = agent.WORKSPACE_PATH / result["clips"][0]["workspacePath"]
+        self.assertTrue(result["clips"][0]["reencoded"])
+        streams, _ = await agent.media_clip_probe_file(output, self.ffprobe)
+        self.assertEqual([stream["codec_name"] for stream in streams], ["h264", "aac"])
+        self.assertEqual(self.decoded_frames(self.source), self.decoded_frames(output))
+        self.assertEqual(self.packet_hashes(self.source, "a"), self.packet_hashes(output, "a"))
+        webm = await self.convert({"path": "source.mp4", "outputFormat": "webm"})
+        self.assertEqual(webm["status"], "completed", webm.get("error"))
+        self.assertEqual(self.decoded_frames(self.source),
+                         self.decoded_frames(agent.WORKSPACE_PATH / webm["clips"][0]["workspacePath"]))
+
+    async def test_pcm_conversion_preserves_float_and_integer_precision(self) -> None:
+        result = await self.convert({"path": "source.mp4", "outputFormat": "wav"})
+        self.assertEqual(result["status"], "completed", result.get("error"))
+        output = agent.WORKSPACE_PATH / result["clips"][0]["workspacePath"]
+        streams, _ = await agent.media_clip_probe_file(output, self.ffprobe)
+        self.assertEqual(streams[0]["codec_name"], "pcm_f32le")
+        self.assertEqual(self.decoded_audio(self.source), self.decoded_audio(output))
+        source = agent.WORKSPACE_PATH / "high-depth.wav"
+        subprocess.run([self.ffmpeg, "-v", "error", "-f", "lavfi", "-i", "sine=frequency=731:sample_rate=48000",
+                        "-t", "1", "-c:a", "pcm_s32le", str(source)], check=True)
+        result = await self.convert({"path": source.name, "outputFormat": "flac"})
+        self.assertEqual(result["status"], "completed", result.get("error"))
+        self.assertEqual(self.decoded_audio(source, "pcm_s32le", "s32le"),
+                         self.decoded_audio(agent.WORKSPACE_PATH / result["clips"][0]["workspacePath"], "pcm_s32le", "s32le"))
+
+    async def test_explicit_bitrate_overrides_quality_and_encodes_only_selected_stream(self) -> None:
+        result = await self.convert({"path": "source.mp4", "outputFormat": "m4a", "audioBitrate": "192k"})
+        self.assertEqual(result["status"], "completed", result.get("error"))
+        self.assertTrue(result["clips"][0]["reencoded"])
+        self.assertNotEqual(self.packet_hashes(self.source, "a"),
+                            self.packet_hashes(agent.WORKSPACE_PATH / result["clips"][0]["workspacePath"], "a"))
+        result = await self.convert({"path": "source.mp4", "outputFormat": "mp3", "audioBitrate": "192k"})
+        self.assertEqual(result["status"], "completed", result.get("error"))
+        streams, _ = await agent.media_clip_probe_file(agent.WORKSPACE_PATH / result["clips"][0]["workspacePath"], self.ffprobe)
+        self.assertEqual(int(streams[0]["bit_rate"]), 192000)
+
+    async def test_raw_audio_formats_have_the_requested_codec(self) -> None:
+        for fmt in ("mp2", "ac3", "eac3", "aac"):
+            with self.subTest(format=fmt):
+                result = await self.convert({"path": "source.mp4", "outputFormat": fmt})
+                self.assertEqual(result["status"], "completed", result.get("error"))
+                streams, _ = await agent.media_clip_probe_file(agent.WORKSPACE_PATH / result["clips"][0]["workspacePath"], self.ffprobe)
+                self.assertEqual(streams[0]["codec_name"], fmt)
+                self.assertEqual(result["clips"][0]["reencoded"], fmt != "aac")
 
 
 if __name__ == "__main__":

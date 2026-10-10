@@ -84,7 +84,7 @@ Call `media_clip` with:
 }
 ```
 
-Poll `media_task_status`. Report actual FFmpeg progress and confirm two independent output files in caller order. Show the first video clip only after completion. Explain that specifying outputFormat cuts and converts with precise boundaries; omitting it with segments keeps the source format without transcoding and can align video boundaries to keyframes.
+Poll `media_task_status`. Report actual FFmpeg progress and confirm two independent output files in caller order. Show the first video clip only after completion. Explain that compatible streams are copied without quality loss, and incompatible streams use automatic codec-specific quality profiles. Copied video can align to keyframes with or without outputFormat. Specify videoCodec only when precise video cuts require re-encoding.
 
 ### 6. Extract complete audio
 
