@@ -64,6 +64,8 @@ async function loadAgentStatus(port) {
 }
 let activeYouTubeVideoTab = null;
 async function load() {
+  $("extension-status").textContent = version(chrome.runtime.getManifest().version);
+  $("extension-status").className = "good";
   $("agent-status").textContent = "Checking…";
   $("chrome-automation-status").textContent = "Checking…";
   // Local popup state and actions render independently of Agent availability.
@@ -77,8 +79,6 @@ async function load() {
   const state = await statePromise;
   const youtubeSearch = state.youtubeSearch;
   const searchLimited = Boolean(youtubeSearch?.rateLimited);
-  $("extension-status").textContent = version(state.extensionVersion);
-  $("extension-status").className = "good";
   if (connectionRevision === connectionReadRevision) renderConnectionStatus(state);
   $("youtube-status").textContent = searchLimited ? `Search paused — retry in ${youtubeSearch.retryAfterSeconds}s` : "Ready";
   $("youtube-status").className = searchLimited ? "warn" : "good";

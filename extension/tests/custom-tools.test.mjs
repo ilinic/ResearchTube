@@ -24,7 +24,7 @@ console.log('Custom Tools: manifest package, sync/async examples and MCP lifecyc
 const event={addListener(){}};
 const worker=vm.createContext({URL,Intl,TextEncoder,TextDecoder,AbortController,crypto:webcrypto,setTimeout,clearTimeout,
   console:{info(){},warn(){},error(){}},
-  chrome:{runtime:{id:'extension',getURL:p=>p,onInstalled:event,onStartup:event,onMessage:event},alarms:{onAlarm:event},
+  chrome:{runtime:{ getManifest: () => ({ version: "9.8.7" }),id:'extension',getURL:p=>p,onInstalled:event,onStartup:event,onMessage:event},alarms:{onAlarm:event},
     storage:{local:{get:async()=>({}),set:async()=>{}}}}});
 vm.runInContext(fs.readFileSync(path.join(root,'extension/dist/background.js'),'utf8'),worker);
 const packageTool=(name,packageId,groupTitle,execution='sync')=>({name,title:name,description:'Example.',inputSchema:{type:'object'},

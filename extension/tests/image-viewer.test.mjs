@@ -616,8 +616,12 @@ for (const mediaKind of ['video','audio']) {
 
 let workerMessage;
 const worker = vm.createContext({ URL, console, setTimeout, clearTimeout, crypto: webcrypto,
-  chrome: { runtime: { onInstalled: { addListener() {} }, onStartup: { addListener() {} }, onMessage: { addListener(fn) { workerMessage=fn; } }, getURL: path => path }, alarms: { onAlarm: { addListener() {} } } } });
+  chrome: { runtime: { getManifest: () => ({ version: manifest.version }), onInstalled: { addListener() {} }, onStartup: { addListener() {} }, onMessage: { addListener(fn) { workerMessage=fn; } }, getURL: path => path }, alarms: { onAlarm: { addListener() {} } } } });
 vm.runInContext(bundle, worker);
+assert.equal((await worker.handleMcpRequest({ id: 1, method: "initialize" })).result.serverInfo.version, manifest.version,
+  "MCP initialization uses the installed manifest version");
+assert.equal(worker.agentUnavailableStatus(17843).extensionVersion, manifest.version,
+  "offline Agent status uses the installed manifest version");
 worker.fetch = async (url, options) => {
   assert.equal(url, `ui/capture-frame-widget-v30.html?version=${manifest.version}`);
   assert.equal(options.cache, 'no-store');
@@ -627,8 +631,8 @@ worker.agentJsonRequest = async () => ({ mediaWidgetHandshakeTimeoutSeconds: 7 }
 assert.match(await worker.readCaptureFrameWidgetHtml(), /const IMAGE_HANDSHAKE_TIMEOUT_SECONDS = 7;/);
 worker.agentJsonRequest = async () => ({});
 assert.match(await worker.readCaptureFrameWidgetHtml(), /const IMAGE_HANDSHAKE_TIMEOUT_SECONDS = 10;/);
-worker.fetch = async () => ({ ok: true, text: async () => widgetHtml.replace(`const WIDGET_VERSION = "${manifest.version}";`, 'const WIDGET_VERSION = "2.2.58";') });
-await assert.rejects(worker.readCaptureFrameWidgetHtml(), /widget version differs/);
+worker.fetch = async () => ({ ok: true, text: async () => widgetHtml.replaceAll("__EXTENSION_VERSION__", "2.2.58") });
+await assert.rejects(worker.readCaptureFrameWidgetHtml(), /widget version template is invalid/);
 worker.fetch = async () => ({ ok: true, text: async () => widgetHtml });
 for(const uri of ['ui://researchtube/capture-frame-v51.html','ui://researchtube/capture-frame-v52.html','ui://researchtube/capture-frame-v53.html','ui://researchtube/capture-frame-v54.html','ui://researchtube/capture-frame-v55.html','ui://researchtube/capture-frame-v56.html']) {
   const resource=await worker.readMcpResource(10,uri);

@@ -46,7 +46,7 @@ function worker({ acceptedAt = 0, enabledAt = 0, acknowledgedAfter = 0, busyUnti
   const event = { addListener() {} };
   const context = vm.createContext({ URL, Intl, TextEncoder, TextDecoder, AbortController, crypto: webcrypto, Date: Clock, performance: { now: () => now },
     console: { info: (...args) => logs.push(args) }, setTimeout() {}, clearTimeout() {},
-    chrome: { runtime: { id: 'extension', getURL: path => path, onInstalled: event, onStartup: event, onMessage: event },
+    chrome: { runtime: { getManifest: () => ({ version: "9.8.7" }), id: 'extension', getURL: path => path, onInstalled: event, onStartup: event, onMessage: event },
       alarms: { onAlarm: event }, storage: { local: { get: async () => ({}), set: async () => {} } },
       tabs: { get: async id => { assert.equal(id, 42); if (!tabOpen) throw Error('closed'); return tab; },
         update: async () => { throw Error('Must never activate a tab'); }, query: async () => [tab] }

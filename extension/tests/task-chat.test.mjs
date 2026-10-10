@@ -152,7 +152,7 @@ ack = true;
 
 // Check the shipped worker's public schemas and every asynchronous producer.
 const event = { addListener() {} };
-const chrome = { runtime: { id: "fixture", getURL: p => p, onInstalled: event, onStartup: event, onMessage: event },
+const chrome = { runtime: { getManifest: () => ({ version: "9.8.7" }), id: "fixture", getURL: p => p, onInstalled: event, onStartup: event, onMessage: event },
   tabs: { onRemoved: event, onUpdated: event, onActivated: event }, alarms: { onAlarm: event }, action: {},
   storage: { local: { get: async defaults => defaults, set: async () => {} } } };
 const worker = new Function("chrome", "setTimeout", "clearTimeout", "console", bundle + "\nreturn { publicMcpTools, customToolDefinition, startArtifactTask, mediaToChatTaskSchema };")(

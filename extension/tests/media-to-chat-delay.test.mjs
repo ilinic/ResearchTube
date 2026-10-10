@@ -30,7 +30,7 @@ function worker() {
     setTimeout: (fn, ms) => { const id = ++timerId; timers.set(id, { fn, deadline: now + ms }); return id; },
     clearTimeout: id => timers.delete(id),
     chrome: {
-      runtime: { id: 'extension', getURL: path => path, onInstalled: { addListener() {} }, onStartup: { addListener() {} }, onMessage: { addListener() {} } },
+      runtime: { getManifest: () => ({ version: "9.8.7" }), id: 'extension', getURL: path => path, onInstalled: { addListener() {} }, onStartup: { addListener() {} }, onMessage: { addListener() {} } },
       alarms: { onAlarm: { addListener(fn) { onAlarm = fn; } }, create: async (name, value) => alarms.set(name, value), clear: async name => alarms.delete(name) },
       tabs: { query: async () => [...tabs.values()], get: async id => { if (!tabs.has(id)) throw new Error('closed'); return tabs.get(id); } },
       storage: { local: { get: async () => clone(storage), set: async value => Object.assign(storage, clone(value)) } }

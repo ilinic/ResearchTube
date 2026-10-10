@@ -114,7 +114,7 @@ function ui(script, sendMessage, storage = {}) {
   };
   const context = { document: { getElementById: element, querySelectorAll: () => [], createElement: () => element(Symbol()) },
     console, URL, window: { close() {}, addEventListener() {}, location: { hash: "" } }, setTimeout, navigator: { clipboard: { writeText: async () => {} } },
-    chrome: { tabs: { query: async () => [] }, runtime: { sendMessage, openOptionsPage() {} },
+    chrome: { tabs: { query: async () => [] }, runtime: { getManifest: () => ({ version: "9.8.7" }), sendMessage, openOptionsPage() {} },
       storage: { local: { get: async () => storage }, onChanged: { addListener: listener => { storageListener = listener; } } } } };
   vm.runInNewContext(script, context);
   return { context, element, notify: changes => storageListener(changes, "local") };

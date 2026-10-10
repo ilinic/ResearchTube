@@ -14,7 +14,7 @@ function worker(storage={}) {
  const tabs=new Map([[42,{id:42,url:'https://chatgpt.com/c/origin'}],[81,{id:81,url:'https://chatgpt.com/c/other',active:true}]]);
  const context=vm.createContext({URL,Intl,TextEncoder,TextDecoder,AbortController,crypto:webcrypto,Date:Clock,
   setTimeout:(fn,ms)=>{timers.set(++timerId,{fn,ms});return timerId;},clearTimeout:id=>timers.delete(id),console:{info(){}},
-  chrome:{runtime:{id:'extension',getURL:p=>p,onInstalled:event,onStartup:event,onMessage:event},
+  chrome:{runtime:{ getManifest: () => ({ version: "9.8.7" }),id:'extension',getURL:p=>p,onInstalled:event,onStartup:event,onMessage:event},
     tabs:{query:async query=>{assert.deepEqual(JSON.parse(JSON.stringify(query)),{});return [...tabs.values()];},get:async id=>{if(!tabs.has(id))throw new Error('closed');return tabs.get(id);}},
     alarms:{onAlarm:event,create:async(name,value)=>alarms.set(name,value),clear:async name=>alarms.delete(name)},
     storage:{local:{get:async defaults=>Object.assign({},defaults,storage),set:async values=>Object.assign(storage,JSON.parse(JSON.stringify(values)))}}}
@@ -267,7 +267,7 @@ assert.doesNotMatch(exported,/\[object Object\]|timing Object|\n/);
 const record=JSON.parse(exported.slice(exported.indexOf('{')));
 assert.equal(record.elapsedMs,123.4);assert.equal(record.sinceLaunchMs,500);
 assert.equal(record.stage,'page.axRefresh');assert.equal(record.sessionId,'bas_abcdefghij');
-assert.match(record.extensionVersion,/^2\.2\.\d+$/);
+assert.equal(record.extensionVersion, "9.8.7", "diagnostics report the installed manifest version");
 assert.ok(Number.isFinite(Date.parse(record.atUtc)));
 const sample=w.context.createBrowserDiagnostics({enabled:true,sessionId:'bas_abcdefghij',log:w.context.browserDiagnosticLog,now:()=>10});
 sample.event('export.test',{bytes:8,url:'https://PRIVATE.test/?signature=SECRET',rawResponse:'SECRET'});

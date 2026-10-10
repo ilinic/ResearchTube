@@ -72,7 +72,7 @@ const MCP_TOOL_SETTINGS = Object.freeze({
   library_store_start: { group: "library" }, library_store_status: { group: "library" }, library_store_cancel: { group: "library" }, online_share_start: { group: "online" }, online_share_status: { group: "online" }, online_share_stop: { group: "online" },
   custom_tool_status: { group: "custom" }, custom_tool_cancel: { group: "custom" }
 });
-const EXTENSION_VERSION = "2.2.110";
+const EXTENSION_VERSION = chrome.runtime.getManifest().version;
 // Chrome dispatches this for requests made by our Extension-owned viewer.
 // Packaged assets and unrelated requests fall through without interception.
 globalThis.addEventListener?.("fetch", createMediaStreamHandler({
@@ -6354,10 +6354,13 @@ async function configuredImageWidgetTimeout() {
 async function readCaptureFrameWidgetHtml(uri = CAPTURE_FRAME_WIDGET_URI) {
   const response = await fetch(chrome.runtime.getURL(`ui/capture-frame-widget-v30.html?version=${EXTENSION_VERSION}`), { cache: "no-store" });
   if (!response.ok) throw new Error("The bundled workspace-image widget could not be read.");
-  const html = await response.text();
-  const widgetVersion = html.match(/const WIDGET_VERSION = "([^"]+)";/)?.[1] || "unknown";
+  const template = await response.text();
+  if (!template.includes('const WIDGET_VERSION = "__EXTENSION_VERSION__";') || !template.includes('data-researchtube-media-widget="__EXTENSION_VERSION__"')) {
+    throw new Error("The bundled media widget version template is invalid. Replace the complete Extension folder.");
+  }
+  const html = template.replaceAll("__EXTENSION_VERSION__", EXTENSION_VERSION);
+  const widgetVersion = EXTENSION_VERSION;
   consoleAction(`[ResearchTube media resource] extension=${EXTENSION_VERSION} widget=${widgetVersion} requested=${uri} current=${CAPTURE_FRAME_WIDGET_URI}`);
-  if (widgetVersion !== EXTENSION_VERSION) throw new Error("The bundled media widget version differs from the Extension. Replace the complete Extension folder.");
   const timeout = await configuredImageWidgetTimeout();
   return html.replace("const IMAGE_HANDSHAKE_TIMEOUT_SECONDS = 10;", `const IMAGE_HANDSHAKE_TIMEOUT_SECONDS = ${timeout};`);
 }

@@ -21,7 +21,7 @@ function worker({initialStorage={},initialNow=Date.now()}={}) {
  class Clock extends Date {static now(){return now;}}
  const context=vm.createContext({URL,Intl,TextEncoder,TextDecoder,AbortController,crypto:webcrypto,Date:Clock,setTimeout,clearTimeout,
   console:{info(line){logs.push(line);},warn(){},error(){}},
-  chrome:{runtime:{id:'extension-id',getURL:path=>path,onInstalled:{addListener(){}},onStartup:{addListener(){}},onMessage:{addListener(fn){listener=fn;}}},
+  chrome:{runtime:{ getManifest: () => ({ version: "9.8.7" }),id:'extension-id',getURL:path=>path,onInstalled:{addListener(){}},onStartup:{addListener(){}},onMessage:{addListener(fn){listener=fn;}}},
    alarms:{onAlarm:{addListener(){}},create:async(name,value)=>alarms.set(name,value),clear:async name=>alarms.delete(name)},
    tabs:{query:async query=>{queries.push(query);assert.deepEqual(JSON.parse(JSON.stringify(query)),{},'never query active or last-focused tabs');return [...tabs.values()];},get:async id=>{if(!tabs.has(id))throw new Error('closed');return tabs.get(id);}},
    storage:{local:{get:async()=>storage,set:async value=>Object.assign(storage,value)}}}

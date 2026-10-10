@@ -146,12 +146,7 @@ GitHub Releases have no additional shared version. Their title lists both implem
 
 Change the interface version only for a required compatibility change. A new required Agent endpoint or response contract normally increments it. Documentation-only and Extension-only behavior does not.
 
-When the Extension version changes, update:
-
-- `extension/package.json`;
-- the root package entry in `extension/package-lock.json`;
-- `extension/manifest.json`;
-- `EXTENSION_VERSION` in `extension/background.js`.
+Change the Extension version only in `extension/manifest.json`, then run `npm run build --prefix extension`. The build synchronizes the derived versions in `extension/package.json` and `extension/package-lock.json`. Chrome, the popup and service worker read the installed manifest version; the service worker also inserts it into the media widget template. Do not add hardcoded implementation versions to JavaScript or widget HTML.
 
 When the Agent version changes, update `AGENT_VERSION`. When the interface changes, update both Agent and Extension interface constants in the same change.
 

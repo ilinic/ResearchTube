@@ -14,7 +14,7 @@ const context = vm.createContext({
   URL, Intl, TextEncoder, TextDecoder, AbortController, console: { info() {} },
   setTimeout, clearTimeout,
   chrome: {
-    runtime: { id: 'fixture', getURL: p => p, onInstalled: event, onStartup: event, onMessage: event },
+    runtime: { getManifest: () => ({ version: "9.8.7" }), id: 'fixture', getURL: p => p, onInstalled: event, onStartup: event, onMessage: event },
     tabs: { onRemoved: event, onUpdated: event, onActivated: event },
     alarms: { onAlarm: event }, action: {},
     storage: { local: { get: async defaults => defaults, set: async () => {} } }

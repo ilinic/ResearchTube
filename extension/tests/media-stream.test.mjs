@@ -89,7 +89,7 @@ const bundle = await readFile(new URL('../dist/background.js',import.meta.url),'
 const listeners=new Map();
 const context=vm.createContext({URL,Request,Response,Headers,console,setTimeout,clearTimeout,crypto:webcrypto,
   addEventListener(type,fn){listeners.set(type,fn);},clients:{get:async()=>({url:`${extensionUrl}media-viewer.html`})},
-  chrome:{runtime:{getURL:path=>`${extensionUrl}${path.replace(/^\//,'')}`,onInstalled:{addListener(){}},onStartup:{addListener(){}},onMessage:{addListener(){}}},alarms:{onAlarm:{addListener(){}}}}
+  chrome:{runtime:{ getManifest: () => ({ version: "9.8.7" }),getURL:path=>`${extensionUrl}${path.replace(/^\//,'')}`,onInstalled:{addListener(){}},onStartup:{addListener(){}},onMessage:{addListener(){}}},alarms:{onAlarm:{addListener(){}}}}
 });
 vm.runInContext(bundle,context);
 assert.equal(typeof listeners.get('fetch'),'function');

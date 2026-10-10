@@ -15,7 +15,7 @@ function worker({enabledByName={},defaultEnabled=true,agentError=null}={}) {
  const messages=[];
  const event={addListener(){}};
  const context=vm.createContext({
-  chrome:{runtime:{onInstalled:event,onStartup:event,onMessage:event},alarms:{onAlarm:event},
+  chrome:{runtime:{ getManifest: () => ({ version: "9.8.7" }),onInstalled:event,onStartup:event,onMessage:event},alarms:{onAlarm:event},
    storage:{local:{get:async()=>storage,set:async values=>Object.assign(storage,values)}}},
   console:{info:(message)=>messages.push(message),warn:(message)=>messages.push(message)},
   URL, Intl, TextEncoder, TextDecoder, AbortController, setTimeout, clearTimeout

@@ -2626,7 +2626,7 @@ var MCP_TOOL_SETTINGS = Object.freeze({
   custom_tool_status: { group: "custom" },
   custom_tool_cancel: { group: "custom" }
 });
-var EXTENSION_VERSION = "2.2.110";
+var EXTENSION_VERSION = chrome.runtime.getManifest().version;
 globalThis.addEventListener?.("fetch", createMediaStreamHandler({
   extensionUrl: chrome.runtime.getURL("/"),
   getClient: (id) => globalThis.clients.get(id),
@@ -8939,10 +8939,13 @@ async function configuredImageWidgetTimeout() {
 async function readCaptureFrameWidgetHtml(uri = CAPTURE_FRAME_WIDGET_URI) {
   const response = await fetch(chrome.runtime.getURL(`ui/capture-frame-widget-v30.html?version=${EXTENSION_VERSION}`), { cache: "no-store" });
   if (!response.ok) throw new Error("The bundled workspace-image widget could not be read.");
-  const html = await response.text();
-  const widgetVersion = html.match(/const WIDGET_VERSION = "([^"]+)";/)?.[1] || "unknown";
+  const template = await response.text();
+  if (!template.includes('const WIDGET_VERSION = "__EXTENSION_VERSION__";') || !template.includes('data-researchtube-media-widget="__EXTENSION_VERSION__"')) {
+    throw new Error("The bundled media widget version template is invalid. Replace the complete Extension folder.");
+  }
+  const html = template.replaceAll("__EXTENSION_VERSION__", EXTENSION_VERSION);
+  const widgetVersion = EXTENSION_VERSION;
   consoleAction(`[ResearchTube media resource] extension=${EXTENSION_VERSION} widget=${widgetVersion} requested=${uri} current=${CAPTURE_FRAME_WIDGET_URI}`);
-  if (widgetVersion !== EXTENSION_VERSION) throw new Error("The bundled media widget version differs from the Extension. Replace the complete Extension folder.");
   const timeout = await configuredImageWidgetTimeout();
   return html.replace("const IMAGE_HANDSHAKE_TIMEOUT_SECONDS = 10;", `const IMAGE_HANDSHAKE_TIMEOUT_SECONDS = ${timeout};`);
 }

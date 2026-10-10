@@ -24,7 +24,7 @@ assert.doesNotMatch(html, /Image preview|Base64|Local Agent URL/);
 assert.doesNotMatch(html, /cdp-image-path|Image file path|Attach Image/);
 assert.doesNotMatch(html, /Local tunnel connection/);
 assert.match(script, /function version\(value\)/);
-assert.match(script, /\$\("extension-status"\)\.textContent = version\(state\.extensionVersion\)/);
+assert.match(script, /\$\("extension-status"\)\.textContent = version\(chrome\.runtime\.getManifest\(\)\.version\)/);
 assert.match(script, /Ready · \$\{version\(agent\.agentVersion\)\}/);
 assert.match(script, /function chromeAutomationSummary\(agent\)/);
 assert.match(script, /\$\("chrome-automation-status"\)\.textContent = chromeAutomation\.text/);
@@ -68,6 +68,7 @@ const popupContext = {
     storage: { onChanged: { addListener() {} } },
     tabs: { query: async () => [] },
     runtime: {
+      getManifest: () => ({ version: "9.8.7" }),
       openOptionsPage() {},
       sendMessage: (message) => {
         messages.push(message);
@@ -84,8 +85,9 @@ const popupContext = {
   },
 };
 vm.runInNewContext(script, popupContext);
+assert.equal(element("extension-status").textContent, "v9.8.7", "version renders before worker status resolves");
 await new Promise((resolve) => setImmediate(resolve));
-assert.equal(element("extension-status").textContent, "v2.2.52", "local status renders before Agent responds");
+assert.equal(element("extension-status").textContent, "v9.8.7", "popup uses installed manifest even when worker returns an older version");
 assert.equal(element("tunnel-status-value").textContent, "tunnel_test");
 assert.equal(element("interface-version").textContent, "v73");
 assert.equal(element("agent-status").textContent, "Checking…");
@@ -140,6 +142,7 @@ for (const [url, video] of actionCases) {
       storage: { onChanged: { addListener() {} } },
       tabs: { query: async () => [tab] },
       runtime: {
+        getManifest: () => ({ version: "9.8.7" }),
         openOptionsPage() {},
         sendMessage(message) {
           sent.push(message);
@@ -151,6 +154,7 @@ for (const [url, video] of actionCases) {
   };
   vm.runInNewContext(script, context);
   await new Promise(resolve => setImmediate(resolve));
+  assert.equal(getControl("extension-status").textContent, "v9.8.7", "version is available while worker status is stalled");
   assert.equal(getControl("describe-video").hidden, !video, url);
   assert.equal(getControl("chatgpt").hidden, video, url);
   assert.equal(["describe-video", "chatgpt"].filter(id => !getControl(id).hidden).length, 1, url);
