@@ -26,9 +26,11 @@ ResearchTube turns everyday ChatGPT conversations into hands-on research and med
 
 **Dig into real conversations, not just video summaries.** Explore public YouTube comments and replies, discover recurring opinions, and compare different viewpoints across discussions.
 
-### 🌐 Let ChatGPT investigate real websites
+### 🌐 Explore Websites Behind Your Login
 
-**Study the pages you're already browsing.** ResearchTube's Browser Agent can explore page content, inspect images, and interact with website controls — including pages you can access while signed in to Chrome websites. You stay in control of the browser session.
+**Let ChatGPT investigate pages that ordinary web search cannot access.** ResearchTube can explore websites through your authenticated browser session — including member-only listings, private forums, account dashboards, forms, and other content available only after signing in.
+
+ChatGPT can read text, inspect images, navigate pages, and interact with website controls using your existing browser access. No need to make private content publicly accessible.
 
 ### 🎥 Turn research into videos, images, and audio
 
