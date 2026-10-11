@@ -1,0 +1,30 @@
+import assert from "node:assert/strict";
+import { createTabAutomationQueue, createDebuggerLeases } from "../tab-automation.js";
+const turn = () => new Promise(resolve => setImmediate(resolve));
+const queue = createTabAutomationQueue(), events = [];
+let release;
+const first = queue.run(1, async () => { events.push("first"); await new Promise(resolve => { release = resolve; }); events.push("end"); });
+const second = queue.run(1, () => events.push("second"));
+const other = queue.run(2, () => events.push("other"));
+await turn(); await other;
+assert.deepEqual(events, ["first", "other"]);
+release(); await Promise.all([first, second]); assert.deepEqual(events, ["first", "other", "end", "second"]);
+await assert.rejects(queue.run(1, () => { throw Error("failed"); }));
+assert.equal(await queue.run(1, () => 42), 42);
+
+let attaches = 0, detaches = 0, finishDetach;
+const leases = createDebuggerLeases({ attach: async () => { attaches++; }, detach: async () => {
+  detaches++; if (detaches === 1) await new Promise(resolve => { finishDetach = resolve; });
+} });
+await Promise.all([leases.attach(1), leases.attach(1)]); assert.equal(attaches, 1);
+await leases.detach(1); assert.equal(detaches, 0, "borrower cannot detach a retained page");
+const disconnect = leases.detach(1); await turn();
+const reconnect = leases.attach(1); await turn(); assert.equal(attaches, 1, "reattach waits for native detach");
+finishDetach(); await Promise.all([disconnect, reconnect]); assert.equal(attaches, 2);
+await leases.detach(1); assert.equal(detaches, 2); assert.equal(leases.has(1), false);
+await leases.attach(2); leases.lost(2); await leases.detach(2); assert.equal(detaches, 2);
+await leases.attach(2); assert.equal(attaches, 4);
+let fail = true;
+const recovering = createDebuggerLeases({ attach: async () => { if (fail) throw Error("denied"); }, detach: async () => {} });
+await assert.rejects(recovering.attach(3)); fail = false; await recovering.attach(3); await recovering.detach(3);
+console.log("Tab automation: per-tab ordering, cross-tab parallelism, failed queue recovery, shared debugger leases and detach/reattach races: ok");

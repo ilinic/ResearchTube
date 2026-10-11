@@ -27,7 +27,7 @@ npm ci --prefix extension
 | ChatGPT media overlay | `extension/chatgpt-image-viewer-bridge.js`, `extension/chatgpt-capture-frame-bridge.js`, `extension/media-viewer.html`, `extension/media-viewer.js`, `extension/media-stream.js` |
 | ChatGPT Composer inspection and upload editing guard | `extension/chat-composer.js` |
 | Settings and popup | `extension/settings.*`, `extension/popup.*` |
-| Browser Agent contracts and page operations | `extension/browser-tools.js`, `extension/browser-agent.js`, `extension/browser-page.js`, `extension/browser-observation-options.js` |
+| Browser Agent contracts and page operations | `extension/browser-tools.js`, `extension/browser-agent.js`, `extension/browser-groups.js`, `extension/tab-automation.js`, `extension/browser-page.js`, `extension/browser-observation-options.js` |
 | Artifact workflow/public contracts | `extension/artifact-tasks.js`, `extension/artifact-tools.js` |
 | Custom Tools | `agent/custom_tools.py`, package manifests/implementations under `agent/custom-tools/` |
 | Local Agent | `agent/researchtube_agent.py` |
@@ -232,7 +232,7 @@ Configuration example (all settings use this layout):
 
 ### Browser Agent changes
 
-Keep page JS fixed and Extension-owned; never add a public eval/source-string parameter. Preserve AX hierarchy and deferred text access. Keep all physical tabs and authenticated resource URLs private, validate current page versions, and refuse alternate-tab fallbacks. Popup sessions and resource continuations do not use media widgets to identify their destination. Run `extension/tests/browser-agent.test.mjs` and `agent/tests/test_browser_resources.py` with the normal suite; then verify actual Chrome/ChatGPT behavior separately. See [Browser Agent](features/BROWSER_AGENT.md).
+Keep page JS fixed and Extension-owned; never add a public eval/source-string parameter. Preserve AX hierarchy and deferred text access. Expose explicit participant tab IDs and safe page addresses, keep CDP handles/authenticated resource URLs private, validate live group membership and tab/document references, and refuse alternate-tab fallbacks. Popup sessions and resource continuations do not use media widgets to identify their destination. Run `extension/tests/browser-agent.test.mjs`, `extension/tests/browser-resource-groups.test.mjs`, `extension/tests/tab-automation.test.mjs` and `agent/tests/test_browser_resources.py` with the normal suite; then verify actual Chrome/ChatGPT behavior separately. See [Browser Agent](features/BROWSER_AGENT.md).
 
 Run `extension/tests/browser-visible-images.test.mjs` for fixed DOM discovery of empty-alt images and CSS backgrounds, visibility/clipping, ignored or absent AX backing, stable IDs, resource replacement, bounded pagination and navigation during discovery. Preserve semantic roles and avoid duplicate images when AX already includes the element.
 
@@ -240,7 +240,7 @@ Run `extension/tests/browser-page-updates.test.mjs` for full first reads, actual
 
 ## Browser Agent timing diagnostics
 
-Keep optional timing instrumentation behind `extension/browser-diagnostics.js` and `browserStudyDetailedLogging` in the single Agent config. Use `trace.span`/`begin` around waits/work and `trace.command` for CDP aggregates; emit only allowlisted counts, IDs, stage names and durations. Never log tool arguments, page contents, request URLs, exception messages or CDP bodies. Logger failures must not alter automation. Timing spans can overlap; gaps between tool calls are not pure model inference time. Tests exercise disabled/enabled logging, unchanged public results and target tabs, aggregation, failure transparency and private-data exclusion.
+Keep optional timing instrumentation behind `extension/browser-diagnostics.js` and `browserStudyDetailedLogging` in the single Agent config. Use `trace.span`/`begin` around waits/work and `trace.command` for CDP aggregates; emit only allowlisted counts, group/tab/task IDs, stage names and durations. Never log tool arguments, page contents, request URLs, exception messages or CDP bodies. Logger failures must not alter automation. Timing spans can overlap; gaps between tool calls are not pure model inference time. Tests exercise disabled/enabled logging, unchanged public results and target tabs, aggregation, failure transparency and private-data exclusion.
 
 ## Shared Composer media retry policy
 

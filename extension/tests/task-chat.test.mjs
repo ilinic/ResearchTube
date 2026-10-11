@@ -103,6 +103,11 @@ install(5, inspect);
 count = 2; interval(); time += 5000; interval(); await flush(); assert.equal(messages, 5, "configured timeout is used");
 pageWindow.__researchtubeComposerWatchdog.dispose(); assert.equal(pageWindow.__researchtubeComposerWatchdog, undefined);
 
+install(1, inspect, true);
+const beforeReadOnly = messages; time += 5000; interval(); await flush();
+assert.equal(messages, beforeReadOnly, "group readiness monitor does not auto-send user drafts");
+pageWindow.__researchtubeComposerWatchdog.dispose();
+
 // Shared sender: append without replacement, idle only, UI acknowledgement,
 // exact tab selection, active upload ownership and uncertain-click suppression.
 let state, submitted, committed, suppressed, inserted;
@@ -118,6 +123,7 @@ let ack = true, url = "https://chatgpt.com/c/test";
 const sendComposer = new Function("deps", "with(deps) { return (" + senderSource + "); }")({
   withChatFileAutomation: work => work(),
   chrome: { tabs: { get: async id => { assert.equal(id, 42); return { id, url }; } } },
+  chatConversationPath: value => new URL(value).pathname,
   startComposerWatchdog: async () => {}, readWatchedComposer: async () => ({ ...state }),
   ensureMediaToChatLoaded: async () => {},
   mediaToChatTasks: mediaTasks, composerAutoSendTimeout: async () => 20,
@@ -135,6 +141,15 @@ assert.equal(inserted, "done"); assert.equal(suppressed, 1);
 reset(); state.text = "existing draft"; state.attachments = 2;
 assert.equal((await sendComposer(42, { completionText: "done" })).sent, true);
 assert.equal(inserted, "\n\ndone");
+reset(); state.text = "user draft";
+assert.equal((await sendComposer(42, { completionText: "group changed", requireEmpty: true })).reason, "userDraft");
+assert.equal(inserted, ""); assert.equal(committed, false);
+reset();
+assert.equal((await sendComposer(42, { completionText: "group changed", requireEmpty: true, chatPath: "/c/other" })).reason, "BROWSER_CHAT_CHANGED");
+assert.equal(inserted, "");
+reset();
+assert.equal((await sendComposer(42, { completionText: "group changed", requireEmpty: true, beforeSend: async () => { throw Object.assign(Error("obsolete"), { code: "BROWSER_NOTIFICATION_OBSOLETE" }); } })).sent, false);
+assert.equal(inserted, "");
 reset(); state.idle = false;
 assert.equal((await sendComposer(42, { completionText: "done" })).sent, false); assert.equal(inserted, "");
 reset(); state.text = "editing"; state.stableMs = 19000;
@@ -161,12 +176,19 @@ const worker = new Function("chrome", "setTimeout", "clearTimeout", "console", b
 const tools = worker.publicMcpTools();
 const launchNames = ["youtube_download", "youtube_storyboard_download", "media_capture_frame", "visual_map_create", "media_clip",
  "camera_record_video", "camera_record_audio", "system_speech_speak", "media_capture_screen", "media_image_crop", "camera_capture_frame",
- "clipboard_get", "media_to_chat", "library_store_start", "timer_start", "site_get_images", "site_get_files"];
+ "clipboard_get", "media_to_chat", "library_store_start", "timer_start"];
 for (const name of launchNames) {
  const tool = tools.find(t => t.name === name);
  assert.ok(tool, name); assert.equal(tool.inputSchema.properties.tabId.type, "integer", name);
  assert.ok(!(tool.inputSchema.required || []).includes("tabId"), name + " optional context");
  assert.ok(tool.description.length <= 600, name);
+}
+for (const name of ["site_get_images", "site_get_files", "site_send_message"]) {
+ const tool = tools.find(t => t.name === name);
+ assert.ok(tool.inputSchema.required.includes("chatTabId"));
+ assert.ok(tool.inputSchema.required.includes("tabId"));
+ assert.ok(tool.outputSchema.properties.chatTabId);
+ assert.ok(!tool.inputSchema.properties.sessionId);
 }
 assert.ok(worker.mediaToChatTaskSchema.properties.tabId, "nested artifact chat schema permits context");
 const custom = worker.customToolDefinition({ name: "custom_test", title: "Test", description: "Test",

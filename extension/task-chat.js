@@ -1,7 +1,7 @@
 import { resolveChatComposer } from "./chat-composer.js";
 
 // Optional chat context lives on task records; no task-ID/tab-ID routing table.
-export const taskTabSchema = { type: "integer", minimum: 0, description: "Optional ChatGPT tabId from the startup prompt. On completion notify this tab only if idle; omit for no wake-up." };
+export const taskTabSchema = { type: "integer", minimum: 0, description: "Optional ChatGPT tabId from the startup prompt (use chatTabId in a Study this site prompt). On completion notify this tab only if idle; omit for no wake-up." };
 export function normalizeTaskTabId(value) {
   if (value === undefined || value === null) return null;
   if (!Number.isSafeInteger(value) || value < 0) throw Object.assign(new Error("tabId must be a nonnegative integer."), { code: "INVALID_ARGUMENT" });
@@ -87,11 +87,11 @@ export function createTaskCompletionDelivery(host) {
 
 // Installed only in a ChatGPT tab explicitly used by ResearchTube. Readiness
 // uses the shared Composer resolver/inspection; messages never log draft text.
-export function installComposerWatchdog(seconds, inspect) {
+export function installComposerWatchdog(seconds, inspect, readOnly = false) {
   const previous = window.__researchtubeComposerWatchdog;
-  if (previous) { previous.seconds = seconds; return previous.read(); }
+  if (previous) { previous.seconds = seconds; if (!readOnly) previous.autoSend = true; return previous.read(); }
   let key = null, changedAt = performance.now(), revision = 0, suppressed = false, requesting = false, holds = 0;
-  const state = { seconds };
+  const state = { seconds, autoSend: !readOnly };
   function read() {
     const { composer, root } = resolveChatComposer();
     const inspected = inspect();
@@ -111,6 +111,7 @@ export function installComposerWatchdog(seconds, inspect) {
   state.release = preserve => { holds = Math.max(0, holds - 1); if (preserve) suppressed = true; };
   state.suppress = () => { suppressed = true; };
   const sample = () => {
+    if (!state.autoSend) return;
     const value = read();
     if (requesting || value.blocked || !value.found || !value.idle || !value.sendEnabled || !value.text.trim() && !value.attachments || value.stableMs < state.seconds * 1000) return;
     requesting = true;

@@ -42,26 +42,28 @@ function worker(storage={}) {
 const w=worker(),definitions=w.context.publicMcpTools();
 for(const name of BROWSER_TOOL_NAMES) {
  const tool=definitions.find(t=>t.name===name);assert.ok(tool,'generated bundle must expose '+name);
- assert.equal(tool.inputSchema.additionalProperties,false);assert.ok(tool.inputSchema.required.includes('sessionId'));
+ assert.equal(tool.inputSchema.additionalProperties,false);assert.ok(tool.inputSchema.required.includes('chatTabId'));
  assert.equal(w.context.toolSettingsMetadata(name).group,'browser');
 }
 const browserCalls=[];
 w.context.browserAgent.execute=async(name,args)=>{browserCalls.push({name,args});return {mockBrowserResult:true};};
-const browserRouted=await w.call('site_session_status',{sessionId:'bas_abcdefghij'});
+const browserRouted=await w.call('site_session_status',{chatTabId:22});
 assert.equal(browserRouted.result.structuredContent.mockBrowserResult,true);assert.equal(browserCalls[0].name,'site_session_status');
-assert.equal((await w.call('site_session_status',{sessionId:'bas_abcdefghij',tabId:81})).result.isError,false,'extra browser arguments are rejected before routing');
+assert.equal((await w.call('site_session_status',{chatTabId:22,tabId:81})).result.isError,false,'extra browser arguments are rejected before routing');
 assert.equal(browserCalls.length,1);
 
 // The complete renamed public catalog dispatches through the shipped worker.
-assert.equal(BROWSER_TOOL_NAMES.length,11);
+assert.equal(BROWSER_TOOL_NAMES.length,13);
 assert.ok(definitions.every(tool=>!tool.name.startsWith('browser_')));
 for(const name of BROWSER_TOOL_NAMES) {
  const properties=definitions.find(tool=>tool.name===name).inputSchema.properties;
- const args={sessionId:'bas_abcdefghij'};
- if(properties.nodeId) args.nodeId='n_1_1';
+ const args={chatTabId:22};
+ if(properties.tabId) args.tabId=21;
+ if(properties.text) args.text='Hello';
+ if(properties.nodeId) args.nodeId='n_21_1_1';
  if(properties.taskId) args.taskId='tsk_abcdefghij';
  if(properties.action) args.action='click';
- if(properties.resourceId) args.resourceId='r_1_1';
+ if(properties.resourceId) args.resourceId='r_21_1_1';
  const response=await w.call(name,args);
  assert.equal(response.result.structuredContent.mockBrowserResult,true,name+' MCP route');
  assert.equal(browserCalls.at(-1).name,name);
@@ -230,23 +232,23 @@ badgeCalls.length=0;w.context.cameraRecordingBadgeKind=null;w.context.browserAut
 await w.context.paintBrowserAutomationBadge(42);assert.equal(badgeCalls.find(([k])=>k==='text')[1].text,null,'Stop restores the global toolbar badge');
 console.log('Browser toolbar: tab-specific AUTO, recording priority and Stop reset: ok');
 
-// The grouping config is optional for old/offline Agents; invalid values fail.
+// The old grouping flag is ignored; group membership is required.
 for(const value of [true,false]) {
  w.context.agentJsonRequest=async()=>({browserStudyGroupTabs:value});
- assert.deepEqual(JSON.parse(JSON.stringify(await w.context.configuredBrowserStudyOptions())), { groupTabs: value, detailedLogging: true, observation: { maxNodes: 200, maxChars: 48000 } });
+ assert.deepEqual(JSON.parse(JSON.stringify(await w.context.configuredBrowserStudyOptions())), { detailedLogging: true, observation: { maxNodes: 200, maxChars: 48000 } });
 }
-w.context.agentJsonRequest=async()=>({});assert.deepEqual(JSON.parse(JSON.stringify(await w.context.configuredBrowserStudyOptions())), { groupTabs: true, detailedLogging: true, observation: { maxNodes: 200, maxChars: 48000 } });
+w.context.agentJsonRequest=async()=>({});assert.deepEqual(JSON.parse(JSON.stringify(await w.context.configuredBrowserStudyOptions())), { detailedLogging: true, observation: { maxNodes: 200, maxChars: 48000 } });
 w.context.agentJsonRequest=async()=>{throw Object.assign(Error('offline'),{code:'AGENT_UNAVAILABLE'});};
-assert.deepEqual(JSON.parse(JSON.stringify(await w.context.configuredBrowserStudyOptions())), { groupTabs: true, detailedLogging: true, observation: { maxNodes: 200, maxChars: 48000 } });
+assert.deepEqual(JSON.parse(JSON.stringify(await w.context.configuredBrowserStudyOptions())), { detailedLogging: true, observation: { maxNodes: 200, maxChars: 48000 } });
 for(const value of [null,1,'false']) {
  w.context.agentJsonRequest=async()=>({browserStudyGroupTabs:value});
- await assert.rejects(w.context.configuredBrowserStudyOptions(),e=>e.code==='AGENT_INVALID_RESPONSE');
+ assert.deepEqual(JSON.parse(JSON.stringify(await w.context.configuredBrowserStudyOptions())), { detailedLogging: true, observation: { maxNodes: 200, maxChars: 48000 } });
 }
-console.log('Browser grouping setting: live boolean, default and offline compatibility: ok');
+console.log('Browser grouping: legacy flag ignored and offline compatibility: ok');
 
 for (const detailedLogging of [true, false]) {
  w.context.agentJsonRequest=async()=>({browserStudyGroupTabs:false,browserStudyDetailedLogging:detailedLogging});
- assert.deepEqual(JSON.parse(JSON.stringify(await w.context.configuredBrowserStudyOptions())),{groupTabs:false,detailedLogging,observation:{maxNodes:200,maxChars:48000}});
+ assert.deepEqual(JSON.parse(JSON.stringify(await w.context.configuredBrowserStudyOptions())),{detailedLogging,observation:{maxNodes:200,maxChars:48000}});
 }
 for (const value of [null, 1, "false"]) {
  w.context.agentJsonRequest=async()=>({browserStudyDetailedLogging:value});
@@ -258,7 +260,7 @@ console.log('Browser detailed logging setting: live boolean, strict validation a
 // A DevTools-style text export must retain measurements without expanding objects.
 const consoleCalls=[];
 w.context.console.info=(...args)=>consoleCalls.push(args);
-w.context.browserDiagnosticLog('timing',{sessionId:'bas_abcdefghij',stage:'page.axRefresh',event:'end',elapsedMs:123.4,sinceLaunchMs:500});
+w.context.browserDiagnosticLog('timing',{groupId:7,stage:'page.axRefresh',event:'end',elapsedMs:123.4,sinceLaunchMs:500});
 assert.equal(consoleCalls.length,1);
 assert.equal(consoleCalls[0].length,1,'a complete record is passed as a single string');
 const exported=consoleCalls[0].map(String).join(' ');
@@ -266,10 +268,10 @@ assert.match(exported, /^\[\d{4}-\d{2}-\d{2}T[\d:.]+Z\] \[ResearchTube Browser\]
 assert.doesNotMatch(exported,/\[object Object\]|timing Object|\n/);
 const record=JSON.parse(exported.slice(exported.indexOf('{')));
 assert.equal(record.elapsedMs,123.4);assert.equal(record.sinceLaunchMs,500);
-assert.equal(record.stage,'page.axRefresh');assert.equal(record.sessionId,'bas_abcdefghij');
+assert.equal(record.stage,'page.axRefresh');assert.equal(record.groupId,7);
 assert.equal(record.extensionVersion, "9.8.7", "diagnostics report the installed manifest version");
 assert.ok(Number.isFinite(Date.parse(record.atUtc)));
-const sample=w.context.createBrowserDiagnostics({enabled:true,sessionId:'bas_abcdefghij',log:w.context.browserDiagnosticLog,now:()=>10});
+const sample=w.context.createBrowserDiagnostics({enabled:true,groupId:7,log:w.context.browserDiagnosticLog,now:()=>10});
 sample.event('export.test',{bytes:8,url:'https://PRIVATE.test/?signature=SECRET',rawResponse:'SECRET'});
 assert.doesNotMatch(consoleCalls.at(-1)[0],/PRIVATE|SECRET|signature|rawResponse/);
 const diagnosticLogCount=consoleCalls.length;

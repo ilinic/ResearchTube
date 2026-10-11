@@ -47,9 +47,9 @@ shadowHost.css.opacity = "1";
 // Exercise the actual fixed functions through a mock CDP remote-object boundary.
 const ax = (nodeId, role, name, children, backend, ignored = false) => ({ nodeId, role: { value: role }, name: { value: name }, childIds: children, backendDOMNodeId: backend, ignored });
 const nodes = [ax("root", "RootWebArea", "Page", ["photo", "button"], 100), ax("photo", "none", "", [], 102, true), ax("button", "button", "Open", [], 104)];
-const session = { sessionId: "bas_abcdefghij", agentTabId: 1, pageVersion: 1, revision: 1, childSessions: new Map(), title: "Page", url: d.doc.baseURI, observation: { maxNodes: 200, maxChars: 48000 } };
+const session = { agentTabId: 1, pageVersion: 1, revision: 1, childSessions: new Map(), title: "Page", url: d.doc.baseURI, observation: { maxNodes: 200, maxChars: 48000 } };
 const commands = []; let onDescribe;
-const host = { check: async () => {}, command: async (_tab, method, params) => {
+const host = { context: () => ({ chatTabId: 22, group: { groupId: 7, revision: 1, state: "running", totalTabs: 0, nextOffset: null, tabs: [], error: null } }), check: async () => {}, command: async (_tab, method, params) => {
   commands.push({ method, params });
   if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "main" } } };
   if (method === "Accessibility.getFullAXTree") return { nodes: structuredClone(nodes) };

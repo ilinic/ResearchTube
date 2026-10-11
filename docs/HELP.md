@@ -127,12 +127,12 @@ Browse [MCP Tools](MCP_TOOLS.md) for plain-language descriptions of every tool, 
 | Read text aloud | `system_speech_*`: Google Translate by default or Windows voices; speakers, saved file, or both. |
 | Manage/share files | `workspace_*`, `media_to_chat`, `library_store_*`, `online_share_*`. Sending/sharing is deliberate, not automatic for every saved file. |
 | Timers | `timer_start/status/cancel` for real durations or deadlines. |
-| Study a website | **Study this site** in the popup; `site_*` tools operate its dedicated session. |
+| Study a website | **Study this site** in the popup; `site_*` tools operate the sites and ChatGPT participants in its tab group. |
 | Custom Tools | Trusted Python packages; bundled **Count Words Example** and **Wait Asynchronous Task Example** demonstrate sync/task execution. |
 
 Use logical Workspace paths such as `downloads/example.mp4`, never your physical disk path. Long operations return a task ID and progress; ChatGPT should check the matching status tool no faster than its `pollIntervalMs`. Cancellation preserves completed files and cannot undo a message already sent. Creation normally saves files; `media_show` displays them and supported `addToChat:true` requests attachment/Send. See [artifact tasks](features/ARTIFACT_TASKS.md).
 
-On a YouTube video or Short, the popup offers **Describe this video**. On other pages it offers **Study this site**, opening a controlled copy and a dedicated chat. Keep both session tabs open. Closing either stops the session; closing the original source tab does not. Text/tree data alone is not visual input: selected images must be downloaded and attached using `site_get_images`; other observed downloadable items use `site_get_files`. Empty-alt images and CSS backgrounds can be discovered when visible in the controlled page's viewport. Scroll and read again when needed. See [Browser Agent](features/BROWSER_AGENT.md).
+On a YouTube video or Short, the popup offers **Describe this video**. Elsewhere **Study this site** opens a page copy and one chat in a tab group. Add more sites or ChatGPT tabs to that group to work together. Closing one participant stops only its work. The original source is unaffected. ChatGPT discovers participants with **List group tabs**, reads peer chats and can send them messages. The prompt supplies the initiating chat ID; no session token is needed. Group changes are reported in tool results or by a queued message when chat is free; drafts are preserved. Selected images must be downloaded/attached with `site_get_images` for visual analysis; use `site_get_files` for other observed files. Empty-alt images and CSS backgrounds can be discovered when visible; scroll and read again when needed. Refresh the ResearchTube MCP catalog after upgrading. See [Browser Agent](features/BROWSER_AGENT.md).
 
 ## Common problems: start here
 

@@ -6,7 +6,7 @@ import { assertSchema } from "./fixtures/schema-check.mjs";
 
 const ax = (nodeId, role, name, children = [], backend = Number(nodeId) + 100) => ({ nodeId, role: { value: role }, name: { value: name }, childIds: children, backendDOMNodeId: backend });
 function fixture(observation) {
-  const session = { sessionId: "bas_abcdefghij", agentTabId: 1, pageVersion: 1, revision: 1, url: "https://site.test/page?secret=PRIVATE", title: "Page", childSessions: new Map(), observation };
+  const session = { agentTabId: 1, pageVersion: 1, revision: 1, url: "https://site.test/page?secret=PRIVATE", title: "Page", childSessions: new Map(), observation };
   const trees = new Map([
     ["main", [ax("1", "RootWebArea", "Page", ["2", "3", "4"]), ax("2", "button", "Expand"), ax("3", "image", "Photo"), ax("4", "heading", "Article", ["5"]), ax("5", "paragraph", "", ["6"]), ax("6", "paragraph", "", ["7"]), ax("7", "StaticText", "Useful article text")]],
     ["ad", [ax("20", "RootWebArea", "Ad", ["21"]), ax("21", "image", "Advertisement")]]
@@ -14,7 +14,7 @@ function fixture(observation) {
   const urls = new Map([[103, "https://private.test/photo.jpg?signed=PRIVATE"], [121, "https://private.test/ad.jpg?token=PRIVATE"]]);
   const commands = [];
   let withFrame = false, action = null, duringRead = null, failRead = false;
-  const host = { check: async () => {}, command: async (tab, method, params, targetSessionId) => {
+  const host = { context: () => ({ chatTabId: 22, group: { groupId: 7, revision: 1, state: "running", totalTabs: 0, nextOffset: null, tabs: [], error: null } }), check: async () => {}, command: async (tab, method, params, targetSessionId) => {
     commands.push({ method, params });
     if (method === "Page.getFrameTree") return targetSessionId ? { frameTree: { frame: { id: "ad", parentId: "main" } } } : { frameTree: { frame: { id: "main" }, childFrames: withFrame ? [{ frame: { id: "ad", parentId: "main" } }] : [] } };
     if (method === "Accessibility.getFullAXTree") {

@@ -49,21 +49,23 @@ Find and organize files in ResearchTube's local working folder.
 
 ## Browser Agent
 
-Use **Study this site** in the extension popup to let ChatGPT explore a page through your browser, including content behind your login. It can read text, inspect images and interact with the page in that study session.
+Study websites together in a Chrome tab group. Add sites or ChatGPT conversations to the group; participants can read pages, inspect images and exchange messages. Each tab works independently, so closing one does not end everyone else's research.
 
 | Tool | What you can do |
 | --- | --- |
-| **Cancel site file task** | Stop an ongoing website download or pending delivery to chat, keeping files already saved. |
-| **Site file task status** | Follow website downloads and see which files have been saved or sent to chat. |
-| **Get site node children** | Explore the items inside a page section, such as a list, menu or form. |
-| **Get site documents, audio and video** | Download documents, audio or video found on the page, and optionally send them to the study chat. |
-| **Get site images** | Download selected page images so ChatGPT can inspect them, or save them locally. |
-| **Inspect site node** | Examine a particular page element and discover its details or associated images and files. |
-| **Read site node text** | Read the text of a selected section in more detail. |
-| **Interact with site element** | Click controls, fill ordinary text fields, select options, hover, scroll and navigate the page. |
-| **Read site page** | Read the page's content and structure, and discover available images and files. |
-| **Site session status** | Check whether the website study session is active and which page it is studying. |
-| **Stop site session** | End website automation while leaving the tabs and saved files in place. |
+| **Cancel site task** | Stop a website download or pending message, keeping saved files and drafts. |
+| **Site task status** | Follow file downloads and messages and see confirmed results. |
+| **Get site node children** | Explore items inside a page section, list, menu or form. |
+| **Get site documents, audio and video** | Download files found on a page and optionally send them to the requesting chat. |
+| **Get site images** | Download selected images for ChatGPT to inspect, or save them locally. |
+| **Inspect site node** | Examine an element and discover details, images or files. |
+| **Read site node text** | Read a selected section in more detail. |
+| **Interact with site element** | Click, type, select, hover or scroll in a group site or peer chat. |
+| **List group tabs** | Discover all participating sites and ChatGPT conversations. |
+| **Read site page** | Read a site's or peer chat's accessible content and discover available files. |
+| **Send message to group chat** | Ask another ChatGPT participant to research, compare or review results. |
+| **Group automation status** | Check the group's participants and current automation state. |
+| **Stop group automation** | End group automation while leaving tabs, files and drafts in place. |
 
 ## Media and images
 

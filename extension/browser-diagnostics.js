@@ -1,8 +1,8 @@
 // All optional Browser Agent performance logging lives behind this boundary.
 // Never log CDP parameters/results, page text, URLs, prompts or file paths.
-const DETAIL_KEYS = new Set(["sessionId", "taskId", "stage", "event", "spanId", "method", "outcome", "code", "elapsedMs", "sinceLaunchMs", "gapMs", "count", "frameCount", "rawNodes", "indexedNodes", "returnedNodes", "totalNodes", "characters", "bytes", "extraction", "mode", "enabled", "addedNodes", "updatedNodes", "removedNodes", "addedResources", "removedResources", "point", "tabId", "windowId", "tabStatus", "active", "windowFocused", "visibilityState", "hidden", "hasFocus", "readyState", "tabState", "cdpState"]);
+const DETAIL_KEYS = new Set(["groupId", "taskId", "stage", "event", "spanId", "method", "outcome", "code", "elapsedMs", "sinceLaunchMs", "gapMs", "count", "frameCount", "rawNodes", "indexedNodes", "returnedNodes", "totalNodes", "characters", "bytes", "extraction", "mode", "enabled", "addedNodes", "updatedNodes", "removedNodes", "addedResources", "removedResources", "point", "tabId", "windowId", "tabStatus", "active", "windowFocused", "visibilityState", "hidden", "hasFocus", "readyState", "tabState", "cdpState"]);
 const round = value => Math.round(Math.max(0, value) * 10) / 10;
-export function createBrowserDiagnostics({ enabled = false, sessionId, log = () => {}, now = () => performance.now() } = {}) {
+export function createBrowserDiagnostics({ enabled = false, groupId, log = () => {}, now = () => performance.now() } = {}) {
   const launched = enabled ? now() : 0;
   const methods = new Map();
   let sequence = 0;
@@ -12,7 +12,7 @@ export function createBrowserDiagnostics({ enabled = false, sessionId, log = () 
     for (const [key, value] of Object.entries(details)) {
       if (DETAIL_KEYS.has(key) && (typeof value === "boolean" || typeof value === "number" && Number.isFinite(value) || typeof value === "string" && value.length <= 100)) safe[key] = value;
     }
-    try { log("timing", { sessionId, stage, sinceLaunchMs: round(now() - launched), ...safe }); } catch { /* Diagnostics never affect automation. */ }
+    try { log("timing", { groupId, stage, sinceLaunchMs: round(now() - launched), ...safe }); } catch { /* Diagnostics never affect automation. */ }
   };
   const begin = (stage, details = {}) => {
     if (!enabled) return () => {};

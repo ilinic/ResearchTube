@@ -71,7 +71,7 @@
   },
   "browserStudyGroupTabs": {
     "value": true,
-    "comment": "Group the two new Study this site tabs (site copy and dedicated ChatGPT conversation). Default true; false leaves them ungrouped. Uses a short RT · page title, or hostname when untitled. The source tab is untouched. Read on each new study session; groups already created are unchanged."
+    "comment": "Legacy preference for older Extensions. Extension 2.4 and later always group new study tabs because the group defines automation participants. The source tab is untouched."
   },
   "browserStudyMaxNodes": {
     "value": 200,

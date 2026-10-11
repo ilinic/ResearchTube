@@ -199,25 +199,25 @@ The original Workspace files are unchanged. A restarted Extension worker marks q
 
 ## Browser Agent
 
-Start **Study this site** from the Extension popup. The two new tabs are grouped by default (`browserStudyGroupTabs` in Agent configuration); the source tab remains outside the new group. Closing either new tab ends the session normally, with `state: stopped`, `error: null` and `stopReason: TAB_CLOSED`. The popup has no session controls. The new dedicated chat receives its `sessionId` (`bas_` plus ten random URL-safe characters); every browser call requires it. Startup binds the saved conversation address, after ChatGPT replaces its temporary local address. AX/DOM data describes the page; visible empty-alt images and URL-based CSS backgrounds also receive image resource references, even when AX omits them. Only real attachments provide model visual input. See [Browser Agent](features/BROWSER_AGENT.md) for sessions, frame handling, limits and resource fallbacks.
+Start **Study this site** from the popup. It groups a new page copy and one ChatGPT tab, leaving the source in place. The prompt supplies only the task/language and `chatTabId`. Every site tool takes that initiating `chatTabId`; page tools also take a target `tabId` discovered from the group. Multiple sites and ChatGPT participants can work together. Closing/leaving one participant cancels only its work. Chrome is the live source of membership; no public session ID or stored group session is used. See [Browser Agent](features/BROWSER_AGENT.md).
 
-| Tool | Purpose |
+| Tool | Behavior |
 | --- | --- |
-| `site_read` | Bounded full-depth content by default, resource references, hierarchy and added/updated/removed IDs; optional outline/subtree and pagination. |
-| `site_get_children` | Expand a selected node's current children with depth and pagination. |
-| `site_get_node` | Inspect AX details, safe DOM attributes/geometry and resource references. |
-| `site_get_text` | Read deferred AX subtree text with offset/limit. |
-| `site_interact` | Click, hover, replace editable text, key, scroll or select in the exact agent tab. |
-| `site_get_images` | Download observed images only, save in `study-this-site/`, and by default attach/send one batch to the dedicated chat. Screenshots are labelled fallbacks; `addToChat:false` saves only. |
-| `site_get_files` | Download observed documents, audio or video only. Asynchronously extract one `resourceId` or an ordered `resourceIds` batch, save files in `study-this-site/` named `res_… [tsk_…].ext`, and by default attach/send the entire batch in the dedicated chat. `addToChat:false` saves only. |
-| `site_files_status` | Read extraction, save and delivery progress plus confirmed outputs. |
-| `site_files_cancel` | Cancel before Send commits without deleting files or Composer attachments. |
-| `site_session_status` | Read session state and safe current page metadata. |
-| `site_session_stop` | Stop work, release debugger and clear the automation indicator; tabs remain open. |
+| `site_list_tabs` | Discover current sites/ChatGPT participants, titles, safe URLs, IDs and state; paginate large groups with offset/limit. |
+| `site_read` | Bounded full-depth AX/DOM content and resource references from the exact target; optional outline/subtree and pagination. |
+| `site_get_children` | Expand current children with depth and pagination. |
+| `site_get_node` | Inspect AX details, safe DOM geometry and resource references. |
+| `site_get_text` | Read deferred subtree text with offset/limit. |
+| `site_interact` | Click, hover, type, key, scroll or select in an exact group site or peer ChatGPT tab. |
+| `site_get_images` | Download observed images from the target tab and optionally attach/send an ordered batch to the initiating chat; labelled screenshot fallbacks. |
+| `site_get_files` | Download observed documents/audio/video from the target and optionally attach/send one batch to the initiating chat. |
+| `site_send_message` | Asynchronously send text to a selected group ChatGPT participant, waiting for an idle, empty Composer; drafts remain. |
+| `site_files_status` | Read file/message task progress, saved files and confirmed submission. |
+| `site_files_cancel` | Cancel file/message work before Send commits, preserving outputs and drafts. |
+| `site_session_status` | Read current group participants and automation state using chatTabId, without a session token. |
+| `site_session_stop` | Cancel group work, release automation and preserve tabs/files/drafts. |
 
-Browser resource tasks use their own status/cancel pair rather than `media_task_status`. They are created from a browser resource reference, not a Workspace source path. Source URLs and browser handles are private. Browser tasks/session state are Extension-memory records; they are not resumed after a restart. Pause and Resume are not public session controls; use Stop to end automation while keeping the tabs open, or close either session tab.
-
-`site_get_images` and `site_get_files` accept only resource IDs already observed in the supplied session, with no arbitrary source URL or destination-chat parameter. Both save new Workspace files without overwriting. The session fixes the source page and delivery conversation. Their default `addToChat:true` performs attachment and Send there; `false` saves only. MCP metadata explicitly describes both persistence and optional delivery, and retains state-changing/open-world annotations. Images and non-images cannot be mixed in a call: a wrong observed kind rejects the entire batch before a task is created. Downloaded bytes are checked again before saving. Both tools use `site_files_status` and `site_files_cancel`.
+Node/resource references are specific to their tab and document. Navigation invalidates affected references. File tools accept exactly one observed resource ID or an ordered batch from the selected tab; no arbitrary resource URL or destination-chat argument. Images and non-images cannot be mixed. Byte kinds are rechecked before saving. `addToChat:true` (default) delivers to the initiating chat; false saves only. Page/task responses include current group metadata. Unacknowledged group changes produce a queued idle-chat notification. Group discovery survives worker recreation; in-memory tasks/history do not resume. Refresh the MCP catalog after upgrading; old sessionId arguments are rejected.
 
 Shared Composer file delivery uses `composerMediaRetryCount.value` (15) and `composerMediaRetryIntervalSeconds.value` (2) in Agent configuration: one immediate check plus up to 15 repeats at two-second intervals. These apply to `media_to_chat`, artifact `addToChat`, Browser Agent resources, startup prompts and Library transfers. Active ChatGPT generation retains its separate bounded wait. After files are accepted, an enabled Send may be dispatched repeatedly while the original guarded payload remains and submission has not been acknowledged. Attempts alternate the owning form's `requestSubmit` and trusted CDP pointer input; without a usable form they use pointer input. A new user turn, started response, saved startup conversation or empty Composer confirms submission and ends attempts immediately. Disabled Send is never clicked. Files are supplied once, never reattached during Send retries. An unconfirmed timeout preserves the Composer and saved files. See [Composer delivery retries](features/BROWSER_AGENT.md#composer-delivery-retries).
 

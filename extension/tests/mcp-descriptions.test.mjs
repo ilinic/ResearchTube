@@ -46,14 +46,14 @@ for (const name of ['site_get_images', 'site_get_files']) {
   const tool = byName(name);
   assert.ok(tool.description.length <= 400, name + ' stays concise');
   assert.match(tool.description, /study-this-site.*without overwriting/);
-  assert.match(tool.description, /addToChat=true \(default\).*attaches.*sends a continuation.*session's chat; false saves only/);
+  assert.match(tool.description, /addToChat=true \(default\).*attaches.*sends a continuation.*initiating chat; false saves only/);
   assert.match(tool.description, /asynchronous task.*site_files_status.*site_files_cancel/);
   assert.deepEqual(tool.annotations, { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true });
   assert.equal(tool.inputSchema.properties.addToChat.default, true);
   assert.match(tool.inputSchema.properties.addToChat.description, /save Workspace files only.*no chat attachment or message/);
-  assert.match(tool.inputSchema.properties.resourceId.description, /observed in this session.*URLs are not accepted/);
-  assert.match(tool.inputSchema.properties.resourceIds.description, /same session/);
-  assert.match(tool.inputSchema.properties.sessionId.description, /source page and dedicated ChatGPT conversation/);
+  assert.match(tool.inputSchema.properties.resourceId.description, /observed in this exact tab.*URLs are not accepted/);
+  assert.match(tool.inputSchema.properties.resourceIds.description, /same target tab/);
+  assert.match(tool.inputSchema.properties.chatTabId.description, /Your ChatGPT chatTabId/);
   assert.ok(!Object.hasOwn(tool.inputSchema.properties, 'url'));
   assert.ok(!Object.hasOwn(tool.inputSchema.properties, 'chatId'));
 }

@@ -83,6 +83,7 @@ export function createBrowserPage(session, host) {
   let reported = { version: null, nodes: new Map(), resources: new Set() };
   const command = (method, params = {}, target = {}) => host.command(session.agentTabId, method, params, target.sessionId);
   const metadata = () => ({ pageVersion: session.pageVersion, revision: session.revision, title: (session.title || "").slice(0, 500), url: safePageUrl(session.url) });
+  const context = () => ({ tabId: session.agentTabId, ...host.context?.() });
   function pruneReferences() {
     for (const [key, id] of identifiers) if (!index.has(id)) identifiers.delete(key);
     for (const [id, item] of resources) if (!index.get(item.entry.id)?.resources.some(resource => resource.resourceId === id)) resources.delete(id);
@@ -139,7 +140,7 @@ export function createBrowserPage(session, host) {
       const media = await discoverVisualImages(target, response.nodes || []);
       if (!liveTarget(target)) continue;
       const keyOf = axId => `${target.sessionId || "root"}:${target.frameId}:${axId}`;
-      const identify = axId => { const key = keyOf(axId), oldId = identifiers.get(key), oldEntry = index.get(oldId), current = raw.get(axId); if (!oldId || !oldEntry || oldEntry.backendNodeId !== current.backendDOMNodeId || nodeSignature(oldEntry.raw) !== nodeSignature(current)) identifiers.set(key, `n_${version}_${++counter}`); return identifiers.get(key); };
+      const identify = axId => { const key = keyOf(axId), oldId = identifiers.get(key), oldEntry = index.get(oldId), current = raw.get(axId); if (!oldId || !oldEntry || oldEntry.backendNodeId !== current.backendDOMNodeId || nodeSignature(oldEntry.raw) !== nodeSignature(current)) identifiers.set(key, `n_${session.agentTabId}_${version}_${++counter}`); return identifiers.get(key); };
       const visiting = new Set();
       const walk = (axId, parentId) => {
         if (visiting.has(axId)) return [];
@@ -166,7 +167,7 @@ export function createBrowserPage(session, host) {
         if (represented.has(backendNodeId)) continue;
         const key = keyOf(`dom-image:${backendNodeId}`);
         const oldId = identifiers.get(key);
-        const id = oldId && index.has(oldId) ? oldId : `n_${version}_${++counter}`;
+        const id = oldId && index.has(oldId) ? oldId : `n_${session.agentTabId}_${version}_${++counter}`;
         identifiers.set(key, id);
         const rawNode = { role: { value: "image" }, name: { value: "" } };
         next.set(id, { id, parentId: parent?.id || null, childIds: [], raw: rawNode, role: "image", name: "", description: "", text: "", value: null, target, backendNodeId, visualMedia: true, domOnly: true, resources: index.get(id)?.resources || [] });
@@ -208,7 +209,7 @@ export function createBrowserPage(session, host) {
   }
   async function requireNode(id, requireDom = true) {
     await host.check(session, false);
-    if (!String(id).startsWith(`n_${session.pageVersion}_`) || indexedVersion !== session.pageVersion) throw browserError("PAGE_CHANGED", "This node belongs to an earlier page. Observe the current page first.");
+    if (!String(id).startsWith(`n_${session.agentTabId}_${session.pageVersion}_`) || indexedVersion !== session.pageVersion) throw browserError("PAGE_CHANGED", "This node belongs to an earlier page. Observe the current page first.");
     const entry = index.get(id);
     if (!entry) throw browserError("STALE_NODE", "This browser node is no longer in the live tree. Re-observe its parent.");
     if (!entry.backendNodeId && !requireDom) return entry;
@@ -241,7 +242,7 @@ export function createBrowserPage(session, host) {
     const previous = entry.resources.map(item => item.resourceId);
     entry.resources = list.map(item => {
       const key = `${entry.id}:${item.kind}:${item.url || item.rendering || "element"}`;
-      if (!resourceKeys.has(key)) resourceKeys.set(key, `r_${session.pageVersion}_${++resourceCounter}`);
+      if (!resourceKeys.has(key)) resourceKeys.set(key, `r_${session.agentTabId}_${session.pageVersion}_${++resourceCounter}`);
       const resourceId = resourceKeys.get(key);
       resources.set(resourceId, { ...item, resourceId, entry, pageVersion: session.pageVersion });
       return { resourceId, kind: item.kind, label: entry.name.slice(0, 200) || `${item.kind} resource` };
@@ -307,7 +308,7 @@ export function createBrowserPage(session, host) {
     }
     if (entries.length > offset && !nodes.length) throw browserError("BROWSER_INVALID", "The observation character budget is too small for the selected node structure. Increase browserStudyMaxChars or maxChars.");
     const nextOffset = offset + nodes.length < entries.length ? offset + nodes.length : null;
-    return { sessionId: session.sessionId, page: metadata(), roots: roots.slice(0, limits.maxNodes), nodes, truncated: nextOffset !== null, nextOffset, totalNodes: entries.length, changes };
+    return { ...context(), page: metadata(), roots: roots.slice(0, limits.maxNodes), nodes, truncated: nextOffset !== null, nextOffset, totalNodes: entries.length, changes };
   }
   async function observe(input = {}) {
     if (input.nodeId) await requireNode(input.nodeId, false);
@@ -330,7 +331,7 @@ export function createBrowserPage(session, host) {
     finish?.({ outcome: "ok", returnedNodes: result.nodes.length, totalNodes: entries.length, characters: JSON.stringify(result.nodes).length });
     return result;
   }
-  async function getNode(id) { const entry = await requireNode(id, false); const dom = await enrich(entry); return { sessionId: session.sessionId, page: metadata(), node: project(entry, 2000), dom }; }
+  async function getNode(id) { const entry = await requireNode(id, false); const dom = await enrich(entry); return { ...context(), page: metadata(), node: project(entry, 2000), dom }; }
   async function getText(id, offset = 0, limit = 12000) {
     await requireNode(id, false); await refresh();
     const entry = index.get(id); if (!entry) throw browserError("STALE_NODE", "The requested text node was removed.");
@@ -338,7 +339,7 @@ export function createBrowserPage(session, host) {
     const walk = current => { if (!current || protectedNode(current.raw)) return; if (current.role === "StaticText") parts.push(current.name); else { if (current.value) parts.push(current.value); if (!current.childIds.length && current.name) parts.push(current.name); } for (const child of current.childIds) walk(index.get(child)); };
     walk(entry);
     const text = parts.join("\n");
-    return { sessionId: session.sessionId, page: metadata(), nodeId: id, text: text.slice(offset, offset + limit), totalCharacters: text.length, nextOffset: offset + limit < text.length ? offset + limit : null };
+    return { ...context(), page: metadata(), nodeId: id, text: text.slice(offset, offset + limit), totalCharacters: text.length, nextOffset: offset + limit < text.length ? offset + limit : null };
   }
   async function point(entry) {
     await command("DOM.scrollIntoViewIfNeeded", { backendNodeId: entry.backendNodeId }, entry.target);
@@ -412,16 +413,16 @@ export function createBrowserPage(session, host) {
       const delta = difference(reported);
       const observation = serialize(delta.entries, {}, delta.changes);
       reported = delta.current;
-      return { sessionId: session.sessionId, action: input.action, page: metadata(), observeAgain: session.observedRevision !== session.revision || observation.truncated || delta.changes.truncated, observation, observationError: null };
+      return { ...context(), action: input.action, page: metadata(), observeAgain: session.observedRevision !== session.revision || observation.truncated || delta.changes.truncated, observation, observationError: null };
     } catch (error) {
       // Input has already been dispatched. A loading/context failure must not
       // present the action as failed and invite a duplicate click or submission.
-      return { sessionId: session.sessionId, action: input.action, page: metadata(), observeAgain: true, observation: null, observationError: { code: error.code || "BROWSER_UNAVAILABLE", message: "The action was dispatched, but its page update is not readable yet. Observe again; do not repeat the action solely for this read failure." } };
+      return { ...context(), action: input.action, page: metadata(), observeAgain: true, observation: null, observationError: { code: error.code || "BROWSER_UNAVAILABLE", message: "The action was dispatched, but its page update is not readable yet. Observe again; do not repeat the action solely for this read failure." } };
     }
   }
   function getResource(id) {
     const item = resources.get(id);
-    if (!String(id).startsWith(`r_${session.pageVersion}_`) || item && item.pageVersion !== session.pageVersion) throw browserError("PAGE_CHANGED", "The resource belongs to an earlier page. Observe the current page and select a new resource.");
+    if (!String(id).startsWith(`r_${session.agentTabId}_${session.pageVersion}_`) || item && item.pageVersion !== session.pageVersion) throw browserError("PAGE_CHANGED", "The resource belongs to an earlier page. Observe the current page and select a new resource.");
     if (!item) throw browserError("BROWSER_RESOURCE_NOT_FOUND", "Observe or inspect the resource node before requesting it.");
     return item;
   }

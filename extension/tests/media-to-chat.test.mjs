@@ -1,3 +1,4 @@
+import { createTabAutomationQueue } from "../tab-automation.js";
 import { waitForComposerMedia } from "../composer-media-retry.js";
 import { pruneCompletedTasks } from "../task-history.js";
 import assert from "node:assert/strict";
@@ -33,6 +34,7 @@ let resetInputs = 0;
 const telemetry = [];
 const commands = [];
 const context = vm.createContext({
+  tabAutomationQueue: createTabAutomationQueue(),
   waitForComposerMedia,
   normalizeTaskTabId: value => value ?? null,
   startComposerWatchdog: async () => {},

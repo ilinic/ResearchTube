@@ -3,7 +3,7 @@ import { createBrowserDiagnostics } from "../browser-diagnostics.js";
 
 let clock = 0;
 const logs = [];
-const trace = createBrowserDiagnostics({ enabled: true, sessionId: "bas_abcdefghij", now: () => clock, log: (label, value) => logs.push({ label, ...value }) });
+const trace = createBrowserDiagnostics({ enabled: true, groupId: 7, now: () => clock, log: (label, value) => logs.push({ label, ...value }) });
 const finish = trace.begin("page.read");
 clock = 15;
 const payload = { url: "https://private.test/?signed=SECRET", text: "PRIVATE PAGE", bytes: new Uint8Array([1, 2]) };
