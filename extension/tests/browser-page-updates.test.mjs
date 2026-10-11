@@ -38,7 +38,7 @@ function fixture(observation) {
   const page = createBrowserPage(session, host);
   const read = async args => { const result = await page.observe(args); assertSchema(browserToolDefinitions().find(tool => tool.name === "site_read").outputSchema, result); return result; };
   const click = async nodeId => { const result = await page.act({ action: "click", nodeId }); assertSchema(browserToolDefinitions().find(tool => tool.name === "site_interact").outputSchema, result); return result; };
-  return { session, page, trees, urls, commands, read, click, frame: () => { withFrame = true; }, onAction: fn => { action = fn; }, onRead: fn => { duringRead = fn; }, failRead: () => { failRead = true; } };
+  return { session, page, host, trees, urls, commands, read, click, frame: () => { withFrame = true; }, onAction: fn => { action = fn; }, onRead: fn => { duringRead = fn; }, failRead: () => { failRead = true; } };
 }
 
 // One bounded first call reaches real content below outline depth, with live
@@ -172,3 +172,51 @@ const withoutDetached=await detached.read();
 assert.ok(withoutDetached.nodes.some(node=>node.name==="Photo"));
 assert.ok(!withoutDetached.nodes.some(node=>node.name==="Advertisement"));
 console.log("Browser detached targets: first-read response cannot resurrect removed iframe entries: ok");
+
+// Protected descendants are metadata only: never ask CDP for their AX/DOM.
+const restricted=fixture();restricted.frame();
+const restrictedCommand=restricted.host.command;
+restricted.host.command=async(tab,method,params,target)=>{
+ const result=await restrictedCommand(tab,method,params,target);
+ if(method==='Page.getFrameTree'&&!target){
+  result.frameTree.frame.url='https://forum.test/discussion';
+  result.frameTree.childFrames.push({frame:{id:'extension',parentId:'main',url:'chrome-extension://OTHER/private.html'},childFrames:[{frame:{id:'nested',parentId:'extension',url:'https://private.test/nested'}}]});
+ }
+ return result;
+};
+const restrictedRead=await restricted.read();
+assert.ok(restrictedRead.nodes.some(node=>node.name==='Useful article text'));
+assert.ok(restrictedRead.nodes.some(node=>node.name==='Advertisement'),'ordinary cross-origin child frames remain readable');
+assert.equal(restrictedRead.page.omittedFrameCount,2);
+assert.ok(!restricted.commands.some(command=>['extension','nested'].includes(command.params.frameId)));
+assert.doesNotMatch(JSON.stringify(restrictedRead),/chrome-extension|OTHER|private\.test/);
+
+// AX in the main document survives a refused or hung child's visual supplement.
+for(const stalled of [false,true]){
+ const isolated=fixture();isolated.frame();isolated.host.frameTimeoutMs=10;
+ const command=isolated.host.command;
+ isolated.host.command=async(tab,method,params,target)=>{
+  if(method==='DOM.resolveNode'&&params.backendNodeId>=120){
+   if(stalled)return new Promise(()=>{});
+   throw Error('Cannot access a chrome-extension:// URL of different extension');
+  }
+  return command(tab,method,params,target);
+ };
+ const partial=await isolated.read();
+ assert.ok(partial.nodes.some(node=>node.name==='Useful article text'));
+ assert.ok(partial.nodes.some(node=>node.name==='Advertisement'));
+ assert.equal(partial.page.imageDiscoveryIncomplete,true);
+}
+const failedChild=fixture();failedChild.frame();
+const childCommand=failedChild.host.command;
+failedChild.host.command=(tab,method,params,target)=>{
+ if(method==='Accessibility.getFullAXTree'&&params.frameId==='ad')throw Error('Cannot access a chrome-extension:// URL of different extension');
+ return childCommand(tab,method,params,target);
+};
+const surviving=await failedChild.read();assert.ok(surviving.nodes.some(node=>node.name==='Useful article text'));assert.equal(surviving.page.omittedFrameCount,1);
+// Root failures are not replaced with an empty successful observation.
+const failedRoot=fixture();const rootCommand=failedRoot.host.command;
+failedRoot.host.command=(tab,method,params,target)=>{if(method==='Page.getFrameTree'&&!target)throw Error('blocked');return rootCommand(tab,method,params,target);};
+await assert.rejects(failedRoot.read(),{code:'BROWSER_UNAVAILABLE'});
+const failedMainAx=fixture();failedMainAx.frame();failedMainAx.failRead();await assert.rejects(failedMainAx.read(),{code:'BROWSER_UNAVAILABLE'});
+console.log('Browser inaccessible frames: protected descendants skipped, child AX/DOM failures and timeouts isolated, main-document failures explicit: ok');

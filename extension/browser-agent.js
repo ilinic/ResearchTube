@@ -3,6 +3,7 @@ import { createBrowserPage, inspectBrowserElement } from "./browser-page.js";
 import { pruneCompletedTasks } from "./task-history.js";
 import { createBrowserDiagnostics } from "./browser-diagnostics.js";
 import { createBrowserGroups, isChatTab } from "./browser-groups.js";
+import { browserAttachmentError, isBrowserFrameUrlAllowed, withBrowserFrameTimeout } from "./browser-frame-policy.js";
 import { createTabAutomationQueue } from "./tab-automation.js";
 
 const AUTO_ATTACH = { autoAttach: true, waitForDebuggerOnStart: false, flatten: true, filter: [{ type: "iframe", exclude: false }] };
@@ -170,8 +171,10 @@ export function createBrowserAgent(host) {
     session.title = tab.title || "";
     return tab;
   }
-  async function enableTarget(session, childId = null) {
-    for (const domain of ["Page", "Runtime", "DOM", "Accessibility", "Network"]) await command(session.agentTabId, `${domain}.enable`, {}, childId);
+  async function enableTarget(session, childId = null, checkEnabled = () => {}) {
+    for (const domain of ["Page", "Runtime", "DOM", "Accessibility", "Network"]) {
+      checkEnabled(); await command(session.agentTabId, `${domain}.enable`, {}, childId); checkEnabled();
+    }
     await command(session.agentTabId, "Target.setAutoAttach", AUTO_ATTACH, childId);
     if (!childId) {
       await command(session.agentTabId, "Emulation.setFocusEmulationEnabled", { enabled: true });
@@ -190,7 +193,9 @@ export function createBrowserAgent(host) {
   async function ensureTarget(target, onDocument = null) {
     await check(target);
     if (!target.attached) {
-      await host.attach(target.agentTabId); target.attached = true;
+      try { await host.attach(target.agentTabId); }
+      catch (error) { const failure = browserAttachmentError(error); target.trace.event("target.attachFailed", { tabId: target.agentTabId, code: failure.code }); throw failure; }
+      target.attached = true;
       try { await enableTarget(target); await onDocument?.(); await host.waitReady(target.agentTabId, () => {
         if (target.error || targets.get(target.agentTabId) !== target) throw browserError("BROWSER_CANCELLED", "The target left during initialization.");
       }, target.trace); }
@@ -500,22 +505,47 @@ export function createBrowserAgent(host) {
     return { ...result, chatTabId: input.chatTabId, tabId: input.tabId, group: groups.project(group),
       ...(result.observation ? { observation: { ...result.observation, chatTabId: input.chatTabId, group: groups.project(group) } } : {}) };
   }
+  function discardChildSessions(session, childId) {
+    const removed = new Set([childId]);
+    for (;;) { const size = removed.size; for (const child of session.childSessions.values()) if (removed.has(child.parentSessionId)) removed.add(child.sessionId); if (size === removed.size) break; }
+    for (const id of removed) { session.page.invalidateFrame(null, id); session.childSessions.delete(id); }
+  }
   async function onEvent(source, method, params = {}) {
     const session = targets.get(source.tabId);
     if (!session || session.error || !session.attached) return;
+    if (source.sessionId && !session.childSessions.has(source.sessionId)) return;
     if (method === "Target.attachedToTarget" && params.targetInfo?.type === "iframe") {
-      session.childSessions.set(params.sessionId, { sessionId: params.sessionId, parentSessionId: source.sessionId || null });
-      await enableTarget(session, params.sessionId).catch(() => {}); session.revision += 1;
+      if (!isBrowserFrameUrlAllowed(params.targetInfo.url)) {
+        session.trace.event("target.frameSkipped", { code: "BROWSER_FRAME_RESTRICTED" }); return;
+      }
+      const child = { sessionId: params.sessionId, parentSessionId: source.sessionId || null, targetId: params.targetInfo.targetId, url: params.targetInfo.url, ready: false };
+      session.childSessions.set(params.sessionId, child);
+      try {
+        await withBrowserFrameTimeout(() => enableTarget(session, params.sessionId, () => {
+          if (session.childSessions.get(params.sessionId) !== child || !session.attached || targets.get(session.agentTabId) !== session)
+            throw browserError("BROWSER_FRAME_UNAVAILABLE", "The child frame left during initialization.");
+        }), host.frameTimeoutMs);
+        if (session.childSessions.get(params.sessionId) === child) child.ready = true;
+      } catch (error) {
+        if (session.childSessions.get(params.sessionId) === child) {
+          discardChildSessions(session, params.sessionId);
+        }
+        session.trace.event("target.frameSkipped", { code: error.code || "BROWSER_UNAVAILABLE" });
+      }
+      session.revision += 1;
+    } else if (method === "Target.targetInfoChanged") {
+      for (const child of session.childSessions.values()) if (child.targetId === params.targetInfo?.targetId && !isBrowserFrameUrlAllowed(params.targetInfo.url)) {
+        discardChildSessions(session, child.sessionId); session.revision += 1;
+      }
     } else if (method === "Target.detachedFromTarget") {
-      const removed = new Set([params.sessionId]);
-      for (;;) { const size = removed.size; for (const target of session.childSessions.values()) if (removed.has(target.parentSessionId)) removed.add(target.sessionId); if (size === removed.size) break; }
-      for (const id of removed) { session.page.invalidateFrame(null, id); session.childSessions.delete(id); }
+      discardChildSessions(session, params.sessionId);
       session.revision += 1;
     }
     else if (method === "Page.frameNavigated") {
       if (!source.sessionId && !params.frame?.parentId) { session.mainFrameId = params.frame.id; session.url = params.frame.url; session.pageVersion = nextPageVersion(); session.page.invalidate(); }
       // Keep unrelated main-page and sibling-frame references usable.
       else session.page.invalidateFrame(params.frame?.id, source.sessionId || null);
+      if (source.sessionId && !isBrowserFrameUrlAllowed(params.frame?.url)) discardChildSessions(session, source.sessionId);
       session.revision += 1;
     } else if (method === "Page.frameDetached" && params.reason !== "swap") {
       session.page.invalidateFrame(params.frameId, source.sessionId || null); session.revision += 1;

@@ -194,3 +194,43 @@ assert.equal(Array.from(browserStudyGroupTitle({title:'😀'.repeat(30)})).lengt
 for(const input of [{sessionId:'bas_abcdefghij'},{chatTabId:22,tabId:21,depth:21},{chatTabId:22,tabId:21,mode:'subtree'}])assert.throws(()=>validateBrowserInput('site_read',input),{code:'BROWSER_INVALID'});
 assert.throws(()=>validateBrowserInput('site_send_message',{chatTabId:22,tabId:30,text:' '}),{code:'BROWSER_INVALID'});
 console.log('Browser groups: prompt, strict schemas, exact multiple tabs, peer messages, resource delivery, closure, movement, restart discovery, notifications and cancellation: ok');
+
+// Protected OOP targets never receive domain-enable or tree-read commands.
+const protectedFrame=fixture();await protectedFrame.agent.start(10);
+await protectedFrame.agent.onEvent({tabId:21},'Target.attachedToTarget',{sessionId:'protected',targetInfo:{type:'iframe',targetId:'ext-frame',url:'chrome-extension://OTHER/view.html'}});
+await protectedFrame.run('site_read');
+assert.ok(!protectedFrame.events.some(event=>event[3]==='protected'));
+
+// A child initialization timeout does not block the main page. A late reply
+// cannot continue enabling domains or resurrect that removed child session.
+const slowFrame=fixture();await slowFrame.agent.start(10);slowFrame.host.frameTimeoutMs=10;
+const slowCommand=slowFrame.host.command;let finishDom;
+slowFrame.host.command=(tab,method,params,child)=>{
+ if(child==='slow'&&method==='DOM.enable')return new Promise(resolve=>{finishDom=resolve;});
+ return slowCommand(tab,method,params,child);
+};
+await slowFrame.agent.onEvent({tabId:21},'Target.attachedToTarget',{sessionId:'slow',targetInfo:{type:'iframe',targetId:'slow-frame',url:'https://ads.test/frame'}});
+assert.ok((await slowFrame.run('site_read')).nodes.some(node=>node.role==='heading'));
+finishDom({});await new Promise(resolve=>setImmediate(resolve));
+assert.ok(!slowFrame.events.some(event=>event[3]==='slow'&&['Accessibility.enable','Network.enable','Page.getFrameTree'].includes(event[0])));
+
+// Known root attach refusal has a safe, actionable code; a retry can succeed
+// after the conflicting extension is disabled without losing other group tabs.
+const attachBlocked=fixture();await attachBlocked.agent.start(10);attachBlocked.tabs.set(31,{id:31,url:'https://forum.test/discussion',groupId:100});
+const attach=attachBlocked.host.attach;
+attachBlocked.host.attach=async id=>{if(id===31)throw Error('Cannot access a chrome-extension:// URL of different extension');return attach(id);};
+await assert.rejects(attachBlocked.run('site_read',{tabId:31}),error=>error.code==='BROWSER_DEBUGGER_RESTRICTED'&&/disable/.test(error.message));
+assert.equal((await attachBlocked.run('site_read')).tabId,21);
+attachBlocked.host.attach=attach;assert.equal((await attachBlocked.run('site_read',{tabId:31})).tabId,31);
+console.log('Browser frame attachment: protected frames excluded, child initialization bounded, late replies ignored and root restrictions normalized: ok');
+
+// Ignored parents cannot reintroduce descendants through recursive auto-attach.
+await protectedFrame.agent.onEvent({tabId:21,sessionId:'protected'},'Target.attachedToTarget',{sessionId:'nested-protected',targetInfo:{type:'iframe',targetId:'nested-frame',url:'https://site.test/nested'}});
+assert.ok(!protectedFrame.events.some(event=>event[3]==='nested-protected'));
+const changedFrame=fixture();await changedFrame.agent.start(10);
+await changedFrame.agent.onEvent({tabId:21},'Target.attachedToTarget',{sessionId:'parent',targetInfo:{type:'iframe',targetId:'parent-frame',url:'https://ads.test/parent'}});
+await changedFrame.agent.onEvent({tabId:21,sessionId:'parent'},'Target.attachedToTarget',{sessionId:'nested',targetInfo:{type:'iframe',targetId:'nested-frame',url:'https://ads.test/nested'}});
+await changedFrame.agent.onEvent({tabId:21},'Target.targetInfoChanged',{targetInfo:{targetId:'parent-frame',url:'chrome-extension://OTHER/view.html'}});
+const afterRestricted=changedFrame.events.length;await changedFrame.run('site_read');
+assert.ok(!changedFrame.events.slice(afterRestricted).some(event=>['parent','nested'].includes(event[3])));
+console.log('Browser protected frame changes: ignored parents and retired descendants cannot be rediscovered through child sessions: ok');

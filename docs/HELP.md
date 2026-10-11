@@ -134,6 +134,8 @@ Use logical Workspace paths such as `downloads/example.mp4`, never your physical
 
 On a YouTube video or Short, the popup offers **Describe this video**. Elsewhere **Study this site** opens a page copy and one chat in a tab group. Add more sites or ChatGPT tabs to that group to work together. Closing one participant stops only its work. The original source is unaffected. ChatGPT discovers participants with **List group tabs**, reads peer chats and can send them messages. The prompt supplies the initiating chat ID; no session token is needed. Group changes are reported in tool results or by a queued message when chat is free; drafts are preserved. Selected images must be downloaded/attached with `site_get_images` for visual analysis; use `site_get_files` for other observed files. Empty-alt images and CSS backgrounds can be discovered when visible; scroll and read again when needed. Refresh the ResearchTube MCP catalog after upgrading. See [Browser Agent](features/BROWSER_AGENT.md).
 
+If Study this site reports **BROWSER_DEBUGGER_RESTRICTED**, Chrome refused access because the page embeds another extension’s frame. Temporarily disable the extension injecting that frame for the site, reload and retry. ResearchTube skips inaccessible child frames when the main page connection is available. See [Troubleshooting](TROUBLESHOOTING.md#study-this-site--browser-agent).
+
 ## Common problems: start here
 
 | Symptom | First checks / action |

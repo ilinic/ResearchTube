@@ -1,5 +1,6 @@
 import { browserError } from "./browser-tools.js";
 import { DEFAULT_BROWSER_OBSERVATION } from "./browser-observation-options.js";
+import { isBrowserFrameUrlAllowed, withBrowserFrameTimeout } from "./browser-frame-policy.js";
 
 export function safePageUrl(value) {
   try { const url = new URL(value); return ["https:", "http:"].includes(url.protocol) ? `${url.origin}${url.pathname}` : ""; } catch { return ""; }
@@ -77,12 +78,18 @@ export function createBrowserPage(session, host) {
   let index = new Map(), identifiers = new Map(), resources = new Map(), resourceKeys = new Map();
   let counter = 0, resourceCounter = 0, roots = [];
   let indexedVersion = -1;
+  let omittedFrameCount = 0, imageDiscoveryIncomplete = false;
   const limits = session.observation || DEFAULT_BROWSER_OBSERVATION;
   const frameParents = new Map(), frameEpochs = new Map(), targetEpochs = new Map();
   const liveTarget = target => target.epoch === (frameEpochs.get(target.frameId) || 0) && target.targetEpoch === (targetEpochs.get(target.sessionId || "root") || 0);
   let reported = { version: null, nodes: new Map(), resources: new Set() };
-  const command = (method, params = {}, target = {}) => host.command(session.agentTabId, method, params, target.sessionId);
-  const metadata = () => ({ pageVersion: session.pageVersion, revision: session.revision, title: (session.title || "").slice(0, 500), url: safePageUrl(session.url) });
+  const command = (method, params = {}, target = {}) => {
+    const work = () => host.command(session.agentTabId, method, params, target.sessionId);
+    const child = target.sessionId || target.frameId && target.frameId !== session.mainFrameId;
+    return child && ["DOM.resolveNode", "DOM.describeNode", "DOM.getBoxModel", "Accessibility.getPartialAXTree", "Runtime.callFunctionOn", "Runtime.getProperties"].includes(method)
+      ? withBrowserFrameTimeout(work, host.frameTimeoutMs) : work();
+  };
+  const metadata = () => ({ pageVersion: session.pageVersion, revision: session.revision, title: (session.title || "").slice(0, 500), url: safePageUrl(session.url), omittedFrameCount, imageDiscoveryIncomplete });
   const context = () => ({ tabId: session.agentTabId, ...host.context?.() });
   function pruneReferences() {
     for (const [key, id] of identifiers) if (!index.has(id)) identifiers.delete(key);
@@ -104,40 +111,70 @@ export function createBrowserPage(session, host) {
     host.trace?.event("page.frameInvalidated", { frameCount: affected.size });
   }
   async function frames() {
-    const targets = [{ sessionId: null }, ...session.childSessions.values()];
+    const targets = [{ sessionId: null }, ...[...session.childSessions.values()].filter(target => target.ready !== false && isBrowserFrameUrlAllowed(target.url))];
     const output = [];
+    const blocked = new Set();
     for (const target of targets) {
+      if (target.sessionId && blocked.has(target.targetId)) continue;
       const targetEpoch = targetEpochs.get(target.sessionId || "root") || 0;
       try {
-        const result = await command("Page.getFrameTree", {}, target);
+        const read = () => command("Page.getFrameTree", {}, target);
+        const result = target.sessionId ? await withBrowserFrameTimeout(read, host.frameTimeoutMs) : await read();
         if (!target.sessionId && result.frameTree?.frame?.id) session.mainFrameId = result.frameTree.frame.id;
-        const walk = (frame, parentId = null) => { if (!frame) return; frameParents.set(frame.frame.id, frame.frame.parentId || parentId || frameParents.get(frame.frame.id) || null); output.push({ ...target, frameId: frame.frame.id, targetEpoch, epoch: frameEpochs.get(frame.frame.id) || 0 }); for (const child of frame.childFrames || []) walk(child, frame.frame.id); };
+        if (!result.frameTree?.frame) throw browserError("BROWSER_UNAVAILABLE", "The current page frame tree is unavailable.");
+        const walk = (frame, parentId = null, restrictedParent = false) => {
+          if (!frame?.frame) return;
+          const id = frame.frame.id;
+          frameParents.set(id, frame.frame.parentId || parentId || frameParents.get(id) || null);
+          const restricted = restrictedParent || blocked.has(id) || !isBrowserFrameUrlAllowed(frame.frame.url);
+          if (restricted) { blocked.add(id); omittedFrameCount++; }
+          else output.push({ ...target, frameId: id, targetEpoch, epoch: frameEpochs.get(id) || 0 });
+          for (const child of frame.childFrames || []) walk(child, id, restricted);
+        };
         walk(result.frameTree);
-      } catch { /* An OOP frame may have detached. Main-frame failures surface below. */ }
+        if (!target.sessionId && blocked.has(session.mainFrameId)) throw browserError("BROWSER_UNAVAILABLE", "The main document is no longer an ordinary browser page.");
+      } catch (error) {
+        if (!target.sessionId) throw browserError("BROWSER_UNAVAILABLE", "The main page frame tree is unavailable. Wait for page loading or check Chrome debugger permissions.");
+        omittedFrameCount++; host.trace?.event("page.frameSkipped", { code: error.code || "BROWSER_UNAVAILABLE" });
+      }
     }
     // Parent frame trees include OOP descendants as metadata. Read each frame
     // through its most specific attached target once, rather than issuing a
     // duplicate parent-target read or publishing two identities for one frame.
     const owned = new Map();
     for (const target of output) if (!owned.has(target.frameId) || target.sessionId) owned.set(target.frameId, target);
-    return [...owned.values()];
+    return [...owned.values()].filter(target => !blocked.has(target.frameId));
   }
   async function refreshNative() {
     await host.check(session, false);
     const version = session.pageVersion;
     const revision = session.revision;
     if (indexedVersion !== version) invalidate();
+    omittedFrameCount = 0; imageDiscoveryIncomplete = false;
     const next = new Map(), nextRoots = [];
     const frameTargets = await frames();
     let rawNodes = 0;
     for (const target of frameTargets) {
       let response;
-      try { response = await command("Accessibility.getFullAXTree", { frameId: target.frameId }, target); }
-      catch (error) { if (!target.sessionId && !next.size) throw browserError("BROWSER_UNAVAILABLE", "The current page Accessibility Tree is unavailable. Wait for page loading or check Chrome debugger permissions."); else continue; }
+      const main = !target.sessionId && target.frameId === session.mainFrameId;
+      try {
+        const read = () => command("Accessibility.getFullAXTree", { frameId: target.frameId }, target);
+        response = main ? await read() : await withBrowserFrameTimeout(read, host.frameTimeoutMs);
+      } catch (error) {
+        if (main) throw browserError("BROWSER_UNAVAILABLE", "The current page Accessibility Tree is unavailable. Wait for page loading or check Chrome debugger permissions.");
+        omittedFrameCount++; host.trace?.event("page.frameSkipped", { code: error.code || "BROWSER_UNAVAILABLE" }); continue;
+      }
       rawNodes += response.nodes?.length || 0;
       if (!liveTarget(target)) continue;
       const raw = new Map((response.nodes || []).map(node => [node.nodeId, node]));
-      const media = await discoverVisualImages(target, response.nodes || []);
+      let media;
+      try {
+        const discover = () => discoverVisualImages(target, response.nodes || []);
+        media = main ? await discover() : await withBrowserFrameTimeout(discover, host.frameTimeoutMs);
+      } catch (error) {
+        imageDiscoveryIncomplete = true; media = new Map();
+        host.trace?.event("page.imagesSkipped", { code: error.code || "BROWSER_UNAVAILABLE" });
+      }
       if (!liveTarget(target)) continue;
       const keyOf = axId => `${target.sessionId || "root"}:${target.frameId}:${axId}`;
       const identify = axId => { const key = keyOf(axId), oldId = identifiers.get(key), oldEntry = index.get(oldId), current = raw.get(axId); if (!oldId || !oldEntry || oldEntry.backendNodeId !== current.backendDOMNodeId || nodeSignature(oldEntry.raw) !== nodeSignature(current)) identifiers.set(key, `n_${session.agentTabId}_${version}_${++counter}`); return identifiers.get(key); };
@@ -287,7 +324,18 @@ export function createBrowserPage(session, host) {
     return { current, changes, entries: [...added, ...updated].map(id => index.get(id)) };
   }
   async function enrichMedia(entries) {
-    for (const entry of entries) if (RESOURCE_ROLES.has(entry.role) || entry.visualMedia) await enrich(entry).catch(error => { if (error.code === "STALE_NODE") { for (const item of entry.resources) resources.delete(item.resourceId); entry.resources = []; } });
+    const failedFrames = new Set();
+    const clear = entry => { for (const item of entry.resources) resources.delete(item.resourceId); entry.resources = []; };
+    for (const entry of entries) if (RESOURCE_ROLES.has(entry.role) || entry.visualMedia) {
+      if (failedFrames.has(entry.target.frameId)) { clear(entry); continue; }
+      await enrich(entry).catch(error => {
+        if (error.code === "STALE_NODE") clear(entry);
+        else if (entry.target.sessionId || entry.target.frameId !== session.mainFrameId) {
+          failedFrames.add(entry.target.frameId); imageDiscoveryIncomplete = true; clear(entry);
+          host.trace?.event("page.imagesSkipped", { code: error.code || "BROWSER_UNAVAILABLE" });
+        }
+      });
+    }
   }
   function serialize(entries, input = {}, changes) {
     const offset = input.offset ?? 0, maxNodes = Math.min(input.maxNodes ?? limits.maxNodes, limits.maxNodes), maxChars = Math.min(input.maxChars ?? limits.maxChars, limits.maxChars);

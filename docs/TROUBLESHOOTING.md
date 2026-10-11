@@ -257,6 +257,8 @@ Use the creation tool's taskId with media_task_status. If creation completed and
 
 ## Study this site / Browser Agent
 
+`Cannot access a chrome-extension:// URL of different extension` can occur before page reading, in Chrome's root debugger-attachment permission check. ResearchTube reports `BROWSER_DEBUGGER_RESTRICTED` for this refusal. Temporarily disable the extension injecting its own frame into that site, reload the page and retry; a separate profile with ResearchTube alone can help isolate the conflict. No protected frame is removed and no security restriction is bypassed. When the root debugger is already available, protected frame URLs are skipped and a child frame's AX/DOM failure or five-second timeout does not abort main-document text. Check `page.omittedFrameCount` and `page.imageDiscoveryIncomplete` for partial coverage. A failed main-document read remains an explicit error.
+
 If a visible photograph has an empty `alt` or is a CSS background, the DOM supplement includes it even when Chrome omits it from AX. Reload the updated Extension and start a fresh session. Scroll the controlled page to the image and observe again: supplemental images must intersect the frame viewport. Hidden/transparent/overflow-clipped elements are excluded; pseudo-element backgrounds are not collected. Discovery examines at most 20,000 elements and 1,000 images per frame.
 
 - Start from an ordinary HTTP/HTTPS page. Chrome internal pages and protected debugger targets cannot be studied. The popup creates a copy and a separate ChatGPT conversation; it does not use whichever chat later becomes active.
