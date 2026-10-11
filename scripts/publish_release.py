@@ -60,7 +60,19 @@ def publish(archives, repo, commit, root=ROOT):
     tag = metadata['tag']
     release = find_release(repo, tag)
     if release is not None and not release['draft']:
-        # Published version pairs remain historical records; never replace them.
+        # Promote a tested preliminary pair without replacing its assets/tag.
+        if not metadata['prerelease'] and release.get('prerelease', False):
+            with tempfile.TemporaryDirectory(prefix='researchtube-promotion-') as folder:
+                notes = Path(folder) / 'notes.md'
+                body = release.get('body') or ''
+                if body.startswith('Pre-release for testing.'):
+                    body = 'Stable release.' + body[len('Pre-release for testing.'):]
+                notes.write_text(body, encoding='utf-8')
+                gh('release', 'edit', tag, '--repo', repo, '--prerelease=false',
+                   '--latest=true', '--notes-file', str(notes))
+            print('Promoted to stable: ' + release['html_url'])
+            return release['html_url']
+        # Published pairs remain historical records; never replace or demote.
         print('Already published: ' + release['html_url'])
         return release['html_url']
     retarget = release is not None and release['target_commitish'] != commit

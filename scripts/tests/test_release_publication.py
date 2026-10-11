@@ -73,6 +73,42 @@ class ReleaseTests(unittest.TestCase):
             self.assertEqual(publish(self.archives, 'owner/repo', self.commit, self.root), existing['html_url'])
             gh.assert_not_called()
 
+    def test_stable_config_promotes_existing_prerelease_without_replacing_build(self):
+        (self.root / 'release.json').write_text('{"prerelease":false}')
+        self.archives = [self.make_archive(platform, filename) for platform, filename in PLATFORMS.items()]
+        existing = {'draft': False, 'prerelease': True, 'target_commitish': 'b' * 40,
+                    'assets': [{'name': 'existing.zip', 'digest': 'keep'}],
+                    'body': 'Pre-release for testing.\n\nExisting links and source commit.\n',
+                    'html_url': 'https://github.com/owner/repo/releases/tag/old'}
+        original = json.loads(json.dumps(existing))
+        def check_promotion(*args):
+            self.calls.append(args)
+            self.assertEqual(args[:3], ('release', 'edit', 'ext-2.2.101_agent-2.2.72'))
+            self.assertIn('--prerelease=false', args)
+            self.assertIn('--latest=true', args)
+            self.assertNotIn('--target', args)
+            self.assertNotIn('--draft=false', args)
+            self.assertEqual(Path(args[args.index('--notes-file') + 1]).read_text(),
+                             'Stable release.\n\nExisting links and source commit.\n')
+        with patch('scripts.publish_release.find_release', return_value=existing), \
+             patch('scripts.publish_release.gh', side_effect=check_promotion):
+            self.assertEqual(publish(self.archives, 'owner/repo', self.commit, self.root), existing['html_url'])
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual(existing, original)
+        existing['prerelease'] = False
+        with patch('scripts.publish_release.find_release', return_value=existing), \
+             patch('scripts.publish_release.gh') as gh:
+            publish(self.archives, 'owner/repo', self.commit, self.root)
+            gh.assert_not_called()
+
+    def test_prerelease_config_never_demotes_an_existing_stable_release(self):
+        existing = {'draft': False, 'prerelease': False,
+                    'html_url': 'https://github.com/owner/repo/releases/tag/stable'}
+        with patch('scripts.publish_release.find_release', return_value=existing), \
+             patch('scripts.publish_release.gh') as gh:
+            publish(self.archives, 'owner/repo', self.commit, self.root)
+            gh.assert_not_called()
+
     def test_wrong_commit_or_platform_is_rejected_before_remote_calls(self):
         wrong = self.make_archive('windows-x64', PLATFORMS['windows-x64'], 'b' * 40)
         archives = [wrong, *self.archives[1:]]
