@@ -31,11 +31,13 @@ body{display:flex;align-items:center;gap:8px;padding:0 8px;box-sizing:border-box
     for(const candidate of candidates) {
       const item=candidate?.['researchtube/chatTarget'];
       const artifact=candidate?.['researchtube/artifactTask'];
+      const context=candidate?.['researchtube/chatContext'];
       const validBinding=item && /^tsk_[A-Za-z0-9_-]{10}$/.test(item.taskId)
         && typeof item.bindingToken==='string' && /^[a-f0-9-]{36}$/.test(item.bindingToken);
       const validArtifact=artifact && /^tsk_[A-Za-z0-9_-]{10}$/.test(artifact.taskId)
         && typeof artifact.addToChat==='boolean';
-      if(validBinding || validArtifact) return {binding:validBinding?item:null,artifact:validArtifact?artifact:null};
+      const validContext=context && /^tsk_[A-Za-z0-9_-]{10}$/.test(context.taskId) && ['working','completed','failed','cancelled'].includes(context.status);
+      if(validBinding || validArtifact || validContext) return {binding:validBinding?item:null,artifact:validArtifact?artifact:null,context:validContext?context:null};
     }
     return null;
   }
@@ -46,7 +48,7 @@ body{display:flex;align-items:center;gap:8px;padding:0 8px;box-sizing:border-box
     const artifact=incoming.artifact;
     // The host may reuse one iframe for many tool calls. Reset only for a new
     // task; old globals and late acknowledgments must not revive earlier calls.
-    const handles=[artifact?.taskId,incoming.binding?.taskId].filter(Boolean);
+    const handles=[artifact?.taskId,incoming.binding?.taskId,incoming.context?.taskId].filter(Boolean);
     if(handles.some(key=>retired.has(key))) return true;
     if(!handles.some(key=>taskHandles.has(key))) {
       for(const key of taskHandles) retired.add(key);
@@ -58,6 +60,18 @@ body{display:flex;align-items:center;gap:8px;padding:0 8px;box-sizing:border-box
     }
     for(const key of handles) taskHandles.add(key);
     if(incoming.binding) metadata=incoming.binding;
+    if(incoming.context) {
+      if(incoming.context.status==='working' && (bound || stopped)) return true;
+      status.textContent='Connecting tab group…';
+      if(incoming.context.status==='completed') {
+        showGroup(incoming.context.group);bound=true;finish();return true;
+      }
+      if(incoming.context.status==='failed' || incoming.context.status==='cancelled') {
+        status.textContent=incoming.context.status==='cancelled'?'Group connection cancelled.':incoming.context.error?.code==='BROWSER_GROUP_NOT_FOUND'?'Place this chat and the sites in one tab group.':'Unable to connect group. Check task status.';
+        finish();return true;
+      }
+    }
+    if(metadata?.mode==='group' && !bound && !stopped) status.textContent='Connecting tab group…';
     if(bound || stopped) return true;
     if(artifact && !artifact.addToChat) {
       status.textContent=typeof artifact.operationLabel==='string' && artifact.operationLabel.length<=160?artifact.operationLabel:(artifact.tool==='system_speech_speak'?'Synthesizing speech…':'Processing media task…');bound=true;finish();return true;
@@ -80,14 +94,26 @@ body{display:flex;align-items:center;gap:8px;padding:0 8px;box-sizing:border-box
   }
   function result(value) {
     if(!metadata || value?.source!==SOURCE || value.taskId!==metadata.taskId || bound || stopped) return;
-    if(value.ok) {bound=true;finish();}
+    if(value.ok) {
+      if(metadata.mode==='group') {
+        const group=value.context?.group;
+        if(value.context?.status!=='completed' || !Number.isSafeInteger(value.context?.chatTabId) || !group) return;
+        showGroup(group);
+      }
+      bound=true;finish();
+    }
     else if(value.errorCode) {
       // Authoritative task errors stop. A transport/reload failure can be
       // temporary, so retry it until the binding deadline instead.
       console.info(`[ResearchTube] Chat binding stopped: ${value.errorCode}`);
-      status.textContent='Unable to add files. Check task status.';
+      status.textContent=metadata.mode==='group'?(value.errorCode==='BROWSER_GROUP_NOT_FOUND'?'Place this chat and the sites in one tab group.':'Unable to connect group. Check task status.'):'Unable to add files. Check task status.';
       finish();
     }
+  }
+  function showGroup(group) {
+    if(!group || !Array.isArray(group.tabs)) {status.textContent='Group connected.';return;}
+    const sites=group.tabs.filter(tab=>tab.role==='site').length;
+    status.textContent=group.nextOffset!==null?`Group connected · ${group.totalTabs} tabs`:`Group connected · ${sites} sites, ${group.tabs.length-sites} chats`;
   }
   window.addEventListener('researchtube-chat-target-result',event=>result(event.detail));
   window.addEventListener('openai:set_globals',event=>{consume(event.detail?.globals?.toolResponseMetadata);reportSize();});
@@ -103,7 +129,7 @@ body{display:flex;align-items:center;gap:8px;padding:0 8px;box-sizing:border-box
       if(!consume(value.params)) consume(window.openai?.toolResponseMetadata);
     }
     if(value.method==='ui/notifications/host-context-changed') reportSize();
-    if(value.method==='ui/notifications/tool-cancelled') {status.textContent='File upload cancelled.';finish();}
+    if(value.method==='ui/notifications/tool-cancelled') {status.textContent=metadata?.mode==='group'?'Group connection cancelled.':'File upload cancelled.';finish();}
     if(value.method==='ui/resource-teardown') {tornDown=true;finish();window.parent.postMessage({jsonrpc:'2.0',id:value.id,result:{}},'*');}
   });
   window.parent.postMessage({jsonrpc:'2.0',id:initId,method:'ui/initialize',params:{appInfo:{name:'researchtube-chat-target',version:'2.0.0'},appCapabilities:{},protocolVersion:'2026-01-26'}},'*');

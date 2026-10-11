@@ -107,7 +107,7 @@ export function createBrowserGroups(host) {
     return { group, member };
   }
   async function check(group, tabId, chatPath = null) {
-    if (["stopped", "failed"].includes(group.state)) throw browserError(group.error?.code || "BROWSER_SESSION_STOPPED", group.error?.message || "Group automation stopped. Start Study this site again.");
+    if (["stopped", "failed"].includes(group.state)) throw browserError(group.error?.code || "BROWSER_SESSION_STOPPED", group.error?.message || "Group automation stopped. Reconnect with system_get_chat_context.");
     const tab = await host.getTab(tabId).catch(() => { throw browserError("TAB_CLOSED", "The selected participant closed; other group tabs remain available."); });
     if (tab.groupId !== group.groupId) throw browserError("TAB_LEFT_GROUP", "The selected participant is no longer in this tab group.");
     if (chatPath && (!isChatTab(tab) || pathOf(tab) !== chatPath)) throw browserError("BROWSER_CHAT_CHANGED", "The selected ChatGPT conversation changed. No replacement destination was selected.");

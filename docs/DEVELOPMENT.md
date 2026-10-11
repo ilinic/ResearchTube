@@ -26,6 +26,7 @@ npm ci --prefix extension
 | YouTube isolated bridge | `extension/youtube-content.js` |
 | ChatGPT media overlay | `extension/chatgpt-image-viewer-bridge.js`, `extension/chatgpt-capture-frame-bridge.js`, `extension/media-viewer.html`, `extension/media-viewer.js`, `extension/media-stream.js` |
 | ChatGPT Composer inspection and upload editing guard | `extension/chat-composer.js` |
+| System context and diagnostics | `extension/system-tools.js`, `extension/chat-context.js`, `extension/system-diagnostics.js` |
 | Settings and popup | `extension/settings.*`, `extension/popup.*` |
 | Browser Agent contracts and page operations | `extension/browser-tools.js`, `extension/browser-agent.js`, `extension/browser-groups.js`, `extension/tab-automation.js`, `extension/browser-page.js`, `extension/browser-observation-options.js`, `extension/browser-frame-policy.js` |
 | Artifact workflow/public contracts | `extension/artifact-tasks.js`, `extension/artifact-tools.js` |

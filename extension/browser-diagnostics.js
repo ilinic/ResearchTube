@@ -2,20 +2,23 @@
 // Never log CDP parameters/results, page text, URLs, prompts or file paths.
 const DETAIL_KEYS = new Set(["groupId", "taskId", "stage", "event", "spanId", "method", "outcome", "code", "elapsedMs", "sinceLaunchMs", "gapMs", "count", "frameCount", "rawNodes", "indexedNodes", "returnedNodes", "totalNodes", "characters", "bytes", "extraction", "mode", "enabled", "addedNodes", "updatedNodes", "removedNodes", "addedResources", "removedResources", "point", "tabId", "windowId", "tabStatus", "active", "windowFocused", "visibilityState", "hidden", "hasFocus", "readyState", "tabState", "cdpState"]);
 const round = value => Math.round(Math.max(0, value) * 10) / 10;
-export function createBrowserDiagnostics({ enabled = false, groupId, log = () => {}, now = () => performance.now() } = {}) {
+export function createBrowserDiagnostics({ enabled = false, groupId, log = () => {}, onError = () => {}, now = () => performance.now() } = {}) {
   const launched = enabled ? now() : 0;
   const methods = new Map();
   let sequence = 0;
   const emit = (stage, details = {}) => {
-    if (!enabled) return;
     const safe = {};
     for (const [key, value] of Object.entries(details)) {
       if (DETAIL_KEYS.has(key) && (typeof value === "boolean" || typeof value === "number" && Number.isFinite(value) || typeof value === "string" && value.length <= 100)) safe[key] = value;
     }
+    if (safe.code || safe.outcome === "failed") {
+      try { onError({ groupId, stage, ...safe }); } catch { /* Error history never affects automation. */ }
+    }
+    if (!enabled) return;
     try { log("timing", { groupId, stage, sinceLaunchMs: round(now() - launched), ...safe }); } catch { /* Diagnostics never affect automation. */ }
   };
   const begin = (stage, details = {}) => {
-    if (!enabled) return () => {};
+    if (!enabled) return details => { if (details?.outcome === "failed") emit(stage, details); };
     const started = now(), spanId = ++sequence;
     const before = new Map([...methods].map(([method, value]) => [method, { ...value }]));
     emit(stage, { ...details, spanId, event: "begin" });
@@ -37,7 +40,10 @@ export function createBrowserDiagnostics({ enabled = false, groupId, log = () =>
     catch (error) { finish({ outcome: "failed", code: /^[A-Z0-9_]{1,80}$/.test(error?.code || "") ? error.code : "UNEXPECTED" }); throw error; }
   };
   const command = async (method, work) => {
-    if (!enabled) return work();
+    if (!enabled) {
+      try { return await work(); }
+      catch (error) { emit("cdp.failed", { method, outcome: "failed", code: /^[A-Z0-9_]{1,80}$/.test(error?.code || "") ? error.code : "BROWSER_UNAVAILABLE" }); throw error; }
+    }
     const started = now(); let outcome = "ok";
     try { return await work(); }
     catch (error) { outcome = "failed"; throw error; }

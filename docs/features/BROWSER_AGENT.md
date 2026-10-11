@@ -2,7 +2,15 @@
 
 **Study this site** in the popup duplicates the source page, opens one new ChatGPT conversation and places both new tabs in a blue `RT · …` group. The original tab stays in place. The compact prompt asks for text and image research **in my language**, with only the new `chatTabId`. No browser session identifier is passed to ChatGPT.
 
-Reload the Extension and refresh the ResearchTube MCP catalog after upgrading. Start a new study chat, or provide an existing grouped ChatGPT tab's ID and rediscover the current tools. Old `sessionId` arguments are rejected.
+Reload the Extension and refresh the ResearchTube MCP catalog after upgrading. Start a new study chat, or use `system_get_chat_context` to connect an existing grouped ChatGPT tab without knowing its ID. Old `sessionId` arguments are rejected.
+
+## Manually created groups
+
+Place an existing saved ChatGPT conversation and the desired sites in one Chrome tab group. Ask ResearchTube to research the group. `system_get_chat_context` without arguments returns an immediate standard task and uses the same compact service widget as file delivery, with a “Connecting tab group…” caption. The widget sends a private capability through the Extension bridge; Chrome supplies the exact sender tab. No focus, selected window, page text or URL similarity is used to choose the tab. It does not attach a debugger or change tabs, files or drafts.
+
+Poll the same tool with `taskId` no faster than its one-second interval. Completion requires verified identity and group membership, and returns `chatTabId` plus the first page of current participants. Use `site_list_tabs` for larger groups. If the client delays mounting the widget until the assistant response ends, finish that response and check the task on the next turn. `cancel: true` with the task ID cancels a pending binding. The binding deadline is 30 seconds; start again after timeout or worker restart. Pending bindings are bounded to 100 and terminal history to 2000.
+
+A chat outside a group gets `BROWSER_GROUP_NOT_FOUND`. Duplicate browser views of the same conversation are ambiguous: close the duplicate before connecting. Different conversations in the same group bind independently. Polling refreshes membership but rejects a moved, closed or changed chat and never silently retargets it. Explicit new connection can resume a stopped group; previously cancelled tasks are not restarted.
 
 ## Participants and identity
 
@@ -20,7 +28,7 @@ Tab IDs are valid only in the current browser session. After a service-worker re
 
 `site_send_message` sends text to a selected saved ChatGPT conversation in the same group. It returns a standard asynchronous task immediately and labels the initiating chat. It waits for an idle, empty Composer, preserves drafts and attachments, and verifies the exact conversation and group again before Send. Busy recipients retry for at most ten minutes. Cancel stops before Send commits. An uncertain committed Send is reported as failure without automatically resending. If sending to yourself, finish the current response to allow delivery.
 
-`site_files_status` and `site_files_cancel` cover both file and inter-chat message tasks. Task records expose `kind`, initiating `chatTabId`, target `tabId`, `groupId`, progress and saved/submitted outputs. Participants in the original group can inspect/cancel group tasks. `site_session_status` and `site_session_stop` retain their tool names but operate on the caller's current group; neither accepts a session ID. Stop cancels pending work and releases connections while preserving tabs, files and drafts. Start a new Study this site group to resume automation.
+`site_files_status` and `site_files_cancel` cover both file and inter-chat message tasks. Task records expose `kind`, initiating `chatTabId`, target `tabId`, `groupId`, progress and saved/submitted outputs. Participants in the original group can inspect/cancel group tasks. `site_session_status` and `site_session_stop` retain their tool names but operate on the caller's current group; neither accepts a session ID. Stop cancels pending work and releases connections while preserving tabs, files and drafts. Call `system_get_chat_context` without arguments to explicitly reconnect and resume the existing group; status polling never undoes Stop.
 
 ## Group notifications
 
@@ -67,3 +75,9 @@ Existing guarded file/startup delivery uses `composerMediaRetryCount` (15) and `
 ## Verification
 
 Run the normal Extension suite, including browser-agent, browser-resource-groups, tab-automation, browser-page-updates, browser-visible-images, browser-diagnostics and task-chat tests; Agent byte-ingestion tests remain required. Actual Chrome/ChatGPT verification must cover adding/removing/duplicating sites, multiple ChatGPT participants, peer messages, background reads, authenticated images, busy/draft recipients, navigation and closing one participant. Mocked protocol tests do not establish that an external site or the current ChatGPT UI passed a live browser test.
+
+## Errors available to ChatGPT
+
+`system_get_diagnostics` returns the latest 20 errors/warnings by default (up to 100), with exact tool, tab and task filters. The journal retains at most 500 sanitized records in Extension storage and survives worker restart. Records include time, source, tool, stage, code, bounded message, available tab/group/task IDs, method and duration. Essential browser failures are recorded even with detailed timing disabled. Child-frame omissions can appear as warnings; they do not imply failure of the whole page. These technical events are separate from in-memory group/session state.
+
+The journal includes calls received by ResearchTube, observed failed task statuses, browser connection/read failures and selected Extension errors. It cannot see an OpenAI rejection before a request reaches ResearchTube, arbitrary website consoles or the complete Agent console. Existing specialized task-diagnostics tools remain available. Settings **Clear diagnostics** also clears this journal. Legacy saved tool failures can be imported on the first read; old DevTools-only events cannot be recovered. No credentials, raw inputs, page/chat bodies, signed URLs or host paths are exported.

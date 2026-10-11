@@ -140,7 +140,7 @@ export function createBrowserAgent(host) {
       task.finishPhase = TERMINAL.has(task.status) ? null : task.trace?.begin(`resource.${phase}`, { taskId: task.taskId });
     }
     task.progressPercent = Math.max(task.progressPercent, percent); task.phase = phase; task.updatedAt = timestamp();
-    log("resource", { taskId: task.taskId, status: task.status, phase, progressPercent: task.progressPercent });
+    log("resource", { tool: task.caller.tool, taskId: task.taskId, tabId: task.tabId, chatTabId: task.chatTabId, groupId: task.groupId, status: task.status, phase, progressPercent: task.progressPercent, error: task.error });
   }
   function cancelTask(task) {
     if (TERMINAL.has(task.status) || task.sendCommitted) return false;
@@ -186,7 +186,7 @@ export function createBrowserAgent(host) {
     if (target) return target;
     target = { group, agentTabId: tab.id, observation: group.options.observation, state: "running", url: tab.url, title: tab.title || "",
       pageVersion: nextPageVersion(), revision: 1, childSessions: new Map(), attached: false, error: null, operation: null, lastPageCallEnd: null };
-    target.trace = createBrowserDiagnostics({ enabled: group.options.detailedLogging, groupId: group.groupId, log, now: host.monotonicNow || host.now });
+    target.trace = createBrowserDiagnostics({ enabled: group.options.detailedLogging, groupId: group.groupId, log, onError: details => host.diagnostic?.({ ...details, tool: target.operation?.tool, tabId: target.agentTabId, chatTabId: target.operation?.chatTabId }), now: host.monotonicNow || host.now });
     target.page = createBrowserPage(target, { command, check, trace: target.trace, context: () => ({ chatTabId: target.operation?.chatTabId ?? target.agentTabId, group: groups.project(group) }) });
     group.targets.set(tab.id, target); targets.set(tab.id, target); return target;
   }
@@ -449,7 +449,7 @@ export function createBrowserAgent(host) {
   async function execute(name, argumentsValue) {
     const input = validateBrowserInput(name, argumentsValue);
     const { group, member } = await groups.forChat(input.chatTabId);
-    const caller = { group, chatTabId: input.chatTabId, chatPath: member.chatPath };
+    const caller = { group, chatTabId: input.chatTabId, chatPath: member.chatPath, tool: name };
     if (["site_list_tabs", "site_session_status"].includes(name)) {
       groups.acknowledge(group, input.chatTabId); return { chatTabId: input.chatTabId, group: groups.project(group, input.offset, input.limit) };
     }
@@ -573,6 +573,7 @@ export function createBrowserAgent(host) {
     if (reason === "target_closed") return onRemoved(source.tabId);
     cancelForTab(target.group, source.tabId);
     target.error = { code: "DEBUGGER_DETACHED", message: "Chrome detached this participant's debugger. Other group tabs remain available; move this tab out and back to reconnect." };
+    target.trace.event("target.detached", { code: "DEBUGGER_DETACHED", tabId: source.tabId });
     await host.updateStatus?.([source.tabId], { state: "failed", phase: "failed", statusMessage: target.error.message, error: target.error });
   }
   async function onUpdated(tabId, change) {
@@ -586,6 +587,15 @@ export function createBrowserAgent(host) {
     }
     return statuses.get(tabId) || null;
   }
-  return { start, execute, onEvent, onRemoved, onDetached, onUpdated, onCreated: groups.changed, onReplaced: groups.changed,
+  async function connectGroup(chatTabId, checkPending = () => {}) {
+    const { group } = await groups.forChat(chatTabId);
+    checkPending();
+    if (group.state === "starting") throw browserError("BROWSER_SESSION_NOT_READY", "Wait for the existing study startup to finish.");
+    // Only a new explicit widget connection resumes Stop; status never does.
+    if (["stopped", "failed"].includes(group.state)) { group.state = "running"; group.phase = "running"; group.error = null; await groups.refresh(group); }
+    groups.acknowledge(group, chatTabId);
+    return { chatTabId, group: groups.project(group) };
+  }
+  return { start, execute, connectGroup, onEvent, onRemoved, onDetached, onUpdated, onCreated: groups.changed, onReplaced: groups.changed,
     localStatus, ownsTab: id => [...groups.values()].some(group => !["stopped", "failed"].includes(group.state) && group.members.has(id)) };
 }

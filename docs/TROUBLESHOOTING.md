@@ -307,3 +307,9 @@ Pass `resourceIds` from the latest observation instead of making separate tasks.
 ## Automatic Composer Send
 
 `composerAutoSendTimeoutSeconds.value` defaults to 20 seconds and controls only the watchdog in ResearchTube-used ChatGPT tabs. Text or attachment-count changes restart it; busy generation postpones Send. Active file-delivery tasks and cancelled drafts are protected. Successful task completion with `tabId` sends immediately into an empty idle Composer, or appends to a stable draft. Busy/missing tabs are skipped without a pending wake-up. Check the Extension service-worker console for `[ResearchTube chat]` confirmation/stopped messages. See [Task chat](features/TASK_CHAT.md).
+
+## Manual group connection and recent errors
+
+For an existing chat, put it and the sites in the same Chrome tab group and ask ResearchTube to connect using `system_get_chat_context`. Refresh the MCP catalog if this tool is missing. Wait for the conversation to receive its saved address. Close duplicate tabs showing that same conversation. No group produces `BROWSER_GROUP_NOT_FOUND`; moving or changing the bound chat requires a fresh connection. A pending widget binding times out after 30 seconds: let the widget load, then retry without an old task ID. Extension restart loses pending context tasks. Explicit reconnect resumes a stopped group, while status calls respect Stop.
+
+Ask ChatGPT to call `system_get_diagnostics` for recent errors (20 by default, maximum 100). It can filter by tool, tab or task and see browser stages without needing a pasted DevTools log. The journal is bounded and sanitized; it cannot report OpenAI requests blocked before they reach the Extension. For full download/frame task details use the existing specialized diagnostic tools. It does not grant access to protected extension frames or resolve a native debugger refusal by itself.

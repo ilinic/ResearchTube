@@ -57,6 +57,8 @@ by each custom package group with its manifest `groupTitle`. See [Custom Tools](
 | Tool | Behavior |
 | --- | --- |
 | `system_agent_status` | Reports Extension and Agent versions and interface compatibility, plus the saved startup OS, Workspace/free-space, component and Chrome automation diagnostics. Pending background checks report `checking`; status calls never rerun them. Restart the Agent to refresh the snapshot. |
+| `system_get_chat_context` | Connects the invoking chat to its manually created Chrome tab group through the existing service widget. Call with no arguments; poll this same tool with `taskId` at the returned interval, or pass `cancel: true` with that ID. Completion returns `chatTabId` and the first page of live group tabs; use `site_list_tabs` for pagination. Explicit reconnection resumes a stopped group. No tabs or Composer contents are changed. |
+| `system_get_diagnostics` | Reads recent sanitized errors and warnings, newest first: default 20, maximum 100. Optional exact tool, tab or task filters. Includes tool calls, browser failures/omissions and Extension failures; no raw website console or page/chat content. |
 
 ## Text to Speech
 

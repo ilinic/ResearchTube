@@ -27,6 +27,7 @@ The tunnel is outbound-only from the Extension. The Agent binds only to loopback
 | YouTube MAIN bridge | `extension/youtube-page-bridge.src.js` | Anonymous requests in a normal `youtube.com` origin for public research data |
 | Storyboard Extension module | `extension/storyboards.js` | Storyboard schemas, validation and public result projection |
 | ChatGPT media bridge | `extension/chatgpt-capture-frame-bridge.js` | Finds the exact MCP widget iframe and installs the local viewer overlay |
+| System context and diagnostics | `extension/system-tools.js`, `extension/chat-context.js`, `extension/system-diagnostics.js` | Widget-authenticated manual group discovery and bounded sanitized error journal |
 | Current-chat binding | `extension/chatgpt-chat-target-bridge.js`, `extension/ui/chat-target-v1.html` | Compact task handshake using Chrome sender identity, independent of ChatGPT layout |
 | Local media viewer | `extension/media-viewer.html` | Loads image, video or audio bytes from loopback with Extension permissions; packaged script in `media-viewer.js` |
 | Settings and popup | `extension/settings.*`, `extension/popup.*` | Connection, Agent status, tool availability and bounded diagnostics |

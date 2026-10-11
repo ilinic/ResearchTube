@@ -12,13 +12,13 @@ if (!globalThis.__researchTubeChatTargetBridgeInstalled) {
   function send(value, reply) {
     if (!valid(value) || inFlight.has(value.taskId)) return;
     const respond=result=>reply({source:SOURCE,taskId:value.taskId,...result});
-    if (settled.get(value.taskId)===value.bindingToken) { respond({ok:true}); return; }
+    if (settled.get(value.taskId)?.bindingToken===value.bindingToken) { respond(settled.get(value.taskId).result); return; }
     inFlight.add(value.taskId);
     // A stale extension context can throw before returning a Promise.
-    Promise.resolve().then(()=>chrome.runtime.sendMessage({type:'researchtube_chat_target_bind', taskId:value.taskId, bindingToken:value.bindingToken})).then(
+    Promise.resolve().then(()=>chrome.runtime.sendMessage({type:'researchtube_chat_target_bind', taskId:value.taskId, bindingToken:value.bindingToken, ...(value.mode==='group'?{mode:'group'}:{})})).then(
       response => {
         if(response?.ok) {
-          settled.set(value.taskId,value.bindingToken);
+          settled.set(value.taskId,{bindingToken:value.bindingToken,result:response});
           if(settled.size>128) settled.delete(settled.keys().next().value);
         }
         respond(response ?? {ok:false,error:'The originating tab could not be bound.'});

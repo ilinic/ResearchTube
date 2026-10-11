@@ -14,6 +14,7 @@ const node = object({ nodeId: string, parentId: nullableString, childIds: { type
 const page = object({ pageVersion: integer, revision: integer, title: string, url: string, omittedFrameCount: { type: "integer", minimum: 0 }, imageDiscoveryIncomplete: { type: "boolean" } }, ["pageVersion", "revision", "title", "url"]);
 const member = object({ tabId: integer, role: { enum: ["chatgpt", "site"] }, title: string, url: string, state: { enum: ["available", "starting", "running", "failed"] }, error });
 const group = object({ groupId: integer, revision: integer, state: { enum: ["starting", "running", "idle", "stopped", "failed"] }, totalTabs: integer, nextOffset: { type: ["integer", "null"] }, tabs: { type: "array", items: member }, error });
+export const browserGroupSchema = group;
 const context = { chatTabId: integer, tabId: integer, group };
 const ids = { type: "array", items: string };
 const changes = object({ pageChanged: { type: "boolean" }, addedNodeIds: ids, updatedNodeIds: ids, removedNodeIds: ids, addedResourceIds: ids, removedResourceIds: ids, addedNodes: integer, updatedNodes: integer, removedNodes: integer, addedResources: integer, removedResources: integer, truncated: { type: "boolean" } });
@@ -43,7 +44,7 @@ export function browserToolDefinitions() {
     define("site_files_cancel", "Cancel site task", "Cancel extraction/delivery before Send commits. Saved files, Composer attachments and tabs remain; committed Send cannot be cancelled.", { taskId }, ["taskId"], object({ cancelled: { type: "boolean" }, task: resourceTask }), write, false),
     define("site_send_message", "Send message to group chat", "Send a message to another ChatGPT tab in your group. Returns an asynchronous task; poll site_files_status or cancel with site_files_cancel. Waits for an idle, empty Composer; preserves user drafts. Finish your response if sending to yourself.", { text: { type: "string", minLength: 1, maxLength: 100000 } }, ["text"], resourceTask, write),
     define("site_session_status", "Group automation status", "Read your current group's participants and automation state. Closing one participant cancels only its pending work. No session ID is required.", {}, [], object({ chatTabId: integer, group }), read, false),
-    define("site_session_stop", "Stop group automation", "Cancel pending group tasks and release browser automation. Tabs, files and drafts remain. Start Study this site again to create a new working group.", {}, [], object({ chatTabId: integer, group }), write, false)
+    define("site_session_stop", "Stop group automation", "Cancel pending group tasks and release browser automation. Tabs, files and drafts remain. Reconnect with system_get_chat_context to resume this group.", {}, [], object({ chatTabId: integer, group }), write, false)
   ].map(tool => {
     if (["site_get_images", "site_get_files"].includes(tool.name)) tool.inputSchema.oneOf = [{ required: ["resourceId"] }, { required: ["resourceIds"] }];
     return tool;
