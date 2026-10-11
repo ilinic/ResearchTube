@@ -96,6 +96,231 @@
         }
       },
       "watchers": 0
+    },
+    "2026-10-11": {
+      "forks": 0,
+      "releases": [
+        {
+          "assets": [
+            {
+              "downloads": 0,
+              "id": 629336942,
+              "name": "ResearchTube-Linux-x64.zip"
+            },
+            {
+              "downloads": 0,
+              "id": 629337588,
+              "name": "ResearchTube-Linux-x64.zip.sha256"
+            },
+            {
+              "downloads": 0,
+              "id": 629337243,
+              "name": "ResearchTube-macOS-ARM64.zip"
+            },
+            {
+              "downloads": 0,
+              "id": 629337625,
+              "name": "ResearchTube-macOS-ARM64.zip.sha256"
+            },
+            {
+              "downloads": 0,
+              "id": 629337415,
+              "name": "ResearchTube-macOS-x64.zip"
+            },
+            {
+              "downloads": 0,
+              "id": 629337679,
+              "name": "ResearchTube-macOS-x64.zip.sha256"
+            },
+            {
+              "downloads": 2,
+              "id": 629336663,
+              "name": "ResearchTube-Windows-x64.zip"
+            },
+            {
+              "downloads": 0,
+              "id": 629337571,
+              "name": "ResearchTube-Windows-x64.zip.sha256"
+            }
+          ],
+          "prerelease": false,
+          "tag": "ext-2.3.2_agent-2.3.1"
+        },
+        {
+          "assets": [
+            {
+              "downloads": 0,
+              "id": 628988480,
+              "name": "ResearchTube-Linux-x64.zip"
+            },
+            {
+              "downloads": 0,
+              "id": 628989241,
+              "name": "ResearchTube-Linux-x64.zip.sha256"
+            },
+            {
+              "downloads": 0,
+              "id": 628988801,
+              "name": "ResearchTube-macOS-ARM64.zip"
+            },
+            {
+              "downloads": 0,
+              "id": 628989258,
+              "name": "ResearchTube-macOS-ARM64.zip.sha256"
+            },
+            {
+              "downloads": 0,
+              "id": 628989041,
+              "name": "ResearchTube-macOS-x64.zip"
+            },
+            {
+              "downloads": 0,
+              "id": 628989281,
+              "name": "ResearchTube-macOS-x64.zip.sha256"
+            },
+            {
+              "downloads": 4,
+              "id": 628988182,
+              "name": "ResearchTube-Windows-x64.zip"
+            },
+            {
+              "downloads": 0,
+              "id": 628989201,
+              "name": "ResearchTube-Windows-x64.zip.sha256"
+            }
+          ],
+          "prerelease": false,
+          "tag": "ext-2.3.2_agent-2.3.0"
+        },
+        {
+          "assets": [
+            {
+              "downloads": 0,
+              "id": 628125524,
+              "name": "ResearchTube-Linux-x64.zip"
+            },
+            {
+              "downloads": 0,
+              "id": 628126898,
+              "name": "ResearchTube-Linux-x64.zip.sha256"
+            },
+            {
+              "downloads": 0,
+              "id": 628126235,
+              "name": "ResearchTube-macOS-ARM64.zip"
+            },
+            {
+              "downloads": 0,
+              "id": 628126924,
+              "name": "ResearchTube-macOS-ARM64.zip.sha256"
+            },
+            {
+              "downloads": 0,
+              "id": 628126565,
+              "name": "ResearchTube-macOS-x64.zip"
+            },
+            {
+              "downloads": 0,
+              "id": 628126963,
+              "name": "ResearchTube-macOS-x64.zip.sha256"
+            },
+            {
+              "downloads": 0,
+              "id": 628125116,
+              "name": "ResearchTube-Windows-x64.zip"
+            },
+            {
+              "downloads": 0,
+              "id": 628126865,
+              "name": "ResearchTube-Windows-x64.zip.sha256"
+            }
+          ],
+          "prerelease": true,
+          "tag": "ext-2.3.1_agent-2.3.0"
+        }
+      ],
+      "stars": 0,
+      "traffic": {
+        "clones_14d": {
+          "count": 1210,
+          "uniques": 356
+        },
+        "popular_paths_14d": [
+          {
+            "count": 37,
+            "path": "/ilinic/ResearchTube/releases",
+            "title": "/releases",
+            "uniques": 1
+          },
+          {
+            "count": 22,
+            "path": "/ilinic/ResearchTube/actions",
+            "title": "/actions",
+            "uniques": 1
+          },
+          {
+            "count": 4,
+            "path": "/ilinic/ResearchTube",
+            "title": "Overview",
+            "uniques": 4
+          },
+          {
+            "count": 3,
+            "path": "/ilinic/ResearchTube/actions/runs/38093849507",
+            "title": "/actions/runs/38093849507",
+            "uniques": 1
+          },
+          {
+            "count": 3,
+            "path": "/ilinic/ResearchTube/actions/workflows/collect-researchtube-stats.yml",
+            "title": "/actions/workflows/collect-researchtube-stats.yml",
+            "uniques": 1
+          },
+          {
+            "count": 2,
+            "path": "/ilinic/ResearchTube/branches",
+            "title": "/branches",
+            "uniques": 1
+          },
+          {
+            "count": 2,
+            "path": "/ilinic/ResearchTube/releases/edit/ext-2.3.2_agent-2.3.0",
+            "title": "/releases/edit/ext-2.3.2_agent-2.3.0",
+            "uniques": 1
+          },
+          {
+            "count": 2,
+            "path": "/ilinic/ResearchTube/tags",
+            "title": "/tags",
+            "uniques": 1
+          },
+          {
+            "count": 1,
+            "path": "/ilinic/ResearchTube/actions/runs/38045271162",
+            "title": "/actions/runs/38045271162",
+            "uniques": 1
+          },
+          {
+            "count": 1,
+            "path": "/ilinic/ResearchTube/actions/runs/38078152217",
+            "title": "/actions/runs/38078152217",
+            "uniques": 1
+          }
+        ],
+        "referrers_14d": [
+          {
+            "count": 1,
+            "referrer": "reddit.com",
+            "uniques": 1
+          }
+        ],
+        "status": "ok",
+        "views_14d": {
+          "count": 93,
+          "uniques": 4
+        }
+      },
+      "watchers": 0
     }
   },
   "schema_version": 1,
@@ -183,6 +408,12 @@
       "clones_unique": 143,
       "views": 15,
       "views_unique": 1
+    },
+    "2026-10-10": {
+      "clones": 362,
+      "clones_unique": 105,
+      "views": 77,
+      "views_unique": 4
     }
   }
 }
