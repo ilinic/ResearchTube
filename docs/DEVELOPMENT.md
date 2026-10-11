@@ -197,6 +197,8 @@ The **Build and publish ResearchTube release** GitHub Actions workflow builds al
 
 Native Windows verification is separate from Linux/macOS source smoke checks. Custom Tools remain external Python modules; additional third-party imports must be included when rebuilding the EXE, or installed for Python source mode. Runtime pip installation does not extend a frozen interpreter.
 
+The Windows EXE embeds `icons/researchtube.ico`, selected in `agent/ResearchTubeAgent.spec`. This multi-size icon contains the existing Extension PNG artwork at 16, 24, 32, 48, 64 and 128 pixels. When changing the logo, update the ICO alongside the PNGs and rebuild the Windows release.
+
 Do not commit, push or publish unless the user explicitly requests it.
 
 ## Workspace configuration

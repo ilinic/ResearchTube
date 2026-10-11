@@ -25,4 +25,4 @@ a = Analysis([str(root / "researchtube_agent.py")], pathex=[str(root)],
 pyz = PYZ(a.pure)
 exe = EXE(pyz, a.scripts, a.binaries, a.datas, [], name="ResearchTubeAgent",
           debug=False, bootloader_ignore_signals=False, strip=False,
-          upx=False, console=True)
+          upx=False, console=True, icon=str(root.parent / "icons" / "researchtube.ico"))
