@@ -148,6 +148,7 @@ If Study this site reports **BROWSER_DEBUGGER_RESTRICTED**, Chrome refused acces
 | Agent unavailable | Start its Windows EXE or Python script, answer the Workspace prompt if shown, keep the console open, match the port, then Test connection. Do not open its port publicly. |
 | Version mismatch | Use compatible components from the release; reload Extension, restart changed Agent, refresh ChatGPT catalog. Version numbers need not be equal; interfaces must match. |
 | Tool missing or `TOOL_DISABLED` | Enable that tool in Extension Settings; in ChatGPT open ResearchTube's management and **Refresh**, then use a new chat. |
+| Download reports a missing final file after yt-dlp succeeds | Update/restart the Local Agent, retry once and request download diagnostics. Cyrillic and Unicode filenames are supported; renaming the video is unnecessary. |
 | Component missing or stale | Check `system_agent_status`; install/extract only the relevant component, remove ambiguous duplicate executables, restart Agent. |
 | Chrome flag still Disabled/Mixed | Fully exit Chrome; relaunch with the edited shortcut; restart Agent for a fresh snapshot. Flag is optional. |
 | YouTube verification/403/429 | Respect the returned retry time. Open YouTube normally and complete visible verification if requested. Missing captions/comments can be a property of the video. |

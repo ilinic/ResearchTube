@@ -131,6 +131,8 @@ Keep a normal YouTube tab available and retry once. ResearchTube already perform
 6. Check for `DESTINATION_EXISTS` or a more specific destination conflict.
 7. Use `media_probe` on a local source before assuming it contains video/audio streams.
 
+If yt-dlp exits with code 0 but ResearchTube reports `YTDLP_FINAL_OUTPUT_MISSING`, update and restart the Local Agent before retrying. Older Agents could corrupt non-ASCII final paths by assuming UTF-8 without setting yt-dlp's output encoding, or by splitting a UTF-8 character across pipe reads. Current downloads explicitly request UTF-8 and decode it incrementally, preserving Cyrillic, emoji and valid Unicode punctuation in filenames. The same handling applies to full and partial downloads. A remaining error requires the bounded download diagnostics and a check of disk/destination permissions; unrelated task-named files are not used as substitute results.
+
 For `media_clip`, specify `outputFormat` when converting the whole file. With intervals, omit it to keep the source format without transcoding. Specifying a format still copies compatible streams; incompatible streams are encoded with automatic quality profiles. Video copying may align to keyframes. For precise video cuts, supply a videoCodec to force video encoding; for exact source audio extraction, choose a compatible audio format such as AAC -> M4A or Opus -> Opus. Lossless encoding can produce large files. `outputKind` and input `cutMode` are obsolete. If FFmpeg rejects a format or codec, check the installed build and choose compatible encoding settings.
 
 Do not delete output directories as a generic fix. ResearchTube intentionally refuses silent overwrite. Choose a new output name/directory or move the existing file deliberately.

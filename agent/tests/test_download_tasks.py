@@ -55,6 +55,67 @@ class YtDlpFormatNormalizationTests(unittest.TestCase):
             agent.mcp_tool_log("library_store_status", {"status": "submitted", "taskId": "private"})
 
 
+class DownloadUnicodeStreamTests(unittest.IsolatedAsyncioTestCase):
+    """Portable pipe-boundary regression tests, including Windows CI."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        previous = agent.WORKSPACE_PATH
+        self.addCleanup(setattr, agent, "WORKSPACE_PATH", previous)
+        agent.WORKSPACE_PATH = Path(self.temp.name) / "Рабочая папка"
+        self.directory = agent.WORKSPACE_PATH / "downloads"
+        self.directory.mkdir(parents=True)
+        self.output = self.directory / "Я СНОВА ВИЖУ ТЕБЯ ｜ FLYXO REMIX — “музыка” 🎵 [yt_MxJLoHLhlQM] [tsk_1234567890].webm"
+        self.output.write_bytes(b"downloaded bytes")
+        self.manager = agent.DownloadTaskManager()
+
+    def task(self) -> agent.DownloadTask:
+        return agent.DownloadTask("tsk_1234567890", "", "MxJLoHLhlQM", agent.DownloadSelection(audio="251"), None,
+                                  self.directory, "downloads", agent.utc_now(), agent.utc_now())
+
+    async def test_unicode_final_path_survives_every_byte_boundary(self) -> None:
+        data = (f"__RESEARCHTUBE_FINAL_FILE__:{self.output}\r\n").encode("utf-8")
+
+        class Chunks:
+            def __init__(self, chunks: list[bytes]):
+                self.chunks = iter(chunks)
+
+            async def read(self, _size: int) -> bytes:
+                return next(self.chunks, b"")
+
+        for boundary in range(1, len(data)):
+            with self.subTest(boundary=boundary):
+                task = self.task()
+                await self.manager.consume_stream(task, Chunks([data[:boundary], data[boundary:]]), source="stdout")
+                self.assertEqual(task.output_file, self.output)
+                self.assertEqual(self.manager.valid_output_file(task), self.output.resolve())
+        task = self.task()
+        await self.manager.consume_stream(task, Chunks([bytes([value]) for value in data]), source="stdout")
+        self.assertEqual(task.output_file, self.output)
+
+    async def test_unicode_final_path_at_actual_4096_byte_read_boundary(self) -> None:
+        record = f"__RESEARCHTUBE_FINAL_FILE__:{self.output}".encode("utf-8")
+        unicode_at = next(index for index, value in enumerate(record) if value >= 128)
+        prefix = b"." * (4095 - unicode_at - 1) + b"\n"
+        stream = asyncio.StreamReader()
+        stream.feed_data(prefix + record)  # No trailing newline: flush at EOF.
+        stream.feed_eof()
+        task = self.task()
+        await self.manager.consume_stream(task, stream, source="stdout")
+        self.assertEqual(task.output_file, self.output)
+        self.assertEqual(self.manager.valid_output_file(task), self.output.resolve())
+
+    async def test_invalid_diagnostic_bytes_do_not_break_later_path_or_progress(self) -> None:
+        stream = asyncio.StreamReader()
+        stream.feed_data(b"warning: \xff\xfe\r[download] 37.4%\r\n" + f"__RESEARCHTUBE_FINAL_FILE__:{self.output}\n".encode("utf-8"))
+        stream.feed_eof()
+        task = self.task()
+        await self.manager.consume_stream(task, stream, source="stderr")
+        self.assertEqual(task.progress_percent, 37.4)
+        self.assertEqual(task.output_file, self.output)
+
+
 @unittest.skipIf(os.name == "nt", "The fake yt-dlp fixture is a POSIX script.")
 class DownloadTaskTests(unittest.IsolatedAsyncioTestCase):
     def test_generated_task_id_is_readable_and_compact(self) -> None:
@@ -85,6 +146,8 @@ directory = pathlib.Path(args[args.index('--paths') + 1])
 template = args[args.index('--output') + 1]
 task_id = re.search(r'\\[([^]]+)\\]\\.', template).group(1)
 output = directory / f'Test Video [yt_abc123] [{task_id}].mp4'
+if selector == '997':
+    output = directory / f'Я СНОВА ВИЖУ ТЕБЯ ｜ FLYXO REMIX — “музыка” 🎵 [yt_abc123] [{task_id}].webm'
 directory.mkdir(parents=True, exist_ok=True)
 sys.stdout.write('[download]  10.0% of 1.00GiB at 10.00MiB/s ETA 01:30\\r')
 sys.stdout.flush()
@@ -94,7 +157,10 @@ print('[Merger] Merging formats into "test.mp4"', flush=True)
 output.write_bytes(b'test mp4')
 if selector == '998':
     raise SystemExit(0)
-print(f'__RESEARCHTUBE_FINAL_FILE__:{output}', flush=True)
+record = f'__RESEARCHTUBE_FINAL_FILE__:{output}\\n'
+encoding = args[args.index('--encoding') + 1] if '--encoding' in args else 'cp1252'
+sys.stdout.buffer.write(record.encode(encoding, errors='replace'))
+sys.stdout.buffer.flush()
 """,
             encoding="utf-8",
         )
@@ -138,6 +204,7 @@ print(f'__RESEARCHTUBE_FINAL_FILE__:{output}', flush=True)
         self.assertIn("--merge-output-format", self.command)
         self.assertIn("mp4", self.command)
         self.assertIn("--progress", self.command)
+        self.assertEqual(self.command[self.command.index("--encoding") + 1], "utf-8")
         progress_delta_index = self.command.index("--progress-delta")
         self.assertEqual(self.command[progress_delta_index + 1], "1")
         self.assertIn("--no-js-runtimes", self.command)
@@ -182,6 +249,28 @@ print(f'__RESEARCHTUBE_FINAL_FILE__:{output}', flush=True)
         self.assertEqual(task.status, "completed")
         self.assertIn("22", self.command)
         self.assertNotIn("--merge-output-format", self.command)
+
+    async def test_unicode_audio_final_path_uses_explicit_utf8(self) -> None:
+        manager = agent.DownloadTaskManager()
+        started = await manager.create_download({"videoId": "abc123", "formatSelection": {"audio": "997"}})
+        task = manager.get(started["taskId"])
+        await task.runner
+        self.assertEqual(task.status, "completed", task.error)
+        self.assertIn("Я СНОВА ВИЖУ ТЕБЯ ｜ FLYXO REMIX", task.result["fileName"])
+        self.assertIn("🎵", task.result["fileName"])
+        self.assertTrue((agent.WORKSPACE_PATH / task.result["filePath"]).is_file())
+        self.assertEqual(self.command[self.command.index("--encoding") + 1], "utf-8")
+        self.assertEqual(manager.diagnostics_snapshot(task.task_id, {})["process"]["finalOutput"], "verified")
+
+    async def test_unicode_partial_audio_path_uses_same_utf8_contract(self) -> None:
+        manager = agent.DownloadTaskManager()
+        started = await manager.create_download({"videoId": "abc123", "formatSelection": {"audio": "997"}, "startSeconds": 0, "endSeconds": 452.5})
+        task = manager.get(started["taskId"])
+        await task.runner
+        self.assertEqual(task.status, "completed", task.error)
+        self.assertIn("Я СНОВА ВИЖУ ТЕБЯ ｜ FLYXO REMIX", task.result["fileName"])
+        self.assertIn("--download-sections", self.command)
+        self.assertEqual(self.command[self.command.index("--encoding") + 1], "utf-8")
 
     async def test_partial_download_requires_a_complete_range_and_marks_result(self) -> None:
         manager = agent.DownloadTaskManager()

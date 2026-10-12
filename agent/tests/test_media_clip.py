@@ -283,6 +283,32 @@ class MediaConversionIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "completed", result.get("error"))
         self.assertFalse(result["clips"][0]["hasAudio"])
 
+    async def test_downloaded_unicode_opus_path_converts_to_320k_mp3(self) -> None:
+        directory = agent.WORKSPACE_PATH / "downloads"
+        directory.mkdir()
+        source = directory / "Я СНОВА ВИЖУ ТЕБЯ ｜ FLYXO REMIX 🎵 [yt_MxJLoHLhlQM] [tsk_1234567890].webm"
+        subprocess.run([self.ffmpeg, "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000",
+                        "-t", "1", "-c:a", "libopus", str(source)], check=True)
+        before = (source.read_bytes(), source.stat().st_mtime_ns)
+        stream = asyncio.StreamReader()
+        stream.feed_data(f"__RESEARCHTUBE_FINAL_FILE__:{source}\n".encode("utf-8"))
+        stream.feed_eof()
+        download = agent.DownloadTask("tsk_1234567890", "", "MxJLoHLhlQM", agent.DownloadSelection(audio="251"), None,
+                                      directory, "downloads", agent.utc_now(), agent.utc_now())
+        downloads = agent.DownloadTaskManager()
+        await downloads.consume_stream(download, stream, source="stdout")
+        verified = downloads.valid_output_file(download)
+        self.assertIsNotNone(verified)
+        logical = agent.WorkspacePathResolver().logical_existing_file(verified, error_code="OUTPUT_FILE_NOT_FOUND")
+        result = await self.convert({"path": logical, "outputFormat": "mp3", "audioBitrate": "320k"})
+        self.assertEqual(result["status"], "completed", result.get("error"))
+        output = agent.WORKSPACE_PATH / result["clips"][0]["workspacePath"]
+        streams, duration = await agent.media_clip_probe_file(output, self.ffprobe)
+        self.assertEqual(streams[0]["codec_name"], "mp3")
+        self.assertEqual(int(streams[0]["bit_rate"]), 320000)
+        self.assertAlmostEqual(duration, 1, delta=0.2)
+        self.assertEqual((source.read_bytes(), source.stat().st_mtime_ns), before)
+
     async def test_copy_by_omitting_format_and_unsupported_format_failures(self) -> None:
         result = await self.convert({"path": "source.mp4", "segments": [{"startSeconds": 0, "endSeconds": 1}]})
         self.assertEqual(result["status"], "completed", result.get("error"))

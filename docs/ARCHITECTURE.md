@@ -119,7 +119,7 @@ uses the shared Custom Tool status/cancel lifecycle.
 
 - `ffprobe` supplies stream, format, chapter and program metadata.
 - `ffmpeg` performs frame extraction, visual maps, image crop, screen/camera capture and media clipping.
-- `yt-dlp` resolves formats and downloads complete or partial public YouTube media.
+- `yt-dlp` resolves formats and downloads complete or partial public YouTube media. Download stdout/stderr use explicit UTF-8 and one incremental decoder per pipe, preserving Unicode final paths across arbitrary read boundaries. Completion still requires the reported final file to exist inside the Workspace; filenames are not guessed from directory contents.
 - YouTube storyboards download ready-made JPEG sheets rather than video.
 - Google Translate TTS is driven in a retained background tab. Source text is inserted by script, the listen control is clicked with CDP browser input, and file output is collected from CDP network response bodies.
 - Windows TTS uses Windows speech voices and produces WAV output. Source mode starts the helper script; frozen mode starts the same EXE with `--windows-speech-helper`, dispatched before normal Agent setup. WinRT dependencies are bundled; each frozen helper resets PyInstaller's environment for its own extraction lifetime.

@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import codecs
 import ctypes
 from html import escape
 import json
@@ -43,7 +44,7 @@ except ImportError:
     from task_history import TaskHistory
     from browser_resources import save_browser_resource
 
-AGENT_VERSION = "2.3.1"
+AGENT_VERSION = "2.3.2"
 INTERFACE_VERSION = 79
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
@@ -5440,7 +5441,7 @@ class DownloadTaskManager:
                 # but yt-dlp documents that it implies --quiet.  Re-enable
                 # progress explicitly so the progress template is emitted.
                 executable, *yt_dlp_youtube_arguments(deno),
-                "--no-playlist", "--windows-filenames", "--trim-filenames", "180", "--newline", "--progress", "--progress-delta", "1",
+                "--no-playlist", "--windows-filenames", "--trim-filenames", "180", "--encoding", "utf-8", "--newline", "--progress", "--progress-delta", "1",
                 "--format", task.selection.format_selector(),
             ]
             if task.selection.requires_merge:
@@ -5529,13 +5530,17 @@ class DownloadTaskManager:
     async def consume_stream(self, task: DownloadTask, stream: asyncio.StreamReader | None, *, source: str) -> None:
         if stream is None:
             return
+        # Pipe reads can split Cyrillic, emoji or punctuation within a UTF-8
+        # character. Decoding each chunk separately corrupts final file paths.
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         buffered = ""
         while chunk := await stream.read(4_096):
-            buffered += chunk.decode("utf-8", errors="replace")
+            buffered += decoder.decode(chunk)
             lines = re.split(r"[\r\n]+", buffered)
             buffered = lines.pop()
             for line in lines:
                 self.consume_output_line(task, line, source=source)
+        buffered += decoder.decode(b"", final=True)
         if buffered:
             self.consume_output_line(task, buffered, source=source)
 

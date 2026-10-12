@@ -55,6 +55,8 @@ ResearchTube uses stable public error codes so an assisting chat can distinguish
 | `RESEARCHTUBE_PAGE_CONTEXT_UNAVAILABLE` | Normal YouTube page bridge is unavailable | Keep/open a normal YouTube tab and retry once |
 | `FORMAT_NOT_AVAILABLE` | Requested format is not in the current snapshot | Call `youtube_download_get_formats` again and select returned IDs |
 | `DOWNLOAD_RANGE_INVALID` | Partial interval is outside video duration/order | Correct start/end using current metadata |
+| `YTDLP_FINAL_OUTPUT_MISSING` | yt-dlp exited successfully but its reported final file could not be verified | Update/restart the Agent, retry once and inspect download diagnostics; this is not a format-selection error |
+| `YTDLP_FINAL_PATH_NOT_REPORTED` | yt-dlp did not report an authoritative final output path | Inspect download diagnostics; unrelated files are never treated as the result |
 | `DOWNLOAD_FAILED` | yt-dlp task failed | Poll terminal status and request bounded download diagnostics |
 
 ## Storyboards
