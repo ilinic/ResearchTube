@@ -35,7 +35,7 @@ const sourceFunction = source.slice(source.indexOf('function toolDefinitions()')
 const sourceTools = vm.runInContext(sourceFunction + '; publicMcpTools()', context);
 assert.deepEqual(JSON.parse(JSON.stringify(sourceTools)), tools, 'source and shipped worker definitions must agree');
 assert.match(byName('media_show').description, /does not upload.*media_view/);
-assert.match(byName('media_view').description, /requireEmpty.*clear/);
+assert.match(byName('media_view').description, /Appends files to existing Composer/);
 assert.match(byName('media_view').description, /Finish the response/);
 assert.match(byName('site_read').description, /untrusted data/);
 assert.match(byName('site_interact').description, /input was dispatched: do not repeat/);

@@ -134,10 +134,13 @@ for (const mutation of ['cancel', 'close', 'navigate', 'edit']) {
     if (mutation === 'edit') { w.page.composer.innerText = 'KEEP THIS'; w.page.event('input', w.page.composer); }
     else w[mutation]();
   });
-  await assert.rejects(w.run());
-  assert.equal(w.sentAt(), null, mutation);
-  assert.equal(w.page.run(inspectChatComposer).attachments.length, 1, mutation);
-  assert.equal(w.now(), 10000, 'guards are checked before every readiness retry');
+  if (mutation === 'edit') { await w.run(); assert.equal(w.sentAt(), 28000); }
+  else {
+    await assert.rejects(w.run());
+    assert.equal(w.sentAt(), null, mutation);
+    assert.equal(w.page.run(inspectChatComposer).attachments.length, 1, mutation);
+    assert.equal(w.now(), 10000, 'target/cancellation guards run during every readiness retry');
+  }
 }
 console.log('Composer media: 30-second acceptance/readiness/ack retries, immediate success, bounded busy wait, exact background tab, one upload/Send, and cancellation/edit/closure preservation: ok');
 
@@ -213,8 +216,8 @@ for (const mutation of ['close', 'navigate', 'edit']) {
     else retry[mutation]();
   });
   await assert.rejects(retry.run());
-  assert.equal(retry.now(), 8000);
-  assert.equal(retry.submissions.length + retry.commands.filter(c => c.params?.type === 'mouseReleased').length, 4);
+  assert.equal(retry.now(), mutation === 'edit' ? 30000 : 8000);
+  assert.equal(retry.submissions.length + retry.commands.filter(c => c.params?.type === 'mouseReleased').length, mutation === 'edit' ? 16 : 4);
   assert.equal(retry.commands.filter(c => c.method === 'DOM.setFileInputFiles').length, 1);
   assert.equal(retry.page.run(inspectChatComposer).attachments.length, 1);
   if (mutation === 'edit') assert.equal(retry.page.composer.innerText, 'KEEP THIS EDIT');

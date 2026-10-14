@@ -214,7 +214,7 @@ export function resetChatComposerFileInputs() {
   return true;
 }
 
-// Track user editing independently of the final text: typing then deleting still stops Send.
+// Track editing for new-chat startup guards; file delivery permits edits.
 export function installChatComposerGuard(_expectedNames, token, _inspectAttachments = null) {
   const key = '__researchtubeChatComposerGuard';
   window[key]?.dispose?.();
@@ -222,7 +222,9 @@ export function installChatComposerGuard(_expectedNames, token, _inspectAttachme
   if (!root) return false;
   // File identity is deliberately not monitored. The delivery check compares
   // only the number of visible attachment cards, allowing same-count replacement.
-  const state = { token, changed: false, ownText: null, ownBeforeInput: false, ownInput: false };
+  const initial = _inspectAttachments?.();
+  const existingCount = Math.max(initial?.attachments?.length || 0, initial?.previewCount || 0);
+  const state = { token, expectedCount: existingCount + _expectedNames.length, changed: false, ownText: null, ownBeforeInput: false, ownInput: false };
   const listener = (event) => {
     if (!event.isTrusted) return;
     const { composer: liveComposer, root: liveRoot } = resolveChatComposer();
@@ -246,7 +248,7 @@ export function installChatComposerGuard(_expectedNames, token, _inspectAttachme
 
 export function readChatComposerGuard(token) {
   const state = window.__researchtubeChatComposerGuard;
-  return state?.token === token ? { present: true, changed: state.changed } : { present: false, changed: true };
+  return state?.token === token ? { present: true, changed: state.changed, expectedCount: state.expectedCount } : { present: false, changed: true };
 }
 
 export function disposeChatComposerGuard(token) {
@@ -255,12 +257,16 @@ export function disposeChatComposerGuard(token) {
   return true;
 }
 
-// Authorize exactly one known Extension insertion, retaining all user-edit
-// monitoring across it. Never clear or reset the guard to mask an edit.
+// Append one Extension continuation at the live editor end, preserving its text.
 export function authorizeChatComposerText(token, text) {
   const state = window.__researchtubeChatComposerGuard;
   const { composer } = resolveChatComposer();
-  if (!state || state.token !== token || state.changed || !composer || String(composer.value ?? composer.innerText ?? composer.textContent ?? '').trim()) return false;
-  state.ownText = text; state.ownBeforeInput = false; state.ownInput = false;
-  composer.focus(); return document.activeElement === composer;
+  if (!state || state.token !== token || !composer) return false;
+  const current = String(composer.value ?? composer.innerText ?? composer.textContent ?? '');
+  const insertion = (current.trim() ? '\n\n' : '') + text;
+  state.ownText = insertion; state.ownBeforeInput = false; state.ownInput = false;
+  composer.focus();
+  if (composer.tagName === 'TEXTAREA') composer.setSelectionRange(composer.value.length, composer.value.length);
+  else { const range = document.createRange(); range.selectNodeContents(composer); range.collapse(false); const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range); }
+  return document.activeElement === composer ? insertion : false;
 }

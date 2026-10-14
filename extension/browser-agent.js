@@ -448,7 +448,7 @@ export function createBrowserAgent(host) {
         if (task.sendCommitted) throw browserError("BROWSER_SEND_UNCONFIRMED", "Send was dispatched but acknowledgement was uncertain. No retry was made.");
         if (host.sleep) await host.sleep(2000); else await new Promise(resolve => setTimeout(resolve, 2000));
       }
-      throw browserError("BROWSER_CHAT_BUSY", "The destination remained busy or contained a draft for ten minutes. Nothing was replaced.");
+      throw browserError("BROWSER_CHAT_BUSY", "The destination remained busy for ten minutes. Composer contents were preserved.");
     } catch (error) {
       if (!task.cancelRequested) { task.status = "failed"; task.error = { code: error.code || "BROWSER_UNAVAILABLE", message: error.code ? error.message : "Inter-chat delivery failed." }; progress(task, "failed", task.progressPercent); }
     } finally { delete task.text; pruneCompletedTasks(tasks, host.historyLimit?.() || 2000); }

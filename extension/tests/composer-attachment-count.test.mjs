@@ -35,7 +35,7 @@ for (const path of ['../background.js', '../dist/background.js']) {
   page.input.files = names.map(name => ({ name }));
   assert.equal(evaluate().accepted, false, 'a populated FileList is not proof of visible attachments');
 
-  const helpers = section(source, 'async function currentChatComposerState(', '\nasync function prepareCurrentChatComposer(');
+  const helpers = section(source, 'async function currentChatComposerState(', '\nasync function clearCurrentChatComposer(');
   async function scenario({ readyAt = 0, unavailableUntil = 0, extra = false, mutation = null } = {}) {
     let now = 0, reads = 0, sent = 0, cancelled = false, closed = false, guardChanged = false;
     const state = { found: true, textEmpty: true, attachments: [{ name: null, text: '' }], selectedFiles: [], removeTargets: [], previewCount: 1 };
@@ -80,14 +80,14 @@ for (const path of ['../background.js', '../dist/background.js']) {
       });
       sent++;
     })();
-    if (readyAt === Infinity || extra) {
+    if (readyAt === Infinity) {
       await assert.rejects(work, error => error.code === 'MEDIA_TO_CHAT_TIMEOUT');
       assert.equal(now, 30000);
       assert.equal(reads, 16);
       assert.equal(sent, 0);
-    } else if (mutation) {
+    } else if (mutation && mutation !== 'text') {
       await assert.rejects(work);
-      assert.equal(now, 4000, 'cancel, target closure and text edits interrupt polling');
+      assert.equal(now, 4000, 'cancel, target closure interrupt polling');
       assert.equal(sent, 0);
     } else {
       await work;

@@ -27,7 +27,7 @@ function worker(storage={}) {
  context.resolveLibraryStoreFiles=async files=>({localPaths:files.map(f=>'/private/'+f.workspacePath),submittedFiles:files,skippedFiles:[]});
  context.cdpAttachFilesNow=async(paths,options)=>{
   await context.requireCurrentChatTarget(options.currentChatTarget);options.checkCancelled();
-  uploads.push({paths,tabId:options.currentChatTarget.tabId,policy:options.composerPolicy,deferSend:options.deferSend});
+  uploads.push({paths,tabId:options.currentChatTarget.tabId,deferSend:options.deferSend});
   if(options.deferSend)return {guardToken:'guard',fileNames:['crop.png']};options.onSendCommit();
  };
  context.agentJsonRequest=async(path,options)=>{
@@ -40,6 +40,7 @@ function worker(storage={}) {
  return {context,tabs,storage,requests,uploads,timers,alarms,reports,call,tick(ms=1000){now+=ms;}};
 }
 const w=worker(),definitions=w.context.publicMcpTools();
+for (const tool of definitions) assert.ok(!JSON.stringify(tool).includes('composerPolicy'), `${tool.name} has no Composer policy in inputs or results`);
 assert.ok(definitions.some(tool=>tool.name==='media_view'));
 assert.ok(!definitions.some(tool=>tool.name.startsWith('media_to_chat')));
 const renamed=worker({mcpToolPreferences:{enabledByName:{media_to_chat:false,media_to_chat_status:true,media_to_chat_cancel:false,media_view_status:false}}});
@@ -129,7 +130,7 @@ for(const tool of migrated.filter(tool=>BROWSER_TOOL_NAMES.includes(tool.name)))
 
 for(const name of ARTIFACT_TOOLS){const tool=definitions.find(t=>t.name===name);
  assert.equal(tool.inputSchema.properties.addToChat.default,false);
- assert.equal(tool.inputSchema.properties.composerPolicy.default,'requireEmpty');assert.equal(tool.inputSchema.properties.sendDelaySeconds.default,0);
+ assert.ok(!('composerPolicy' in tool.inputSchema.properties));assert.equal(tool.inputSchema.properties.sendDelaySeconds.default,0);
  assert.equal(tool.inputSchema.additionalProperties,false);assert.equal(tool.outputSchema.properties.statusTool.const,'media_task_status');
  assert.equal(tool.inputSchema.properties.showInChat,undefined,'presentation flag must not compete with uploading');
  assert.match(tool.description,/asynchronous/);assert.match(tool.description,/creation.data/);assert.match(tool.description,/addToChat/);
@@ -196,7 +197,7 @@ for (const invalid of [{workspacePath:'source.mp4'}, {workspacePath:'source.mp4'
 
 // Launch binding survives long creation and focus switches; no upload occurs
 // on binding alone while the child reservation is awaiting artifacts.
-const send=worker();const created=await send.call('media_image_crop',{...args,addToChat:true,composerPolicy:'clear',sendDelaySeconds:60});
+const send=worker();const created=await send.call('media_image_crop',{...args,addToChat:true,sendDelaySeconds:60});
 const sending=created.result.structuredContent,binding=created.result._meta['researchtube/chatTarget'];
 assertSchema(definitions.find(t=>t.name==='media_image_crop').outputSchema,sending,'crop chat start');
 assert.ok(binding.bindingToken);assert.ok(!JSON.stringify(sending).includes(binding.bindingToken));
@@ -208,7 +209,7 @@ let paused=(await send.call('media_task_status',{taskId:sending.taskId})).result
 assert.equal(paused.creation.status,'completed');assert.equal(paused.status,'working');assert.equal(paused.chat.phase,'waitingToSend');
 assert.equal(paused.chat.sendDelaySeconds,60);assert.equal(paused.chat.remainingSeconds,59);
 assertSchema(definitions.find(t=>t.name==='media_task_status').outputSchema,paused,'crop paused');
-assert.equal(send.uploads[0].tabId,42);assert.equal(send.uploads[0].policy,'clear');assert.equal(send.uploads[0].deferSend,true);
+assert.equal(send.uploads[0].tabId,42);assert.equal(send.uploads[0].deferSend,true);
 const resumed=worker(JSON.parse(JSON.stringify(send.storage)));
 await resumed.context.artifactTaskManager.ensure();
 const recovered=(await resumed.call('media_task_status',{taskId:sending.taskId})).result.structuredContent;

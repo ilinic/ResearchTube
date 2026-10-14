@@ -36,7 +36,6 @@ const nullable = schema => ({anyOf:[schema,{type:'null'}]});
 export const artifactOptionsSchema = {
   tabId:{type:'integer',minimum:0,description:'Optional ChatGPT tabId from the startup prompt; notify on completion only if idle.'},
   addToChat:{type:'boolean',default:false,description:'Upload created files to this conversation and press Send. Default false creates only; media_show displays a viewer instead.'},
-  composerPolicy:{type:'string',enum:['requireEmpty','clear'],default:'requireEmpty',description:'With addToChat: requireEmpty refuses drafts/attachments; clear discards both once. Later text edits stop Send and retain files.'},
   sendDelaySeconds:{type:'number',minimum:0,default:0,description:'With addToChat: seconds before Send after files are accepted. Default 0. waitingToSend reports deadline/remaining time; cancel preserves Composer.'}
 };
 export function artifactTaskSchema(chatSchema, dataSchema = {type:'object'}) {

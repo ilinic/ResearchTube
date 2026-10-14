@@ -22,7 +22,7 @@ The last four tools now use the same public task lifecycle as the others, even w
 ## Common options
 
 - `addToChat` defaults to false: create Workspace outputs only. True requests uploading and sending every completed output in the originating conversation after successful creation.
-- `composerPolicy` defaults to `requireEmpty`. With delivery enabled, `clear` explicitly discards initial text and attachments once, before uploading. Later text edits stop Send and leave attachments in place. Delivery verifies only the attachment count; same-count file replacement is allowed.
+- Chat delivery always appends to the existing Composer and sends its text and attachments together with the new files. There is no Composer policy parameter. Text edits and extra attachments do not stop Send. Delivery verifies a minimum visible count: existing cards plus new files; same-count replacements are allowed.
 - `sendDelaySeconds` defaults to zero. Positive values pause after the files are accepted in Composer. Readiness is still checked separately. The current-chat task reports `sendNotBefore` in UTC and `remainingSeconds` during `waitingToSend`.
 
 `addToChat` supplies actual file attachments to ChatGPT. `media_show` displays a local viewer and does not supply visual input. Do not call `media_view` again for outputs whose creation task already requested delivery.

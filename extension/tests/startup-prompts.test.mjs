@@ -48,7 +48,7 @@ let supplied = { describeThisVideoPrompt: 'Describe [video_title]\n[video_link] 
 context.agentJsonRequest = async path => { requests.push(path); return supplied; };
 context.chrome.tabs.create = async options => { created.push(options); return { id: nextTab++ }; };
 context.waitForChatGPTTab = async id => ({ id });
-for (const name of ['cdpAttach', 'cdpDetach', 'cdpCommand', 'cdpPrepareBackgroundChat', 'cdpWaitForTextComposer', 'prepareCurrentChatComposer', 'sleep', 'requireCurrentChatTarget', 'startComposerWatchdog']) context[name] = async () => {};
+for (const name of ['cdpAttach', 'cdpDetach', 'cdpCommand', 'cdpPrepareBackgroundChat', 'cdpWaitForTextComposer', 'clearCurrentChatComposer', 'sleep', 'requireCurrentChatTarget', 'startComposerWatchdog']) context[name] = async () => {};
 context.cdpSetComposerText = async (id, prompt) => sent.push(['insert', id, prompt]);
 context.cdpEvaluate = async () => ({ value: true });
 context.cdpSendComposerText = async (id, prompt, guard) => { await guard(); sent.push(['send', id, prompt]); };

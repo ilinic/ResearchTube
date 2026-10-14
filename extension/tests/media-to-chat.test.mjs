@@ -6,7 +6,7 @@ import { readFile } from "node:fs/promises";
 import vm from "node:vm";
 import { pageFixture } from './fixtures/chat-composer-page.mjs';
 import { webcrypto } from "node:crypto";
-import { resolveChatComposer, chatComposerPageExpression, chatComposerAttachmentNamesMatch, inspectChatComposer, clickChatComposerAttachmentRemoval, resetChatComposerFileInputs, installChatComposerGuard, readChatComposerGuard, disposeChatComposerGuard } from "../chat-composer.js";
+import { resolveChatComposer, chatComposerPageExpression, chatComposerAttachmentNamesMatch, inspectChatComposer, clickChatComposerAttachmentRemoval, resetChatComposerFileInputs, installChatComposerGuard, readChatComposerGuard, disposeChatComposerGuard, authorizeChatComposerText } from "../chat-composer.js";
 
 const source = await readFile(new URL("../background.js", import.meta.url), "utf8");
 for (const name of ["media_show", "media_view", "media_view_status", "media_view_cancel"]) assert.match(source, new RegExp(`name: "${name}"`));
@@ -22,6 +22,8 @@ let draftEmpty = true;
 let attachmentNames = [];
 let guardChanged = false;
 let guardPresent = false;
+let guardExpectedCount = 0, chooserCount = 0;
+const sentBatches = [];
 let clears = 0;
 let removals = 0;
 let afterAcceptance = () => {};
@@ -41,7 +43,7 @@ const context = vm.createContext({
   updateComposerWatchdog: async () => {},
   taskCompletionDelivery: { completed: async () => {} },
   pruneCompletedTasks, completedTaskHistoryLimit: 2000, developerNewToolsDefault: true, refreshTaskHistorySettings: async () => {},
-  resolveChatComposer, chatComposerPageExpression, chatComposerAttachmentNamesMatch, inspectChatComposer, clickChatComposerAttachmentRemoval, resetChatComposerFileInputs, installChatComposerGuard, readChatComposerGuard, disposeChatComposerGuard,
+  resolveChatComposer, chatComposerPageExpression, chatComposerAttachmentNamesMatch, inspectChatComposer, clickChatComposerAttachmentRemoval, resetChatComposerFileInputs, installChatComposerGuard, readChatComposerGuard, disposeChatComposerGuard, authorizeChatComposerText,
   URL, console, Promise, crypto: webcrypto, setTimeout, clearTimeout,
   EXTERNAL_URLS: { chatgptNewChat: "https://chatgpt.com/" },
   MEDIA_TO_CHAT_BIND_TIMEOUT_MS: 30_000,
@@ -66,7 +68,7 @@ const context = vm.createContext({
   cdpCommand: async (id, method, params) => {
     commands.push({ id, method, params });
     if (method === "Input.dispatchMouseEvent" && params.type === "mouseMoved" && params.x === 40) hoverSeen = true;
-    if (method === "DOM.setFileInputFiles") attachmentNames = params.files.map((path) => path.split("/").pop());
+    if (method === "DOM.setFileInputFiles") attachmentNames.push(...params.files.map((path) => path.split("/").pop()));
     if (method === "Input.dispatchMouseEvent" && params.type === "mouseReleased") { attachmentNames.shift(); removals++; }
     return {};
   },
@@ -77,7 +79,7 @@ const context = vm.createContext({
   Date,
   cdpEvaluate: async (id, expression) => {
     if (expression.includes("function clickChatComposerAttachmentRemoval")) return {value:{clicked:false,reason:"noMatchingControl"}};
-    if (expression.includes("function installChatComposerGuard")) { guardPresent = true; guardChanged = false; return { value: true }; }
+    if (expression.includes("function installChatComposerGuard")) { guardPresent = true; guardChanged = false; guardExpectedCount = attachmentNames.length + chooserCount; return { value: true }; }
     if (expression.includes("function resetChatComposerFileInputs")) { resetInputs++; staleSelectedFiles = null; return {value:true}; }
     if (expression.includes("function inspectChatComposer")) return { value: {
       found: true, textEmpty: draftEmpty,
@@ -85,13 +87,13 @@ const context = vm.createContext({
       selectedFiles: (staleSelectedFiles ?? attachmentNames).map((name) => ({ name })),
       removeTargets: attachmentNames.map(() => ({ x: 1, y: 1, enabled: !hoverRequired || hoverSeen })), hoverTargets: attachmentNames.map(()=>({x:40,y:40})), previewCount: attachmentNames.length
     } };
-    if (expression.includes("function readChatComposerGuard")) return { value: { present: guardPresent, changed: guardChanged } };
+    if (expression.includes("function readChatComposerGuard")) return { value: { present: guardPresent, changed: guardChanged, expectedCount: guardExpectedCount } };
     if (expression.includes("function disposeChatComposerGuard")) { guardPresent = false; return { value: true }; }
     return { value: draftEmpty };
   },
-  cdpOpenStableFileChooser: async () => ({ backendNodeId: 7 }),
+  cdpOpenStableFileChooser: async (_id, count) => { chooserCount = count; return { backendNodeId: 7 }; },
   cdpWaitForAttachmentAccepted: async () => { afterAcceptance(); },
-  cdpSendAttachedFiles: async (id, count, options) => { if (options.beforeClick) await options.beforeClick(); options.onSendCommit?.(); sends++; attachmentNames = []; },
+  cdpSendAttachedFiles: async (id, count, options) => { if (options.beforeClick) await options.beforeClick(); options.onSendCommit?.(); sends++; sentBatches.push({ draftEmpty, files: [...attachmentNames] }); attachmentNames = []; draftEmpty = true; },
   findOrCreateServiceTab: async () => { serviceTabs++; return { tab: { id: 43 } }; },
   libraryStoreNow: () => "2026-10-05T00:00:00Z",
   configuredToolLimits: async () => ({ mediaToChatMaxFiles: 2 }),
@@ -129,29 +131,29 @@ afterAcceptance = () => { tabUrl = "https://chatgpt.com/c/other"; };
 await assert.rejects(context.cdpAttachFilesNow(["/workspace/report.pdf"], { currentChatTarget: target }), /closed or changed/);
 assert.equal(sends, 1);
 assert.equal(detached, 2);
-// A draft appearing during upload must also stop before Send.
+// A draft appearing during upload is included in the same Send.
 tabUrl = "https://chatgpt.com/c/example"; attachmentNames = [];
 afterAcceptance = () => { draftEmpty = false; };
-await assert.rejects(context.cdpAttachFilesNow(["/workspace/report.pdf"], { currentChatTarget: target }), /contains a draft/);
-assert.equal(sends, 1);
+await context.cdpAttachFilesNow(["/workspace/report.pdf"], { currentChatTarget: target });
+assert.equal(sends, 2);
 assert.equal(detached, 3);
-assert.deepEqual(attachmentNames, ["report.pdf"], "failed Send must retain uploaded files");
+assert.deepEqual(sentBatches.at(-1), { draftEmpty: false, files: ['report.pdf'] });
 assert.equal(clears, 0);
-assert.equal(guardPresent, false, "a failed task must remove its edit listener");
+assert.equal(guardPresent, false);
 draftEmpty = true; attachmentNames = []; afterAcceptance = () => {};
 tabUrl = "https://example.com/c/example";
 await assert.rejects(context.requireCurrentChatTarget(target), /closed or changed/);
 tabUrl = "https://chatgpt.com/c/example";
 
 await assert.rejects(context.mediaToChatStart({ files: [{ workspacePath: "one" }, { workspacePath: "two" }, { workspacePath: "three" }] }), (error) => error.code === "MEDIA_TO_CHAT_INVALID" && /2 items/.test(error.message));
-for (const composerPolicy of ["replace", "", null, true, 123]) {
-  await assert.rejects(context.mediaToChatStart({ files: [{ workspacePath: "report.pdf" }], composerPolicy }), (error) => error.code === "MEDIA_TO_CHAT_INVALID" && /composerPolicy/.test(error.message));
+for (const composerPolicy of ["requireEmpty", "clear", "append", "replace", "", null, true, 123]) {
+  await assert.rejects(context.mediaToChatStart({ files: [{ workspacePath: "report.pdf" }], composerPolicy }), (error) => error.code === "MEDIA_TO_CHAT_INVALID");
 }
 const queued = await context.mediaToChatStart({ files: [{ workspacePath: "report.pdf" }] });
 assert.match(queued.task.taskId, /^tsk_[A-Za-z0-9_-]{10}$/);
 assert.equal(queued.task.status, "queued");
 assert.equal(queued.task.progressPercent, 0);
-assert.equal(queued.task.composerPolicy, "requireEmpty");
+assert.ok(!("composerPolicy" in queued.task));
 assert.equal(queued.task.tabId, null, "unbound task has no chat context yet");
 assert.ok(!("target" in queued.task) && !("chatPath" in queued.task), "private target details must not reach MCP");
 assert.equal((await context.mediaToChatCancel(queued.task.taskId)).cancelled, true);
@@ -184,61 +186,23 @@ await context.drainMediaToChatQueue();
 assert.equal((await context.mediaToChatStatus(allSkipped.task.taskId)).status, "failed");
 assert.equal(sends, previousSends);
 
-// Policy refuses both text and existing attachments, before passing any new files.
+// Delivery preserves drafts, old files and changes during upload.
 vm.runInContext("mediaToChatDraining = true", context);
 const injectedBefore = () => commands.filter((item) => item.method === "DOM.setFileInputFiles").length;
-let initialUploads = injectedBefore();
-draftEmpty = false;
-await assert.rejects(context.cdpAttachFilesNow(["/workspace/report.pdf"], { currentChatTarget: target }), /contains a draft/);
-assert.equal(injectedBefore(), initialUploads);
-assert.equal(clears, 0);
-draftEmpty = true; attachmentNames = ["user.pdf"];
-await assert.rejects(context.cdpAttachFilesNow(["/workspace/report.pdf"], { currentChatTarget: target }), /already contains attachments/);
-assert.deepEqual(attachmentNames, ["user.pdf"]);
-assert.equal(injectedBefore(), initialUploads);
-assert.equal(removals, 0);
-
-// clear explicitly discards the initial draft + files, only once before upload.
-draftEmpty = false; attachmentNames = ["old.png", "old.txt"];
-await context.cdpAttachFilesNow(["/workspace/report.pdf"], { currentChatTarget: target, composerPolicy: "clear" });
-assert.equal(clears, 1);
-assert.equal(removals, 2);
-assert.equal(draftEmpty, true);
-assert.equal(guardPresent, false);
-// A native FileList may stay populated after both React cards have been removed.
-draftEmpty=true; attachmentNames=['old.png','old.docx']; staleSelectedFiles=[...attachmentNames];
-hoverRequired=true; hoverSeen=false;
-await context.cdpAttachFilesNow(['/workspace/report.pdf'],{currentChatTarget:target,composerPolicy:'clear'});
-assert.equal(resetInputs,1,'reset the native selection only after confirmed card removal');
-assert.equal(hoverSeen,true,'reveal pointer-events-none removal buttons before clicking');
-assert.deepEqual(attachmentNames,[]);
-hoverRequired=false;hoverSeen=false;
-const clearsBeforeUploadEdit = clears;
-const removalsBeforeUploadEdit = removals;
-afterAcceptance = () => { draftEmpty = false; };
-const sendsBeforeEdit = sends;
-await assert.rejects(context.cdpAttachFilesNow(["/workspace/report.pdf"], { currentChatTarget: target, composerPolicy: "clear" }), /contains a draft/);
-assert.equal(clears, clearsBeforeUploadEdit, "clear must never repeat after upload starts");
-assert.equal(removals, removalsBeforeUploadEdit);
-assert.equal(sends, sendsBeforeEdit);
-assert.deepEqual(attachmentNames, ["report.pdf"]);
-assert.equal(draftEmpty, false);
-
-// An added attachment or editing and then deleting text also stops Send.
-draftEmpty = true; attachmentNames = [];
-afterAcceptance = () => { attachmentNames.push("user.txt"); };
-await assert.rejects(context.cdpAttachFilesNow(["/workspace/report.pdf"], { currentChatTarget: target }), /did not confirm Composer attachment count/);
-assert.deepEqual(attachmentNames, ["report.pdf", "user.txt"]);
-assert.equal(sends, sendsBeforeEdit);
-attachmentNames = [];
-afterAcceptance = () => { guardChanged = true; };
-await assert.rejects(context.cdpAttachFilesNow(["/workspace/report.pdf"], { currentChatTarget: target }), /edited during upload/);
-assert.deepEqual(attachmentNames, ["report.pdf"]);
-assert.equal(sends, sendsBeforeEdit);
+for (const extraFile of ['added.txt', 'extra.mp3']) {
+  draftEmpty = false; attachmentNames = ['user.pdf', 'old.png'];
+  afterAcceptance = () => { attachmentNames.push(extraFile); guardChanged = true; };
+  const before = sends;
+  await context.cdpAttachFilesNow(['/workspace/report.pdf'], { currentChatTarget: target });
+  assert.equal(sends, before + 1);
+  assert.deepEqual(sentBatches.at(-1), { draftEmpty: false, files: ['user.pdf', 'old.png', 'report.pdf', extraFile] });
+}
+assert.equal(clears, 0); assert.equal(removals, 0); assert.equal(resetInputs, 0);
 attachmentNames = []; afterAcceptance = () => {};
-const clearTask = await context.mediaToChatStart({ files: [{ workspacePath: "report.pdf" }], composerPolicy: "clear" });
-assert.equal(clearTask.task.composerPolicy, "clear");
+const clearTask = await context.mediaToChatStart({ files: [{ workspacePath: 'report.pdf' }] });
+assert.ok(!('composerPolicy' in clearTask.task));
 assert.equal((await context.mediaToChatCancel(clearTask.task.taskId)).cancelled, true);
+const sendsBeforeEdit = sends;
 
 // Library and current-chat work share one lock, including recovery after errors.
 let active = 0;
@@ -287,7 +251,7 @@ await assert.rejects(waiting.cdpClickEnabledSendButton(42, 45_000, async () => {
   if (polls === 2) throw new Error('user changed the Composer');
 }), /user changed the Composer/);
 assert.equal(polls, 2);
-console.log('media to chat: user changes abort the Send readiness wait');
+console.log('media to chat: a failing caller guard aborts the Send readiness wait');
 
 // Standard short task IDs are URL-safe, cryptographically random, and unique.
 const ids=new Set(Array.from({length:1000},()=>context.createAsyncTaskId()));
@@ -295,22 +259,12 @@ assert.equal(ids.size,1000);
 for(const id of ids) assert.match(id,/^tsk_[A-Za-z0-9_-]{10}$/);
 console.log('media to chat: standard IDs, mixed attachment removal, hover and stale FileList passed');
 
-// Unrecognized removal markup must fail before replacing the native selection or uploading new files.
-const evaluateBefore=context.cdpEvaluate;
-const uploadsBeforeUnknown=injectedBefore();
-attachmentNames=['unknown.bin'];draftEmpty=true;
-context.cdpEvaluate=async (id,expression)=>{
- const result=await evaluateBefore(id,expression);
- if(expression.includes('function inspectChatComposer') && !expression.includes('function installChatComposerGuard')) {
-  result.value.removeTargets=[];result.value.hoverTargets=[];
- }
- return result;
-};
-await assert.rejects(context.cdpAttachFilesNow(['/workspace/report.pdf'],{currentChatTarget:target,composerPolicy:'clear'}), /removal control/);
-assert.equal(injectedBefore(),uploadsBeforeUnknown);
-assert.deepEqual(attachmentNames,['unknown.bin']);
-assert.equal(resetInputs,1,'unconfirmed removal must not reset the native input');
-context.cdpEvaluate=evaluateBefore;
+// Appending does not depend on old attachments having removal controls.
+const evaluateBefore = context.cdpEvaluate;
+attachmentNames = ['unknown.bin']; draftEmpty = false;
+await context.cdpAttachFilesNow(['/workspace/report.pdf'], { currentChatTarget: target });
+assert.deepEqual(sentBatches.at(-1), { draftEmpty: false, files: ['unknown.bin', 'report.pdf'] });
+assert.equal(resetInputs, 0);
 
 // Run the real page expressions through the complete attachment flow. The old
 // #prompt-textarea is hidden and empty while the live rich Composer is occupied.
@@ -344,6 +298,7 @@ context.cdpCommand = async (_id, method, params) => {
     live.root.controls=live.root.controls.filter(item=>item!==button);
     actualRemovals++;
   }
+  if (method==='Input.insertText') { live.event('beforeinput', live.composer, { inputType: 'insertText', data: params.text }); live.composer.innerText += params.text; live.event('input', live.composer, { inputType: 'insertText', data: params.text }); }
   if (method==='DOM.setFileInputFiles') {
     actualUploads++;
     const names=params.files.map(path=>path.split('/').pop());
@@ -355,8 +310,8 @@ context.cdpCommand = async (_id, method, params) => {
   }
   return {};
 };
-context.cdpWaitForAttachmentAccepted = async (_id,names)=>{
-  const state=vm.runInContext(context.cdpAttachmentStateExpression(names),live.context);
+context.cdpWaitForAttachmentAccepted = async (_id,names,_retry,_check,existing=0)=>{
+  const state=vm.runInContext(context.cdpAttachmentStateExpression(names,existing),live.context);
   assert.equal(state.accepted,true);
   onActualAcceptance();
 };
@@ -368,31 +323,32 @@ manualClose.click=()=>{
   live.root.controls=live.root.controls.filter(button=>button!==manualClose);
   actualScriptRemovals++;
 };
-await assert.rejects(context.cdpAttachFilesNow(['/workspace/task.jpg'],{currentChatTarget:target}),/contains a draft/);
-assert.equal(actualUploads,0,'requireEmpty must refuse before supplying any files');
-assert.equal(live.composer.innerText,'actual draft');
-assert.equal(live.run(inspectChatComposer).attachments[0].name,'manual.jpg');
-await context.cdpAttachFilesNow(['/workspace/task.jpg','/workspace/task.mp3'],{currentChatTarget:target,composerPolicy:'clear'});
-assert.equal(actualUploads,1);
-assert.equal(actualRemovals,0);
-assert.equal(actualScriptRemovals,1,'labelled hidden removal invokes React without depending on pointer hover');
-assert.equal(actualSends,1);
-assert.equal(live.composer.innerText,'');
-assert.deepEqual([...live.run(inspectChatComposer).attachments].map(card=>card.name),['task.jpg','task.mp3']);
-// Empty Composer works after FileList reset; an extra card or text blocks Send.
-const resetPage=()=>{live.root.cards=[];live.root.controls=[];live.root.images=[];live.input.files=[];live.composer.innerText='';};
+await context.cdpAttachFilesNow(['/workspace/task.jpg','/workspace/task.mp3'], { currentChatTarget: target });
+assert.equal(actualUploads, 1); assert.equal(actualSends, 1);
+assert.equal(actualRemovals, 0); assert.equal(actualScriptRemovals, 0);
+assert.equal(live.composer.innerText, 'actual draft');
+assert.deepEqual([...live.run(inspectChatComposer).attachments].map(card => card.name), ['manual.jpg','task.jpg','task.mp3']);
+const resetPage = () => { live.root.cards=[]; live.root.controls=[]; live.root.images=[]; live.input.files=[]; live.composer.innerText=''; };
 resetPage();
-await context.cdpAttachFilesNow(['/workspace/task.jpg'],{currentChatTarget:target});
-assert.equal(actualSends,2);
-resetPage();onActualAcceptance=()=>{live.composer.innerText='user typed';live.event('input',live.composer);};
-await assert.rejects(context.cdpAttachFilesNow(['/workspace/task.jpg'],{currentChatTarget:target}),/edited during upload/);
-assert.equal(actualSends,2);
-assert.equal(live.composer.innerText,'user typed');
-assert.equal(live.run(inspectChatComposer).attachments[0].name,'task.jpg');
-resetPage();onActualAcceptance=()=>live.button('Remove extra.pdf','extra.pdf',{markedCard:true});
-await assert.rejects(context.cdpAttachFilesNow(['/workspace/task.jpg'],{currentChatTarget:target}),/did not confirm Composer attachment count/);
-assert.equal(actualSends,2);
-console.log('media to chat: real page expressions reject occupied live editor, clear initial state, accept reset FileList and preserve user changes');
+await context.cdpAttachFilesNow(['/workspace/task.jpg'], { currentChatTarget: target });
+assert.equal(actualSends, 2);
+resetPage(); onActualAcceptance = () => { live.composer.innerText='user typed'; live.event('input',live.composer); };
+await context.cdpAttachFilesNow(['/workspace/task.jpg'], { currentChatTarget: target });
+assert.equal(actualSends, 3); assert.equal(live.composer.innerText, 'user typed');
+resetPage(); onActualAcceptance = () => live.button('Remove extra.pdf','extra.pdf',{markedCard:true});
+await context.cdpAttachFilesNow(['/workspace/task.jpg'], { currentChatTarget: target });
+assert.equal(actualSends, 4);
+console.log('media to chat: live occupied editor, old attachments, reset FileList and concurrent additions append and Send');
+
+// Browser continuations append at the end of the live draft, including a user edit during upload.
+resetPage(); live.composer.innerText = 'Keep my draft';
+onActualAcceptance = () => { live.composer.innerText += ' and this edit'; live.event('input', live.composer); };
+const beforeContinuation = actualSends;
+vm.runInContext(section('async function cdpInsertBrowserContinuation(', '\nasync function cdpAttachFilesNow('), context);
+await context.cdpAttachFilesNow(['/workspace/image.png'], { currentChatTarget: target, continuationText: 'Continue study.' });
+assert.equal(actualSends, beforeContinuation + 1);
+assert.equal(live.composer.innerText, 'Keep my draft and this edit\n\nContinue study.');
+onActualAcceptance = () => {};
 
 // The enabled submit button must come from the same visible draft area.
 vm.runInContext(section('const CDP_ENABLED_SEND_BUTTON_EXPRESSION =', '\nfunction cdpComposerTextExpression('), context);
@@ -424,25 +380,30 @@ for(const name of ['manual-photo.png','Report.docx','voice.mp3','archive.zip']) 
   mixedScriptRemovals++;
  };
 }
-await context.cdpAttachFilesNow(['/workspace/result.pdf'],{currentChatTarget:target,composerPolicy:'clear'});
-assert.equal(mixedScriptRemovals,4);
+await context.cdpAttachFilesNow(['/workspace/result.pdf'],{currentChatTarget:target});
+assert.equal(mixedScriptRemovals,0);
 assert.equal(actualUploads,uploadsBeforeMixed+1);
 assert.equal(actualSends,sendsBeforeMixed+1);
-assert.equal(live.composer.innerText,'');
-assert.deepEqual([...live.run(inspectChatComposer).attachments].map(card=>card.name),['result.pdf']);
-console.log('media to chat: clear removes every mixed initial attachment before uploading and Send');
+assert.equal(live.composer.innerText,'old mixed draft');
+assert.deepEqual([...live.run(inspectChatComposer).attachments].map(card=>card.name),['manual-photo.png','Report.docx','voice.mp3','archive.zip','result.pdf']);
+console.log('media to chat: mixed original attachments and text remain alongside new files');
 
 resetPage(); tabUrl = 'https://chatgpt.com/';
 live.composer.innerText = 'restored new-chat draft';
 const restored = live.button('Remove restored.png', 'restored.png', { markedCard: true });
 restored.click = () => { live.root.cards = []; live.root.controls = []; };
 const uploadBeforeStartup = actualUploads;
-await context.prepareCurrentChatComposer({ tabId: 42, chatPath: '/', newChat: true }, 'clear');
+await context.clearCurrentChatComposer({ tabId: 42, chatPath: '/', newChat: true });
 assert.equal(live.composer.innerText, '');
 assert.equal(live.run(inspectChatComposer).attachments.length, 0);
 assert.equal(actualUploads, uploadBeforeStartup);
 await assert.rejects(context.requireCurrentChatTarget({ tabId: 42, chatPath: '/' }), /closed or changed/);
 live.composer.innerText = 'KEEP USER DRAFT'; tabUrl = 'https://chatgpt.com/c/example';
-await assert.rejects(context.prepareCurrentChatComposer({ tabId: 42, chatPath: '/', newChat: true }, 'clear'), /closed or changed/);
+await assert.rejects(context.clearCurrentChatComposer({ tabId: 42, chatPath: '/', newChat: true }), /closed or changed/);
 assert.equal(live.composer.innerText, 'KEEP USER DRAFT');
 console.log('Startup clear: text and attachment removal only for an explicitly captured new-chat tab, navigation stops before clearing: ok');
+
+resetPage(); tabUrl = 'https://chatgpt.com/';
+live.input.files = [{ name: 'stale.pdf', size: 5, lastModified: 1 }];
+await context.clearCurrentChatComposer({ tabId: 42, chatPath: '/', newChat: true });
+assert.equal(live.input.files.length, 0, 'startup reset clears stale native selections without visible cards');

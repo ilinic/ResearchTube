@@ -48,13 +48,13 @@ Tab IDs are valid only in the current browser session. After a service-worker re
 
 `tab-automation.js` supplies a shared queue per physical tab. Work in different tabs can proceed independently. Page input, Composer messages and file delivery in one tab are serialized. Resource extraction releases its source queue before waiting for the receiving chat, preventing cross-chat delivery deadlocks. Temporary file/Composer operations borrow debugger leases and cannot detach a retained page connection.
 
-`site_send_message` sends text to a selected saved ChatGPT conversation in the same group. It returns a standard asynchronous task immediately and labels the initiating chat. It waits for an idle, empty Composer, preserves drafts and attachments, and verifies the exact conversation and group again before Send. Busy recipients retry for at most ten minutes. Cancel stops before Send commits. An uncertain committed Send is reported as failure without automatically resending. If sending to yourself, finish the current response to allow delivery.
+`site_send_message` sends text to a selected saved ChatGPT conversation in the same group. It returns a standard asynchronous task immediately and labels the initiating chat. It appends the message to existing text/attachments and sends everything together once idle, and verifies the exact conversation and group again before Send. Busy recipients retry for at most ten minutes. Cancel stops before Send commits. An uncertain committed Send is reported as failure without automatically resending. If sending to yourself, finish the current response to allow delivery.
 
 `site_files_status` and `site_files_cancel` cover both file and inter-chat message tasks. Task records expose `kind`, initiating `chatTabId`, target `tabId`, `groupId`, progress and saved/submitted outputs. Participants in the original group can inspect/cancel group tasks. `site_session_status` and `site_session_stop` retain their tool names but operate on the caller's current group; neither accepts a session ID. Stop cancels pending work and releases connections while preserving tabs, files and drafts. Call `system_get_chat_context` without arguments to explicitly reconnect and resume the existing group; status polling never undoes Stop.
 
 ## Group notifications
 
-Chrome tab creation, closure, replacement and membership/URL changes trigger a fresh group query. Rapid changes coalesce. The next successful tool result reports the current group; this acknowledges the update for that caller. Otherwise a short queued message is sent when the participant's exact chat is idle and its Composer is empty. Busy/edited chats wait; their drafts are not replaced. The message asks ChatGPT to refresh the tab list and continue its existing task. This actually starts a new turn; an MCP result alone cannot wake an ended turn. Notifications do not install automatic sending of unrelated user drafts. A committed or partially inserted notification is never automatically duplicated after an uncertain result.
+Chrome tab creation, closure, replacement and membership/URL changes trigger a fresh group query. Rapid changes coalesce. The next successful tool result reports the current group; this acknowledges the update for that caller. Otherwise a short queued message is sent when the participant's exact chat is idle. Notifications append to existing Composer text/attachments and send them together; busy chats wait. The message asks ChatGPT to refresh the tab list and continue its existing task. This actually starts a new turn; an MCP result alone cannot wake an ended turn. Notifications do not install automatic sending of unrelated user drafts. A committed or partially inserted notification is never automatically duplicated after an uncertain result.
 
 ## Observation and navigation
 
@@ -80,7 +80,7 @@ Tasks return immediately with standard `tsk_…` IDs, monotonic `progressPercent
 
 CDP's authenticated streaming resource loader is preferred, followed by a known bounded cache entry or fixed DOM rendering for data/blob/canvas/SVG images. An unavailable original image can use a labelled element/viewport screenshot fallback. Audio/video/documents cannot substitute screenshots. Signed URLs, credentials, physical paths and resource bytes are not returned through MCP.
 
-Finish the current assistant response for automatic attachment/Send. Source navigation, participant departure, conversation changes, cancellation and user edits are checked before Send. Saved files/attachments remain after a failure; committed Send cannot be undone.
+Finish the current assistant response for automatic attachment/Send. Source navigation, participant departure, conversation changes and cancellation are checked before Send; current text edits and additional attachments are included. Saved files/attachments remain after a failure; committed Send cannot be undone.
 
 ## Startup and diagnostics
 
@@ -92,7 +92,7 @@ AUTO appears on group participants and ERR on a failed page/startup. The popup h
 
 ## Composer delivery retries
 
-Existing guarded file/startup delivery uses `composerMediaRetryCount` (15) and `composerMediaRetryIntervalSeconds` (2): one immediate check plus bounded repeats. ChatGPT generation has a separate wait. Attachment confirmation uses visible attachment count. Files are supplied once; guarded Send attempts end on acknowledged submission. User edits, cancellation or conversation changes stop delivery and preserve the Composer.
+Existing guarded file/startup delivery uses `composerMediaRetryCount` (15) and `composerMediaRetryIntervalSeconds` (2): one immediate check plus bounded repeats. ChatGPT generation has a separate wait. Attachment confirmation uses visible attachment count. Files are supplied once; guarded Send attempts end on acknowledged submission. Text edits and extra attachments do not stop file delivery. Missing required cards, cancellation or conversation changes prevent Send and preserve the Composer. Startup prompt guards still detect edits after the reset.
 
 ## Verification
 

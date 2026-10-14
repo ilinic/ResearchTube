@@ -11,6 +11,7 @@ export function pageFixture() {
   };
   const composer = { rich: true, tagName: 'DIV', innerText: '', getAttribute: (name) => name === 'contenteditable' ? 'true' : '', matches: () => composer.rich, getBoundingClientRect: () => ({left:0,top:100,width:300,height:40}), closest: () => root, contains: () => false };
   const input = { root, files: [], closest: () => root, matches: (selector) => selector === 'input[type="file"]' };
+  Object.defineProperty(input, 'value', { get: () => '', set: value => { if (value === '') input.files = []; } });
   const historyForm = {};
   const historicalInput = { files: [{ name: 'old-history.pdf', size: 10 }], closest: () => historyForm };
   const historyRemove = { getAttribute: () => 'Remove file' };
@@ -23,10 +24,10 @@ export function pageFixture() {
   };
   const window = { getSelection: () => ({
     toString: () => document.activeElement?.innerText || '',
-    removeAllRanges() {}, addRange() { composer.selected = true; }
+    removeAllRanges() {}, addRange(range) { composer.selected = !range.collapsed; }
   }) };
   composer.focus = () => { document.activeElement = composer; };
-  document.createRange = () => ({ selectNodeContents(target) { if (target !== composer) throw new Error('Wrong editor selected'); } });
+  document.createRange = () => ({ collapsed: false, selectNodeContents(target) { if (target !== composer) throw new Error('Wrong editor selected'); }, collapse() { this.collapsed = true; } });
   const context = vm.createContext({ document, window, getComputedStyle: (element) => ({ display: element.hidden ? 'none' : 'block', visibility: 'visible', pointerEvents: element.pointerBlocked ? 'none' : 'auto', opacity: element.pointerBlocked ? '0' : '1' }) });
   const run = (fn, ...args) => vm.runInContext(chatComposerPageExpression(fn, ...args), context);
   const event = (type, target, extra = {}) => { for (const listener of listeners.get(type) || []) listener({ type, target, isTrusted: true, ...extra }); };

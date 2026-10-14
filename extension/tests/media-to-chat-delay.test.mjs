@@ -65,7 +65,8 @@ function worker() {
       page.input.files = [];
     }
     if (method === 'Input.dispatchMouseEvent' && params.type === 'mouseReleased') {
-      sends.push({ id, at: now });
+      sends.push({ id, at: now, text: page.composer.innerText });
+      page.composer.innerText = "";
       page.root.cards = []; page.root.controls = [];
     }
     return {};
@@ -157,9 +158,9 @@ for (const mutation of ['differentName', 'differentExtension', 'duplicate', 'tru
     page.input.files = [{ name }]; page.event('change', page.input); page.input.files = [];
   }
   w.advance(60_000); await w.context.resumeDelayedMediaToChatTask(task.taskId);
-  assert.equal((await w.context.mediaToChatStatus(task.taskId)).status, mutation === 'duplicate' ? 'failed' : 'completed', mutation);
-  assert.equal(w.sends.length, mutation === 'duplicate' ? 0 : 1, mutation);
-  assert.equal(page.run(inspectChatComposer).attachments.length, mutation === 'duplicate' ? 2 : 0);
+  assert.equal((await w.context.mediaToChatStatus(task.taskId)).status, 'completed', mutation);
+  assert.equal(w.sends.length, 1, mutation);
+  assert.equal(page.run(inspectChatComposer).attachments.length, 0);
 }
 
 // Acceptance can see the timestamp name immediately, before the waiting stage.
@@ -171,7 +172,7 @@ assert.equal(acceptance.value.accepted, true);
 // Waiting releases the global file-automation queue and reserves only its own Composer.
 const parallel = worker(); const reserved = await parallel.start(600);
 assert.equal((await parallel.start(0, 81)).status, 'completed');
-const conflicting = await parallel.context.mediaToChatStart({ files: [{ workspacePath: 'other.pdf' }], composerPolicy: 'clear' });
+const conflicting = await parallel.context.mediaToChatStart({ files: [{ workspacePath: 'other.pdf' }] });
 await assert.rejects(parallel.context.bindMediaToChatTarget(parallel.context.mediaToChatWidgetMetadata(conflicting.task.taskId), { id: 'extension', tab: parallel.tabs.get(42) }), /already using this Composer/);
 assert.deepEqual(clone(parallel.pages.get(42).run(inspectChatComposer).attachments.map(card => card.name)), ['report.pdf']);
 assert.equal((await parallel.context.mediaToChatCancel(reserved.taskId)).cancelled, true);
@@ -204,10 +205,9 @@ for (const mutation of ['text', 'textThenDelete', 'extraFile', 'removeFile', 'cl
   if (mutation === 'guardLost') delete page.window.__researchtubeChatComposerGuard;
   w.advance(20_000); await w.context.resumeDelayedMediaToChatTask(task.taskId);
   const result = await w.context.mediaToChatStatus(task.taskId);
-  assert.equal(result.status, 'failed', mutation); assert.equal(w.sends.length, 0, mutation);
-  assert.deepEqual(clone(result.submittedFiles), []);
-  assert.equal(result.submittedAt, null);
-  if (mutation === 'text') assert.equal(page.composer.innerText, 'Do not send');
+  const appended = ['text', 'textThenDelete', 'extraFile'].includes(mutation);
+  assert.equal(result.status, appended ? 'completed' : 'failed', mutation); assert.equal(w.sends.length, appended ? 1 : 0, mutation);
+  if (!appended) { assert.deepEqual(clone(result.submittedFiles), []); assert.equal(result.submittedAt, null); }
 }
 
 // Cancellation is linearized immediately before the trusted Send starts.

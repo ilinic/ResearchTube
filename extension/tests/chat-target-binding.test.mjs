@@ -42,7 +42,7 @@ function worker({initialStorage={},initialNow=Date.now()}={}) {
  return {context,tabs,storage,alarms,mutations,queries,logs,now:()=>now,advance(ms){now+=ms;},
   receive:(message,sender)=>new Promise(resolve=>{assert.equal(listener(message,sender,resolve),true);}),
   start:async()=>{
-   const result=await context.handleMcpRequest({jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'media_view',arguments:{files:[{workspacePath:'report.pdf'}],composerPolicy:'clear'}}});
+   const result=await context.handleMcpRequest({jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'media_view',arguments:{files:[{workspacePath:'report.pdf'}]}}});
    assert.equal(result.result.isError,false);
    const {task}=result.result.structuredContent;
    const metadata=result.result._meta['researchtube/chatTarget'];

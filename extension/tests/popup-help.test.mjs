@@ -31,7 +31,7 @@ for (const [name, script] of [["source", source], ["bundle", bundle]]) {
       cdpCommand: (id, method) => record(method, id), cdpPrepareBackgroundChat: id => record("prepare", id),
       cdpWaitForTextComposer: id => record("composer", id),
       requireCurrentChatTarget: async target => { assert.equal(target.tabId, 77); assert.equal(target.newChat, true); assert.equal(target.chatPath, "/"); await record("guard", target.tabId); if (navigated) throw new Error("navigation"); },
-      prepareCurrentChatComposer: async (target, policy) => { assert.equal(policy, "clear"); await record("clear", target.tabId); },
+      clearCurrentChatComposer: async (target) => { await record("clear", target.tabId); },
       cdpSetComposerText: async (id, text) => { assert.equal(text, prompt); await record("insert", id); },
       cdpComposerTextExpression: text => text,
       cdpEvaluate: async id => { await record("verify", id); return { value: !edited }; },

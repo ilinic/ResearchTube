@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {createArtifactTaskManager,ARTIFACT_TOOLS} from '../artifact-tasks.js';
 import {pruneCompletedTasks} from '../task-history.js';
-const options={addToChat:false,composerPolicy:'requireEmpty',sendDelaySeconds:0};
+const options={addToChat:false,sendDelaySeconds:0};
 const terminal=status=>['completed','failed','cancelled'].includes(status);
 const deferred=()=>{let resolve;const promise=new Promise(r=>{resolve=r;});return {promise,resolve};};
 function fixture({asyncCreation=false,startGate=null,startStatus='working',files=['out/b.png','out/a.png'],chatFailure=null,chatGate=false}={}) {
