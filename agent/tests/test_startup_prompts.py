@@ -9,6 +9,37 @@ from agent import researchtube_agent as agent
 
 
 class StartupPromptTests(unittest.IsolatedAsyncioTestCase):
+    async def test_numbered_variants_are_inactive_until_renamed(self):
+        shipped = json.loads((Path(agent.__file__).parent / 'agent-config.json').read_text(encoding='utf-8'))
+        keys = ['studyThisSitePrompt', 'describeThisVideoPrompt']
+        active = {key: shipped[key]['value'] for key in keys}
+        original = {key: shipped[key + '1']['value'] for key in keys}
+        for key in keys:
+            self.assertIn('in English', active[key])
+            self.assertNotIn('in my language', active[key])
+            self.assertEqual(original[key], active[key].replace('in English', 'in my language'))
+        with tempfile.TemporaryDirectory() as folder:
+            config = Path(folder) / 'agent-config.json'
+            with patch.object(agent, 'CONFIG_PATH', config):
+                # High numbers and experimental unused text never influence selection.
+                entries = {key: shipped[key] for key in keys}
+                for key in keys:
+                    entries[key + '1'] = shipped[key + '1']
+                    entries[key + '123'] = {'value': 'Unused [experimental_placeholder]'}
+                config.write_text(json.dumps(entries), encoding='utf-8')
+                self.assertEqual(agent.configured_startup_prompts(), active)
+                # Switch purely by renaming keys; both saved texts remain intact.
+                for key in keys:
+                    entries[key + '2'] = entries.pop(key)
+                    entries[key] = entries.pop(key + '1')
+                config.write_text(json.dumps(entries), encoding='utf-8')
+                self.assertEqual(agent.configured_startup_prompts(), original)
+                for key in keys:
+                    self.assertEqual(entries[key + '2']['value'], active[key])
+                    del entries[key]
+                config.write_text(json.dumps(entries), encoding='utf-8')
+                self.assertEqual(agent.configured_startup_prompts(), {}, 'never auto-select a numbered variant')
+
     async def test_startup_snapshot_is_stable_until_restart(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -28,6 +59,8 @@ class StartupPromptTests(unittest.IsolatedAsyncioTestCase):
             def save(prompts):
                 config.write_text(json.dumps({
                     **{key: {'value': value} for key, value in prompts.items()},
+                    'studyThisSitePrompt1': {'value': 'Inactive site prompt'},
+                    'describeThisVideoPrompt99': {'value': 'Inactive video prompt'},
                     'workspacePath': {'value': str(root / 'PRIVATE' / 'workspace')},
                 }), encoding='utf-8')
 

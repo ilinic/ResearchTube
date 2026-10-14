@@ -9,7 +9,7 @@ const f=fixture();const started=await f.agent.start(10);
 assert.equal(started.chatTabId,22);assert.equal(started.group.groupId,100);
 assertSchema(definitions.find(t=>t.name==='site_list_tabs').outputSchema,{chatTabId:22,group:started.group});
 const prompt=f.events.find(e=>e[0]==='prompt')[2];
-assert.equal(prompt,"@ResearchTube Study the text and images of the sites in my tab group. Download and inspect relevant images when available, then explain in my language. Use chatTabId: 22.");
+assert.equal(prompt,"@ResearchTube Study the text and images of the sites in my tab group. Download and inspect relevant images when available, then explain in English. Use chatTabId: 22.");
 assert.doesNotMatch(prompt,/sessionId|bas_|site_get_images|site_get_files/);
 for(const tool of definitions){assert.ok(!tool.inputSchema.properties.sessionId);assert.ok(tool.inputSchema.required.includes('chatTabId'));}
 assert.deepEqual(f.events.find(e=>e[0]==='group'),['group',[21,22],'RT · Site']);

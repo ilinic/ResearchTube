@@ -6,7 +6,11 @@ import { DEFAULT_STARTUP_PROMPTS, normalizeStartupPrompts, renderStartupPrompt }
 import { fixture } from './fixtures/browser-agent-fixture.mjs';
 
 const config = JSON.parse(await readFile(new URL('../../agent/agent-config.json', import.meta.url), 'utf8'));
-for (const [key, value] of Object.entries(DEFAULT_STARTUP_PROMPTS)) assert.equal(config[key].value, value, 'shipped and offline defaults agree');
+for (const [key, value] of Object.entries(DEFAULT_STARTUP_PROMPTS)) {
+  assert.equal(config[key].value, value, 'shipped and offline defaults agree');
+  assert.match(value, /in English/, 'active prompts explicitly request English');
+  assert.equal(config[key + '1'].value, value.replace('in English', 'in my language'), 'original variants remain unchanged');
+}
 assert.deepEqual(normalizeStartupPrompts(), DEFAULT_STARTUP_PROMPTS);
 assert.equal(renderStartupPrompt('describeThisVideoPrompt', { describeThisVideoPrompt: '[video_title]\n[video_link] → [chat_tab_id] [chat_tab_id]' }, {
   video_title: 'Кириллица 🐈 [chat_tab_id] $&', video_link: 'https://www.youtube.com/watch?v=MxJLoHLhlQM', chat_tab_id: 22

@@ -44,7 +44,7 @@ except ImportError:
     from task_history import TaskHistory
     from browser_resources import save_browser_resource
 
-AGENT_VERSION = "2.3.4"
+AGENT_VERSION = "2.3.5"
 INTERFACE_VERSION = 79
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
@@ -6211,7 +6211,7 @@ STORYBOARD_TASKS = StoryboardService(sys.modules[__name__])
 
 
 def configured_startup_prompts() -> dict:
-    """Load popup prompts once at startup; missing entries use Extension defaults."""
+    """Load only unsuffixed popup prompts at startup; numbered variants stay inactive."""
     config = read_agent_config()
     placeholders = {
         "studyThisSitePrompt": {"chat_tab_id", "site_tab_id", "site_title", "site_link", "group_id"},

@@ -66,12 +66,20 @@
     "comment": "Seconds between Composer media checks. Default 2; integer 1–60. With 15 retries the normal budget is about 30 seconds plus operation latency. Successful acceptance/readiness/acknowledgement ends polling immediately; no fixed delay is imposed when ready. Applies to media_view, artifact addToChat, Browser Agent resources and Library transfers."
   },
   "studyThisSitePrompt": {
+    "value": "@ResearchTube Study the text and images of the sites in my tab group. Download and inspect relevant images when available, then explain in English. Use chatTabId: [chat_tab_id].",
+    "comment": "Active startup prompt (no numeric suffix). Study this site startup prompt. Placeholders: [chat_tab_id] = new ChatGPT tab ID, [site_tab_id] = duplicated site tab ID, [group_id] = Chrome group ID, [site_title] = source title, [site_link] = source URL without query or fragment. Keep [chat_tab_id] for tool routing. Loaded once at Agent startup. Restart the Agent after editing. Use \"\\n\" for newlines."
+  },
+  "studyThisSitePrompt1": {
     "value": "@ResearchTube Study the text and images of the sites in my tab group. Download and inspect relevant images when available, then explain in my language. Use chatTabId: [chat_tab_id].",
-    "comment": "Study this site startup prompt. Placeholders: [chat_tab_id] = new ChatGPT tab ID, [site_tab_id] = duplicated site tab ID, [group_id] = Chrome group ID, [site_title] = source title, [site_link] = source URL without query or fragment. Keep [chat_tab_id] for tool routing. Loaded once at Agent startup. Restart the Agent after editing. Use \"\\n\" for newlines."
+    "comment": "Saved original prompt (in my language); inactive because the key ends in 1. Any positive integer suffix stores another variant. To activate, rename studyThisSitePrompt to studyThisSitePrompt2 (or another unused number), then rename this key to studyThisSitePrompt. Restart the Agent. Only the exact key without digits is used."
   },
   "describeThisVideoPrompt": {
+    "value": "@ResearchTube [video_title] [video_link]\nStudy this video and explain it in English. Use tabId: [chat_tab_id] for async tasks.",
+    "comment": "Active startup prompt (no numeric suffix). Describe this video startup prompt. Placeholders: [video_title] = current video title, [video_link] = canonical YouTube URL, [chat_tab_id] = new ChatGPT tab ID. Keep [video_link] and [chat_tab_id] for video selection and task routing. Loaded once at Agent startup. Restart the Agent after editing. Use \"\\n\" for newlines."
+  },
+  "describeThisVideoPrompt1": {
     "value": "@ResearchTube [video_title] [video_link]\nStudy this video and explain it in my language. Use tabId: [chat_tab_id] for async tasks.",
-    "comment": "Describe this video startup prompt. Placeholders: [video_title] = current video title, [video_link] = canonical YouTube URL, [chat_tab_id] = new ChatGPT tab ID. Keep [video_link] and [chat_tab_id] for video selection and task routing. Loaded once at Agent startup. Restart the Agent after editing. Use \"\\n\" for newlines."
+    "comment": "Saved original prompt (in my language); inactive because the key ends in 1. Any positive integer suffix stores another variant. To activate, rename describeThisVideoPrompt to describeThisVideoPrompt2 (or another unused number), then rename this key to describeThisVideoPrompt. Restart the Agent. Only the exact key without digits is used."
   },
   "browserStudyDetailedLogging": {
     "value": true,

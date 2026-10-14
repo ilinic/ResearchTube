@@ -1,6 +1,6 @@
 # Browser Agent: group automation
 
-**Study this site** in the popup duplicates the source page, opens one new ChatGPT conversation and places both new tabs in a blue `RT · …` group. The original tab stays in place. The compact prompt asks for text and image research **in my language**, with only the new `chatTabId`. No browser session identifier is passed to ChatGPT.
+**Study this site** in the popup duplicates the source page, opens one new ChatGPT conversation and places both new tabs in a blue `RT · …` group. The original tab stays in place. The compact prompt asks for text and image research **in English**, with only the new `chatTabId`. No browser session identifier is passed to ChatGPT.
 
 Reload the Extension and refresh the ResearchTube MCP catalog after upgrading. Start a new study chat, or use `system_get_chat_context` to connect an existing grouped ChatGPT tab without knowing its ID. Old `sessionId` arguments are rejected.
 
@@ -14,7 +14,11 @@ A chat outside a group gets `BROWSER_GROUP_NOT_FOUND`. Duplicate browser views o
 
 ## Prompt templates
 
-Edit `studyThisSitePrompt.value` and `describeThisVideoPrompt.value` in the external `agent/agent-config.json` beside the Agent script or EXE. The Agent loads both templates once at startup and serves them from memory. Restart the Agent after editing. These settings change the initial ChatGPT message, not the tool catalog or an existing chat. Defaults retain **in my language** and text/image research.
+Edit `studyThisSitePrompt.value` and `describeThisVideoPrompt.value` in the external `agent/agent-config.json` beside the Agent script or EXE. The Agent loads both templates once at startup and serves them from memory. Restart the Agent after editing. These settings change the initial ChatGPT message, not the tool catalog or an existing chat. Active shipped defaults request **in English** and text/image research. The original **in my language** prompts are preserved as numbered variants.
+
+Only the exact keys `studyThisSitePrompt` and `describeThisVideoPrompt` are active. Store alternatives as separate JSON entries with any positive integer suffix: `studyThisSitePrompt1`, `studyThisSitePrompt2`, `describeThisVideoPrompt1`, etc. Each entry keeps the same `value`/`comment` structure. Numbered entries are stored only; they are not sent to the Extension and never selected automatically.
+
+The shipped `...Prompt1` entries preserve the original **in my language** wording. To restore them, rename each active `...Prompt` to an unused name such as `...Prompt2`, then remove `1` from the saved key. Keep one unique unsuffixed key per action and restart the Agent. No prompt text needs copying.
 
 | Placeholder | Study this site | Describe this video |
 | --- | --- | --- |

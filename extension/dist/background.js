@@ -1338,8 +1338,8 @@ function createBrowserGroups(host) {
 
 // startup-prompts.js
 var DEFAULT_STARTUP_PROMPTS = Object.freeze({
-  studyThisSitePrompt: "@ResearchTube Study the text and images of the sites in my tab group. Download and inspect relevant images when available, then explain in my language. Use chatTabId: [chat_tab_id].",
-  describeThisVideoPrompt: "@ResearchTube [video_title] [video_link]\nStudy this video and explain it in my language. Use tabId: [chat_tab_id] for async tasks."
+  studyThisSitePrompt: "@ResearchTube Study the text and images of the sites in my tab group. Download and inspect relevant images when available, then explain in English. Use chatTabId: [chat_tab_id].",
+  describeThisVideoPrompt: "@ResearchTube [video_title] [video_link]\nStudy this video and explain it in English. Use tabId: [chat_tab_id] for async tasks."
 });
 var PLACEHOLDERS = Object.freeze({
   studyThisSitePrompt: ["chat_tab_id", "site_tab_id", "site_title", "site_link", "group_id"],
