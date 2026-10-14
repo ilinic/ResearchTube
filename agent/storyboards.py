@@ -25,6 +25,8 @@ DIAGNOSTIC_SAMPLE_BYTES = 4096
 MAX_FRAMES = 1_000_000
 CACHE_SECONDS = 300
 TIMESTAMP_POSITIONS = {'none', 'topLeft', 'topRight', 'bottomLeft', 'bottomRight'}
+IMAGE_FORMATS = {'jpeg': 'image/jpeg', 'webp': 'image/webp', 'png': 'image/png',
+                 'gif': 'image/gif', 'avif': 'image/avif'}
 PUBLIC_FIELDS = ('variantId', 'cellWidth', 'cellHeight', 'columns', 'rows',
                  'framesPerSheet', 'frameIntervalSeconds', 'frameIntervalEstimated', 'sheetCount', 'format')
 
@@ -36,6 +38,8 @@ FAILURE_REASONS = {
     'Timestamp renderer is unavailable': 'RENDERER_UNAVAILABLE', 'Timestamp rendering failed': 'RENDERING_FAILED',
     'Timestamp renderer produced an invalid JPEG': 'INVALID_JPEG',
     'Unexpected content type': 'UNEXPECTED_CONTENT_TYPE',
+    'Invalid image': 'INVALID_IMAGE', 'Unsupported image format': 'UNSUPPORTED_IMAGE_FORMAT',
+    'Timestamp renderer produced an invalid image': 'INVALID_IMAGE',
     'Destination belongs to another file': 'DESTINATION_CONFLICT', 'Destination already exists': 'DESTINATION_CONFLICT',
 }
 EXCEPTION_TYPES = {'ValueError', 'RuntimeError', 'FileNotFoundError', 'PermissionError', 'FileExistsError',
@@ -70,13 +74,17 @@ class SheetTransferError(ValueError):
 
 def response_body_kind(data):
     """Classify bounded bytes without publishing any part of the response."""
+    data = bytes(data)
     if not data:
         return 'empty'
     if data.startswith(b'\xff\xd8\xff'): return 'jpeg'
     if data.startswith(b'\x89PNG\r\n\x1a\n'): return 'png'
     if data.startswith((b'GIF87a', b'GIF89a')): return 'gif'
     if data.startswith(b'RIFF') and data[8:12] == b'WEBP': return 'webp'
-    if len(data) >= 12 and data[4:8] == b'ftyp' and data[8:12] in {b'avif', b'avis'}: return 'avif'
+    if len(data) >= 16 and data[4:8] == b'ftyp':
+        box_end = min(len(data), int.from_bytes(data[:4], 'big'))
+        brands = [data[8:12], *(data[i:i + 4] for i in range(16, box_end - 3, 4))]
+        if any(brand in {b'avif', b'avis'} for brand in brands): return 'avif'
     if data.startswith(b'\x1f\x8b'): return 'gzip'
     prefix = bytes(data).lstrip(b'\xef\xbb\xbf \t\r\n').lower()
     if prefix.startswith((b'<!doctype html', b'<html', b'<head', b'<body')): return 'html'
@@ -99,6 +107,46 @@ def response_header_details(headers):
     return dict(contentType=content_type, declaredBodyBytes=declared,
                 contentEncoding=encoding('content-encoding', {'identity', 'gzip', 'br', 'deflate', 'zstd'}),
                 transferEncoding=encoding('transfer-encoding', {'identity', 'chunked'}))
+
+
+def image_format(data):
+    """Identify raster containers from bytes, never URL suffix or HTTP MIME.
+
+    Container checks catch truncated transfers; timestamp rendering additionally
+    decodes the image. This is not a full image decoder.
+    """
+    kind = response_body_kind(data[:DIAGNOSTIC_SAMPLE_BYTES])
+    if kind not in IMAGE_FORMATS:
+        raise ValueError('Unsupported image format')
+    valid = False
+    if kind == 'jpeg':
+        valid = len(data) >= 6 and data.endswith(b'\xff\xd9')
+    elif kind == 'png':
+        valid = len(data) >= 45 and data[12:16] == b'IHDR' and data.endswith(b'\x00\x00\x00\x00IEND\xaeB`\x82')
+    elif kind == 'webp':
+        valid = (len(data) >= 20 and int.from_bytes(data[4:8], 'little') + 8 == len(data)
+                 and bytes(data[12:16]) in {b'VP8 ', b'VP8L', b'VP8X'})
+    elif kind == 'gif':
+        valid = len(data) >= 14 and data.endswith(b';')
+    elif kind == 'avif':
+        # Walk bounded top-level ISO BMFF boxes, including extended sizes.
+        offset, boxes = 0, set()
+        while offset + 8 <= len(data):
+            size = int.from_bytes(data[offset:offset + 4], 'big')
+            box = bytes(data[offset + 4:offset + 8])
+            header = 8
+            if size == 1:
+                if offset + 16 > len(data): break
+                size, header = int.from_bytes(data[offset + 8:offset + 16], 'big'), 16
+            elif size == 0:
+                size = len(data) - offset
+            if size < header or offset + size > len(data): break
+            boxes.add(box)
+            offset += size
+        valid = offset == len(data) and {b'ftyp', b'meta', b'mdat'} <= boxes
+    if not valid:
+        raise ValueError('Invalid image')
+    return kind
 
 
 class StoryboardError(Exception):
@@ -144,7 +192,7 @@ def variant(level, width, height, count, columns, rows, interval, urls, estimate
         raise ValueError('Invalid sheet count')
     return dict(variantId=f'storyboard_{level + 1}', cellWidth=width, cellHeight=height,
                 columns=columns, rows=rows, framesPerSheet=columns * rows,
-                frameIntervalSeconds=interval, frameIntervalEstimated=estimated, sheetCount=len(urls), format='jpeg',
+                frameIntervalSeconds=interval, frameIntervalEstimated=estimated, sheetCount=len(urls), format=None,
                 count=count, urls=[sheet_url(url) for url in urls])
 
 
@@ -228,10 +276,12 @@ def select_sheets(selection, v, duration):
     invalid('selection must contain exactly the fields documented for its mode.')
 
 
-def filename(title, vid, v, index):
+def filename(title, vid, v, index, image_kind='jpeg'):
+    if image_kind not in IMAGE_FORMATS:
+        raise ValueError('Unsupported image format')
     step = format(v['frameIntervalSeconds'], '.9f').rstrip('0').rstrip('.')
     suffix = (f" [yt_{vid}] [sz_{v['cellWidth']}x{v['cellHeight']}]"
-              f" [tstp_{step}] [mesh_{v['columns']}x{v['rows']}] [sheet_{index:04d}].jpeg")
+              f" [tstp_{step}] [mesh_{v['columns']}x{v['rows']}] [sheet_{index:04d}].{image_kind}")
     title = re.sub(r'[\x00-\x1f<>:"/\\|?*]', '', title).strip(' .') or 'YouTube'
     if title.split('.', 1)[0].upper() in {'CON', 'PRN', 'AUX', 'NUL', *('COM' + str(i) for i in range(1, 10)), *('LPT' + str(i) for i in range(1, 10))}:
         title = '_' + title
@@ -343,7 +393,7 @@ async def _fetch_https_body(url, progress, metadata=False, diagnostics=None):
     writer = None
     stage, status = 'url', None
     diagnostics = diagnostics if diagnostics is not None else {}
-    diagnostics.update(expectedContentType='text/html' if metadata else 'image/jpeg', redirectCount=0,
+    diagnostics.update(expectedContentType='text/html' if metadata else 'image/*', redirectCount=0,
                        bodyBytesRead=0, bodyKind='unavailable', _started=time.monotonic())
     data = bytearray()
     try:
@@ -362,7 +412,7 @@ async def _fetch_https_body(url, progress, metadata=False, diagnostics=None):
             diagnostics.update(_stage=stage, requestHost=parsed.hostname if len(parsed.hostname) <= 253 else None)
             reader, writer = await asyncio.open_connection(parsed.hostname, 443, ssl=ssl.create_default_context())
             target = parsed.path + ('?' + parsed.query if parsed.query else '')
-            accept = 'text/html' if metadata else 'image/jpeg'
+            accept = 'text/html' if metadata else 'image/*'
             stage = 'http'
             diagnostics['_stage'] = stage
             writer.write(f'GET {target} HTTP/1.1\r\nHost: {parsed.hostname}\r\nUser-Agent: Mozilla/5.0\r\nAccept: {accept}\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n'.encode('ascii'))
@@ -383,11 +433,10 @@ async def _fetch_https_body(url, progress, metadata=False, diagnostics=None):
                 await writer.wait_closed()
                 writer = None
                 continue
-            accepted_types = ('text/html',) if metadata else ('image/jpeg', 'image/jpg')
             if status != 200:
                 await inspect_rejected_body(reader, headers, diagnostics)
                 raise ValueError('Sheet unavailable')
-            if headers.get('content-type', '').split(';')[0].lower() not in accepted_types:
+            if metadata and diagnostics['contentType'] != 'text/html':
                 await inspect_rejected_body(reader, headers, diagnostics)
                 raise ValueError('Unexpected content type')
             stage = 'body'
@@ -429,10 +478,10 @@ async def _fetch_https_body(url, progress, metadata=False, diagnostics=None):
                     raise ValueError('Sheet too large')
             if total is not None and len(data) != total:
                 raise ValueError('Truncated sheet')
-            stage = 'jpeg'
+            stage = 'image'
             diagnostics['_stage'] = stage
-            if not metadata and (not data.startswith(b'\xff\xd8\xff') or not data.endswith(b'\xff\xd9')):
-                raise ValueError('Invalid JPEG')
+            if not metadata:
+                image_format(data)
             return bytes(data)
         raise ValueError('Too many redirects')
     except asyncio.CancelledError:
@@ -639,8 +688,23 @@ class StoryboardService:
         if ffmpeg.error or not ffmpeg.executable or font_file is None:
             raise ValueError('Timestamp renderer is unavailable')
         filters = sheet_timestamp_filter(v, sheet_index, duration, position, font_file, self.host.ffmpeg_filter_value)
+        kind = image_format(source.read_bytes())
+        # Preserve the received format and dimensions. RGB lossless WebP avoids
+        # another lossy generation; ordinary JPEG needs DCT re-encoding.
+        encoding = {
+            'jpeg': ['-c:v', 'mjpeg', '-q:v', '1'],
+            'webp': ['-c:v', 'libwebp', '-lossless', '1', '-quality', '100', '-pix_fmt', 'bgra'],
+            'png': ['-c:v', 'png'],
+            'gif': ['-c:v', 'gif'],
+            'avif': ['-c:v', 'libaom-av1', '-crf', '0', '-b:v', '0', '-cpu-used', '6', '-still-picture', '1'],
+        }[kind]
+        if kind in {'webp', 'gif'}:
+            filters = 'format=rgba,' + filters
+        if kind == 'gif':
+            # GIF is palette-limited; derive its palette from the labelled image.
+            filters += ',split[colors][image];[colors]palettegen=reserve_transparent=1[palette];[image][palette]paletteuse'
         command = [ffmpeg.executable, '-hide_banner', '-nostdin', '-v', 'error', '-i', str(source),
-                   '-map', '0:v:0', '-an', '-frames:v', '1', '-vf', filters, '-q:v', '2', '-y', str(output)]
+                   '-map', '0:v:0', '-an', '-frames:v', '1', '-vf', filters, *encoding, '-y', str(output)]
         returncode, _stderr = await self.host.run_visual_map_ffmpeg(command, 30)
         if returncode != 0 or not output.is_file() or output.stat().st_size > MAX_SHEET_BYTES:
             details = failure_details(ValueError('Timestamp rendering failed'), 'timestamp')
@@ -648,8 +712,8 @@ class StoryboardService:
                 details['processExitCode'] = returncode
             raise SheetTransferError(details)
         result = output.read_bytes()
-        if not result.startswith(b'\xff\xd8\xff') or not result.endswith(b'\xff\xd9'):
-            raise ValueError('Timestamp renderer produced an invalid JPEG')
+        if image_format(result) != kind:
+            raise ValueError('Timestamp renderer produced an invalid image')
         return result
 
     async def run(self, task):
@@ -659,28 +723,38 @@ class StoryboardService:
                 for index in task.indexes:
                     task.failed_index = index
                     stage = 'publishing'
-                    logical = filename(task.source['title'], task.source['videoId'], task.variant, index)
-                    destination = self.path(logical)
                     identity = (task.timestamp_position, task.source['videoId'], task.variant['variantId'], index,
                                 tuple(task.variant[key] for key in PUBLIC_FIELDS))
-                    known = self.published.get(logical)
                     reused = False
                     task.phase = 'downloading'
-                    if known and known[0] == identity and destination.is_file() and destination.stat().st_size <= MAX_SHEET_BYTES:
-                        reused = hashlib.sha256(destination.read_bytes()).digest() == known[1]
+                    # A cached publication knows its real format. Discovery does
+                    # not: .jpg URLs can return WebP, even within one variant.
+                    for kind in IMAGE_FORMATS:
+                        logical = filename(task.source['title'], task.source['videoId'], task.variant, index, kind)
+                        known = self.published.get(logical)
+                        if not known or known[0] != identity:
+                            continue
+                        destination = self.path(logical)
+                        if known and known[0] == identity and destination.is_file() and destination.stat().st_size <= MAX_SHEET_BYTES:
+                            reused = hashlib.sha256(destination.read_bytes()).digest() == known[1]
+                            if reused: break
                     if not reused:
                         def progress(received, total):
                             fraction = min(0.99, received / total) if total else 0
                             task.progress = max(task.progress, 100 * (task.completed + fraction) / len(task.indexes))
                         stage = 'http'
                         data = await fetch_sheet(task.variant['urls'][index], progress)
+                        stage = 'image'
+                        kind = image_format(data)
+                        logical = filename(task.source['title'], task.source['videoId'], task.variant, index, kind)
                         stage = 'publishing'
+                        destination = self.path(logical)
                         destination.parent.mkdir(parents=True, exist_ok=True)
                         destination = self.path(logical)  # Recheck redirects after network await.
                         task.phase = 'publishing'
                         with tempfile.TemporaryDirectory(prefix='researchtube-storyboard-', dir=destination.parent.parent.parent) as temp:
-                            temporary = Path(temp) / 'source.jpeg'
-                            rendered = Path(temp) / 'sheet.jpeg'
+                            temporary = Path(temp) / f'source.{kind}'
+                            rendered = Path(temp) / f'sheet.{kind}'
                             temporary.write_bytes(data)
                             if task.timestamp_position == 'none':
                                 rendered.write_bytes(data)
@@ -713,7 +787,8 @@ class StoryboardService:
                             self.published.pop(next(iter(self.published)))
                     task.reused += int(reused)
                     task.downloaded += int(not reused)
-                    task.published_sheets.append(dict(sheetIndex=index, workspacePath=logical))
+                    task.published_sheets.append(dict(sheetIndex=index, workspacePath=logical,
+                                                     format=kind, mimeType=IMAGE_FORMATS[kind]))
                     task.completed += 1
                     task.progress = 100 * task.completed / len(task.indexes)
                     await asyncio.sleep(0)

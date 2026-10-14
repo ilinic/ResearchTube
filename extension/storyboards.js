@@ -20,8 +20,9 @@ const messages = {
   TASK_NOT_FOUND: "The storyboard task does not exist in this Agent session."
 };
 const errorSchema = object({ code: { type: "string", enum: Object.keys(messages) }, message: { type: "string" } });
+const imageFormats = { jpeg: "image/jpeg", webp: "image/webp", png: "image/png", gif: "image/gif", avif: "image/avif" };
 const variantSchema = object({ variantId, cellWidth: positive, cellHeight: positive, columns: positive, rows: positive,
-  framesPerSheet: positive, frameIntervalEstimated: { type: "boolean" }, frameIntervalSeconds: { type: "number", exclusiveMinimum: 0 }, sheetCount: positive, format: { const: "jpeg" } });
+  framesPerSheet: positive, frameIntervalEstimated: { type: "boolean" }, frameIntervalSeconds: { type: "number", exclusiveMinimum: 0 }, sheetCount: positive, format: { enum: [null, ...Object.keys(imageFormats)] } });
 const selectionSchema = { oneOf: [object({ mode: { const: "all" } }),
   object({ mode: { const: "range" }, startSeconds: { type: "number", minimum: 0 }, endSeconds: { type: "number", minimum: 0 } }),
   object({ mode: { const: "sheets" }, sheetIndexes: { type: "array", minItems: 1, items: integer } })] };
@@ -33,7 +34,7 @@ const statuses = ["working", "completed", "cancelled", "failed"];
 const sheetTimestampSchema = object({ sheetIndex: integer,
   frameTimestampsSeconds: { type: "array", minItems: 1, items: { type: "number", minimum: 0 } } });
 const responseDiagnostics = {
-  expectedContentType: { enum: ["image/jpeg", "text/html"] },
+  expectedContentType: { enum: ["image/*", "image/jpeg", "text/html"] },
   contentType: { type: ["string", "null"], maxLength: 127, pattern: "^(?:invalid|[a-z0-9!#$&^_.+\\-]+/[a-z0-9!#$&^_.+\\-]+)$" },
   declaredBodyBytes: { type: ["integer", "null"], minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
   bodyBytesRead: { type: "integer", minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
@@ -45,8 +46,8 @@ const responseDiagnostics = {
   elapsedMs: { type: "integer", minimum: 0, maximum: 2147483647 },
   requestHost: { type: ["string", "null"], maxLength: 253, pattern: "^(?:(?:[a-z0-9-]+\\.)*ytimg\\.com|www\\.youtube\\.com)$" }
 };
-const failureSchema = object({ stage: { enum: ["url", "connect", "http", "body", "jpeg", "timestamp", "publishing"] },
-  reason: { enum: ["HTTP_STATUS", "INVALID_LENGTH", "UNSUPPORTED_TRANSFER_ENCODING", "RESPONSE_TOO_LARGE", "INVALID_CHUNK", "TRUNCATED_RESPONSE", "INVALID_JPEG", "TOO_MANY_REDIRECTS", "INVALID_URL", "RENDERER_UNAVAILABLE", "RENDERING_FAILED", "DESTINATION_CONFLICT", "TIMEOUT", "TLS_FAILED", "CONNECTION_FAILED", "FILE_IO", "INVALID_HTTP_RESPONSE", "UNEXPECTED_CONTENT_TYPE", "INTERNAL_ERROR"] },
+const failureSchema = object({ stage: { enum: ["url", "connect", "http", "body", "jpeg", "image", "timestamp", "publishing"] },
+  reason: { enum: ["HTTP_STATUS", "INVALID_LENGTH", "UNSUPPORTED_TRANSFER_ENCODING", "RESPONSE_TOO_LARGE", "INVALID_CHUNK", "TRUNCATED_RESPONSE", "INVALID_JPEG", "INVALID_IMAGE", "UNSUPPORTED_IMAGE_FORMAT", "TOO_MANY_REDIRECTS", "INVALID_URL", "RENDERER_UNAVAILABLE", "RENDERING_FAILED", "DESTINATION_CONFLICT", "TIMEOUT", "TLS_FAILED", "CONNECTION_FAILED", "FILE_IO", "INVALID_HTTP_RESPONSE", "UNEXPECTED_CONTENT_TYPE", "INTERNAL_ERROR"] },
   httpStatus: { type: ["integer", "null"], minimum: 100, maximum: 599 },
   osErrorCode: { type: ["string", "null"], pattern: "^(?:E[A-Z0-9_]{1,40}|WINERROR_[0-9]{1,10})$" },
   processExitCode: { type: "integer", minimum: -2147483648, maximum: 4294967295 },
@@ -56,7 +57,8 @@ const taskSchema = object({ taskId, status: { enum: statuses }, phase: { enum: [
   progressPercent: { type: "number", minimum: 0, maximum: 100 }, completedSheets: integer, totalSheets: positive,
   downloadedSheets: integer, reusedSheets: integer, workspaceDirectory: { const: "storyboards" }, pollIntervalMs: { type: "integer", minimum: 1000 },
   frameTimestampPosition, sheetTimestamps: { type: "array", minItems: 1, items: sheetTimestampSchema },
-  publishedSheets: {type:"array",items:object({sheetIndex:integer,workspacePath:{type:"string",minLength:1}})},
+  publishedSheets: {type:"array",items:object({sheetIndex:integer,workspacePath:{type:"string",minLength:1},
+    format:{enum:Object.keys(imageFormats)},mimeType:{enum:Object.values(imageFormats)}},["sheetIndex","workspacePath"])},
   failedSheetIndex: integer, error: errorSchema, failureDetails: failureSchema },
 ["taskId", "status", "phase", "progressPercent", "completedSheets", "totalSheets", "downloadedSheets", "reusedSheets", "workspaceDirectory", "pollIntervalMs", "frameTimestampPosition", "sheetTimestamps", "publishedSheets"]);
 const cancelSchema = object({ taskId, status: { enum: statuses } });
@@ -66,8 +68,8 @@ export function storyboardDefinitions(readAnnotations, writeAnnotations) {
   const make = (name, title, description, inputSchema, outputSchema, write = false) => ({ name, title, description, inputSchema, outputSchema,
     annotations: { ...(write ? writeAnnotations : readAnnotations), openWorldHint: name.endsWith("get_info") || name.endsWith("download") } });
   return [
-    make(STORYBOARD_TOOL_NAMES[0], "Get YouTube storyboard variants", "Discover YouTube preview-sheet variants, geometry, timing and sheet counts; retain variantId unchanged. frameIntervalEstimated marks inferred timing. Creates no files. If unavailable, the response recommends visual_map_create from a Workspace video.", object({ videoId }), infoSchema),
-    make(STORYBOARD_TOOL_NAMES[1], "Download YouTube storyboard sheets", "Download ready JPEG sheets of a discovered variant: all, a time range or sheet indexes. sheetTimestamps always returns calculated tile times; frameTimestampPosition draws labels (default bottomRight, none disables). Saves directly under storyboards/; never downloads video/audio.", object({ videoId, variantId, selection: selectionSchema, frameTimestampPosition }, ["videoId", "variantId", "selection"]), { type: "object", oneOf: [taskSchema, rejected] }, true),
+    make(STORYBOARD_TOOL_NAMES[0], "Get YouTube storyboard variants", "Discover YouTube preview-sheet variants, geometry, timing and sheet counts; retain variantId unchanged. frameIntervalEstimated marks inferred timing. Format is unknown (null) until downloaded. Creates no files. If unavailable, the response recommends visual_map_create from a Workspace video.", object({ videoId }), infoSchema),
+    make(STORYBOARD_TOOL_NAMES[1], "Download YouTube storyboard sheets", "Download preview sheets: all, a time range or indexes. sheetTimestamps always returns calculated tile times. frameTimestampPosition defaults bottomRight; none keeps original bytes. Preserves image format. Saves under storyboards/ without downloading video/audio.", object({ videoId, variantId, selection: selectionSchema, frameTimestampPosition }, ["videoId", "variantId", "selection"]), { type: "object", oneOf: [taskSchema, rejected] }, true),
     make(STORYBOARD_TOOL_NAMES[2], "Get storyboard task progress", "Read storyboard progress and published paths. On failure, creation.data.failureDetails reports stage, HTTP status, received MIME, body kind/bytes, encodings, redirects and timing without private URLs or body text. Poll at pollIntervalMs. Complete sheets survive failure/cancellation.", object({ taskId }), { type: "object", oneOf: [taskSchema, rejected] }),
     make(STORYBOARD_TOOL_NAMES[3], "Cancel storyboard download", "Cancel storyboard transfers; keep completely published sheets. Repeated cancellation returns terminal status.", object({ taskId }), { type: "object", oneOf: [cancelSchema, rejected] }, true)
   ];
@@ -107,7 +109,7 @@ export function normalizeStoryboardResult(name, data) {
     if (data.available === false && reasons.includes(data.reason)) return { videoId: data.videoId, available: false, reason: data.reason, comment: storyboardAlternativeComment };
     if (data.available !== true || !finite(data.durationSeconds) || data.durationSeconds <= 0 || !Array.isArray(data.variants) || !data.variants.length) bad();
     const variants = data.variants.map(v => {
-      if (!plain(v) || !matches(variantId, v.variantId) || v.format !== "jpeg" || typeof v.frameIntervalEstimated !== "boolean" || !finite(v.frameIntervalSeconds) || v.frameIntervalSeconds <= 0 ||
+      if (!plain(v) || !matches(variantId, v.variantId) || !variantSchema.properties.format.enum.includes(v.format) || typeof v.frameIntervalEstimated !== "boolean" || !finite(v.frameIntervalSeconds) || v.frameIntervalSeconds <= 0 ||
           !["cellWidth", "cellHeight", "columns", "rows", "framesPerSheet", "sheetCount"].every(k => Number.isInteger(v[k]) && v[k] > 0) || v.framesPerSheet !== v.columns * v.rows) bad();
       return Object.fromEntries(Object.keys(variantSchema.properties).map(k => [k, v[k]]));
     });
@@ -126,13 +128,16 @@ export function normalizeStoryboardResult(name, data) {
   if (!Array.isArray(data.publishedSheets) || data.publishedSheets.length !== data.completedSheets
     || new Set(data.publishedSheets.map(sheet=>sheet?.workspacePath)).size !== data.publishedSheets.length
     || data.publishedSheets.some((sheet,index)=>!plain(sheet) || sheet.sheetIndex !== data.sheetTimestamps[index].sheetIndex
-      || typeof sheet.workspacePath !== 'string' || !/^storyboards\/[^/]+$/.test(sheet.workspacePath)
+      || typeof sheet.workspacePath !== 'string'
+      || sheet.format !== undefined && (!Object.hasOwn(imageFormats, sheet.format) || sheet.mimeType !== imageFormats[sheet.format] || !sheet.workspacePath?.endsWith(`.${sheet.format}`))
+      || sheet.mimeType !== undefined && sheet.format === undefined
+      || !/^storyboards\/[^/]+$/.test(sheet.workspacePath)
       || /[\\<>:"|?*\u0000-\u001f]/.test(sheet.workspacePath) || /\/(?:\.|\.\.)$/.test(sheet.workspacePath))) bad();
   if (data.status !== "working" && data.phase !== data.status || data.status === "working" && !["resolving", "downloading", "publishing"].includes(data.phase)) bad();
   if (data.status === "completed" && (data.progressPercent !== 100 || data.completedSheets !== data.totalSheets)) bad();
   if (data.status !== "failed" && data.error) bad();
   const result = Object.fromEntries(taskSchema.required.map(k => [k, data[k]]));
-  result.publishedSheets = data.publishedSheets.map(({sheetIndex,workspacePath})=>({sheetIndex,workspacePath}));
+  result.publishedSheets = data.publishedSheets.map(({sheetIndex,workspacePath,format,mimeType})=>({sheetIndex,workspacePath,...(format === undefined ? {} : {format,mimeType})}));
   if (data.status === "failed") {
     if (data.error?.code !== "STORYBOARD_DOWNLOAD_FAILED" || !Number.isInteger(data.failedSheetIndex) || data.failedSheetIndex < 0) bad();
     result.failedSheetIndex = data.failedSheetIndex;

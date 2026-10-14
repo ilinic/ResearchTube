@@ -44,8 +44,8 @@ except ImportError:
     from task_history import TaskHistory
     from browser_resources import save_browser_resource
 
-AGENT_VERSION = "2.3.7"
-INTERFACE_VERSION = 79
+AGENT_VERSION = "2.3.8"
+INTERFACE_VERSION = 80
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
 MAX_GOOGLE_TRANSLATE_AUDIO_BYTES = 16 * 1024 * 1024

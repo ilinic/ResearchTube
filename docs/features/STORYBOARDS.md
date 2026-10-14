@@ -28,7 +28,7 @@ When discovery returns `available:false`, its `comment` recommends `visual_map_c
 - effective frame interval;
 - whether interval timing was estimated;
 - sheet count;
-- JPEG format.
+- `format: null`: the actual image format is known only after downloading; URL suffixes are not authoritative.
 
 ResearchTube preserves YouTube level identity rather than exposing yt-dlp's reversed `sbN` ordering.
 
@@ -56,6 +56,8 @@ storyboards/Title [yt_aqz-KE-bpKQ] [sz_160x90] [tstp_5] [mesh_5x5] [sheet_0000].
 - `sheet` is a zero-based index padded to at least four digits.
 - Each tag has its own square brackets.
 
+The file extension matches the received image bytes: `.jpeg`, `.webp`, `.png`, `.gif` or `.avif`. Each `publishedSheets` receipt includes the actual `format` and `mimeType`, allowing different sheets of one variant to use different formats. HTTP requests accept images without selecting JPEG; missing or incorrect MIME does not override the detected container. Non-image bodies and truncated containers are rejected. Container checks are not a full image decode.
+
 The Agent preserves Unicode and Windows-safe punctuation, removes forbidden characters and keeps a filename component within the portable limit.
 
 ## Timestamp overlay
@@ -68,7 +70,7 @@ The Agent computes every real tile's absolute video timestamp:
 (sheetIndex × framesPerSheet + cellIndex) × frameIntervalSeconds
 ```
 
-With `none`, the original JPEG bytes are retained. Otherwise a portable bundled font draws `M:SS` or `H:MM:SS` inside each real cell. Unused cells in the last partial sheet remain untouched.
+With `none`, the original image bytes are retained exactly. Otherwise a portable bundled font draws `M:SS` or `H:MM:SS` inside each real cell, preserving the received image format and sheet dimensions. WebP uses lossless RGB encoding and PNG uses lossless encoding. AVIF uses lossless AV1 encoding. Ordinary JPEG must be re-encoded after drawing: maximum-quality JPEG minimizes additional loss but cannot promise mathematically unchanged pixels. GIF regenerates a palette from the labelled image and remains limited to 256 colors. No resize or cross-format conversion is performed. Unused cells receive no labels; JPEG re-encoding or GIF palette changes can still affect their pixels.
 
 `sheetTimestamps` always returns the calculated timestamp arrays, independent of visual overlay.
 
@@ -88,10 +90,10 @@ The authoritative implementation is `extension/storyboards.js` and `agent/storyb
 
 ## Failure diagnostics
 
-On failed creation, `creation.data.failureDetails` reports a fixed stage (`url`, `connect`, `http`, `body`, `jpeg`, `timestamp`, or `publishing`), safe reason code, HTTP status when available, OS error code when available, a fixed exception type, FFmpeg exit code when rendering fails, sheet index and attempt count. The current transfer makes one attempt; redirects are not additional download attempts. The error message repeats these technical fields, so `system_get_diagnostics` can also report them after status is observed. No raw exception text, response body, signed URL, token or host path is returned. Older Agents may omit these optional details. Complete published sheets survive later failures and cancellation.
+On failed creation, `creation.data.failureDetails` reports a fixed stage (`url`, `connect`, `http`, `body`, `image` (`jpeg` from older Agents), `timestamp`, or `publishing`), safe reason code, HTTP status when available, OS error code when available, a fixed exception type, FFmpeg exit code when rendering fails, sheet index and attempt count. The current transfer makes one attempt; redirects are not additional download attempts. The error message repeats these technical fields, so `system_get_diagnostics` can also report them after status is observed. No raw exception text, response body, signed URL, token or host path is returned. Older Agents may omit these optional details. Complete published sheets survive later failures and cancellation.
 
-For example, HTTP 403 at `http` identifies a refused sheet request; `EACCES` at `publishing` identifies a filesystem permission failure. `timestamp` separates timestamp-rendering failures from the JPEG transfer. Use `frameTimestampPosition: none` only when testing whether annotation is the failing step. A successful metadata lookup alone does not prove sheet availability.
+For example, HTTP 403 at `http` identifies a refused sheet request; `EACCES` at `publishing` identifies a filesystem permission failure. `timestamp` separates timestamp-rendering failures from the image transfer. Use `frameTimestampPosition: none` only when testing whether annotation is the failing step. A successful metadata lookup alone does not prove sheet availability.
 
 HTTP/transfer failures additionally expose the expected and received MIME (`expectedContentType`, `contentType`), declared length and bytes actually read (`declaredBodyBytes`, `bodyBytesRead`), `bodyKind`, content/transfer encodings, redirect count, elapsed milliseconds and an allowlisted request hostname. Missing headers are null; malformed MIME is `invalid`; unrecognized encoding is `other`. Header parameters, cookies, paths, query strings and body text are excluded.
 
-For a rejected HTTP status or MIME, the Agent inspects at most 4096 decoded HTTP-body bytes for at most 0.5 seconds. `bodySampleStatus` distinguishes a complete sample, the size limit, timeout and invalid framing. `bodyKind` classifies the inspected prefix (JPEG, WebP, PNG, GIF, AVIF, HTML, JSON, XML, gzip, text, empty, unknown or unavailable); it is not proof that the full body is a valid image or that a particular upstream protection caused the failure. `bodyBytesRead` is bytes consumed by the Agent, not necessarily the complete response size. Transfer timeouts retain already observed headers and byte counts. These details appear in the error message and recent system diagnostics after polling, while older Agents remain compatible.
+For a rejected HTTP status (or rejected watch-page MIME), the Agent inspects at most 4096 decoded HTTP-body bytes for at most 0.5 seconds. `bodySampleStatus` distinguishes a complete sample, the size limit, timeout and invalid framing. `bodyKind` classifies the inspected prefix (JPEG, WebP, PNG, GIF, AVIF, HTML, JSON, XML, gzip, text, empty, unknown or unavailable); it is not proof that the full body is a valid image or that a particular upstream protection caused the failure. `bodyBytesRead` is bytes consumed by the Agent, not necessarily the complete response size. Unsupported or truncated image containers fail at `image` with `UNSUPPORTED_IMAGE_FORMAT` or `INVALID_IMAGE`. A supported WebP returned for a `.jpg` URL is valid. Transfer timeouts retain already observed headers and byte counts. These details appear in the error message and recent system diagnostics after polling. The diagnostic decoder still recognizes older detail shapes; the Extension and Agent must have matching interface versions.

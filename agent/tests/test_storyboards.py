@@ -1,6 +1,8 @@
 """Behavioral checks for private metadata, selection, transfers and publication."""
 import asyncio
 import json
+import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,9 +16,24 @@ SPEC = ('https://i.ytimg.com/sb/' + VID + '/storyboard3_L$L/$N.jpg?sqp=private'
         '|160#90#53#5#5#5000#M$M#secret1')
 CONTEXT = dict(videoId=VID, title='Видео / тест: ☀', durationSeconds=263.2, isLive=False, spec=SPEC)
 JPEG = b'\xff\xd8\xff\xe0' + b'image' * 100 + b'\xff\xd9'
+WEBP = b'RIFF' + (16).to_bytes(4, 'little') + b'WEBPVP8L' + (4).to_bytes(4, 'little') + b'test'
+PNG = b'\x89PNG\r\n\x1a\n' + (13).to_bytes(4, 'big') + b'IHDR' + b'x' * 17 + b'\x00\x00\x00\x00IEND\xaeB`\x82'
+GIF = b'GIF89a' + b'x' * 10 + b';'
+AVIF = b'\x00\x00\x00\x10ftypavifxxxx\x00\x00\x00\x08meta\x00\x00\x00\x08mdat'
+IMAGES = {'jpeg': JPEG, 'webp': WEBP, 'png': PNG, 'gif': GIF, 'avif': AVIF}
 
 
 class MetadataTests(unittest.TestCase):
+    def test_actual_container_not_url_or_mime_selects_format(self):
+        for kind, data in IMAGES.items():
+            with self.subTest(kind=kind):
+                self.assertEqual(sb.image_format(data), kind)
+                self.assertTrue(sb.filename('Title', VID, sb.parse_spec(SPEC, 263.2)[1], 0, kind).endswith('.' + kind))
+                with self.assertRaises(ValueError): sb.image_format(data[:-1])
+        for data in [b'<html>error</html>', b'{"error":1}', b'', b'<svg/>']:
+            with self.assertRaisesRegex(ValueError, 'Unsupported image format'): sb.image_format(data)
+        self.assertIsNone(sb.parse_spec(SPEC, 263.2)[0]['format'], 'metadata cannot know the eventual HTTP format')
+
     def test_timestamp_overlay_uses_absolute_times_and_real_cells_only(self):
         v = sb.parse_spec(SPEC, 263.2)[1]
         filter_value = sb.sheet_timestamp_filter(v, 2, 263.2, 'bottomLeft', Path('/fonts/DejaVuSans.ttf'), agent.ffmpeg_filter_value)
@@ -175,6 +192,42 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         output = next((self.workspace / 'storyboards').iterdir())
         self.assertEqual(output.read_bytes(), JPEG)
 
+    async def test_mixed_formats_preserve_original_bytes_and_reuse_exact_paths(self):
+        kinds = ['webp', 'png', 'jpeg']
+        with patch.object(sb, 'fetch_sheet', AsyncMock(side_effect=[IMAGES[k] for k in kinds])):
+            result = await self.start(timestamp_position='none')
+            task = self.service.get(result['taskId']); await task.runner
+        self.assertEqual(task.status, 'completed')
+        self.annotation.assert_not_called()
+        for sheet, kind in zip(task.published_sheets, kinds):
+            self.assertEqual(sheet['format'], kind)
+            self.assertEqual(sheet['mimeType'], sb.IMAGE_FORMATS[kind])
+            self.assertTrue(sheet['workspacePath'].endswith('.' + kind))
+            self.assertEqual((self.workspace / sheet['workspacePath']).read_bytes(), IMAGES[kind])
+        with patch.object(sb, 'fetch_sheet', AsyncMock(side_effect=AssertionError('must reuse'))):
+            repeated = await self.start(timestamp_position='none')
+            repeated_task = self.service.get(repeated['taskId']); await repeated_task.runner
+        self.assertEqual(repeated_task.reused, 3)
+        self.assertEqual(repeated_task.published_sheets, task.published_sheets)
+
+    async def test_webp_overlay_keeps_format_and_nonoverwrite_contract(self):
+        async def annotate(source, output, *_):
+            self.assertEqual(source.suffix, '.webp')
+            self.assertEqual(output.suffix, '.webp')
+            self.assertEqual(source.read_bytes(), WEBP)
+            output.write_bytes(WEBP)
+        self.service.annotate_sheet = annotate
+        with patch.object(sb, 'fetch_sheet', AsyncMock(return_value=WEBP)):
+            result = await self.start({'mode': 'sheets', 'sheetIndexes': [0]})
+            task = self.service.get(result['taskId']); await task.runner
+            self.assertEqual(task.status, 'completed')
+            destination = self.workspace / task.published_sheets[0]['workspacePath']
+            destination.write_bytes(b'existing user file')
+            result2 = await self.start({'mode': 'sheets', 'sheetIndexes': [0]})
+            task2 = self.service.get(result2['taskId']); await task2.runner
+            self.assertEqual(task2.failure_details['reason'], 'DESTINATION_CONFLICT')
+            self.assertEqual(destination.read_bytes(), b'existing user file')
+
     async def test_range_downloads_only_intersecting_sheet(self):
         transfer = AsyncMock(return_value=JPEG)
         with patch.object(sb, 'fetch_sheet', transfer):
@@ -195,7 +248,7 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
             snapshot = await self.service.dispatch('cancel', {'taskId': task.task_id})
         self.assertEqual(snapshot['status'], 'cancelled'); self.assertEqual(task.completed, 1)
         self.assertEqual(task.snapshot()['publishedSheets'], [dict(sheetIndex=0,
-            workspacePath=sb.filename(CONTEXT['title'], VID, task.variant, 0))])
+            workspacePath=sb.filename(CONTEXT['title'], VID, task.variant, 0), format="jpeg", mimeType="image/jpeg")])
         self.assertEqual(len(list((self.workspace / 'storyboards').iterdir())), 1)
         self.assertEqual([p.name for p in self.root.iterdir()], ['workspace'])
         self.assertEqual((await self.service.cancel(task.task_id))['status'], 'cancelled')
@@ -274,20 +327,67 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
                 server.close(); await server.wait_closed()
 
 
+@unittest.skipUnless(shutil.which('ffmpeg') and shutil.which('ffprobe'), 'real FFmpeg/ffprobe unavailable')
+class ImageEncodingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_real_images_keep_format_dimensions_and_lossless_pixels(self):
+        if agent.visual_map_font_file() is None:
+            self.skipTest('bundled timestamp font unavailable')
+        service = sb.StoryboardService(agent)
+        v = sb.variant(0, 160, 90, 4, 2, 2, 5, [f'https://i.ytimg.com/sb/{VID}/sheet.jpg'])
+        def run(*args):
+            return subprocess.run(args, check=True, capture_output=True, timeout=30).stdout
+        try:
+            with tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                # Many colors expose unintended quantization outside labels.
+                pixels = bytes(channel for y in range(180) for x in range(320)
+                               for channel in (x % 256, y % 256, (x + y) % 256))
+                raw = root / 'image.ppm'
+                raw.write_bytes(b'P6\n320 180\n255\n' + pixels)
+                for kind in IMAGES:
+                    with self.subTest(kind=kind):
+                        source, output = root / f'source.{kind}', root / f'labelled.{kind}'
+                        options = ['-c:v', 'libaom-av1', '-crf', '0', '-b:v', '0', '-cpu-used', '6'] if kind == 'avif' else []
+                        run('ffmpeg', '-v', 'error', '-i', str(raw), '-frames:v', '1', *options, str(source))
+                        self.assertEqual(sb.image_format(source.read_bytes()), kind)
+                        with patch.object(agent, 'find_component', return_value=agent.ComponentDiscovery('path', shutil.which('ffmpeg'))):
+                            await service.annotate_sheet(source, output, v, 0, 20, 'bottomRight')
+                        self.assertEqual(sb.image_format(output.read_bytes()), kind)
+                        probe = json.loads(run('ffprobe', '-v', 'error', '-show_streams', '-of', 'json', str(output)))['streams'][0]
+                        self.assertEqual((probe['width'], probe['height']), (320, 180))
+                        if kind in {'webp', 'png'}:
+                            def decoded(path):
+                                return run('ffmpeg', '-v', 'error', '-i', str(path), '-frames:v', '1', '-f', 'rawvideo', '-pix_fmt', 'rgba', '-')
+                            original, labelled = decoded(source), decoded(output)
+                            self.assertNotEqual(original, labelled, 'labels must actually be drawn')
+                            self.assertEqual(original[:320 * 50 * 4], labelled[:320 * 50 * 4],
+                                             'pixels above the label areas must not suffer another lossy generation')
+        finally:
+            await service.shutdown()
+
+
 class Writer:
     def __init__(self): self.closed = False
-    def write(self, data): pass
+    def write(self, data): self.request = data
     async def drain(self): pass
     def close(self): self.closed = True
     async def wait_closed(self): pass
 
 
 class TransferTests(unittest.IsolatedAsyncioTestCase):
+    async def test_images_are_accepted_by_bytes_with_any_or_missing_mime(self):
+        for kind, data in IMAGES.items():
+            for mime in [sb.IMAGE_FORMATS[kind], 'image/jpeg', 'application/octet-stream', 'text/plain', 'invalid SECRET', None]:
+                with self.subTest(kind=kind, mime=mime):
+                    headers = b'HTTP/1.1 200 OK' + (b'\r\nContent-Type: ' + mime.encode() if mime else b'')
+                    result, _ = await self.transfer(headers, data)
+                    self.assertEqual(result, data)
+
     async def test_http_rejections_and_invalid_jpeg_keep_safe_status(self):
         for response, data, stage, reason, status in [
             (b'HTTP/1.1 403 Forbidden\r\nContent-Type: text/html', b'PRIVATE', 'http', 'HTTP_STATUS', 403),
-            (b'HTTP/1.1 200 OK\r\nContent-Type: text/html', b'PRIVATE', 'http', 'UNEXPECTED_CONTENT_TYPE', 200),
-            (b'HTTP/1.1 200 OK\r\nContent-Type: image/jpeg', b'bad jpeg', 'jpeg', 'INVALID_JPEG', 200),
+            (b'HTTP/1.1 200 OK\r\nContent-Type: text/html', b'PRIVATE', 'image', 'UNSUPPORTED_IMAGE_FORMAT', 200),
+            (b'HTTP/1.1 200 OK\r\nContent-Type: image/jpeg', b'bad jpeg', 'image', 'UNSUPPORTED_IMAGE_FORMAT', 200),
             (b'HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: 1000', JPEG, 'body', 'TRUNCATED_RESPONSE', 200),
         ]:
             with self.assertRaises(sb.SheetTransferError) as caught:
@@ -304,13 +404,13 @@ class TransferTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(sb.SheetTransferError) as caught:
             await self.transfer(header, body)
         detail = caught.exception.details
-        self.assertEqual(detail['reason'], 'UNEXPECTED_CONTENT_TYPE')
-        self.assertEqual(detail['expectedContentType'], 'image/jpeg')
+        self.assertEqual(detail['reason'], 'UNSUPPORTED_IMAGE_FORMAT')
+        self.assertEqual(detail['expectedContentType'], 'image/*')
         self.assertEqual(detail['contentType'], 'text/html')
         self.assertEqual(detail['declaredBodyBytes'], len(body))
         self.assertEqual(detail['bodyBytesRead'], len(body))
         self.assertEqual(detail['bodyKind'], 'html')
-        self.assertEqual(detail['bodySampleStatus'], 'complete')
+        self.assertNotIn('bodySampleStatus', detail)
         self.assertEqual(detail['redirectCount'], 0)
         self.assertEqual(detail['requestHost'], 'i.ytimg.com')
         self.assertGreaterEqual(detail['elapsedMs'], 0)
@@ -329,14 +429,14 @@ class TransferTests(unittest.IsolatedAsyncioTestCase):
         ]
         for headers, body, mime, kind in cases:
             with self.subTest(kind=kind), self.assertRaises(sb.SheetTransferError) as caught:
-                await self.transfer(b'HTTP/1.1 200 OK\r\n' + headers, body)
+                await self.transfer(b'HTTP/1.1 403 Forbidden\r\n' + headers, body)
             detail = caught.exception.details
             self.assertEqual(detail['contentType'], mime)
             self.assertEqual(detail['bodyKind'], kind)
             self.assertNotIn('SECRET', json.dumps(detail))
         body = b'<html>' + b'x' * 10000
         with self.assertRaises(sb.SheetTransferError) as caught:
-            await self.transfer(b'HTTP/1.1 200 OK\r\nContent-Type: text/html', body)
+            await self.transfer(b'HTTP/1.1 403 Forbidden\r\nContent-Type: text/html', body)
         self.assertEqual(caught.exception.details['bodyBytesRead'], 4096)
         self.assertEqual(caught.exception.details['bodySampleStatus'], 'limited')
         self.assertEqual(caught.exception.details['bodyKind'], 'html')
@@ -349,9 +449,9 @@ class TransferTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_rejected_body_sampling_timeout_retains_primary_error(self):
         with self.assertRaises(sb.SheetTransferError) as caught:
-            await self.transfer(b'HTTP/1.1 200 OK\r\nContent-Type: text/html', b'', eof=False)
+            await self.transfer(b'HTTP/1.1 403 Forbidden\r\nContent-Type: text/html', b'', eof=False)
         detail = caught.exception.details
-        self.assertEqual(detail['reason'], 'UNEXPECTED_CONTENT_TYPE')
+        self.assertEqual(detail['reason'], 'HTTP_STATUS')
         self.assertEqual(detail['bodyKind'], 'unavailable')
         self.assertEqual(detail['bodySampleStatus'], 'timeout')
         self.assertEqual(detail['bodyBytesRead'], 0)

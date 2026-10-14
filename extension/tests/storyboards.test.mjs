@@ -24,6 +24,14 @@ for (const selection of [{ mode: 'all', sheetIndexes: [1] }, { mode: 'sheets', s
 const normalized = normalizeStoryboardResult(info, { videoId: vid, available: true, durationSeconds: 263.2, spec: 'secret', variants: [{ ...variant, urls: ['https://private?sigh=secret'] }] });
 assert.equal(JSON.stringify(normalized).includes('secret'), false);
 assert.deepEqual(normalized.variants, [variant]);
+const unknownFormat = normalizeStoryboardResult(info, { videoId: vid, available: true, durationSeconds: 20, variants: [{ ...variant, format: null }] });
+assert.equal(unknownFormat.variants[0].format, null);
+assertSchema(definitions[0].outputSchema, unknownFormat);
+for (const format of ['jpeg', 'webp', 'png', 'gif', 'avif']) {
+  const value = normalizeStoryboardResult(info, { videoId: vid, available: true, durationSeconds: 20, variants: [{ ...variant, format }] });
+  assertSchema(definitions[0].outputSchema, value);
+}
+assert.throws(() => normalizeStoryboardResult(info, { videoId: vid, available: true, durationSeconds: 20, variants: [{ ...variant, format: 'svg' }] }));
 assert.throws(() => normalizeStoryboardResult(info, { videoId: vid, available: true, durationSeconds: 20, variants: [{ ...variant, framesPerSheet: 24 }] }), { code: 'AGENT_INVALID_RESPONSE' });
 
 for (const reason of ['STORYBOARD_NOT_AVAILABLE', 'STORYBOARD_VIDEO_LIVE', 'STORYBOARD_CONTEXT_UNAVAILABLE']) {
@@ -42,6 +50,18 @@ assert.equal(normalizeStoryboardResult(info, {status:'rejected',error:{code:'STO
 
 const task = { taskId: id, status: 'working', phase: 'downloading', progressPercent: 35, completedSheets: 1, totalSheets: 3, downloadedSheets: 1, reusedSheets: 0, workspaceDirectory: 'storyboards', pollIntervalMs: 1000, publishedSheets: [{sheetIndex: 0, workspacePath: 'storyboards/example.jpeg'}], frameTimestampPosition: 'bottomRight', sheetTimestamps: [{ sheetIndex: 0, frameTimestampsSeconds: [0, 5] }, { sheetIndex: 1, frameTimestampsSeconds: [125, 130] }, { sheetIndex: 2, frameTimestampsSeconds: [250, 255, 260] }] };
 assert.deepEqual(normalizeStoryboardResult(status, { ...task, rawSpec: 'secret', paths: ['C:\\private'] }), task);
+for (const [format, mimeType] of Object.entries({ jpeg: 'image/jpeg', webp: 'image/webp', png: 'image/png', gif: 'image/gif', avif: 'image/avif' })) {
+  const publishedSheets = [{ sheetIndex: 0, workspacePath: `storyboards/example.${format}`, format, mimeType }];
+  const result = normalizeStoryboardResult(status, { ...task, publishedSheets: publishedSheets.map(sheet => ({ ...sheet, url: 'SECRET' })) });
+  assert.deepEqual(result.publishedSheets, publishedSheets);
+  assertSchema(definitions[2].outputSchema, result);
+}
+for (const sheet of [
+  { format: 'webp', mimeType: 'image/jpeg', workspacePath: 'storyboards/example.webp' },
+  { format: 'webp', mimeType: 'image/webp', workspacePath: 'storyboards/example.jpeg' },
+  { format: 'svg', mimeType: 'image/svg+xml', workspacePath: 'storyboards/example.svg' },
+  { mimeType: 'image/webp', workspacePath: 'storyboards/example.webp' },
+]) assert.throws(() => normalizeStoryboardResult(status, { ...task, publishedSheets: [{ sheetIndex: 0, ...sheet }] }));
 assert.throws(() => normalizeStoryboardResult(status, { ...task, completedSheets: 2 }), { code: 'AGENT_INVALID_RESPONSE' });
 assert.throws(() => normalizeStoryboardResult(status, { ...task, workspaceDirectory: 'C:\\private' }), { code: 'AGENT_INVALID_RESPONSE' });
 assert.throws(() => normalizeStoryboardResult(status, { ...task, sheetTimestamps: [] }), { code: 'AGENT_INVALID_RESPONSE' });
@@ -97,6 +117,11 @@ console.log('Storyboard failure diagnostics: HTTP, stage, sheet, attempts, fixed
 const responseDetail={...detail,reason:'UNEXPECTED_CONTENT_TYPE',httpStatus:200,exceptionType:'ValueError',
   expectedContentType:'image/jpeg',contentType:'text/html',declaredBodyBytes:123,bodyBytesRead:123,bodyKind:'html',
   contentEncoding:null,transferEncoding:'chunked',bodySampleStatus:'complete',redirectCount:1,elapsedMs:250,requestHost:'i.ytimg.com'};
+for (const reason of ['INVALID_IMAGE', 'UNSUPPORTED_IMAGE_FORMAT']) {
+  const result = normalizeStoryboardResult(status, { ...taskFixture, failureDetails: { ...responseDetail, stage: 'image', reason, expectedContentType: 'image/*' } });
+  assert.match(result.error.message, /Expected image\/\*/);
+  assertSchema(definitions[2].outputSchema, result);
+}
 const expanded=normalizeStoryboardResult(status,{...taskFixture,failureDetails:{...responseDetail,
   body:'SECRET response',headers:{'set-cookie':'SECRET'},url:'https://i.ytimg.com/sb/private?sigh=SECRET'}});
 assert.deepEqual(expanded.failureDetails,responseDetail);

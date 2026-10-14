@@ -3129,6 +3129,7 @@ var messages = {
   TASK_NOT_FOUND: "The storyboard task does not exist in this Agent session."
 };
 var errorSchema2 = object5({ code: { type: "string", enum: Object.keys(messages) }, message: { type: "string" } });
+var imageFormats = { jpeg: "image/jpeg", webp: "image/webp", png: "image/png", gif: "image/gif", avif: "image/avif" };
 var variantSchema = object5({
   variantId,
   cellWidth: positive,
@@ -3139,7 +3140,7 @@ var variantSchema = object5({
   frameIntervalEstimated: { type: "boolean" },
   frameIntervalSeconds: { type: "number", exclusiveMinimum: 0 },
   sheetCount: positive,
-  format: { const: "jpeg" }
+  format: { enum: [null, ...Object.keys(imageFormats)] }
 });
 var selectionSchema = { oneOf: [
   object5({ mode: { const: "all" } }),
@@ -3158,7 +3159,7 @@ var sheetTimestampSchema = object5({
   frameTimestampsSeconds: { type: "array", minItems: 1, items: { type: "number", minimum: 0 } }
 });
 var responseDiagnostics = {
-  expectedContentType: { enum: ["image/jpeg", "text/html"] },
+  expectedContentType: { enum: ["image/*", "image/jpeg", "text/html"] },
   contentType: { type: ["string", "null"], maxLength: 127, pattern: "^(?:invalid|[a-z0-9!#$&^_.+\\-]+/[a-z0-9!#$&^_.+\\-]+)$" },
   declaredBodyBytes: { type: ["integer", "null"], minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
   bodyBytesRead: { type: "integer", minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
@@ -3171,8 +3172,8 @@ var responseDiagnostics = {
   requestHost: { type: ["string", "null"], maxLength: 253, pattern: "^(?:(?:[a-z0-9-]+\\.)*ytimg\\.com|www\\.youtube\\.com)$" }
 };
 var failureSchema = object5({
-  stage: { enum: ["url", "connect", "http", "body", "jpeg", "timestamp", "publishing"] },
-  reason: { enum: ["HTTP_STATUS", "INVALID_LENGTH", "UNSUPPORTED_TRANSFER_ENCODING", "RESPONSE_TOO_LARGE", "INVALID_CHUNK", "TRUNCATED_RESPONSE", "INVALID_JPEG", "TOO_MANY_REDIRECTS", "INVALID_URL", "RENDERER_UNAVAILABLE", "RENDERING_FAILED", "DESTINATION_CONFLICT", "TIMEOUT", "TLS_FAILED", "CONNECTION_FAILED", "FILE_IO", "INVALID_HTTP_RESPONSE", "UNEXPECTED_CONTENT_TYPE", "INTERNAL_ERROR"] },
+  stage: { enum: ["url", "connect", "http", "body", "jpeg", "image", "timestamp", "publishing"] },
+  reason: { enum: ["HTTP_STATUS", "INVALID_LENGTH", "UNSUPPORTED_TRANSFER_ENCODING", "RESPONSE_TOO_LARGE", "INVALID_CHUNK", "TRUNCATED_RESPONSE", "INVALID_JPEG", "INVALID_IMAGE", "UNSUPPORTED_IMAGE_FORMAT", "TOO_MANY_REDIRECTS", "INVALID_URL", "RENDERER_UNAVAILABLE", "RENDERING_FAILED", "DESTINATION_CONFLICT", "TIMEOUT", "TLS_FAILED", "CONNECTION_FAILED", "FILE_IO", "INVALID_HTTP_RESPONSE", "UNEXPECTED_CONTENT_TYPE", "INTERNAL_ERROR"] },
   httpStatus: { type: ["integer", "null"], minimum: 100, maximum: 599 },
   osErrorCode: { type: ["string", "null"], pattern: "^(?:E[A-Z0-9_]{1,40}|WINERROR_[0-9]{1,10})$" },
   processExitCode: { type: "integer", minimum: -2147483648, maximum: 4294967295 },
@@ -3195,7 +3196,12 @@ var taskSchema = object5(
     pollIntervalMs: { type: "integer", minimum: 1e3 },
     frameTimestampPosition,
     sheetTimestamps: { type: "array", minItems: 1, items: sheetTimestampSchema },
-    publishedSheets: { type: "array", items: object5({ sheetIndex: integer3, workspacePath: { type: "string", minLength: 1 } }) },
+    publishedSheets: { type: "array", items: object5({
+      sheetIndex: integer3,
+      workspacePath: { type: "string", minLength: 1 },
+      format: { enum: Object.keys(imageFormats) },
+      mimeType: { enum: Object.values(imageFormats) }
+    }, ["sheetIndex", "workspacePath"]) },
     failedSheetIndex: integer3,
     error: errorSchema2,
     failureDetails: failureSchema
@@ -3214,8 +3220,8 @@ function storyboardDefinitions(readAnnotations, writeAnnotations) {
     annotations: { ...write2 ? writeAnnotations : readAnnotations, openWorldHint: name2.endsWith("get_info") || name2.endsWith("download") }
   });
   return [
-    make(STORYBOARD_TOOL_NAMES[0], "Get YouTube storyboard variants", "Discover YouTube preview-sheet variants, geometry, timing and sheet counts; retain variantId unchanged. frameIntervalEstimated marks inferred timing. Creates no files. If unavailable, the response recommends visual_map_create from a Workspace video.", object5({ videoId }), infoSchema),
-    make(STORYBOARD_TOOL_NAMES[1], "Download YouTube storyboard sheets", "Download ready JPEG sheets of a discovered variant: all, a time range or sheet indexes. sheetTimestamps always returns calculated tile times; frameTimestampPosition draws labels (default bottomRight, none disables). Saves directly under storyboards/; never downloads video/audio.", object5({ videoId, variantId, selection: selectionSchema, frameTimestampPosition }, ["videoId", "variantId", "selection"]), { type: "object", oneOf: [taskSchema, rejected] }, true),
+    make(STORYBOARD_TOOL_NAMES[0], "Get YouTube storyboard variants", "Discover YouTube preview-sheet variants, geometry, timing and sheet counts; retain variantId unchanged. frameIntervalEstimated marks inferred timing. Format is unknown (null) until downloaded. Creates no files. If unavailable, the response recommends visual_map_create from a Workspace video.", object5({ videoId }), infoSchema),
+    make(STORYBOARD_TOOL_NAMES[1], "Download YouTube storyboard sheets", "Download preview sheets: all, a time range or indexes. sheetTimestamps always returns calculated tile times. frameTimestampPosition defaults bottomRight; none keeps original bytes. Preserves image format. Saves under storyboards/ without downloading video/audio.", object5({ videoId, variantId, selection: selectionSchema, frameTimestampPosition }, ["videoId", "variantId", "selection"]), { type: "object", oneOf: [taskSchema, rejected] }, true),
     make(STORYBOARD_TOOL_NAMES[2], "Get storyboard task progress", "Read storyboard progress and published paths. On failure, creation.data.failureDetails reports stage, HTTP status, received MIME, body kind/bytes, encodings, redirects and timing without private URLs or body text. Poll at pollIntervalMs. Complete sheets survive failure/cancellation.", object5({ taskId: taskId4 }), { type: "object", oneOf: [taskSchema, rejected] }),
     make(STORYBOARD_TOOL_NAMES[3], "Cancel storyboard download", "Cancel storyboard transfers; keep completely published sheets. Repeated cancellation returns terminal status.", object5({ taskId: taskId4 }), { type: "object", oneOf: [cancelSchema, rejected] }, true)
   ];
@@ -3256,7 +3262,7 @@ function normalizeStoryboardResult(name2, data) {
     if (data.available === false && reasons.includes(data.reason)) return { videoId: data.videoId, available: false, reason: data.reason, comment: storyboardAlternativeComment };
     if (data.available !== true || !finite(data.durationSeconds) || data.durationSeconds <= 0 || !Array.isArray(data.variants) || !data.variants.length) bad();
     const variants = data.variants.map((v) => {
-      if (!plain2(v) || !matches(variantId, v.variantId) || v.format !== "jpeg" || typeof v.frameIntervalEstimated !== "boolean" || !finite(v.frameIntervalSeconds) || v.frameIntervalSeconds <= 0 || !["cellWidth", "cellHeight", "columns", "rows", "framesPerSheet", "sheetCount"].every((k) => Number.isInteger(v[k]) && v[k] > 0) || v.framesPerSheet !== v.columns * v.rows) bad();
+      if (!plain2(v) || !matches(variantId, v.variantId) || !variantSchema.properties.format.enum.includes(v.format) || typeof v.frameIntervalEstimated !== "boolean" || !finite(v.frameIntervalSeconds) || v.frameIntervalSeconds <= 0 || !["cellWidth", "cellHeight", "columns", "rows", "framesPerSheet", "sheetCount"].every((k) => Number.isInteger(v[k]) && v[k] > 0) || v.framesPerSheet !== v.columns * v.rows) bad();
       return Object.fromEntries(Object.keys(variantSchema.properties).map((k) => [k, v[k]]));
     });
     if (new Set(variants.map((v) => v.variantId)).size !== variants.length) bad();
@@ -3266,12 +3272,12 @@ function normalizeStoryboardResult(name2, data) {
   if (name2.endsWith("cancel_task")) return { taskId: data.taskId, status: data.status };
   if (!taskSchema.properties.phase.enum.includes(data.phase) || !finite(data.progressPercent) || data.progressPercent < 0 || data.progressPercent > 100 || !["completedSheets", "totalSheets", "downloadedSheets", "reusedSheets", "pollIntervalMs"].every((k) => Number.isInteger(data[k]) && data[k] >= 0) || data.pollIntervalMs < 1e3 || data.totalSheets < 1 || data.completedSheets > data.totalSheets || data.completedSheets !== data.downloadedSheets + data.reusedSheets || data.workspaceDirectory !== "storyboards" || !timestampPositions.includes(data.frameTimestampPosition) || !Array.isArray(data.sheetTimestamps) || data.sheetTimestamps.length !== data.totalSheets) bad();
   if (new Set(data.sheetTimestamps.map((sheet) => sheet?.sheetIndex)).size !== data.sheetTimestamps.length || data.sheetTimestamps.some((sheet) => !plain2(sheet) || !Number.isInteger(sheet.sheetIndex) || sheet.sheetIndex < 0 || !Array.isArray(sheet.frameTimestampsSeconds) || !sheet.frameTimestampsSeconds.length || sheet.frameTimestampsSeconds.some((timestamp) => !finite(timestamp) || timestamp < 0))) bad();
-  if (!Array.isArray(data.publishedSheets) || data.publishedSheets.length !== data.completedSheets || new Set(data.publishedSheets.map((sheet) => sheet?.workspacePath)).size !== data.publishedSheets.length || data.publishedSheets.some((sheet, index) => !plain2(sheet) || sheet.sheetIndex !== data.sheetTimestamps[index].sheetIndex || typeof sheet.workspacePath !== "string" || !/^storyboards\/[^/]+$/.test(sheet.workspacePath) || /[\\<>:"|?*\u0000-\u001f]/.test(sheet.workspacePath) || /\/(?:\.|\.\.)$/.test(sheet.workspacePath))) bad();
+  if (!Array.isArray(data.publishedSheets) || data.publishedSheets.length !== data.completedSheets || new Set(data.publishedSheets.map((sheet) => sheet?.workspacePath)).size !== data.publishedSheets.length || data.publishedSheets.some((sheet, index) => !plain2(sheet) || sheet.sheetIndex !== data.sheetTimestamps[index].sheetIndex || typeof sheet.workspacePath !== "string" || sheet.format !== void 0 && (!Object.hasOwn(imageFormats, sheet.format) || sheet.mimeType !== imageFormats[sheet.format] || !sheet.workspacePath?.endsWith(`.${sheet.format}`)) || sheet.mimeType !== void 0 && sheet.format === void 0 || !/^storyboards\/[^/]+$/.test(sheet.workspacePath) || /[\\<>:"|?*\u0000-\u001f]/.test(sheet.workspacePath) || /\/(?:\.|\.\.)$/.test(sheet.workspacePath))) bad();
   if (data.status !== "working" && data.phase !== data.status || data.status === "working" && !["resolving", "downloading", "publishing"].includes(data.phase)) bad();
   if (data.status === "completed" && (data.progressPercent !== 100 || data.completedSheets !== data.totalSheets)) bad();
   if (data.status !== "failed" && data.error) bad();
   const result = Object.fromEntries(taskSchema.required.map((k) => [k, data[k]]));
-  result.publishedSheets = data.publishedSheets.map(({ sheetIndex, workspacePath }) => ({ sheetIndex, workspacePath }));
+  result.publishedSheets = data.publishedSheets.map(({ sheetIndex, workspacePath, format, mimeType }) => ({ sheetIndex, workspacePath, ...format === void 0 ? {} : { format, mimeType } }));
   if (data.status === "failed") {
     if (data.error?.code !== "STORYBOARD_DOWNLOAD_FAILED" || !Number.isInteger(data.failedSheetIndex) || data.failedSheetIndex < 0) bad();
     result.failedSheetIndex = data.failedSheetIndex;
@@ -3437,7 +3443,7 @@ globalThis.addEventListener?.("fetch", createMediaStreamHandler({
   fetchMedia: (url, options) => fetch(url, options),
   log: (stage, details = {}) => consoleAction(`[ResearchTube media stream ${EXTENSION_VERSION}]`, stage, details)
 }));
-var REQUIRED_AGENT_INTERFACE_VERSION = 79;
+var REQUIRED_AGENT_INTERFACE_VERSION = 80;
 var MEDIA_TO_CHAT_WIDGET_URI = "ui://researchtube/chat-target-v8.html";
 var MEDIA_TO_CHAT_WIDGET_ALIASES = /* @__PURE__ */ new Set(["ui://researchtube/chat-target-v4.html", "ui://researchtube/chat-target-v5.html", "ui://researchtube/chat-target-v6.html", "ui://researchtube/chat-target-v7.html"]);
 var MEDIA_TO_CHAT_BIND_TIMEOUT_MS = 3e4;
