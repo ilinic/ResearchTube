@@ -21,6 +21,7 @@ from pathlib import Path
 from urllib.parse import urljoin, urlsplit, urlunsplit, parse_qsl, urlencode
 
 MAX_SHEET_BYTES = 20 * 1024 * 1024
+DIAGNOSTIC_SAMPLE_BYTES = 4096
 MAX_FRAMES = 1_000_000
 CACHE_SECONDS = 300
 TIMESTAMP_POSITIONS = {'none', 'topLeft', 'topRight', 'bottomLeft', 'bottomRight'}
@@ -34,6 +35,7 @@ FAILURE_REASONS = {
     'Too many redirects': 'TOO_MANY_REDIRECTS', 'Invalid sheet URL': 'INVALID_URL',
     'Timestamp renderer is unavailable': 'RENDERER_UNAVAILABLE', 'Timestamp rendering failed': 'RENDERING_FAILED',
     'Timestamp renderer produced an invalid JPEG': 'INVALID_JPEG',
+    'Unexpected content type': 'UNEXPECTED_CONTENT_TYPE',
     'Destination belongs to another file': 'DESTINATION_CONFLICT', 'Destination already exists': 'DESTINATION_CONFLICT',
 }
 EXCEPTION_TYPES = {'ValueError', 'RuntimeError', 'FileNotFoundError', 'PermissionError', 'FileExistsError',
@@ -64,6 +66,39 @@ class SheetTransferError(ValueError):
     def __init__(self, details):
         super().__init__('Storyboard transfer failed')
         self.details = details
+
+
+def response_body_kind(data):
+    """Classify bounded bytes without publishing any part of the response."""
+    if not data:
+        return 'empty'
+    if data.startswith(b'\xff\xd8\xff'): return 'jpeg'
+    if data.startswith(b'\x89PNG\r\n\x1a\n'): return 'png'
+    if data.startswith((b'GIF87a', b'GIF89a')): return 'gif'
+    if data.startswith(b'RIFF') and data[8:12] == b'WEBP': return 'webp'
+    if len(data) >= 12 and data[4:8] == b'ftyp' and data[8:12] in {b'avif', b'avis'}: return 'avif'
+    if data.startswith(b'\x1f\x8b'): return 'gzip'
+    prefix = bytes(data).lstrip(b'\xef\xbb\xbf \t\r\n').lower()
+    if prefix.startswith((b'<!doctype html', b'<html', b'<head', b'<body')): return 'html'
+    if prefix.startswith((b'{', b'[')): return 'json'
+    if prefix.startswith(b'<?xml'): return 'xml'
+    if all(byte in (9, 10, 13) or 32 <= byte < 127 for byte in data): return 'text'
+    return 'unknown'
+
+
+def response_header_details(headers):
+    """Allowlisted technical values only; never header parameters or cookies."""
+    mime = headers.get('content-type', '').split(';', 1)[0].strip().lower()
+    content_type = mime if len(mime) <= 127 and re.fullmatch(r'[a-z0-9!#$&^_.+\-]+/[a-z0-9!#$&^_.+\-]+', mime) else ('invalid' if mime else None)
+    length = headers.get('content-length', '')
+    declared = int(length) if re.fullmatch(r'[0-9]{1,16}', length) else None
+    if declared is not None and declared > 9007199254740991: declared = None
+    def encoding(name, allowed):
+        value = headers.get(name, '').strip().lower()
+        return value if value in allowed else ('other' if value else None)
+    return dict(contentType=content_type, declaredBodyBytes=declared,
+                contentEncoding=encoding('content-encoding', {'identity', 'gzip', 'br', 'deflate', 'zstd'}),
+                transferEncoding=encoding('transfer-encoding', {'identity', 'chunked'}))
 
 
 class StoryboardError(Exception):
@@ -248,19 +283,74 @@ def sheet_timestamp_filter(v, sheet_index, duration, position, font_file, escape
 
 
 async def fetch_sheet(url, progress):
+    diagnostics = {}
     try:
-        return await asyncio.wait_for(_fetch_https_body(url, progress), 45)
+        return await asyncio.wait_for(_fetch_https_body(url, progress, diagnostics=diagnostics), 45)
     except asyncio.TimeoutError as error:
-        raise SheetTransferError(failure_details(error, 'http')) from None
+        details = failure_details(error, diagnostics.get('_stage', 'http'), diagnostics.get('_status'))
+        diagnostics['elapsedMs'] = min(2147483647, max(0, round((time.monotonic() - diagnostics.get('_started', time.monotonic())) * 1000)))
+        details.update({key: value for key, value in diagnostics.items() if not key.startswith('_')})
+        raise SheetTransferError(details) from None
 
 
-async def _fetch_https_body(url, progress, metadata=False):
+async def inspect_rejected_body(reader, headers, diagnostics):
+    """Read at most 4 KiB/0.5 seconds, decode framing, publish only a category."""
+    sample = bytearray()
+    chunked = headers.get('transfer-encoding', '').lower() == 'chunked'
+    total = diagnostics.get('declaredBodyBytes')
+    diagnostics['bodySampleStatus'] = 'complete'
+
+    async def read():
+        while len(sample) < DIAGNOSTIC_SAMPLE_BYTES:
+            remaining = DIAGNOSTIC_SAMPLE_BYTES - len(sample)
+            if chunked:
+                size = int((await reader.readline()).split(b';', 1)[0], 16)
+                if size == 0: return
+                if size < 0: raise ValueError('Invalid chunk')
+                pending = min(size, remaining)
+                while pending:
+                    chunk = await reader.read(pending)
+                    if not chunk: raise ValueError('Truncated sheet')
+                    sample.extend(chunk)
+                    pending -= len(chunk)
+                if size > remaining: break
+                if await reader.readexactly(2) != b'\r\n': raise ValueError('Invalid chunk')
+            else:
+                if total is not None:
+                    remaining = min(remaining, total - len(sample))
+                    if remaining <= 0: return
+                chunk = await reader.read(remaining)
+                if not chunk: return
+                sample.extend(chunk)
+        diagnostics['bodySampleStatus'] = 'complete' if not chunked and total is not None and len(sample) >= total else 'limited'
+
+    try:
+        await asyncio.wait_for(read(), 0.5)
+    except asyncio.CancelledError:
+        diagnostics['bodySampleStatus'] = 'timeout'
+        raise
+    except asyncio.TimeoutError:
+        diagnostics['bodySampleStatus'] = 'timeout'
+    except Exception:
+        diagnostics['bodySampleStatus'] = 'invalid'
+    finally:
+        diagnostics['bodyBytesRead'] = len(sample)
+        diagnostics['bodyKind'] = response_body_kind(sample) if sample or diagnostics['bodySampleStatus'] == 'complete' else 'unavailable'
+
+
+async def _fetch_https_body(url, progress, metadata=False, diagnostics=None):
     """Cancellable HTTPS, with bounded body/header sizes and checked redirects."""
     writer = None
     stage, status = 'url', None
+    diagnostics = diagnostics if diagnostics is not None else {}
+    diagnostics.update(expectedContentType='text/html' if metadata else 'image/jpeg', redirectCount=0,
+                       bodyBytesRead=0, bodyKind='unavailable', _started=time.monotonic())
+    data = bytearray()
     try:
         for _ in range(4):
             stage, status = 'url', None
+            diagnostics.update(response_header_details({}))
+            diagnostics.update(_stage=stage, _status=None, requestHost=None)
             if metadata:
                 parsed = urlsplit(url)
                 if (parsed.scheme != 'https' or parsed.hostname != 'www.youtube.com' or parsed.username
@@ -269,18 +359,25 @@ async def _fetch_https_body(url, progress, metadata=False):
             else:
                 parsed = urlsplit(sheet_url(url))
             stage = 'connect'
+            diagnostics.update(_stage=stage, requestHost=parsed.hostname if len(parsed.hostname) <= 253 else None)
             reader, writer = await asyncio.open_connection(parsed.hostname, 443, ssl=ssl.create_default_context())
             target = parsed.path + ('?' + parsed.query if parsed.query else '')
             accept = 'text/html' if metadata else 'image/jpeg'
             stage = 'http'
+            diagnostics['_stage'] = stage
             writer.write(f'GET {target} HTTP/1.1\r\nHost: {parsed.hostname}\r\nUser-Agent: Mozilla/5.0\r\nAccept: {accept}\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n'.encode('ascii'))
             await writer.drain()
             header = await reader.readuntil(b'\r\n\r\n')
             lines = header.decode('iso-8859-1').split('\r\n')
-            status = int(lines[0].split()[1])
+            parsed_status = int(lines[0].split()[1])
+            if not 100 <= parsed_status <= 599: raise ValueError('Invalid HTTP status')
+            status = parsed_status
+            diagnostics['_status'] = status
             headers = dict(line.split(':', 1) for line in lines[1:] if ':' in line)
             headers = {k.lower(): v.strip() for k, v in headers.items()}
+            diagnostics.update(response_header_details(headers))
             if status in (301, 302, 303, 307, 308):
+                diagnostics['redirectCount'] += 1
                 url = urljoin(url, headers.get('location', ''))
                 writer.close()
                 await writer.wait_closed()
@@ -288,10 +385,13 @@ async def _fetch_https_body(url, progress, metadata=False):
                 continue
             accepted_types = ('text/html',) if metadata else ('image/jpeg', 'image/jpg')
             if status != 200:
+                await inspect_rejected_body(reader, headers, diagnostics)
                 raise ValueError('Sheet unavailable')
             if headers.get('content-type', '').split(';')[0].lower() not in accepted_types:
-                raise SheetTransferError(dict(stage='http', reason='UNEXPECTED_CONTENT_TYPE', httpStatus=status, osErrorCode=None, attempts=1, exceptionType='ValueError'))
+                await inspect_rejected_body(reader, headers, diagnostics)
+                raise ValueError('Unexpected content type')
             stage = 'body'
+            diagnostics['_stage'] = stage
             total = int(headers['content-length']) if 'content-length' in headers else None
             if total is not None and not 0 < total <= MAX_SHEET_BYTES:
                 raise ValueError('Invalid sheet length')
@@ -310,6 +410,7 @@ async def _fetch_https_body(url, progress, metadata=False):
                     while chunk_size:
                         chunk = await reader.readexactly(min(65536, chunk_size))
                         data.extend(chunk)
+                        diagnostics['bodyBytesRead'] = len(data)
                         chunk_size -= len(chunk)
                         progress(len(data), total)
                     if await reader.readexactly(2) != b'\r\n':
@@ -322,20 +423,31 @@ async def _fetch_https_body(url, progress, metadata=False):
                     if not chunk:
                         break
                     data.extend(chunk)
+                    diagnostics['bodyBytesRead'] = len(data)
                     progress(len(data), total)
                 if len(data) > MAX_SHEET_BYTES:
                     raise ValueError('Sheet too large')
             if total is not None and len(data) != total:
                 raise ValueError('Truncated sheet')
             stage = 'jpeg'
+            diagnostics['_stage'] = stage
             if not metadata and (not data.startswith(b'\xff\xd8\xff') or not data.endswith(b'\xff\xd9')):
                 raise ValueError('Invalid JPEG')
             return bytes(data)
         raise ValueError('Too many redirects')
+    except asyncio.CancelledError:
+        if data:
+            diagnostics['bodyKind'] = response_body_kind(data[:DIAGNOSTIC_SAMPLE_BYTES])
+        raise
     except SheetTransferError:
         raise
     except Exception as error:
-        raise SheetTransferError(failure_details(error, stage, status)) from None
+        if data:
+            diagnostics['bodyKind'] = response_body_kind(data[:DIAGNOSTIC_SAMPLE_BYTES])
+        diagnostics['elapsedMs'] = min(2147483647, max(0, round((time.monotonic() - diagnostics['_started']) * 1000)))
+        details = failure_details(error, stage, status)
+        details.update({key: value for key, value in diagnostics.items() if not key.startswith('_')})
+        raise SheetTransferError(details) from None
     finally:
         if writer is not None:
             writer.close()

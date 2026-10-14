@@ -93,3 +93,22 @@ assert.doesNotMatch(JSON.stringify(diagnosed),/SECRET|private|exception/);
 for(const bad of [{...detail,stage:'SECRET'},{...detail,reason:'SECRET'},{...detail,httpStatus:0},{...detail,sheetIndex:1},{...detail,osErrorCode:'C:\\private'},{...detail,attempts:0}])assert.throws(()=>normalizeStoryboardResult(status,{...taskFixture,failureDetails:bad}));
 assert.equal(normalizeStoryboardResult(status,taskFixture).failureDetails,undefined,'older Agents remain compatible');
 console.log('Storyboard failure diagnostics: HTTP, stage, sheet, attempts, fixed reason and private-field exclusion passed');
+
+const responseDetail={...detail,reason:'UNEXPECTED_CONTENT_TYPE',httpStatus:200,exceptionType:'ValueError',
+  expectedContentType:'image/jpeg',contentType:'text/html',declaredBodyBytes:123,bodyBytesRead:123,bodyKind:'html',
+  contentEncoding:null,transferEncoding:'chunked',bodySampleStatus:'complete',redirectCount:1,elapsedMs:250,requestHost:'i.ytimg.com'};
+const expanded=normalizeStoryboardResult(status,{...taskFixture,failureDetails:{...responseDetail,
+  body:'SECRET response',headers:{'set-cookie':'SECRET'},url:'https://i.ytimg.com/sb/private?sigh=SECRET'}});
+assert.deepEqual(expanded.failureDetails,responseDetail);
+assert.match(expanded.error.message,/Content-Type: text\/html/);
+assert.match(expanded.error.message,/body: html, read 123 B, declared 123 B/);
+assert.match(expanded.error.message,/redirects: 1; elapsed: 250 ms/);
+assertSchema(definitions[2].outputSchema,expanded);
+assert.doesNotMatch(JSON.stringify(expanded),/SECRET|set-cookie|https:\/\//);
+for(const extra of [
+ {contentType:'text/html; token=SECRET'},{contentType:'x'.repeat(128)},{expectedContentType:'SECRET'},
+ {bodyKind:'SECRET'},{declaredBodyBytes:-1},{declaredBodyBytes:2**53},{bodyBytesRead:1.5},
+ {contentEncoding:'SECRET'},{transferEncoding:'SECRET'},{redirectCount:5},{elapsedMs:-1},
+ {requestHost:'private.test'},{requestHost:'i.ytimg.com/?sigh=SECRET'},{bodySampleStatus:'SECRET'}
+]) assert.throws(()=>normalizeStoryboardResult(status,{...taskFixture,failureDetails:{...responseDetail,...extra}}));
+console.log('Storyboard HTTP diagnostics: MIME, bounded body classification/counts, encodings, redirects, timing and privacy projection passed');

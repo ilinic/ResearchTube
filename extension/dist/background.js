@@ -3157,6 +3157,19 @@ var sheetTimestampSchema = object5({
   sheetIndex: integer3,
   frameTimestampsSeconds: { type: "array", minItems: 1, items: { type: "number", minimum: 0 } }
 });
+var responseDiagnostics = {
+  expectedContentType: { enum: ["image/jpeg", "text/html"] },
+  contentType: { type: ["string", "null"], maxLength: 127, pattern: "^(?:invalid|[a-z0-9!#$&^_.+\\-]+/[a-z0-9!#$&^_.+\\-]+)$" },
+  declaredBodyBytes: { type: ["integer", "null"], minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
+  bodyBytesRead: { type: "integer", minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
+  bodyKind: { enum: ["empty", "jpeg", "png", "gif", "webp", "avif", "gzip", "html", "json", "xml", "text", "unknown", "unavailable"] },
+  contentEncoding: { enum: [null, "identity", "gzip", "br", "deflate", "zstd", "other"] },
+  transferEncoding: { enum: [null, "identity", "chunked", "other"] },
+  bodySampleStatus: { enum: ["complete", "limited", "timeout", "invalid"] },
+  redirectCount: { type: "integer", minimum: 0, maximum: 4 },
+  elapsedMs: { type: "integer", minimum: 0, maximum: 2147483647 },
+  requestHost: { type: ["string", "null"], maxLength: 253, pattern: "^(?:(?:[a-z0-9-]+\\.)*ytimg\\.com|www\\.youtube\\.com)$" }
+};
 var failureSchema = object5({
   stage: { enum: ["url", "connect", "http", "body", "jpeg", "timestamp", "publishing"] },
   reason: { enum: ["HTTP_STATUS", "INVALID_LENGTH", "UNSUPPORTED_TRANSFER_ENCODING", "RESPONSE_TOO_LARGE", "INVALID_CHUNK", "TRUNCATED_RESPONSE", "INVALID_JPEG", "TOO_MANY_REDIRECTS", "INVALID_URL", "RENDERER_UNAVAILABLE", "RENDERING_FAILED", "DESTINATION_CONFLICT", "TIMEOUT", "TLS_FAILED", "CONNECTION_FAILED", "FILE_IO", "INVALID_HTTP_RESPONSE", "UNEXPECTED_CONTENT_TYPE", "INTERNAL_ERROR"] },
@@ -3165,7 +3178,8 @@ var failureSchema = object5({
   processExitCode: { type: "integer", minimum: -2147483648, maximum: 4294967295 },
   exceptionType: { enum: ["ValueError", "RuntimeError", "FileNotFoundError", "PermissionError", "FileExistsError", "TimeoutError", "SSLError", "SSLCertVerificationError", "ConnectionRefusedError", "ConnectionResetError", "ConnectionAbortedError", "BrokenPipeError", "OSError", "IncompleteReadError", "LimitOverrunError", "UnicodeEncodeError", "UnicodeDecodeError", "TypeError", "KeyError", "AgentApiError", "Other"] },
   attempts: { type: "integer", minimum: 1, maximum: 100 },
-  sheetIndex: integer3
+  sheetIndex: integer3,
+  ...responseDiagnostics
 }, ["stage", "reason", "httpStatus", "osErrorCode", "attempts", "sheetIndex"]);
 var taskSchema = object5(
   {
@@ -3202,7 +3216,7 @@ function storyboardDefinitions(readAnnotations, writeAnnotations) {
   return [
     make(STORYBOARD_TOOL_NAMES[0], "Get YouTube storyboard variants", "Discover YouTube preview-sheet variants, geometry, timing and sheet counts; retain variantId unchanged. frameIntervalEstimated marks inferred timing. Creates no files. If unavailable, the response recommends visual_map_create from a Workspace video.", object5({ videoId }), infoSchema),
     make(STORYBOARD_TOOL_NAMES[1], "Download YouTube storyboard sheets", "Download ready JPEG sheets of a discovered variant: all, a time range or sheet indexes. sheetTimestamps always returns calculated tile times; frameTimestampPosition draws labels (default bottomRight, none disables). Saves directly under storyboards/; never downloads video/audio.", object5({ videoId, variantId, selection: selectionSchema, frameTimestampPosition }, ["videoId", "variantId", "selection"]), { type: "object", oneOf: [taskSchema, rejected] }, true),
-    make(STORYBOARD_TOOL_NAMES[2], "Get storyboard task progress", "Read storyboard progress and published paths. On failure, creation.data.failureDetails reports stage, HTTP status, OS code, sheet and attempts without private URLs. Poll at pollIntervalMs. Complete sheets survive failure/cancellation.", object5({ taskId: taskId4 }), { type: "object", oneOf: [taskSchema, rejected] }),
+    make(STORYBOARD_TOOL_NAMES[2], "Get storyboard task progress", "Read storyboard progress and published paths. On failure, creation.data.failureDetails reports stage, HTTP status, received MIME, body kind/bytes, encodings, redirects and timing without private URLs or body text. Poll at pollIntervalMs. Complete sheets survive failure/cancellation.", object5({ taskId: taskId4 }), { type: "object", oneOf: [taskSchema, rejected] }),
     make(STORYBOARD_TOOL_NAMES[3], "Cancel storyboard download", "Cancel storyboard transfers; keep completely published sheets. Repeated cancellation returns terminal status.", object5({ taskId: taskId4 }), { type: "object", oneOf: [cancelSchema, rejected] }, true)
   ];
 }
@@ -3265,8 +3279,23 @@ function normalizeStoryboardResult(name2, data) {
     if (data.failureDetails !== void 0) {
       const d = data.failureDetails;
       if (!plain2(d) || !failureSchema.properties.stage.enum.includes(d.stage) || !failureSchema.properties.reason.enum.includes(d.reason) || d.sheetIndex !== data.failedSheetIndex || !Number.isInteger(d.attempts) || d.attempts < 1 || d.attempts > 100 || d.httpStatus !== null && (!Number.isInteger(d.httpStatus) || d.httpStatus < 100 || d.httpStatus > 599) || d.osErrorCode !== null && (typeof d.osErrorCode !== "string" || !new RegExp(failureSchema.properties.osErrorCode.pattern).test(d.osErrorCode)) || d.exceptionType !== void 0 && !failureSchema.properties.exceptionType.enum.includes(d.exceptionType) || d.processExitCode !== void 0 && (!Number.isInteger(d.processExitCode) || d.processExitCode < -2147483648 || d.processExitCode > 4294967295)) bad();
+      for (const [key, schema] of Object.entries(responseDiagnostics)) {
+        const value = d[key];
+        if (value === void 0 || value === null && Array.isArray(schema.type) && schema.type.includes("null")) continue;
+        if (schema.enum && !schema.enum.includes(value) || schema.minimum !== void 0 && (!Number.isSafeInteger(value) || value < schema.minimum || value > schema.maximum) || schema.pattern && (typeof value !== "string" || value.length > schema.maxLength || !new RegExp(schema.pattern).test(value))) bad();
+      }
       result.failureDetails = Object.fromEntries(Object.keys(failureSchema.properties).filter((key) => d[key] !== void 0).map((key) => [key, d[key]]));
       result.error.message = `Storyboard sheet ${d.sheetIndex} failed at ${d.stage}: ${d.reason}${d.httpStatus === null ? "" : ` (HTTP ${d.httpStatus})`}${d.osErrorCode === null ? "" : ` (${d.osErrorCode})`}${d.exceptionType ? ` [${d.exceptionType}]` : ""}${d.processExitCode === void 0 ? "" : ` (exit ${d.processExitCode})`}. Attempts: ${d.attempts}.`;
+      const context2 = [];
+      if (d.expectedContentType !== void 0) context2.push(`Expected ${d.expectedContentType}; Content-Type: ${d.contentType ?? "missing"}`);
+      if (d.bodyKind !== void 0) context2.push(`body: ${d.bodyKind}, read ${d.bodyBytesRead ?? 0} B, declared ${d.declaredBodyBytes ?? "unknown"} B`);
+      if (d.contentEncoding !== void 0) context2.push(`Content-Encoding: ${d.contentEncoding ?? "none"}`);
+      if (d.transferEncoding !== void 0) context2.push(`Transfer-Encoding: ${d.transferEncoding ?? "none"}`);
+      if (d.redirectCount !== void 0) context2.push(`redirects: ${d.redirectCount}`);
+      if (d.elapsedMs !== void 0) context2.push(`elapsed: ${d.elapsedMs} ms`);
+      if (d.bodySampleStatus !== void 0) context2.push(`body sample: ${d.bodySampleStatus}`);
+      if (d.requestHost) context2.push(`host: ${d.requestHost}`);
+      if (context2.length) result.error.message += ` ${context2.join("; ")}.`;
     }
   }
   return result;

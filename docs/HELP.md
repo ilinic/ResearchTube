@@ -181,3 +181,5 @@ Developer-owned [Custom Tools](features/CUSTOM_TOOLS.md) are loaded at Agent sta
 - [Documentation index](README.md): all feature guides and the development path.
 
 Maintainers: keep this entry guide consistent with implementation and the linked references. Do not copy complete schemas or release version numbers here. Verify current official OpenAI guidance when changing external setup steps; label account/workspace availability conditions.
+
+Storyboard download failures report the actual MIME, body category/bytes, encodings, redirects and timing in `creation.data.failureDetails`. See [Storyboard diagnostics](features/STORYBOARDS.md#failure-diagnostics).

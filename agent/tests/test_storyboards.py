@@ -297,6 +297,100 @@ class TransferTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(caught.exception.details['httpStatus'], status)
             self.assertNotIn('PRIVATE', str(caught.exception))
 
+    async def test_wrong_mime_reports_sanitized_response_context(self):
+        body = b'<!doctype html><html>SECRET https://private.test/?token=SECRET C:/PRIVATE</html>'
+        header = (b'HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8; token=SECRET\r\n'
+                  b'Set-Cookie: SECRET\r\nContent-Length: ' + str(len(body)).encode())
+        with self.assertRaises(sb.SheetTransferError) as caught:
+            await self.transfer(header, body)
+        detail = caught.exception.details
+        self.assertEqual(detail['reason'], 'UNEXPECTED_CONTENT_TYPE')
+        self.assertEqual(detail['expectedContentType'], 'image/jpeg')
+        self.assertEqual(detail['contentType'], 'text/html')
+        self.assertEqual(detail['declaredBodyBytes'], len(body))
+        self.assertEqual(detail['bodyBytesRead'], len(body))
+        self.assertEqual(detail['bodyKind'], 'html')
+        self.assertEqual(detail['bodySampleStatus'], 'complete')
+        self.assertEqual(detail['redirectCount'], 0)
+        self.assertEqual(detail['requestHost'], 'i.ytimg.com')
+        self.assertGreaterEqual(detail['elapsedMs'], 0)
+        self.assertNotIn('SECRET', json.dumps(detail))
+        self.assertNotIn('PRIVATE', json.dumps(detail))
+        self.assertNotIn('https://', json.dumps(detail))
+
+    async def test_rejected_body_classification_and_sampling_bounds(self):
+        cases = [
+            (b'Content-Type: application/octet-stream', JPEG, 'application/octet-stream', 'jpeg'),
+            (b'Content-Type: image/webp', b'RIFFxxxxWEBPdata', 'image/webp', 'webp'),
+            (b'Content-Type: text/html; private=SECRET', b'{"private":"SECRET"}', 'text/html', 'json'),
+            (b'Content-Type: invalid SECRET', b'PRIVATE', 'invalid', 'text'),
+            (b'Content-Encoding: gzip', b'\x1f\x8bSECRET', None, 'gzip'),
+            (b'Connection: close', b'', None, 'empty'),
+        ]
+        for headers, body, mime, kind in cases:
+            with self.subTest(kind=kind), self.assertRaises(sb.SheetTransferError) as caught:
+                await self.transfer(b'HTTP/1.1 200 OK\r\n' + headers, body)
+            detail = caught.exception.details
+            self.assertEqual(detail['contentType'], mime)
+            self.assertEqual(detail['bodyKind'], kind)
+            self.assertNotIn('SECRET', json.dumps(detail))
+        body = b'<html>' + b'x' * 10000
+        with self.assertRaises(sb.SheetTransferError) as caught:
+            await self.transfer(b'HTTP/1.1 200 OK\r\nContent-Type: text/html', body)
+        self.assertEqual(caught.exception.details['bodyBytesRead'], 4096)
+        self.assertEqual(caught.exception.details['bodySampleStatus'], 'limited')
+        self.assertEqual(caught.exception.details['bodyKind'], 'html')
+        framed = f'{len(body):x}\r\n'.encode() + body + b'\r\n0\r\n\r\n'
+        with self.assertRaises(sb.SheetTransferError) as caught:
+            await self.transfer(b'HTTP/1.1 403 Forbidden\r\nContent-Type: text/html\r\nTransfer-Encoding: chunked', framed)
+        self.assertEqual(caught.exception.details['bodyKind'], 'html')
+        self.assertEqual(caught.exception.details['bodyBytesRead'], 4096)
+        self.assertEqual(caught.exception.details['transferEncoding'], 'chunked')
+
+    async def test_rejected_body_sampling_timeout_retains_primary_error(self):
+        with self.assertRaises(sb.SheetTransferError) as caught:
+            await self.transfer(b'HTTP/1.1 200 OK\r\nContent-Type: text/html', b'', eof=False)
+        detail = caught.exception.details
+        self.assertEqual(detail['reason'], 'UNEXPECTED_CONTENT_TYPE')
+        self.assertEqual(detail['bodyKind'], 'unavailable')
+        self.assertEqual(detail['bodySampleStatus'], 'timeout')
+        self.assertEqual(detail['bodyBytesRead'], 0)
+
+    async def test_redirect_details_exclude_signed_locations(self):
+        readers, writers = [], []
+        for header, body in [
+            (b'HTTP/1.1 302 Found\r\nLocation: https://i9.ytimg.com/sb/abc/M0.jpg?sigh=SECRET', b''),
+            (b'HTTP/1.1 200 OK\r\nContent-Type: text/html', b'<html>SECRET'),
+        ]:
+            reader = asyncio.StreamReader(); reader.feed_data(header + b'\r\n\r\n' + body); reader.feed_eof()
+            writer = Writer(); readers.append(reader); writers.append(writer)
+        with patch.object(sb.asyncio, 'open_connection', AsyncMock(side_effect=list(zip(readers, writers)))):
+            with self.assertRaises(sb.SheetTransferError) as caught:
+                await sb.fetch_sheet(f'https://i.ytimg.com/sb/{VID}/M0.jpg?sigh=SECRET', lambda *_: None)
+        self.assertEqual(caught.exception.details['redirectCount'], 1)
+        self.assertEqual(caught.exception.details['requestHost'], 'i9.ytimg.com')
+        self.assertTrue(all(writer.closed for writer in writers))
+        self.assertNotIn('SECRET', json.dumps(caught.exception.details))
+
+    async def test_timeout_retains_http_and_partial_body_details(self):
+        reader = asyncio.StreamReader(); writer = Writer()
+        reader.feed_data(b'HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: 9999\r\n\r\n' + JPEG[:10])
+        real_wait = asyncio.wait_for
+        async def fast_wait(work, timeout):
+            return await real_wait(work, 0.02 if timeout == 45 else timeout)
+        with patch.object(sb.asyncio, 'open_connection', AsyncMock(return_value=(reader, writer))), \
+             patch.object(sb.asyncio, 'wait_for', side_effect=fast_wait):
+            with self.assertRaises(sb.SheetTransferError) as caught:
+                await sb.fetch_sheet(f'https://i.ytimg.com/sb/{VID}/M0.jpg', lambda *_: None)
+        detail = caught.exception.details
+        self.assertEqual(detail['stage'], 'body')
+        self.assertEqual(detail['httpStatus'], 200)
+        self.assertEqual(detail['contentType'], 'image/jpeg')
+        self.assertEqual(detail['bodyBytesRead'], len(JPEG[:10]))
+        self.assertEqual(detail['bodyKind'], 'jpeg')
+        self.assertEqual(detail['reason'], 'TIMEOUT')
+        self.assertTrue(writer.closed)
+
     async def test_connection_os_error_does_not_publish_hostname(self):
         with patch.object(sb.asyncio, 'open_connection', AsyncMock(side_effect=ConnectionRefusedError(111, 'PRIVATE host and token'))):
             with self.assertRaises(sb.SheetTransferError) as caught:
