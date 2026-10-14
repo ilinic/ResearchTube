@@ -1,4 +1,5 @@
 import { browserError } from "./browser-tools.js";
+import { isGroupChatView } from "./group-chat.js";
 import { safePageUrl } from "./browser-page.js";
 
 export const isChatTab = tab => /^https:\/\/chatgpt\.com(?:\/|$)/.test(tab.url || "");
@@ -22,7 +23,7 @@ export function createBrowserGroups(host) {
   function project(group, offset = 0, limit = 50) {
     const tabs = [...group.members.values()].map(member => {
       const target = group.targets.get(member.id);
-      return { tabId: member.id, role: isChatTab(member) ? "chatgpt" : "site",
+      return { tabId: member.id, role: isGroupChatView(member) ? "service" : isChatTab(member) ? "chatgpt" : "site",
         title: String(member.title || "").slice(0, 500), url: safePageUrl(member.url),
         state: target?.error ? "failed" : target?.attached ? "running" : group.state === "starting" ? "starting" : "available",
         error: target?.error || null };
@@ -34,37 +35,7 @@ export function createBrowserGroups(host) {
     group.seen.set(chatTabId, group.revision);
     group.pending.delete(chatTabId);
   }
-  function scheduleNotifications(group, delay = 1000) {
-    if (group.notifying || !group.pending.size || ["starting", "stopped", "failed"].includes(group.state)) return;
-    group.notifying = true;
-    host.scheduleDelay(async () => {
-      try {
-        await refresh(group);
-        for (const [chatTabId] of group.pending) {
-          const member = group.members.get(chatTabId);
-          if (!member || !isChatTab(member) || !member.chatPath) { group.pending.delete(chatTabId); continue; }
-          const revision = group.pending.get(chatTabId);
-          if ((group.seen.get(chatTabId) || 0) >= revision) { group.pending.delete(chatTabId); continue; }
-          const text = `ResearchTube tab group changed (revision ${revision}, ${group.members.size} participants). Use chatTabId: ${chatTabId}. Refresh the group tab list and continue your current task when appropriate.`;
-          const valid = async () => {
-            if (group.pending.get(chatTabId) !== revision || (group.seen.get(chatTabId) || 0) >= revision)
-              throw browserError("BROWSER_NOTIFICATION_OBSOLETE", "The group update was already received or superseded.");
-            await check(group, chatTabId, member.chatPath);
-          };
-          try {
-            const result = await host.notifyChat(chatTabId, text, { chatPath: member.chatPath, beforeSend: valid });
-            if ((result?.sent || result?.committed || result?.inserted) && group.pending.get(chatTabId) === revision) {
-              group.seen.set(chatTabId, revision); group.pending.delete(chatTabId);
-              if (!result.sent) host.log?.("group notification unconfirmed", { groupId: group.groupId, chatTabId, revision });
-            }
-          } catch { /* Busy/edited chats retry; source data remains in Chrome. */ }
-        }
-      } finally {
-        group.notifying = false;
-        scheduleNotifications(group, 2000);
-      }
-    }, delay);
-  }
+  function scheduleNotifications(group) { host.journalWake?.(group); }
   async function refresh(group) {
     const work = group.refreshing.catch(() => {}).then(async () => {
       const tabs = (await host.queryTabs(group.groupId)).filter(tab => Number.isSafeInteger(tab.id) && /^https?:\/\//.test(tab.url || ""));
@@ -80,7 +51,7 @@ export function createBrowserGroups(host) {
       for (const tab of changedChats) await host.conversationChanged(group, tab.id);
       group.members = next;
       if (!next.size) groups.delete(group.groupId);
-      if (added.length || removed.length || changedChats.length || group.revision === 0) {
+      if (added.length || removed.length || [...next.values()].some(tab => before.has(tab.id) && (before.get(tab.id).url !== tab.url || before.get(tab.id).title !== tab.title)) || changedChats.length || group.revision === 0) {
         group.revision++;
         if (group.revision > 1) for (const tab of next.values()) if (isChatTab(tab)) group.pending.set(tab.id, group.revision);
         host.log?.("group changed", { groupId: group.groupId, revision: group.revision, addedTabIds: added, removedTabIds: removed });
@@ -88,6 +59,7 @@ export function createBrowserGroups(host) {
       if (!["stopped", "failed"].includes(group.state)) await host.updateStatus?.([...next.keys()], {
         state: group.state, phase: group.phase, statusMessage: "Tab group automation is active.", error: null
       });
+      await host.onGroupSnapshot?.(group);
       scheduleNotifications(group);
       return group;
     });
@@ -111,6 +83,7 @@ export function createBrowserGroups(host) {
     const tab = await host.getTab(tabId).catch(() => { throw browserError("TAB_CLOSED", "The selected participant closed; other group tabs remain available."); });
     if (tab.groupId !== group.groupId) throw browserError("TAB_LEFT_GROUP", "The selected participant is no longer in this tab group.");
     if (chatPath && (!isChatTab(tab) || pathOf(tab) !== chatPath)) throw browserError("BROWSER_CHAT_CHANGED", "The selected ChatGPT conversation changed. No replacement destination was selected.");
+    if (isGroupChatView(tab)) throw browserError("BROWSER_INVALID", "The journal view is read-only; use site_chat_read.");
     if (!/^https?:\/\//.test(tab.url || "")) throw browserError("BROWSER_UNAVAILABLE", "Only ordinary HTTP/HTTPS tabs can be controlled.");
     return tab;
   }

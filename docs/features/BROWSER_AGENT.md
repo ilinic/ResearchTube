@@ -1,6 +1,6 @@
 # Browser Agent: group automation
 
-**Study this site** in the popup duplicates the source page, opens one new ChatGPT conversation and places both new tabs in a blue `RT · …` group. The original tab stays in place. The compact prompt asks for text and image research **in English**, with only the new `chatTabId`. No browser session identifier is passed to ChatGPT.
+**Study this site** requires the Local Agent. It duplicates the site, opens two collaborating GPT conversations and a read-only shared journal view in a blue `RT · …` group. The original tab stays in place. Both configured prompts receive their own `chatTabId`, peer IDs and the group ID. No browser session token is passed to ChatGPT. See [Shared group chat](GROUP_CHAT.md).
 
 Reload the Extension and refresh the ResearchTube MCP catalog after upgrading. Start a new study chat, or use `system_get_chat_context` to connect an existing grouped ChatGPT tab without knowing its ID. Old `sessionId` arguments are rejected.
 
@@ -25,6 +25,7 @@ The shipped `...Prompt1` entries preserve the original **in my language** wordin
 | `[chat_tab_id]` | New ChatGPT tab ID | New ChatGPT tab ID |
 | `[site_tab_id]` | Duplicated site tab ID | — |
 | `[group_id]` | Chrome tab group ID | — |
+| `[peer_chat_tab_ids]` | Other GPT tab IDs created for this study | — |
 | `[site_title]` | Original site's title | — |
 | `[site_link]` | Original site's URL without query or fragment | — |
 | `[video_title]` | — | Current video's title |
@@ -32,7 +33,7 @@ The shipped `...Prompt1` entries preserve the original **in my language** wordin
 
 Keep `[chat_tab_id]` so ChatGPT can route tools to its own tab, and `[video_link]` so it knows which video to study. Site automation uses the group and tab IDs; there is no `[session_id]`. Use `\n` inside JSON strings for line breaks. Each template must be nonempty, at most 16000 characters; unknown square-bracket lowercase identifiers report `CONFIG_INVALID`. Substitution happens once, so brackets in titles remain ordinary text.
 
-Missing entries, an older Agent or an unavailable Agent use the built-in defaults, preserving browser-only use. Invalid configured values report `CONFIG_INVALID` at Agent startup; they are not silently replaced by defaults. Existing sessions keep the message they started with.
+Missing entries use the built-in defaults. Describe this video also supports offline defaults; Study this site requires a compatible Local Agent. Invalid configured values report `CONFIG_INVALID` at Agent startup; they are not silently replaced by defaults. Existing sessions keep the message they started with.
 
 ## Participants and identity
 
@@ -42,19 +43,15 @@ A session is an in-memory object keyed by Chrome `groupId`, containing sites, Ch
 
 New tabs join when placed in the group. Leaving or closing a participant cancels only its pending work and releases its page connection. Other chats/sites continue. With no site tabs, status is `idle`; adding a site makes it available again. Renaming, collapsing or reordering the group does not select a different target. Ordinary browser pages and peer ChatGPT conversations can be read and operated through the same page tools. Internal Chrome pages are excluded.
 
-Tab IDs are valid only in the current browser session. After a service-worker restart, the next call rediscovers the group from the supplied `chatTabId`; page content must be read again and old element/resource IDs are invalid. Pending tasks and task history are in memory and cannot resume after worker restart. Browser restart or Extension reload requires a fresh tab ID. No group-session or task records are saved in Chrome Storage.
+Tab IDs are valid only in the current browser session. After a service-worker restart, the next call rediscovers the group from the supplied `chatTabId`; page content must be read again and old element/resource IDs are invalid. File tasks and their history are in memory and cannot resume after worker restart; the shared journal/outbox is durable in the Agent. Browser restart or Extension reload requires a fresh tab ID. No group-session or task records are saved in Chrome Storage.
 
 ## Queues and chat collaboration
 
 `tab-automation.js` supplies a shared queue per physical tab. Work in different tabs can proceed independently. Page input, Composer messages and file delivery in one tab are serialized. Resource extraction releases its source queue before waiting for the receiving chat, preventing cross-chat delivery deadlocks. Temporary file/Composer operations borrow debugger leases and cannot detach a retained page connection.
 
-`site_send_message` sends text to a selected saved ChatGPT conversation in the same group. It returns a standard asynchronous task immediately and labels the initiating chat. It appends the message to existing text/attachments and sends everything together once idle, and verifies the exact conversation and group again before Send. Busy recipients retry for at most ten minutes. Cancel stops before Send commits. An uncertain committed Send is reported as failure without automatically resending. If sending to yourself, finish the current response to allow delivery.
+`site_send_message` records text in the Local Agent's persistent shared journal. Use optional `recipientTabIds` for one/many recipients; omit it to notify all other saved GPT chats in the group. It returns `recorded` after saving, independently of notification delivery. `site_chat_read` pages current/older history; `site_chat_open` opens a read-only view. Group events use this same mechanism. Busy recipients wait, notifications coalesce, and uncertain insertion/Send is not replayed. See [Shared group chat](GROUP_CHAT.md).
 
-`site_files_status` and `site_files_cancel` cover both file and inter-chat message tasks. Task records expose `kind`, initiating `chatTabId`, target `tabId`, `groupId`, progress and saved/submitted outputs. Participants in the original group can inspect/cancel group tasks. `site_session_status` and `site_session_stop` retain their tool names but operate on the caller's current group; neither accepts a session ID. Stop cancels pending work and releases connections while preserving tabs, files and drafts. Call `system_get_chat_context` without arguments to explicitly reconnect and resume the existing group; status polling never undoes Stop.
-
-## Group notifications
-
-Chrome tab creation, closure, replacement and membership/URL changes trigger a fresh group query. Rapid changes coalesce. The next successful tool result reports the current group; this acknowledges the update for that caller. Otherwise a short queued message is sent when the participant's exact chat is idle. Notifications append to existing Composer text/attachments and send them together; busy chats wait. The message asks ChatGPT to refresh the tab list and continue its existing task. This actually starts a new turn; an MCP result alone cannot wake an ended turn. Notifications do not install automatic sending of unrelated user drafts. A committed or partially inserted notification is never automatically duplicated after an uncertain result.
+`site_files_status` and `site_files_cancel` cover file tasks. Their history remains worker-local. `site_session_status` and `site_session_stop` operate on the caller's current group without a session ID. Stop cancels file/page work and pauses journal notification delivery; it preserves tabs, files, drafts, journal history and pending messages. Explicit `system_get_chat_context` reconnection resumes delivery; status reads and recovery alarms do not undo Stop.
 
 ## Observation and navigation
 

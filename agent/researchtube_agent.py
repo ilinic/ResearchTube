@@ -36,16 +36,18 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 from urllib.request import Request, urlopen
 
 try:
+    from .group_chat import GroupChatService, VIEW_HTML
     from .runtime_paths import installation_root
     from .task_history import TaskHistory
     from .browser_resources import save_browser_resource
 except ImportError:
+    from group_chat import GroupChatService, VIEW_HTML
     from runtime_paths import installation_root
     from task_history import TaskHistory
     from browser_resources import save_browser_resource
 
-AGENT_VERSION = "2.3.8"
-INTERFACE_VERSION = 80
+AGENT_VERSION = "2.4.0"
+INTERFACE_VERSION = 81
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
 MAX_GOOGLE_TRANSLATE_AUDIO_BYTES = 16 * 1024 * 1024
@@ -6208,13 +6210,14 @@ except ImportError:
 TIMER_TASKS = TimerService(sys.modules[__name__])
 
 STORYBOARD_TASKS = StoryboardService(sys.modules[__name__])
+GROUP_CHAT = GroupChatService(sys.modules[__name__])
 
 
 def configured_startup_prompts() -> dict:
     """Load only unsuffixed popup prompts at startup; numbered variants stay inactive."""
     config = read_agent_config()
     placeholders = {
-        "studyThisSitePrompt": {"chat_tab_id", "site_tab_id", "site_title", "site_link", "group_id"},
+        "studyThisSitePrompt": {"chat_tab_id", "site_tab_id", "site_title", "site_link", "group_id", "peer_chat_tab_ids"},
         "describeThisVideoPrompt": {"chat_tab_id", "video_title", "video_link"},
     }
     result = {}
@@ -6239,6 +6242,26 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             response_status, response_body = "204 No Content", None
         elif method == "GET" and path == "/health":
             response_status, response_body = "200 OK", cached_public_health()
+        elif method == "GET" and path == "/internal/group-chat/ready":
+            response_status, response_body = "200 OK", await GROUP_CHAT.dispatch("ready", {})
+        elif method == "POST" and path.startswith("/internal/group-chat/"):
+            if headers.get("origin") and not re.fullmatch(r"chrome-extension://[a-z]{32}", headers["origin"]):
+                raise AgentApiError("GROUP_CHAT_INVALID", "Only the Extension can change a group journal.")
+            response_status, response_body = "200 OK", await GROUP_CHAT.dispatch(path.rsplit("/", 1)[1], parse_json_body(body))
+        elif method == "GET" and re.fullmatch(r"/group-chat/gc_[A-Za-z0-9_-]{22}(?:/entries)?", path):
+            room_id = path.split("/")[2]
+            params = {}
+            for key, values in query.items():
+                if key not in {"afterId", "beforeId", "limit"} or len(values) != 1 or not re.fullmatch(r"[0-9]{1,15}", values[0]):
+                    raise AgentApiError("GROUP_CHAT_INVALID", "Invalid journal page.")
+                params[key] = int(values[0])
+            document = await GROUP_CHAT.view(room_id, params)
+            encoded = json.dumps(document, ensure_ascii=False).encode("utf-8") if path.endswith("/entries") else VIEW_HTML.encode("utf-8")
+            mime = "application/json" if path.endswith("/entries") else "text/html"
+            reply = (f"HTTP/1.1 200 OK\r\nContent-Type: {mime}; charset=utf-8\r\nContent-Length: {len(encoded)}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'\r\nConnection: close\r\n\r\n").encode("ascii")
+            writer.write(reply + encoded)
+            await writer.drain()
+            return
         elif method == "GET" and path == "/internal/prompt-templates":
             response_status, response_body = "200 OK", STARTUP_PROMPTS
         elif method == "GET" and path == "/internal/tool-limits":
@@ -6428,7 +6451,9 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
         await writer.drain()
         log_path = compact_google_translate_speech_log_path(path, response_body)
         log_path = compact_custom_tool_log_path(log_path, response_body)
-        log(f"{method or 'INVALID'} {log_path or '/'} -> {response_status.split()[0]}{response_log_suffix(path, response_body)}")
+        log_path = "/internal/group-chat" if path.startswith("/internal/group-chat/") else log_path
+        if path not in {"/internal/group-chat/sync", "/internal/group-chat/pending"}:
+            log(f"{method or 'INVALID'} {log_path or '/'} -> {response_status.split()[0]}{response_log_suffix(path, response_body)}")
     except AgentApiError as error:
         status = "404 Not Found" if error.code in {"TASK_NOT_FOUND", "VISUAL_MAP_TASK_NOT_FOUND", "CAMERA_RECORD_TASK_NOT_FOUND", "CAPTURE_FRAME_TASK_NOT_FOUND", "MEDIA_CLIP_TASK_NOT_FOUND", "TIMER_NOT_FOUND", "CUSTOM_TOOL_NOT_FOUND", "CUSTOM_TOOL_TASK_NOT_FOUND"} else "400 Bad Request"
         writer.write(http_response(status, error_document(error)))

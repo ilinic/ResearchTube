@@ -1,3 +1,4 @@
+import {fakeGroupChat} from "./group-chat-fixture.mjs";
 import assert from 'node:assert/strict';
 import {webcrypto} from 'node:crypto';
 import {createBrowserAgent,waitForBrowserDocument,waitForBrowserConversation,browserStudyGroupTitle} from '../../browser-agent.js';
@@ -27,13 +28,16 @@ export function fixture({multipleImages=false,nonImages=false}={}){
  };
  const tabs=new Map([[10,{id:10,url:'https://site.test/article?token=PRIVATE',title:'Site',active:true,index:3,windowId:2}]]);
  const messages=[],notifications=[]; const events=[],scheduled=[],uploads=[],saved=[],logs=[],domValues=new Map();let closed=false,failOriginal=false,tooLarge=false,onAttach=null,onSave=null;
- const host={now:()=>clock,sleep:async()=>{clock+=500;await new Promise(resolve=>setImmediate(resolve));},getTab:async id=>{if(!tabs.has(id))throw Error('closed');return tabs.get(id);},
+ const journal=fakeGroupChat();
+ const host={groupChatReady:async()=>({available:true}),groupChatRequest:journal.request,
+ openGroupView:async(group,roomId)=>{const existing=[...tabs.values()].find(t=>t.groupId===group.groupId&&t.url===`http://127.0.0.1:17843/group-chat/${roomId}`);if(existing)return existing;const tab={id:++nextTab,url:`http://127.0.0.1:17843/group-chat/${roomId}`,groupId:group.groupId};tabs.set(tab.id,tab);events.push(["view",tab.id]);return tab;},
+ now:()=>clock,sleep:async()=>{clock+=500;await new Promise(resolve=>setImmediate(resolve));},getTab:async id=>{if(!tabs.has(id))throw Error('closed');return tabs.get(id);},
  duplicateTab:async id=>{const tab={...tabs.get(id),id:++nextTab,active:false,index:4};tabs.set(tab.id,tab);events.push(['duplicate',id]);return tab;},restoreSource:async id=>events.push(['restore',id]),
  createChatTab:async(source,agent)=>{const tab={id:++nextTab,url:'https://chatgpt.com/',index:5,windowId:2,active:false};tabs.set(tab.id,tab);events.push(['createChat',source.id,agent.id]);return tab;},waitReady:async id=>events.push(['documentReady',id]),
  attach:async id=>events.push(['attach',id]),detach:async id=>events.push(['detach',id]),conversationPath:url=>url.match(/\/c\/[^/]+/)?.[0]||null,
  startChat:async(id,prompt)=>{events.push(['prompt',id,prompt]);tabs.get(id).url='https://chatgpt.com/c/study'+id;return '/c/study'+id;},
  groupTabs:async(ids,title)=>{const groupId=nextGroup++;for(const id of ids)tabs.get(id).groupId=groupId;events.push(['group',ids,title]);return groupId;}, queryTabs:async groupId=>[...tabs.values()].filter(tab=>tab.groupId===groupId),
- scheduleDelay:work=>notifications.push(work), notifyChat:async(tabId,text,options)=>{await options.beforeSend?.();options.onSendCommit?.();messages.push({tabId,text});return {sent:true};},
+ scheduleDelay:work=>notifications.push(work), notifyChat:async(tabId,text,options)=>{await options.beforeSend?.();await options.beforeInsert?.();options.onSendCommit?.();messages.push({tabId,text});return {sent:true};},
  updateStatus:async(ids,status)=>events.push(['toolbar',ids,structuredClone(status)]),resourceLimit:async()=>1024,resourceCountLimit:async()=>5,historyLimit:()=>2,schedule:work=>scheduled.push(work),log:(label,value)=>logs.push({label,value}),
  saveResource:async(taskId,bytes,mimeType,resourceId)=>{saved.push({taskId,bytes,mimeType,resourceId});await onSave?.();return {workspacePath:`study-this-site/${resourceId.replace(/^r_/,"res_")} [${taskId}].${Object.values(media).find(item=>item.mimeType===mimeType)?.ext || 'png'}`,mimeType,sizeBytes:bytes.length};},
  resolveFiles:async paths=>paths.map(path=>'/PRIVATE/'+path),
@@ -75,5 +79,5 @@ export function fixture({multipleImages=false,nonImages=false}={}){
  };
  const agent=createBrowserAgent(host);
  const run=async(name,args={})=>{const targeted=definitions.find(tool=>tool.name===name)?.inputSchema.properties.tabId;const input={chatTabId:22,...(targeted?{tabId:21}:{}),...args};const result=await agent.execute(name,input);checkSchema(name,result);return result;};
- return {agent,run,host,tabs,events,scheduled,notifications,messages,uploads,saved,logs,setTree:value=>tree=value,setOriginalFailure:()=>failOriginal=true,setTooLarge:()=>tooLarge=true,onAttach:fn=>onAttach=fn,onSave:fn=>onSave=fn};
+ return {agent,run,host,journal,tabs,events,scheduled,notifications,messages,uploads,saved,logs,setTree:value=>tree=value,setOriginalFailure:()=>failOriginal=true,setTooLarge:()=>tooLarge=true,onAttach:fn=>onAttach=fn,onSave:fn=>onSave=fn};
 }

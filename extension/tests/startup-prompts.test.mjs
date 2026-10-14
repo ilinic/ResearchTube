@@ -29,7 +29,7 @@ await site.agent.start(10);
 assert.equal(site.events.find(e => e[0] === 'prompt')[2], 'Исследуй Site\nhttps://site.test/article site=21 chat=22 group=100');
 site.host.promptTemplates = async () => ({ studyThisSitePrompt: 'Updated chat=[chat_tab_id]' });
 await site.agent.start(10);
-assert.equal(site.events.filter(e => e[0] === 'prompt').at(-1)[2], 'Updated chat=24', 'new launches use the current Agent snapshot');
+assert.equal(site.events.filter(e => e[0] === 'prompt').at(-1)[2], 'Updated chat=27', 'new launches use the current Agent snapshot');
 const badSite = fixture();
 badSite.host.promptTemplates = async () => ({ studyThisSitePrompt: '[typo]' });
 await assert.rejects(badSite.agent.start(10), e => e.code === 'AGENT_INVALID_RESPONSE');

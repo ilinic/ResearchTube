@@ -323,6 +323,7 @@ groupWorker.tabs.get(42).groupId=7;
 groupWorker.tabs.set(51,{id:51,groupId:7,url:'https://forum.test/thread',title:'Forum'});
 groupWorker.context.chrome.tabs.query=async query=>[...groupWorker.tabs.values()].filter(tab=>query.groupId==null || tab.groupId===query.groupId);
 groupWorker.context.configuredBrowserStudyOptions=async()=>({detailedLogging:false});
+groupWorker.context.agentJsonRequest=async(path)=>path.endsWith('/sync')?{roomId:'gc_0123456789012345678901',latestId:1,state:'running'}:{batches:[]};
 const callContext=args=>groupWorker.context.handleMcpRequest({id:10,method:'tools/call',params:{name:'system_get_chat_context',arguments:args}});
 const groupStart=await callContext({});
 assert.equal(groupStart.result.structuredContent.status,'working');

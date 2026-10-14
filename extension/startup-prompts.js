@@ -1,10 +1,10 @@
-// Browser-only defaults also support an offline Agent or an older config.
+// Defaults cover missing configured entries; video also supports an offline Agent.
 export const DEFAULT_STARTUP_PROMPTS = Object.freeze({
-  studyThisSitePrompt: "@ResearchTube Study the text and images of the sites in my tab group. Download and inspect relevant images when available, then explain in English. Use chatTabId: [chat_tab_id].",
+  studyThisSitePrompt: "@ResearchTube Study the text and images of the sites in my tab group. Download and inspect relevant images when available, then explain in English. Work with GPT tab(s) [peer_chat_tab_ids] in group [group_id]: use site_list_tabs, divide the research through site_send_message, and read shared findings with site_chat_read. Your chatTabId: [chat_tab_id].",
   describeThisVideoPrompt: "@ResearchTube [video_title] [video_link]\nStudy this video and explain it in English. Download storyboards or create visual maps, load them into this chat, and analyze the visuals. Use tabId: [chat_tab_id] for async tasks."
 });
 const PLACEHOLDERS = Object.freeze({
-  studyThisSitePrompt: ["chat_tab_id", "site_tab_id", "site_title", "site_link", "group_id"],
+  studyThisSitePrompt: ["chat_tab_id", "site_tab_id", "site_title", "site_link", "group_id", "peer_chat_tab_ids"],
   describeThisVideoPrompt: ["chat_tab_id", "video_title", "video_link"]
 });
 

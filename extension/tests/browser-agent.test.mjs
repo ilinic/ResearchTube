@@ -9,10 +9,11 @@ const f=fixture();const started=await f.agent.start(10);
 assert.equal(started.chatTabId,22);assert.equal(started.group.groupId,100);
 assertSchema(definitions.find(t=>t.name==='site_list_tabs').outputSchema,{chatTabId:22,group:started.group});
 const prompt=f.events.find(e=>e[0]==='prompt')[2];
-assert.equal(prompt,"@ResearchTube Study the text and images of the sites in my tab group. Download and inspect relevant images when available, then explain in English. Use chatTabId: 22.");
+assert.match(prompt,/GPT tab\(s\) 23 in group 100/);assert.match(prompt,/chatTabId: 22/);
+assert.deepEqual(started.chatTabIds,[22,23]);assert.equal(started.group.tabs.filter(t=>t.role==='service').length,1);assert.equal(f.events.filter(e=>e[0]==='prompt').length,2);
 assert.doesNotMatch(prompt,/sessionId|bas_|site_get_images|site_get_files/);
 for(const tool of definitions){assert.ok(!tool.inputSchema.properties.sessionId);assert.ok(tool.inputSchema.required.includes('chatTabId'));}
-assert.deepEqual(f.events.find(e=>e[0]==='group'),['group',[21,22],'RT · Site']);
+assert.deepEqual(f.events.find(e=>e[0]==='group'),['group',[21,22,23],'RT · Site']);
 assert.equal(f.tabs.get(10).groupId,undefined,'the original tab is not moved');
 assert.ok(!f.events.some(e=>e[0]==='Accessibility.getFullAXTree'),'startup does not pre-read the page');
 assert.ok(!f.events.some(e=>['Runtime.addBinding','Page.addScriptToEvaluateOnNewDocument'].includes(e[0])));
@@ -42,26 +43,24 @@ f.tabs.get(21).url='https://site.test/next';await f.agent.onEvent({tabId:21},'Pa
 await assert.rejects(f.run('site_get_node',{nodeId:byRole('image').nodeId}),{code:'PAGE_CHANGED'});
 await f.run('site_read');
 await f.run('site_session_stop');assert.equal((await f.run('site_session_status')).group.state,'stopped');
-assert.equal(f.tabs.size,3);await assert.rejects(f.run('site_read'),{code:'BROWSER_SESSION_STOPPED'});
+assert.equal(f.tabs.size,5);await assert.rejects(f.run('site_read'),{code:'BROWSER_SESSION_STOPPED'});
 
 // Multiple sites and peer chats are live members, not copies of a saved list.
 const multi=fixture();await multi.agent.start(10);
 multi.tabs.set(30,{id:30,url:'https://chatgpt.com/c/peer',title:'Peer',groupId:100,windowId:2});
 multi.tabs.set(31,{id:31,url:'https://site.test/second?token=PRIVATE',title:'Second',groupId:100,windowId:2});
 await multi.agent.onCreated();
-assert.equal((await multi.run('site_list_tabs')).group.tabs.length,4);
+assert.equal((await multi.run('site_list_tabs')).group.tabs.length,6);
 const a=await multi.run('site_read');const b=await multi.run('site_read',{chatTabId:30,tabId:31});
 assert.equal(b.chatTabId,30);assert.equal(b.tabId,31);
 assert.notEqual(a.nodes.find(n=>n.role==='image').nodeId,b.nodes.find(n=>n.role==='image').nodeId);
 await assert.rejects(multi.run('site_get_node',{tabId:31,nodeId:a.nodes[0].nodeId}),{code:'PAGE_CHANGED'});
 const peer=await multi.run('site_read',{tabId:30});assert.equal(peer.tabId,30,'peer chat reads use the same page tools');
 assert.ok(multi.events.some(e=>e[0]==='Accessibility.getFullAXTree'&&e[1]===30));
-const toPeer=await multi.run('site_send_message',{tabId:30,text:'Please compare these sources.'});
-assert.equal(toPeer.kind,'message');assert.equal(toPeer.status,'queued');await multi.scheduled.shift()();
-assert.equal((await multi.run('site_files_status',{taskId:toPeer.taskId})).status,'completed');
-assert.equal(multi.messages.at(-1).tabId,30);assert.match(multi.messages.at(-1).text,/from ChatGPT tab 22/);
-assert.equal((await multi.run('site_files_status',{chatTabId:30,taskId:toPeer.taskId})).chatTabId,22,'task retains its initiating chat');
-await assert.rejects(multi.run('site_send_message',{tabId:31,text:'Hello'}),{code:'BROWSER_INVALID'});
+const toPeer=await multi.run('site_send_message',{recipientTabIds:[30],text:'Please compare these sources.'});
+assert.equal(toPeer.status,'recorded');assert.deepEqual(toPeer.recipientTabIds,[30]);
+assert.ok((await multi.run('site_chat_read')).entries.some(e=>e.id===toPeer.messageId&&e.text==='Please compare these sources.'));
+await assert.rejects(multi.run('site_send_message',{recipientTabIds:[31],text:'Hello'}),{code:'BROWSER_INVALID'});
 
 // Source closure cancels its work only, and another ChatGPT participant lives on.
 const queuedA=await multi.run('site_get_images',{resourceId:a.nodes.find(n=>n.role==='image').resources[0].resourceId});
@@ -94,22 +93,10 @@ moved.tabs.get(22).groupId=-1;await assert.rejects(moved.run('site_list_tabs'),{
 const fresh=fixture();await fresh.agent.start(10);
 const oldIds=await fresh.run('site_read');
 const recreated=createBrowserAgent(fresh.host);
-const rediscovered=await recreated.execute('site_list_tabs',{chatTabId:22});assert.equal(rediscovered.group.tabs.length,2);
+const rediscovered=await recreated.execute('site_list_tabs',{chatTabId:22});assert.equal(rediscovered.group.tabs.length,4);
 // Use a separate fake debugger lease here; real workers lose their connections.
 const newRead=await recreated.execute('site_read',{chatTabId:22,tabId:21});
 assert.notEqual(oldIds.nodes[0].nodeId,newRead.nodes[0].nodeId);
-
-// Membership updates coalesce, wait for idle, and are suppressed after a tool read.
-const notice=fixture();await notice.agent.start(10);
-while(notice.notifications.length)await notice.notifications.shift()();
-notice.tabs.set(31,{id:31,url:'https://site.test/new',title:'New',groupId:100});await notice.agent.onCreated();
-notice.tabs.set(32,{id:32,url:'https://site.test/copy',title:'Copy',groupId:100});await notice.agent.onCreated();
-let busy=true;const send=notice.host.notifyChat;
-notice.host.notifyChat=async(...args)=>busy?{sent:false,reason:'busy'}:send(...args);
-await notice.notifications.shift()();assert.equal(notice.messages.length,0);assert.equal(notice.notifications.length,1);
-busy=false;await notice.notifications.shift()();assert.equal(notice.messages.length,1);assert.match(notice.messages[0].text,/4 participants/);
-notice.tabs.delete(32);await notice.agent.onRemoved(32);await notice.run('site_read');
-await notice.notifications.shift()();assert.equal(notice.messages.length,1,'tool result already delivered the group update');
 
 // Saved conversation checks use the live tab URL, not delayed event snapshots.
 const route=fixture();await route.agent.start(10);
@@ -119,15 +106,6 @@ await route.agent.onUpdated(22,{url:'https://chatgpt.com/'});
 assert.equal((await route.run('site_files_status',{taskId:routeTask.taskId})).status,'queued');
 route.tabs.get(22).url='https://chatgpt.com/c/changed';await route.agent.onUpdated(22,{url:'https://chatgpt.com/c/study22'});
 assert.equal((await route.run('site_files_status',{taskId:routeTask.taskId})).status,'cancelled');await route.scheduled.shift()();assert.equal(route.uploads.length,0);
-
-// Uncertain Send is terminal, never an automatic inter-chat duplicate.
-const uncertain=fixture();await uncertain.agent.start(10);uncertain.tabs.set(30,{id:30,url:'https://chatgpt.com/c/peer',groupId:100});
-let attempts=0;uncertain.host.notifyChat=async(_id,_text,options)=>{attempts++;await options.beforeSend();options.onSendCommit();return {sent:false,committed:true};};
-const uncertainTask=await uncertain.run('site_send_message',{tabId:30,text:'One message'});await uncertain.scheduled.shift()();
-assert.equal(attempts,1);assert.equal((await uncertain.run('site_files_status',{taskId:uncertainTask.taskId})).error.code,'BROWSER_SEND_UNCONFIRMED');
-const cancel=fixture();await cancel.agent.start(10);cancel.tabs.set(30,{id:30,url:'https://chatgpt.com/c/peer',groupId:100});
-const cancelMsg=await cancel.run('site_send_message',{tabId:30,text:'Cancelled'});await cancel.run('site_files_cancel',{taskId:cancelMsg.taskId});await cancel.scheduled.shift()();assert.equal(cancel.messages.length,0);
-assert.equal((await cancel.run('site_files_status',{taskId:cancelMsg.taskId})).status,'cancelled','starting a cancelled queued message must preserve its terminal state');
 
 // A slow read serializes only its own physical tab, and queued stale input is refused.
 const ordered=fixture();await ordered.agent.start(10);
@@ -159,9 +137,9 @@ assert.equal((await released.run('site_files_status',{taskId:uploadTask.taskId})
 // Participant count is unbounded; result pages remain bounded.
 const large=fixture();await large.agent.start(10);
 for(let id=1000;id<1250;id++)large.tabs.set(id,{id,url:'https://site.test/'+id,groupId:100});
-const firstPage=await large.run('site_list_tabs',{limit:50});assert.equal(firstPage.group.totalTabs,252);assert.equal(firstPage.group.tabs.length,50);
+const firstPage=await large.run('site_list_tabs',{limit:50});assert.equal(firstPage.group.totalTabs,254);assert.equal(firstPage.group.tabs.length,50);
 const secondPage=await large.run('site_list_tabs',{offset:50,limit:200});assert.equal(secondPage.group.tabs.length,200);assert.equal(secondPage.group.nextOffset,250);
-const lastPage=await large.run('site_list_tabs',{offset:250});assert.equal(lastPage.group.tabs.length,2);assert.equal(lastPage.group.nextOffset,null);
+const lastPage=await large.run('site_list_tabs',{offset:250});assert.equal(lastPage.group.tabs.length,4);assert.equal(lastPage.group.nextOffset,null);
 
 // Old grouping preference cannot disable the now-required working group.
 const required=fixture();required.host.studyOptions=async()=>({groupTabs:false,detailedLogging:false});await required.agent.start(10);assert.ok(required.events.some(e=>e[0]==='group'));

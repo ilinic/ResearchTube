@@ -65,6 +65,8 @@ Study websites together in a Chrome tab group. Add sites or ChatGPT conversation
 | **Interact with site element** | Click, type, select, hover or scroll in a group site or peer chat. |
 | **List group tabs** | Discover all participating sites and ChatGPT conversations. |
 | **Read site page** | Read a site's or peer chat's accessible content and discover available files. |
+| **Read group chat history** | Read recent or older shared messages and group events. |
+| **Open group chat journal** | Open a read-only view of the team conversation; closing it leaves collaboration running. |
 | **Send message to group chat** | Ask another ChatGPT participant to research, compare or review results. |
 | **Group automation status** | Check the group's participants and current automation state. |
 | **Stop group automation** | End group automation while leaving tabs, files and drafts in place. |

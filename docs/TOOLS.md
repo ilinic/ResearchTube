@@ -201,7 +201,7 @@ The original Workspace files are unchanged. A restarted Extension worker marks q
 
 ## Browser Agent
 
-Start **Study this site** from the popup. It groups a new page copy and one ChatGPT tab, leaving the source in place. The prompt supplies only the task/language and `chatTabId`. Every site tool takes that initiating `chatTabId`; page tools also take a target `tabId` discovered from the group. Multiple sites and ChatGPT participants can work together. Closing/leaving one participant cancels only its work. Chrome is the live source of membership; no public session ID or stored group session is used. See [Browser Agent](features/BROWSER_AGENT.md).
+Start **Study this site** from the popup. It requires the Local Agent and groups a page copy, two GPT conversations and a read-only journal view, leaving the source in place. Each prompt supplies its own `chatTabId`, peers and group context. Every site tool takes that initiating `chatTabId`; page tools also take a target `tabId` discovered from the group. Multiple sites and ChatGPT participants can work together. Closing/leaving one participant cancels only its work. Chrome is the live source of membership; no public session ID or stored group session is used. See [Browser Agent](features/BROWSER_AGENT.md).
 
 | Tool | Behavior |
 | --- | --- |
@@ -213,9 +213,11 @@ Start **Study this site** from the popup. It groups a new page copy and one Chat
 | `site_interact` | Click, hover, type, key, scroll or select in an exact group site or peer ChatGPT tab. |
 | `site_get_images` | Download observed images from the target tab and optionally attach/send an ordered batch to the initiating chat; labelled screenshot fallbacks. |
 | `site_get_files` | Download observed documents/audio/video from the target and optionally attach/send one batch to the initiating chat. |
-| `site_send_message` | Asynchronously send text to a selected group ChatGPT participant, appending to existing text/attachments and sending them together when idle. |
-| `site_files_status` | Read file/message task progress, saved files and confirmed submission. |
-| `site_files_cancel` | Cancel file/message work before Send commits, preserving outputs and drafts. |
+| `site_send_message` | Save a shared-journal message and notify one, several or all other group GPT participants; returns recorded after saving. |
+| `site_chat_read` | Read bounded pages of recent/older messages and group events, optionally filtering addressed messages. |
+| `site_chat_open` | Open the read-only local journal view; closing it leaves messaging active. |
+| `site_files_status` | Read file task progress, saved files and confirmed submission. |
+| `site_files_cancel` | Cancel file work before Send commits, preserving outputs and drafts. |
 | `site_session_status` | Read current group participants and automation state using chatTabId, without a session token. |
 | `site_session_stop` | Cancel group work, release automation and preserve tabs/files/drafts. |
 

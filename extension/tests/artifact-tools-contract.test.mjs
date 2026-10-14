@@ -86,7 +86,7 @@ assert.equal((await w.call('site_session_status',{chatTabId:22,tabId:81})).resul
 assert.equal(browserCalls.length,1);
 
 // The complete renamed public catalog dispatches through the shipped worker.
-assert.equal(BROWSER_TOOL_NAMES.length,13);
+assert.equal(BROWSER_TOOL_NAMES.length,15);
 assert.ok(definitions.every(tool=>!tool.name.startsWith('browser_')));
 for(const name of BROWSER_TOOL_NAMES) {
  const properties=definitions.find(tool=>tool.name===name).inputSchema.properties;

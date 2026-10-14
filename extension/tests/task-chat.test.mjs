@@ -139,6 +139,12 @@ const sendComposer = new Function("deps", "with(deps) { return (" + senderSource
 reset();
 assert.equal((await sendComposer(42, { completionText: "done" })).sent, true);
 assert.equal(inserted, "done"); assert.equal(suppressed, 1);
+reset();let persisted=false;
+assert.equal((await sendComposer(42,{completionText:"journal notification",beforeInsert:async()=>{assert.equal(inserted,"");persisted=true;}})).sent,true);
+assert.equal(persisted,true,"durable attempt must be recorded before Composer insertion");
+reset();
+assert.equal((await sendComposer(42,{completionText:"journal notification",beforeInsert:async()=>{throw Object.assign(Error("disk failed"),{code:"GROUP_CHAT_IO"});}})).sent,false);
+assert.equal(inserted,"");assert.equal(committed,false,"journal failure must prevent insertion and Send");
 reset(); state.text = "existing draft"; state.attachments = 2;
 assert.equal((await sendComposer(42, { completionText: "done" })).sent, true);
 assert.equal(inserted, "\n\ndone");
@@ -189,13 +195,14 @@ for (const name of launchNames) {
  assert.ok(!(tool.inputSchema.required || []).includes("tabId"), name + " optional context");
  assert.ok(tool.description.length <= 600, name);
 }
-for (const name of ["site_get_images", "site_get_files", "site_send_message"]) {
+for (const name of ["site_get_images", "site_get_files"]) {
  const tool = tools.find(t => t.name === name);
  assert.ok(tool.inputSchema.required.includes("chatTabId"));
  assert.ok(tool.inputSchema.required.includes("tabId"));
  assert.ok(tool.outputSchema.properties.chatTabId);
  assert.ok(!tool.inputSchema.properties.sessionId);
 }
+for (const name of ["site_send_message", "site_chat_read", "site_chat_open"]) { const tool=tools.find(t=>t.name===name); assert.ok(tool.inputSchema.required.includes("chatTabId")); assert.ok(!tool.inputSchema.properties.tabId); }
 assert.ok(worker.mediaToChatTaskSchema.properties.tabId, "nested artifact chat schema permits context");
 const custom = worker.customToolDefinition({ name: "custom_test", title: "Test", description: "Test",
  inputSchema: { type: "object", properties: {}, required: [], additionalProperties: false },
