@@ -1,10 +1,11 @@
 import { browserError, validateBrowserInput } from "./browser-tools.js";
-import { createBrowserPage, inspectBrowserElement } from "./browser-page.js";
+import { createBrowserPage, inspectBrowserElement, safePageUrl } from "./browser-page.js";
 import { pruneCompletedTasks } from "./task-history.js";
 import { createBrowserDiagnostics } from "./browser-diagnostics.js";
 import { createBrowserGroups, isChatTab } from "./browser-groups.js";
 import { browserAttachmentError, isBrowserFrameUrlAllowed, withBrowserFrameTimeout } from "./browser-frame-policy.js";
 import { createTabAutomationQueue } from "./tab-automation.js";
+import { normalizeStartupPrompts, renderStartupPrompt } from "./startup-prompts.js";
 
 const AUTO_ATTACH = { autoAttach: true, waitForDebuggerOnStart: false, flatten: true, filter: [{ type: "iframe", exclude: false }] };
 const TERMINAL = new Set(["completed", "failed", "cancelled"]);
@@ -223,7 +224,10 @@ export function createBrowserAgent(host) {
     if (!Number.isSafeInteger(sourceTabId) || sourceTabId < 0) throw browserError("BROWSER_INVALID", "The popup must supply an exact source tab ID.");
     const source = await host.getTab(sourceTabId);
     if (!/^https?:\/\//.test(source.url || "")) throw browserError("BROWSER_INVALID", "Study this site requires an ordinary HTTP/HTTPS source tab.");
-    const options = host.studyOptions ? await host.studyOptions() : { detailedLogging: false };
+    const [options, templates] = await Promise.all([
+      host.studyOptions ? host.studyOptions() : { detailedLogging: false },
+      host.promptTemplates ? host.promptTemplates().then(normalizeStartupPrompts) : normalizeStartupPrompts()
+    ]);
     const trace = createBrowserDiagnostics({ enabled: options.detailedLogging, log, now: host.monotonicNow || host.now });
     let group = null, agent = null, chat = null, stopped = false, phase = "duplicating";
     const checkStarting = () => {
@@ -251,7 +255,10 @@ export function createBrowserAgent(host) {
       await notify("connecting");
       await queue(agent.id, async () => { checkStarting(); await ensureTarget(target, () => notify("waitingForPage")); checkStarting(); });
       await notify("waitingForChat");
-      const prompt = `@ResearchTube Study the text and images of the sites in my tab group. Download and inspect relevant images when available, then explain in my language. Use chatTabId: ${chat.id}.`;
+      const prompt = renderStartupPrompt("studyThisSitePrompt", templates, {
+        chat_tab_id: chat.id, site_tab_id: agent.id, group_id: groupId,
+        site_title: source.title || "", site_link: safePageUrl(source.url)
+      });
       const chatPath = await host.startChat(chat.id, prompt, checkStarting, notify, trace);
       if (!chatPath) throw browserError("BROWSER_CHAT_NOT_FOUND", "The new ChatGPT conversation could not be confirmed.");
       checkStarting(); group.state = "running"; await groups.refresh(group); groups.acknowledge(group, chat.id);

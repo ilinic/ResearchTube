@@ -19,7 +19,8 @@ assert.match(pageBundle, /function installComposerWatchdog\(/, "packaged watchdo
 assert.match(pageBundle, /function resolveChatComposer\(/, "packaged Composer resolver is present");
 assert.match(pageBundle, /function inspectChatComposer\(/, "packaged attachment inspection is present");
 new Function(pageBundle);
-assert.match(source, /Use tabId: \$\{chatTab\.id\} for async tasks/);
+assert.match(source, /renderStartupPrompt\("describeThisVideoPrompt", templates/);
+assert.match(source, /chat_tab_id: chatTab\.id/);
 
 // Fast completion, duplicate status reads, busy tabs and autonomous Agent polls.
 let now = 0, records = [], pollResult, pollGate = null;

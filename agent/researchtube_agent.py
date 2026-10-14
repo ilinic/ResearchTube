@@ -44,7 +44,7 @@ except ImportError:
     from task_history import TaskHistory
     from browser_resources import save_browser_resource
 
-AGENT_VERSION = "2.3.3"
+AGENT_VERSION = "2.3.4"
 INTERFACE_VERSION = 79
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
@@ -59,6 +59,7 @@ MAX_TASK_EVENT_MESSAGE_LENGTH = 240
 YTDLP_FORMATS_TIMEOUT_SECONDS = 30
 ROOT = installation_root(__file__)
 CONFIG_PATH = ROOT / "agent-config.json"
+STARTUP_PROMPTS: dict[str, str] = {}
 WORKSPACE_PATH = ROOT / "workspace"
 TOOLS_PATH = ROOT / "tools"
 WINDOWS_SPEECH_SCRIPT_PATH = TOOLS_PATH / "windows-speech" / "researchtube_speech.py"
@@ -6209,6 +6210,27 @@ TIMER_TASKS = TimerService(sys.modules[__name__])
 STORYBOARD_TASKS = StoryboardService(sys.modules[__name__])
 
 
+def configured_startup_prompts() -> dict:
+    """Load popup prompts once at startup; missing entries use Extension defaults."""
+    config = read_agent_config()
+    placeholders = {
+        "studyThisSitePrompt": {"chat_tab_id", "site_tab_id", "site_title", "site_link", "group_id"},
+        "describeThisVideoPrompt": {"chat_tab_id", "video_title", "video_link"},
+    }
+    result = {}
+    for key, allowed in placeholders.items():
+        if key not in config:
+            continue
+        template = config[key]
+        if not isinstance(template, str) or not template.strip() or len(template) > 16000:
+            raise AgentApiError("CONFIG_INVALID", f"{key} must contain 1–16000 characters of prompt text.")
+        for name in re.findall(r"\[([a-z][a-z0-9_]*)\]", template):
+            if name not in allowed:
+                raise AgentApiError("CONFIG_INVALID", f"{key} contains an unknown placeholder: [{name}].")
+        result[key] = template
+    return result
+
+
 async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
     method, path = "", ""
     try:
@@ -6217,6 +6239,8 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             response_status, response_body = "204 No Content", None
         elif method == "GET" and path == "/health":
             response_status, response_body = "200 OK", cached_public_health()
+        elif method == "GET" and path == "/internal/prompt-templates":
+            response_status, response_body = "200 OK", STARTUP_PROMPTS
         elif method == "GET" and path == "/internal/tool-limits":
             response_status, response_body = "200 OK", {"limits": configured_tool_limits(), "newToolsEnabledByDefault": configured_new_tools_default(), "mediaWidgetHandshakeTimeoutSeconds": configured_media_widget_handshake_timeout(), "browserStudyGroupTabs": configured_browser_study_group_tabs(), "browserStudyDetailedLogging": configured_browser_study_detailed_logging(), "browserStudyObservation": configured_browser_study_observation(), "composerMediaRetry": configured_composer_media_retry(), "composerAutoSendTimeoutSeconds": configured_composer_auto_send_timeout()}
         elif method == "GET" and path == "/custom-tools":
@@ -6413,9 +6437,9 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
     except (ConnectionError, asyncio.TimeoutError, UnicodeDecodeError, asyncio.IncompleteReadError) as error:
         log(f"request failed: {error.__class__.__name__}", error=True)
     finally:
-        # Health polling only reads the startup snapshot. Task pruning reads
+        # Health and prompt reads only return startup snapshots. Task pruning reads
         # user configuration and belongs to task/other requests and done callbacks.
-        if not (method == "GET" and path == "/health"):
+        if not (method == "GET" and path in {"/health", "/internal/prompt-templates"}):
             for manager in (TASKS, SPEECH_TASKS, VISUAL_MAP_TASKS, CAMERA_RECORD_TASKS, CAPTURE_FRAME_TASKS, MEDIA_CLIP_TASKS, STORYBOARD_TASKS, TIMER_TASKS):
                 manager.tasks.prune()
         writer.close()
@@ -6426,7 +6450,8 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
 
 
 async def serve(port: int) -> None:
-    global WORKSPACE_PATH
+    global WORKSPACE_PATH, STARTUP_PROMPTS
+    STARTUP_PROMPTS = configured_startup_prompts()
     # Freeze the root for this run: live edits must not redirect active tasks,
     # media viewers or shares into a different directory mid-operation.
     WORKSPACE_PATH = startup_workspace_path()

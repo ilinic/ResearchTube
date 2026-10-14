@@ -1336,6 +1336,43 @@ function createBrowserGroups(host) {
   return { get, forChat, refresh, check, project: project2, acknowledge, changed, scheduleNotifications, values: () => groups.values() };
 }
 
+// startup-prompts.js
+var DEFAULT_STARTUP_PROMPTS = Object.freeze({
+  studyThisSitePrompt: "@ResearchTube Study the text and images of the sites in my tab group. Download and inspect relevant images when available, then explain in my language. Use chatTabId: [chat_tab_id].",
+  describeThisVideoPrompt: "@ResearchTube [video_title] [video_link]\nStudy this video and explain it in my language. Use tabId: [chat_tab_id] for async tasks."
+});
+var PLACEHOLDERS = Object.freeze({
+  studyThisSitePrompt: ["chat_tab_id", "site_tab_id", "site_title", "site_link", "group_id"],
+  describeThisVideoPrompt: ["chat_tab_id", "video_title", "video_link"]
+});
+function invalid(message) {
+  return Object.assign(new Error(message), { code: "AGENT_INVALID_RESPONSE" });
+}
+function normalizeStartupPrompts(value = {}) {
+  if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).some((key) => !Object.hasOwn(PLACEHOLDERS, key))) {
+    throw invalid("The Local Agent returned invalid startup prompt settings.");
+  }
+  const result = { ...DEFAULT_STARTUP_PROMPTS };
+  for (const [key, template] of Object.entries(value)) {
+    if (typeof template !== "string" || !template.trim() || [...template].length > 16e3) {
+      throw invalid(`${key} must contain 1\u201316000 characters of prompt text.`);
+    }
+    for (const match of template.matchAll(/\[([a-z][a-z0-9_]*)\]/g)) {
+      if (!PLACEHOLDERS[key].includes(match[1])) throw invalid(`${key} contains an unknown placeholder: [${match[1]}].`);
+    }
+    result[key] = template;
+  }
+  return result;
+}
+function renderStartupPrompt(key, templates, values) {
+  const template = normalizeStartupPrompts(templates)[key];
+  if (!template) throw invalid("Unknown startup prompt setting.");
+  return template.replace(/\[([a-z][a-z0-9_]*)\]/g, (_, name2) => {
+    if (!Object.hasOwn(values, name2) || values[name2] === void 0 || values[name2] === null) throw invalid(`Missing startup prompt value: [${name2}].`);
+    return String(values[name2]);
+  });
+}
+
 // browser-agent.js
 var AUTO_ATTACH = { autoAttach: true, waitForDebuggerOnStart: false, flatten: true, filter: [{ type: "iframe", exclude: false }] };
 var TERMINAL = /* @__PURE__ */ new Set(["completed", "failed", "cancelled"]);
@@ -1651,7 +1688,10 @@ function createBrowserAgent(host) {
     if (!Number.isSafeInteger(sourceTabId) || sourceTabId < 0) throw browserError("BROWSER_INVALID", "The popup must supply an exact source tab ID.");
     const source = await host.getTab(sourceTabId);
     if (!/^https?:\/\//.test(source.url || "")) throw browserError("BROWSER_INVALID", "Study this site requires an ordinary HTTP/HTTPS source tab.");
-    const options = host.studyOptions ? await host.studyOptions() : { detailedLogging: false };
+    const [options, templates] = await Promise.all([
+      host.studyOptions ? host.studyOptions() : { detailedLogging: false },
+      host.promptTemplates ? host.promptTemplates().then(normalizeStartupPrompts) : normalizeStartupPrompts()
+    ]);
     const trace = createBrowserDiagnostics({ enabled: options.detailedLogging, log, now: host.monotonicNow || host.now });
     let group2 = null, agent = null, chat = null, stopped = false, phase = "duplicating";
     const checkStarting = () => {
@@ -1687,7 +1727,13 @@ function createBrowserAgent(host) {
         checkStarting();
       });
       await notify("waitingForChat");
-      const prompt = `@ResearchTube Study the text and images of the sites in my tab group. Download and inspect relevant images when available, then explain in my language. Use chatTabId: ${chat.id}.`;
+      const prompt = renderStartupPrompt("studyThisSitePrompt", templates, {
+        chat_tab_id: chat.id,
+        site_tab_id: agent.id,
+        group_id: groupId,
+        site_title: source.title || "",
+        site_link: safePageUrl(source.url)
+      });
       const chatPath = await host.startChat(chat.id, prompt, checkStarting, notify, trace);
       if (!chatPath) throw browserError("BROWSER_CHAT_NOT_FOUND", "The new ChatGPT conversation could not be confirmed.");
       checkStarting();
@@ -2174,15 +2220,15 @@ function systemToolDefinitions(widgetUri) {
 }
 function validateSystemInput(name2, value = {}) {
   const rule = systemToolDefinitions("").find((tool) => tool.name === name2)?.inputSchema;
-  const invalid = () => {
+  const invalid2 = () => {
     throw Object.assign(new Error("Invalid system-tool arguments."), { code: "INVALID_ARGUMENT" });
   };
-  if (!rule || !value || typeof value !== "object" || Array.isArray(value)) invalid();
+  if (!rule || !value || typeof value !== "object" || Array.isArray(value)) invalid2();
   for (const [key, item] of Object.entries(value)) {
     const field = rule.properties[key];
-    if (!field || field.type === "boolean" && typeof item !== "boolean" || field.type === "string" && (typeof item !== "string" || field.pattern && !new RegExp(field.pattern).test(item)) || field.type === "integer" && (!Number.isSafeInteger(item) || item < field.minimum || field.maximum != null && item > field.maximum)) invalid();
+    if (!field || field.type === "boolean" && typeof item !== "boolean" || field.type === "string" && (typeof item !== "string" || field.pattern && !new RegExp(field.pattern).test(item)) || field.type === "integer" && (!Number.isSafeInteger(item) || item < field.minimum || field.maximum != null && item > field.maximum)) invalid2();
   }
-  if (name2 === "system_get_chat_context" && value.cancel && !value.taskId) invalid();
+  if (name2 === "system_get_chat_context" && value.cancel && !value.taskId) invalid2();
   return { ...value };
 }
 
@@ -5500,12 +5546,16 @@ async function describeYouTubeVideoInChatGPT(sourceTab) {
     cdpLog("Suppressed duplicate video-description request", { videoUrl });
     return { ok: true, videoUrl, duplicateSuppressed: true };
   }
+  const templates = await configuredStartupPrompts();
   recentDescribeVideoRequests.set(videoUrl, now);
   const created = await chrome.tabs.create({ url: "https://chatgpt.com/", active: false, ...Number.isInteger(sourceTab?.index) ? { index: sourceTab.index + 1 } : {} });
   if (!created?.id) throw cdpError("Chrome could not open a ChatGPT tab.");
   const chatTab = await waitForChatGPTTab(created.id);
-  const prompt = `@ResearchTube ${videoTitle} ${videoUrl}
-Study this video and explain it in my language. Use tabId: ${chatTab.id} for async tasks.`;
+  const prompt = renderStartupPrompt("describeThisVideoPrompt", templates, {
+    video_title: videoTitle,
+    video_link: videoUrl,
+    chat_tab_id: chatTab.id
+  });
   let attached = false;
   try {
     await cdpAttach(chatTab.id);
@@ -7037,6 +7087,14 @@ async function bootstrapTunnel() {
   await refreshActionBadge();
   return startPolling();
 }
+async function configuredStartupPrompts() {
+  try {
+    return normalizeStartupPrompts(await agentJsonRequest("/internal/prompt-templates"));
+  } catch (error4) {
+    if (["CONFIG_INVALID", "AGENT_INVALID_RESPONSE"].includes(error4.code)) throw error4;
+    return normalizeStartupPrompts();
+  }
+}
 async function configuredBrowserStudyOptions() {
   try {
     const document2 = await agentJsonRequest("/internal/tool-limits");
@@ -7100,6 +7158,7 @@ var browserAgent = createBrowserAgent({
     });
   }, milliseconds),
   studyOptions: configuredBrowserStudyOptions,
+  promptTemplates: configuredStartupPrompts,
   groupTabs: async (tabIds, title) => {
     const groupId = await chrome.tabs.group({ tabIds });
     await chrome.tabGroups.update(groupId, { title, color: "blue", collapsed: false });

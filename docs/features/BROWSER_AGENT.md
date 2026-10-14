@@ -12,6 +12,24 @@ Poll the same tool with `taskId` no faster than its one-second interval. Complet
 
 A chat outside a group gets `BROWSER_GROUP_NOT_FOUND`. Duplicate browser views of the same conversation are ambiguous: close the duplicate before connecting. Different conversations in the same group bind independently. Polling refreshes membership but rejects a moved, closed or changed chat and never silently retargets it. Explicit new connection can resume a stopped group; previously cancelled tasks are not restarted.
 
+## Prompt templates
+
+Edit `studyThisSitePrompt.value` and `describeThisVideoPrompt.value` in the external `agent/agent-config.json` beside the Agent script or EXE. The Agent loads both templates once at startup and serves them from memory. Restart the Agent after editing. These settings change the initial ChatGPT message, not the tool catalog or an existing chat. Defaults retain **in my language** and text/image research.
+
+| Placeholder | Study this site | Describe this video |
+| --- | --- | --- |
+| `[chat_tab_id]` | New ChatGPT tab ID | New ChatGPT tab ID |
+| `[site_tab_id]` | Duplicated site tab ID | — |
+| `[group_id]` | Chrome tab group ID | — |
+| `[site_title]` | Original site's title | — |
+| `[site_link]` | Original site's URL without query or fragment | — |
+| `[video_title]` | — | Current video's title |
+| `[video_link]` | — | Canonical YouTube video URL |
+
+Keep `[chat_tab_id]` so ChatGPT can route tools to its own tab, and `[video_link]` so it knows which video to study. Site automation uses the group and tab IDs; there is no `[session_id]`. Use `\n` inside JSON strings for line breaks. Each template must be nonempty, at most 16000 characters; unknown square-bracket lowercase identifiers report `CONFIG_INVALID`. Substitution happens once, so brackets in titles remain ordinary text.
+
+Missing entries, an older Agent or an unavailable Agent use the built-in defaults, preserving browser-only use. Invalid configured values report `CONFIG_INVALID` at Agent startup; they are not silently replaced by defaults. Existing sessions keep the message they started with.
+
 ## Participants and identity
 
 A session is an in-memory object keyed by Chrome `groupId`, containing sites, ChatGPT participants, page connections, tasks and pending notifications. Chrome remains the source of membership. Every site tool requires the initiating `chatTabId`; page operations also require a target `tabId` from `site_list_tabs`. MCP does not authenticate the originating tab: this is explicit caller routing, not proof of request origin. The Extension checks the actual live tabs and group before operations; it never chooses the active tab or a similar URL.

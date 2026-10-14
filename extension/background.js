@@ -4,6 +4,7 @@ import { createTabAutomationQueue, createDebuggerLeases } from "./tab-automation
 import { createBrowserAgent, waitForBrowserDocument, waitForBrowserConversation } from "./browser-agent.js";
 import { browserToolDefinitions, BROWSER_TOOL_NAMES, LEGACY_SITE_TOOL_NAMES } from "./browser-tools.js";
 import { browserObservationOptions } from "./browser-observation-options.js";
+import { normalizeStartupPrompts, renderStartupPrompt } from "./startup-prompts.js";
 import { systemToolDefinitions, validateSystemInput } from "./system-tools.js";
 import { createChatContext } from "./chat-context.js";
 import { createSystemDiagnostics } from "./system-diagnostics.js";
@@ -2096,13 +2097,16 @@ async function describeYouTubeVideoInChatGPT(sourceTab) {
     cdpLog("Suppressed duplicate video-description request", { videoUrl });
     return { ok: true, videoUrl, duplicateSuppressed: true };
   }
+  const templates = await configuredStartupPrompts();
   recentDescribeVideoRequests.set(videoUrl, now);
   // Keep the user on the current YouTube page while ChatGPT works in its new
   // adjacent background tab. The Library flow already uses this CDP mode.
   const created = await chrome.tabs.create({ url: "https://chatgpt.com/", active: false, ...(Number.isInteger(sourceTab?.index) ? { index: sourceTab.index + 1 } : {}) });
   if (!created?.id) throw cdpError("Chrome could not open a ChatGPT tab.");
   const chatTab = await waitForChatGPTTab(created.id);
-  const prompt = `@ResearchTube ${videoTitle} ${videoUrl}\nStudy this video and explain it in my language. Use tabId: ${chatTab.id} for async tasks.`;
+  const prompt = renderStartupPrompt("describeThisVideoPrompt", templates, {
+    video_title: videoTitle, video_link: videoUrl, chat_tab_id: chatTab.id
+  });
   let attached = false;
   try {
     await cdpAttach(chatTab.id); attached = true;
@@ -3609,6 +3613,15 @@ async function bootstrapTunnel() {
   return startPolling();
 }
 
+async function configuredStartupPrompts() {
+  try {
+    return normalizeStartupPrompts(await agentJsonRequest("/internal/prompt-templates"));
+  } catch (error) {
+    if (["CONFIG_INVALID", "AGENT_INVALID_RESPONSE"].includes(error.code)) throw error;
+    return normalizeStartupPrompts();
+  }
+}
+
 async function configuredBrowserStudyOptions() {
   try {
     const document = await agentJsonRequest("/internal/tool-limits");
@@ -3674,6 +3687,7 @@ const browserAgent = createBrowserAgent({
   notifyChat: (tabId, text, options) => sendComposerWhenReady(tabId, { completionText: text, requireEmpty: true, ...options }),
   scheduleDelay: (work, milliseconds) => setTimeout(() => { void work().catch(() => {}); }, milliseconds),
   studyOptions: configuredBrowserStudyOptions,
+  promptTemplates: configuredStartupPrompts,
   groupTabs: async (tabIds, title) => {
     const groupId = await chrome.tabs.group({ tabIds });
     await chrome.tabGroups.update(groupId, { title, color: "blue", collapsed: false });
