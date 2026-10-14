@@ -17,7 +17,7 @@ class StartupPromptTests(unittest.IsolatedAsyncioTestCase):
         for key in keys:
             self.assertIn('in English', active[key])
             self.assertNotIn('in my language', active[key])
-            self.assertEqual(original[key], active[key].replace('in English', 'in my language'))
+            self.assertIn('in my language', original[key])
         with tempfile.TemporaryDirectory() as folder:
             config = Path(folder) / 'agent-config.json'
             with patch.object(agent, 'CONFIG_PATH', config):

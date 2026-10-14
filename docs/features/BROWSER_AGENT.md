@@ -14,7 +14,7 @@ A chat outside a group gets `BROWSER_GROUP_NOT_FOUND`. Duplicate browser views o
 
 ## Prompt templates
 
-Edit `studyThisSitePrompt.value` and `describeThisVideoPrompt.value` in the external `agent/agent-config.json` beside the Agent script or EXE. The Agent loads both templates once at startup and serves them from memory. Restart the Agent after editing. These settings change the initial ChatGPT message, not the tool catalog or an existing chat. Active shipped defaults request **in English** and text/image research. The original **in my language** prompts are preserved as numbered variants.
+Edit `studyThisSitePrompt.value` and `describeThisVideoPrompt.value` in the external `agent/agent-config.json` beside the Agent script or EXE. The Agent loads both templates once at startup and serves them from memory. Restart the Agent after editing. These settings change the initial ChatGPT message, not the tool catalog or an existing chat. Active shipped defaults request **in English** and text/image research. The video prompt also asks to download storyboards or create visual maps, load them into the chat and analyze the visuals. The original **in my language** prompts are preserved as numbered variants.
 
 Only the exact keys `studyThisSitePrompt` and `describeThisVideoPrompt` are active. Store alternatives as separate JSON entries with any positive integer suffix: `studyThisSitePrompt1`, `studyThisSitePrompt2`, `describeThisVideoPrompt1`, etc. Each entry keeps the same `value`/`comment` structure. Numbered entries are stored only; they are not sent to the Extension and never selected automatically.
 
