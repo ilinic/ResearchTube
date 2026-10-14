@@ -322,15 +322,15 @@ class WorkspacePathResolverTests(unittest.TestCase):
             self.assertIn("1 items", body["error"]["message"])
 
     def test_media_to_chat_log_exposes_only_status_and_percentage(self) -> None:
-        document = agent.mcp_tool_log("media_to_chat", {"status": "working", "progressPercent": 65})
+        document = agent.mcp_tool_log("media_view", {"status": "working", "progressPercent": 65})
         self.assertEqual(document, {"status": "working", "progressPercent": 65})
-        self.assertEqual(agent.response_log_suffix("/mcp/log/media_to_chat", document), " working 65%")
+        self.assertEqual(agent.response_log_suffix("/mcp/log/media_view", document), " working 65%")
         for value in [-1, 101, True, None, "65", float("nan"), float("inf")]:
             with self.subTest(value=value), self.assertRaises(agent.AgentApiError) as raised:
-                agent.mcp_tool_log("media_to_chat", {"status": "working", "progressPercent": value})
+                agent.mcp_tool_log("media_view", {"status": "working", "progressPercent": value})
             self.assertEqual(raised.exception.code, "MCP_LOG_INVALID")
         with self.assertRaises(agent.AgentApiError):
-            agent.mcp_tool_log("media_to_chat", {"status": "working", "taskId": "private"})
+            agent.mcp_tool_log("media_view", {"status": "working", "taskId": "private"})
 
 
 class VisualMapContractTests(unittest.TestCase):
@@ -995,6 +995,36 @@ class CaptureFrameTests(unittest.IsolatedAsyncioTestCase):
                 "resize": {"width": 100, "padColor": "red"},
             })
         self.assertEqual(raised.exception.code, "CAPTURE_FRAME_INVALID")
+
+
+class SingleFileShareHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_exact_unicode_file_serves_get_head_and_rejects_other_routes(self):
+        from urllib.parse import quote
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            file = root / 'Файл ｜ example.custom'
+            file.write_bytes(b'public fixture bytes')
+            (root / 'private.txt').write_bytes(b'PRIVATE')
+            with patch.object(agent, 'WORKSPACE_PATH', root), patch.object(agent, 'PUBLIC_SHARE_FOLDER', None), patch.object(agent, 'PUBLIC_SHARE_FILE', agent.ResolvedWorkspacePath(file.name, file)):
+                server = await asyncio.start_server(agent.handle_public_share_client, '127.0.0.1', 0)
+                try:
+                    async def request(method, route):
+                        reader, writer = await asyncio.open_connection('127.0.0.1', server.sockets[0].getsockname()[1])
+                        writer.write(f'{method} {route} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n'.encode('ascii'))
+                        await writer.drain()
+                        response = await asyncio.wait_for(reader.read(), 5)
+                        writer.close(); await writer.wait_closed()
+                        return response.split(b'\r\n\r\n', 1)
+                    route = '/' + quote(file.name, safe='')
+                    headers, body = await request('GET', route)
+                    self.assertIn(b'200 OK', headers); self.assertEqual(body, file.read_bytes())
+                    headers, body = await request('HEAD', route)
+                    self.assertIn(b'200 OK', headers); self.assertEqual(body, b'')
+                    for route in ['/private.txt', '/', '/health', '/%2e%2e/private.txt']:
+                        headers, body = await request('GET', route)
+                        self.assertIn(b'404 Not Found', headers); self.assertNotIn(b'PRIVATE', body)
+                finally:
+                    server.close(); await server.wait_closed()
 
 
 class PublicWorkspaceShareTests(unittest.TestCase):

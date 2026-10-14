@@ -213,6 +213,24 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(task.failed_index, 1)
         self.assertNotIn('secret', json.dumps(task.snapshot()))
         self.assertEqual(len(list((self.workspace / 'storyboards').iterdir())), 1)
+        self.assertEqual(task.snapshot()['failureDetails']['stage'], 'http')
+
+    async def test_http_and_filesystem_failures_are_safe_and_distinct(self):
+        for failure, stage, reason, status, os_code in [
+            (sb.SheetTransferError(dict(stage='http', reason='HTTP_STATUS', httpStatus=403, osErrorCode=None, attempts=1)), 'http', 'HTTP_STATUS', 403, None),
+            (PermissionError(13, 'SECRET C:\\private'), 'publishing', 'FILE_IO', None, 'EACCES'),
+        ]:
+            if stage == 'http':
+                with patch.object(sb, 'fetch_sheet', AsyncMock(side_effect=failure)):
+                    result = await self.start(); task = self.service.get(result['taskId']); await task.runner
+            else:
+                with patch.object(sb, 'fetch_sheet', AsyncMock(return_value=JPEG)), patch.object(sb.os, 'link', side_effect=failure):
+                    result = await self.start(); task = self.service.get(result['taskId']); await task.runner
+            detail = task.snapshot()['failureDetails']
+            self.assertEqual((detail['stage'], detail['reason'], detail['httpStatus'], detail['osErrorCode']), (stage, reason, status, os_code))
+            self.assertEqual(detail['sheetIndex'], 0)
+            self.assertEqual(detail['attempts'], 1)
+            self.assertNotIn('SECRET', json.dumps(task.snapshot()))
 
     async def test_conflicting_file_is_not_overwritten(self):
         destination = self.service.path(sb.filename(CONTEXT['title'], VID, sb.parse_spec(SPEC, 263.2)[1], 0))
@@ -220,6 +238,19 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(sb, 'fetch_sheet', AsyncMock(return_value=JPEG)):
             result = await self.start(); task = self.service.get(result['taskId']); await task.runner
         self.assertEqual(task.status, 'failed'); self.assertEqual(destination.read_bytes(), JPEG)
+
+    async def test_timestamp_failure_keeps_ffmpeg_exit_code_without_stderr(self):
+        self.service.annotate_sheet = sb.StoryboardService.annotate_sheet.__get__(self.service)
+        with patch.object(sb, 'fetch_sheet', AsyncMock(return_value=JPEG)), \
+                patch.object(agent, 'find_component', return_value=agent.ComponentDiscovery('path', 'ffmpeg')), \
+                patch.object(agent, 'visual_map_font_file', return_value=Path('/private/font.ttf')), \
+                patch.object(agent, 'run_visual_map_ffmpeg', AsyncMock(return_value=(7, b'PRIVATE signed URL and host path'))):
+            result = await self.start(); task = self.service.get(result['taskId']); await task.runner
+        detail = task.snapshot()['failureDetails']
+        self.assertEqual(detail['stage'], 'timestamp')
+        self.assertEqual(detail['processExitCode'], 7)
+        self.assertEqual(detail['reason'], 'RENDERING_FAILED')
+        self.assertNotIn('PRIVATE', json.dumps(task.snapshot()))
 
     async def test_workspace_symlink_is_rejected(self):
         self.workspace.mkdir(); outside = self.root / 'outside'; outside.mkdir()
@@ -252,6 +283,28 @@ class Writer:
 
 
 class TransferTests(unittest.IsolatedAsyncioTestCase):
+    async def test_http_rejections_and_invalid_jpeg_keep_safe_status(self):
+        for response, data, stage, reason, status in [
+            (b'HTTP/1.1 403 Forbidden\r\nContent-Type: text/html', b'PRIVATE', 'http', 'HTTP_STATUS', 403),
+            (b'HTTP/1.1 200 OK\r\nContent-Type: text/html', b'PRIVATE', 'http', 'UNEXPECTED_CONTENT_TYPE', 200),
+            (b'HTTP/1.1 200 OK\r\nContent-Type: image/jpeg', b'bad jpeg', 'jpeg', 'INVALID_JPEG', 200),
+            (b'HTTP/1.1 200 OK\r\nContent-Type: image/jpeg\r\nContent-Length: 1000', JPEG, 'body', 'TRUNCATED_RESPONSE', 200),
+        ]:
+            with self.assertRaises(sb.SheetTransferError) as caught:
+                await self.transfer(response, data)
+            self.assertEqual(caught.exception.details['stage'], stage)
+            self.assertEqual(caught.exception.details['reason'], reason)
+            self.assertEqual(caught.exception.details['httpStatus'], status)
+            self.assertNotIn('PRIVATE', str(caught.exception))
+
+    async def test_connection_os_error_does_not_publish_hostname(self):
+        with patch.object(sb.asyncio, 'open_connection', AsyncMock(side_effect=ConnectionRefusedError(111, 'PRIVATE host and token'))):
+            with self.assertRaises(sb.SheetTransferError) as caught:
+                await sb.fetch_sheet(f'https://i.ytimg.com/sb/{VID}/a.jpg?sigh=SECRET', lambda *_: None)
+        self.assertEqual(caught.exception.details['stage'], 'connect')
+        self.assertEqual(caught.exception.details['osErrorCode'], 'ECONNREFUSED')
+        self.assertNotIn('SECRET', json.dumps(caught.exception.details))
+
     async def transfer(self, header, body, eof=True):
         reader = asyncio.StreamReader(); reader.feed_data(header + b'\r\n\r\n' + body)
         if eof: reader.feed_eof()

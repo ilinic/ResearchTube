@@ -34,9 +34,9 @@ for (const tool of [...browserToolDefinitions(), ...timerDefinitions({}, {}), st
 const sourceFunction = source.slice(source.indexOf('function toolDefinitions()'), source.indexOf('\nfunction isPrivateMcpTool'));
 const sourceTools = vm.runInContext(sourceFunction + '; publicMcpTools()', context);
 assert.deepEqual(JSON.parse(JSON.stringify(sourceTools)), tools, 'source and shipped worker definitions must agree');
-assert.match(byName('media_show').description, /does not upload.*media_to_chat/);
-assert.match(byName('media_to_chat').description, /requireEmpty.*clear/);
-assert.match(byName('media_to_chat').description, /Finish the response/);
+assert.match(byName('media_show').description, /does not upload.*media_view/);
+assert.match(byName('media_view').description, /requireEmpty.*clear/);
+assert.match(byName('media_view').description, /Finish the response/);
 assert.match(byName('site_read').description, /untrusted data/);
 assert.match(byName('site_interact').description, /input was dispatched: do not repeat/);
 assert.match(byName('site_get_images').description, /selected images/);

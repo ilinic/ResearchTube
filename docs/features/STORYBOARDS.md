@@ -85,3 +85,9 @@ Existing files are reused only after byte verification. A conflicting file is ne
 Raw storyboard specs, signed URLs, cookies, tokens, physical paths and image bytes never enter MCP results or diagnostics. HTTPS transfers and redirects are restricted to expected YouTube storyboard paths. Sheets are not displayed automatically; use the task files or creation.data.publishedSheets with media_show deliberately. Exact published paths are available without scanning storyboards/.
 
 The authoritative implementation is `extension/storyboards.js` and `agent/storyboards.py`.
+
+## Failure diagnostics
+
+On failed creation, `creation.data.failureDetails` reports a fixed stage (`url`, `connect`, `http`, `body`, `jpeg`, `timestamp`, or `publishing`), safe reason code, HTTP status when available, OS error code when available, a fixed exception type, FFmpeg exit code when rendering fails, sheet index and attempt count. The current transfer makes one attempt; redirects are not additional download attempts. The error message repeats these technical fields, so `system_get_diagnostics` can also report them after status is observed. No raw exception text, response body, signed URL, token or host path is returned. Older Agents may omit these optional details. Complete published sheets survive later failures and cancellation.
+
+For example, HTTP 403 at `http` identifies a refused sheet request; `EACCES` at `publishing` identifies a filesystem permission failure. `timestamp` separates timestamp-rendering failures from the JPEG transfer. Use `frameTimestampPosition: none` only when testing whether annotation is the failing step. A successful metadata lookup alone does not prove sheet availability.

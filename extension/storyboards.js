@@ -32,12 +32,19 @@ const infoSchema = { type: "object", oneOf: [
 const statuses = ["working", "completed", "cancelled", "failed"];
 const sheetTimestampSchema = object({ sheetIndex: integer,
   frameTimestampsSeconds: { type: "array", minItems: 1, items: { type: "number", minimum: 0 } } });
+const failureSchema = object({ stage: { enum: ["url", "connect", "http", "body", "jpeg", "timestamp", "publishing"] },
+  reason: { enum: ["HTTP_STATUS", "INVALID_LENGTH", "UNSUPPORTED_TRANSFER_ENCODING", "RESPONSE_TOO_LARGE", "INVALID_CHUNK", "TRUNCATED_RESPONSE", "INVALID_JPEG", "TOO_MANY_REDIRECTS", "INVALID_URL", "RENDERER_UNAVAILABLE", "RENDERING_FAILED", "DESTINATION_CONFLICT", "TIMEOUT", "TLS_FAILED", "CONNECTION_FAILED", "FILE_IO", "INVALID_HTTP_RESPONSE", "UNEXPECTED_CONTENT_TYPE", "INTERNAL_ERROR"] },
+  httpStatus: { type: ["integer", "null"], minimum: 100, maximum: 599 },
+  osErrorCode: { type: ["string", "null"], pattern: "^(?:E[A-Z0-9_]{1,40}|WINERROR_[0-9]{1,10})$" },
+  processExitCode: { type: "integer", minimum: -2147483648, maximum: 4294967295 },
+  exceptionType: { enum: ["ValueError", "RuntimeError", "FileNotFoundError", "PermissionError", "FileExistsError", "TimeoutError", "SSLError", "SSLCertVerificationError", "ConnectionRefusedError", "ConnectionResetError", "ConnectionAbortedError", "BrokenPipeError", "OSError", "IncompleteReadError", "LimitOverrunError", "UnicodeEncodeError", "UnicodeDecodeError", "TypeError", "KeyError", "AgentApiError", "Other"] },
+  attempts: { type: "integer", minimum: 1, maximum: 100 }, sheetIndex: integer }, ["stage", "reason", "httpStatus", "osErrorCode", "attempts", "sheetIndex"]);
 const taskSchema = object({ taskId, status: { enum: statuses }, phase: { enum: ["resolving", "downloading", "publishing", "completed", "cancelled", "failed"] },
   progressPercent: { type: "number", minimum: 0, maximum: 100 }, completedSheets: integer, totalSheets: positive,
   downloadedSheets: integer, reusedSheets: integer, workspaceDirectory: { const: "storyboards" }, pollIntervalMs: { type: "integer", minimum: 1000 },
   frameTimestampPosition, sheetTimestamps: { type: "array", minItems: 1, items: sheetTimestampSchema },
   publishedSheets: {type:"array",items:object({sheetIndex:integer,workspacePath:{type:"string",minLength:1}})},
-  failedSheetIndex: integer, error: errorSchema },
+  failedSheetIndex: integer, error: errorSchema, failureDetails: failureSchema },
 ["taskId", "status", "phase", "progressPercent", "completedSheets", "totalSheets", "downloadedSheets", "reusedSheets", "workspaceDirectory", "pollIntervalMs", "frameTimestampPosition", "sheetTimestamps", "publishedSheets"]);
 const cancelSchema = object({ taskId, status: { enum: statuses } });
 export const STORYBOARD_TOOL_NAMES = Object.freeze(["youtube_storyboard_get_info", "youtube_storyboard_download", "youtube_storyboard_get_task", "youtube_storyboard_cancel_task"]);
@@ -48,7 +55,7 @@ export function storyboardDefinitions(readAnnotations, writeAnnotations) {
   return [
     make(STORYBOARD_TOOL_NAMES[0], "Get YouTube storyboard variants", "Discover YouTube preview-sheet variants, geometry, timing and sheet counts; retain variantId unchanged. frameIntervalEstimated marks inferred timing. Creates no files. If unavailable, the response recommends visual_map_create from a Workspace video.", object({ videoId }), infoSchema),
     make(STORYBOARD_TOOL_NAMES[1], "Download YouTube storyboard sheets", "Download ready JPEG sheets of a discovered variant: all, a time range or sheet indexes. sheetTimestamps always returns calculated tile times; frameTimestampPosition draws labels (default bottomRight, none disables). Saves directly under storyboards/; never downloads video/audio.", object({ videoId, variantId, selection: selectionSchema, frameTimestampPosition }, ["videoId", "variantId", "selection"]), { type: "object", oneOf: [taskSchema, rejected] }, true),
-    make(STORYBOARD_TOOL_NAMES[2], "Get storyboard task progress", "Read storyboard sheet progress and published paths. Poll at pollIntervalMs. Complete sheets survive failure/cancellation.", object({ taskId }), { type: "object", oneOf: [taskSchema, rejected] }),
+    make(STORYBOARD_TOOL_NAMES[2], "Get storyboard task progress", "Read storyboard progress and published paths. On failure, creation.data.failureDetails reports stage, HTTP status, OS code, sheet and attempts without private URLs. Poll at pollIntervalMs. Complete sheets survive failure/cancellation.", object({ taskId }), { type: "object", oneOf: [taskSchema, rejected] }),
     make(STORYBOARD_TOOL_NAMES[3], "Cancel storyboard download", "Cancel storyboard transfers; keep completely published sheets. Repeated cancellation returns terminal status.", object({ taskId }), { type: "object", oneOf: [cancelSchema, rejected] }, true)
   ];
 }
@@ -117,6 +124,17 @@ export function normalizeStoryboardResult(name, data) {
     if (data.error?.code !== "STORYBOARD_DOWNLOAD_FAILED" || !Number.isInteger(data.failedSheetIndex) || data.failedSheetIndex < 0) bad();
     result.failedSheetIndex = data.failedSheetIndex;
     result.error = { code: data.error.code, message: messages[data.error.code] };
+    if (data.failureDetails !== undefined) {
+      const d = data.failureDetails;
+      if (!plain(d) || !failureSchema.properties.stage.enum.includes(d.stage) || !failureSchema.properties.reason.enum.includes(d.reason)
+        || d.sheetIndex !== data.failedSheetIndex || !Number.isInteger(d.attempts) || d.attempts < 1 || d.attempts > 100
+        || d.httpStatus !== null && (!Number.isInteger(d.httpStatus) || d.httpStatus < 100 || d.httpStatus > 599)
+        || d.osErrorCode !== null && (typeof d.osErrorCode !== 'string' || !new RegExp(failureSchema.properties.osErrorCode.pattern).test(d.osErrorCode))
+        || d.exceptionType !== undefined && !failureSchema.properties.exceptionType.enum.includes(d.exceptionType)
+        || d.processExitCode !== undefined && (!Number.isInteger(d.processExitCode) || d.processExitCode < -2147483648 || d.processExitCode > 4294967295)) bad();
+      result.failureDetails = Object.fromEntries(Object.keys(failureSchema.properties).filter(key=>d[key]!==undefined).map(key => [key, d[key]]));
+      result.error.message = `Storyboard sheet ${d.sheetIndex} failed at ${d.stage}: ${d.reason}${d.httpStatus === null ? '' : ` (HTTP ${d.httpStatus})`}${d.osErrorCode === null ? '' : ` (${d.osErrorCode})`}${d.exceptionType ? ` [${d.exceptionType}]` : ''}${d.processExitCode === undefined ? '' : ` (exit ${d.processExitCode})`}. Attempts: ${d.attempts}.`;
+    }
   }
   return result;
 }

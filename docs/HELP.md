@@ -125,7 +125,7 @@ Browse [MCP Tools](MCP_TOOLS.md) for plain-language descriptions of every tool, 
 | Inspect/edit local media | `media_probe`, frame capture, `media_image_crop`, `media_clip`, `media_show`. Request frames, ordered clips or format conversion from a Workspace file. `media_clip` uses optional outputFormat with intervals; whole-file conversion/audio extraction requires it. Compatible streams retain original quality; necessary encoding uses automatic quality profiles. Lossless output can be much larger. |
 | Capture or record | Screen/region capture, `camera_*`, and Windows clipboard tools. Request these explicitly. |
 | Read text aloud | `system_speech_*`: Google Translate by default or Windows voices; speakers, saved file, or both. |
-| Manage/share files | `workspace_*`, `media_to_chat`, `library_store_*`, `online_share_*`. Sending/sharing is deliberate, not automatic for every saved file. |
+| Manage/share files | `workspace_*`, `media_view`, `library_store_*`, `online_share_*`. Sending/sharing is deliberate, not automatic for every saved file. |
 | Timers | `timer_start/status/cancel` for real durations or deadlines. |
 | Study a website | **Study this site** in the popup; `site_*` tools operate the sites and ChatGPT participants in its tab group. |
 | Custom Tools | Trusted Python packages; bundled **Count Words Example** and **Wait Asynchronous Task Example** demonstrate sync/task execution. |
@@ -149,6 +149,8 @@ If Study this site reports **BROWSER_DEBUGGER_RESTRICTED**, Chrome refused acces
 | Version mismatch | Use compatible components from the release; reload Extension, restart changed Agent, refresh ChatGPT catalog. Version numbers need not be equal; interfaces must match. |
 | Tool missing or `TOOL_DISABLED` | Enable that tool in Extension Settings; in ChatGPT open ResearchTube's management and **Refresh**, then use a new chat. |
 | Download reports a missing final file after yt-dlp succeeds | Update/restart the Local Agent, retry once and request download diagnostics. Cyrillic and Unicode filenames are supported; renaming the video is unnecessary. |
+| Single-file sharing rejected | Update the Extension. Use `online_share_start` with `workspacePath`, without folder categories; the result supplies `publicFileUrl`. |
+| Storyboard download failed | Inspect task `creation.data.failureDetails` for stage, HTTP status and OS error code. |
 | Component missing or stale | Check `system_agent_status`; install/extract only the relevant component, remove ambiguous duplicate executables, restart Agent. |
 | Chrome flag still Disabled/Mixed | Fully exit Chrome; relaunch with the edited shortcut; restart Agent for a fresh snapshot. Flag is optional. |
 | YouTube verification/403/429 | Respect the returned retry time. Open YouTube normally and complete visible verification if requested. Missing captions/comments can be a property of the video. |

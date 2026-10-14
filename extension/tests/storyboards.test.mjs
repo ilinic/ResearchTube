@@ -81,3 +81,15 @@ sandbox.location.href = 'https://www.youtube.com/watch?v=another-video';
 vm.runInContext(`result = storyboardContext('${vid}');`, sandbox);
 assert.equal(sandbox.result, null);
 console.log('Storyboards: metadata, schemas, privacy, browser bridge, routing and validation passed.');
+
+// Bounded technical failure details survive projection, never raw exceptions.
+const taskFixture={taskId:id,status:'failed',phase:'failed',progressPercent:0,totalSheets:1,completedSheets:0,downloadedSheets:0,reusedSheets:0,workspaceDirectory:'storyboards',pollIntervalMs:1000,frameTimestampPosition:'none',publishedSheets:[],sheetTimestamps:[{sheetIndex:0,frameTimestampsSeconds:[0]}],failedSheetIndex:0,error:{code:'STORYBOARD_DOWNLOAD_FAILED',message:'SECRET https://private.test/?sigh=SECRET'}};
+const detail={stage:'http',reason:'HTTP_STATUS',httpStatus:403,osErrorCode:null,attempts:1,sheetIndex:0};
+const diagnosed=normalizeStoryboardResult(status,{...taskFixture,failureDetails:{...detail,url:'https://private?sigh=SECRET',exception:'SECRET C:\\host'}});
+assert.deepEqual(diagnosed.failureDetails,detail);
+assert.match(diagnosed.error.message,/HTTP 403/);
+assertSchema(definitions[2].outputSchema,diagnosed);
+assert.doesNotMatch(JSON.stringify(diagnosed),/SECRET|private|exception/);
+for(const bad of [{...detail,stage:'SECRET'},{...detail,reason:'SECRET'},{...detail,httpStatus:0},{...detail,sheetIndex:1},{...detail,osErrorCode:'C:\\private'},{...detail,attempts:0}])assert.throws(()=>normalizeStoryboardResult(status,{...taskFixture,failureDetails:bad}));
+assert.equal(normalizeStoryboardResult(status,taskFixture).failureDetails,undefined,'older Agents remain compatible');
+console.log('Storyboard failure diagnostics: HTTP, stage, sheet, attempts, fixed reason and private-field exclusion passed');

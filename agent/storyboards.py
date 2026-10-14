@@ -6,6 +6,7 @@ serialized, logged, persisted, or passed to media download tools.
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
 import json
 import math
@@ -25,6 +26,44 @@ CACHE_SECONDS = 300
 TIMESTAMP_POSITIONS = {'none', 'topLeft', 'topRight', 'bottomLeft', 'bottomRight'}
 PUBLIC_FIELDS = ('variantId', 'cellWidth', 'cellHeight', 'columns', 'rows',
                  'framesPerSheet', 'frameIntervalSeconds', 'frameIntervalEstimated', 'sheetCount', 'format')
+
+FAILURE_REASONS = {
+    'Sheet unavailable': 'HTTP_STATUS', 'Invalid sheet length': 'INVALID_LENGTH',
+    'Unsupported transfer encoding': 'UNSUPPORTED_TRANSFER_ENCODING', 'Sheet too large': 'RESPONSE_TOO_LARGE',
+    'Invalid chunk': 'INVALID_CHUNK', 'Truncated sheet': 'TRUNCATED_RESPONSE', 'Invalid JPEG': 'INVALID_JPEG',
+    'Too many redirects': 'TOO_MANY_REDIRECTS', 'Invalid sheet URL': 'INVALID_URL',
+    'Timestamp renderer is unavailable': 'RENDERER_UNAVAILABLE', 'Timestamp rendering failed': 'RENDERING_FAILED',
+    'Timestamp renderer produced an invalid JPEG': 'INVALID_JPEG',
+    'Destination belongs to another file': 'DESTINATION_CONFLICT', 'Destination already exists': 'DESTINATION_CONFLICT',
+}
+EXCEPTION_TYPES = {'ValueError', 'RuntimeError', 'FileNotFoundError', 'PermissionError', 'FileExistsError',
+                   'TimeoutError', 'SSLError', 'SSLCertVerificationError', 'ConnectionRefusedError',
+                   'ConnectionResetError', 'ConnectionAbortedError', 'BrokenPipeError', 'OSError',
+                   'IncompleteReadError', 'LimitOverrunError', 'UnicodeEncodeError', 'UnicodeDecodeError',
+                   'TypeError', 'KeyError', 'AgentApiError', 'Other'}
+
+
+def failure_details(error, stage, http_status=None):
+    """Fixed technical codes only: exceptions may contain signed URLs/paths."""
+    reason = FAILURE_REASONS.get(str(error), 'INTERNAL_ERROR')
+    if isinstance(error, asyncio.TimeoutError): reason = 'TIMEOUT'
+    elif isinstance(error, ssl.SSLError): reason = 'TLS_FAILED'
+    elif isinstance(error, OSError): reason = 'CONNECTION_FAILED' if stage in {'connect', 'http', 'body'} else 'FILE_IO'
+    elif isinstance(error, asyncio.IncompleteReadError): reason = 'TRUNCATED_RESPONSE'
+    elif stage == 'url': reason = 'INVALID_URL'
+    elif stage == 'http' and reason == 'INTERNAL_ERROR': reason = 'INVALID_HTTP_RESPONSE'
+    os_code = errno.errorcode.get(getattr(error, 'errno', None))
+    if os_code is None and type(getattr(error, 'winerror', None)) is int:
+        os_code = f'WINERROR_{error.winerror}'
+    exception_type = type(error).__name__
+    return dict(stage=stage, reason=reason, httpStatus=http_status, osErrorCode=os_code, attempts=1,
+                exceptionType=exception_type if exception_type in EXCEPTION_TYPES else 'Other')
+
+
+class SheetTransferError(ValueError):
+    def __init__(self, details):
+        super().__init__('Storyboard transfer failed')
+        self.details = details
 
 
 class StoryboardError(Exception):
@@ -209,14 +248,19 @@ def sheet_timestamp_filter(v, sheet_index, duration, position, font_file, escape
 
 
 async def fetch_sheet(url, progress):
-    return await asyncio.wait_for(_fetch_https_body(url, progress), 45)
+    try:
+        return await asyncio.wait_for(_fetch_https_body(url, progress), 45)
+    except asyncio.TimeoutError as error:
+        raise SheetTransferError(failure_details(error, 'http')) from None
 
 
 async def _fetch_https_body(url, progress, metadata=False):
     """Cancellable HTTPS, with bounded body/header sizes and checked redirects."""
     writer = None
+    stage, status = 'url', None
     try:
         for _ in range(4):
+            stage, status = 'url', None
             if metadata:
                 parsed = urlsplit(url)
                 if (parsed.scheme != 'https' or parsed.hostname != 'www.youtube.com' or parsed.username
@@ -224,9 +268,11 @@ async def _fetch_https_body(url, progress, metadata=False):
                     raise ValueError('Invalid metadata URL')
             else:
                 parsed = urlsplit(sheet_url(url))
+            stage = 'connect'
             reader, writer = await asyncio.open_connection(parsed.hostname, 443, ssl=ssl.create_default_context())
             target = parsed.path + ('?' + parsed.query if parsed.query else '')
             accept = 'text/html' if metadata else 'image/jpeg'
+            stage = 'http'
             writer.write(f'GET {target} HTTP/1.1\r\nHost: {parsed.hostname}\r\nUser-Agent: Mozilla/5.0\r\nAccept: {accept}\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n'.encode('ascii'))
             await writer.drain()
             header = await reader.readuntil(b'\r\n\r\n')
@@ -241,8 +287,11 @@ async def _fetch_https_body(url, progress, metadata=False):
                 writer = None
                 continue
             accepted_types = ('text/html',) if metadata else ('image/jpeg', 'image/jpg')
-            if status != 200 or headers.get('content-type', '').split(';')[0].lower() not in accepted_types:
+            if status != 200:
                 raise ValueError('Sheet unavailable')
+            if headers.get('content-type', '').split(';')[0].lower() not in accepted_types:
+                raise SheetTransferError(dict(stage='http', reason='UNEXPECTED_CONTENT_TYPE', httpStatus=status, osErrorCode=None, attempts=1, exceptionType='ValueError'))
+            stage = 'body'
             total = int(headers['content-length']) if 'content-length' in headers else None
             if total is not None and not 0 < total <= MAX_SHEET_BYTES:
                 raise ValueError('Invalid sheet length')
@@ -278,10 +327,15 @@ async def _fetch_https_body(url, progress, metadata=False):
                     raise ValueError('Sheet too large')
             if total is not None and len(data) != total:
                 raise ValueError('Truncated sheet')
+            stage = 'jpeg'
             if not metadata and (not data.startswith(b'\xff\xd8\xff') or not data.endswith(b'\xff\xd9')):
                 raise ValueError('Invalid JPEG')
             return bytes(data)
         raise ValueError('Too many redirects')
+    except SheetTransferError:
+        raise
+    except Exception as error:
+        raise SheetTransferError(failure_details(error, stage, status)) from None
     finally:
         if writer is not None:
             writer.close()
@@ -332,6 +386,7 @@ class Task:
     reused: int = 0
     failed_index: int | None = None
     error: dict | None = None
+    failure_details: dict | None = None
     runner: asyncio.Task | None = None
     published_sheets: list = field(default_factory=list)
 
@@ -348,6 +403,8 @@ class Task:
                                        for index in self.indexes])
         if self.error:
             result.update(error=self.error, failedSheetIndex=self.failed_index)
+            if self.failure_details:
+                result['failureDetails'] = dict(self.failure_details)
         return result
 
 
@@ -474,17 +531,22 @@ class StoryboardService:
                    '-map', '0:v:0', '-an', '-frames:v', '1', '-vf', filters, '-q:v', '2', '-y', str(output)]
         returncode, _stderr = await self.host.run_visual_map_ffmpeg(command, 30)
         if returncode != 0 or not output.is_file() or output.stat().st_size > MAX_SHEET_BYTES:
-            raise ValueError('Timestamp rendering failed')
+            details = failure_details(ValueError('Timestamp rendering failed'), 'timestamp')
+            if type(returncode) is int:
+                details['processExitCode'] = returncode
+            raise SheetTransferError(details)
         result = output.read_bytes()
         if not result.startswith(b'\xff\xd8\xff') or not result.endswith(b'\xff\xd9'):
             raise ValueError('Timestamp renderer produced an invalid JPEG')
         return result
 
     async def run(self, task):
+        stage = 'publishing'
         try:
             async with self.slots:
                 for index in task.indexes:
                     task.failed_index = index
+                    stage = 'publishing'
                     logical = filename(task.source['title'], task.source['videoId'], task.variant, index)
                     destination = self.path(logical)
                     identity = (task.timestamp_position, task.source['videoId'], task.variant['variantId'], index,
@@ -498,7 +560,9 @@ class StoryboardService:
                         def progress(received, total):
                             fraction = min(0.99, received / total) if total else 0
                             task.progress = max(task.progress, 100 * (task.completed + fraction) / len(task.indexes))
+                        stage = 'http'
                         data = await fetch_sheet(task.variant['urls'][index], progress)
+                        stage = 'publishing'
                         destination.parent.mkdir(parents=True, exist_ok=True)
                         destination = self.path(logical)  # Recheck redirects after network await.
                         task.phase = 'publishing'
@@ -509,8 +573,10 @@ class StoryboardService:
                             if task.timestamp_position == 'none':
                                 rendered.write_bytes(data)
                             else:
+                                stage = 'timestamp'
                                 await self.annotate_sheet(temporary, rendered, task.variant, index,
                                                           task.source['durationSeconds'], task.timestamp_position)
+                            stage = 'publishing'
                             rendered_data = rendered.read_bytes()
                             digest = hashlib.sha256(rendered_data).digest()
                             if destination.exists():
@@ -544,8 +610,10 @@ class StoryboardService:
                 task.failed_index = None
         except asyncio.CancelledError:
             task.status = task.phase = 'cancelled'
-        except Exception:
+        except Exception as error:
             task.status = task.phase = 'failed'
+            task.failure_details = dict(error.details) if isinstance(error, SheetTransferError) else failure_details(error, stage)
+            task.failure_details['sheetIndex'] = task.failed_index
             task.error = {'code': 'STORYBOARD_DOWNLOAD_FAILED',
                           'message': f'Could not download or safely publish storyboard sheet {task.failed_index}. Check availability, free space, and conflicting files.'}
 

@@ -42,7 +42,7 @@ function worker({initialStorage={},initialNow=Date.now()}={}) {
  return {context,tabs,storage,alarms,mutations,queries,logs,now:()=>now,advance(ms){now+=ms;},
   receive:(message,sender)=>new Promise(resolve=>{assert.equal(listener(message,sender,resolve),true);}),
   start:async()=>{
-   const result=await context.handleMcpRequest({jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'media_to_chat',arguments:{files:[{workspacePath:'report.pdf'}],composerPolicy:'clear'}}});
+   const result=await context.handleMcpRequest({jsonrpc:'2.0',id:1,method:'tools/call',params:{name:'media_view',arguments:{files:[{workspacePath:'report.pdf'}],composerPolicy:'clear'}}});
    assert.equal(result.result.isError,false);
    const {task}=result.result.structuredContent;
    const metadata=result.result._meta['researchtube/chatTarget'];
@@ -134,7 +134,7 @@ await invalid.context.mediaToChatCancel(protectedTask.task.taskId);
 assert.equal(invalid.alarms.size,0);
 await assert.rejects(invalid.context.bindMediaToChatTarget(protectedTask.metadata,sender()),e=>e.code==='MEDIA_TO_CHAT_TARGET_NOT_FOUND');
 // Tools/list and resources/read expose the correct task template, not a media viewer.
-const tool=current.context.publicMcpTools().find(tool=>tool.name==='media_to_chat');
+const tool=current.context.publicMcpTools().find(tool=>tool.name==='media_view');
 assert.equal(tool._meta.ui.resourceUri,'ui://researchtube/chat-target-v8.html');
 const resources=await current.context.handleMcpRequest({id:2,method:'resources/list'});
 assert.ok(resources.result.resources.some(item=>item.uri===tool._meta.ui.resourceUri));

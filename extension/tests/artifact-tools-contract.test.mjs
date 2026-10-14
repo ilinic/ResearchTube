@@ -40,6 +40,38 @@ function worker(storage={}) {
  return {context,tabs,storage,requests,uploads,timers,alarms,reports,call,tick(ms=1000){now+=ms;}};
 }
 const w=worker(),definitions=w.context.publicMcpTools();
+assert.ok(definitions.some(tool=>tool.name==='media_view'));
+assert.ok(!definitions.some(tool=>tool.name.startsWith('media_to_chat')));
+const renamed=worker({mcpToolPreferences:{enabledByName:{media_to_chat:false,media_to_chat_status:true,media_to_chat_cancel:false,media_view_status:false}}});
+await renamed.context.mcpToolSettingsCatalog();
+assert.equal(renamed.storage.mcpToolPreferences.enabledByName.media_view,false);
+assert.equal(renamed.storage.mcpToolPreferences.enabledByName.media_view_status,false,'explicit new choice wins');
+assert.equal(renamed.storage.mcpToolPreferences.enabledByName.media_view_cancel,false);
+assert.ok(!Object.keys(renamed.storage.mcpToolPreferences.enabledByName).some(name=>name.startsWith('media_to_chat')));
+const anyFiles=await w.call('media_view',{files:[{workspacePath:'notes.txt'},{workspacePath:'archive.zip'},{workspacePath:'arbitrary.custom'}]});
+assert.equal(anyFiles.result.structuredContent.task.status,'queued');
+await w.context.mediaToChatCancel(anyFiles.result.structuredContent.task.taskId);
+
+// The single-file Agent response intentionally has no folder category filter.
+const singleShare={state:'active',folder:null,file:'captures/Bird.webp',fileTypes:[],publicBaseUrl:null,publicFileUrl:'https://example.trycloudflare.com/captures/Bird.webp',methods:['GET','HEAD'],externallyReachable:null,
+ externalProbe:{state:'not_requested',provider:'wsrv.nl',probePath:null,httpStatus:null,contentType:null}};
+assert.deepEqual(JSON.parse(JSON.stringify(w.context.normalizeWorkspaceShareStatus(singleShare))),singleShare);
+const shareRequests=[];
+const originalAgent=w.context.agentJsonRequest;
+w.context.agentJsonRequest=async(path,options)=>{shareRequests.push({path,body:options.body});return singleShare;};
+const startedShare=await w.call('online_share_start',{workspacePath:'captures/Bird.webp'});
+assert.equal(startedShare.result.structuredContent.publicFileUrl,singleShare.publicFileUrl);
+assert.deepEqual(JSON.parse(JSON.stringify(shareRequests[0].body)),{file:'captures/Bird.webp',verifyExternal:false});
+assert.equal((await w.call('online_share_status',{})).result.structuredContent.state,'active');
+w.context.agentJsonRequest=originalAgent;
+for(const malformed of [{...singleShare,fileTypes:['images']},{...singleShare,methods:['GET','GET']},{...singleShare,folder:'captures'},{...singleShare,state:'inactive'}]) {
+ assert.throws(()=>w.context.normalizeWorkspaceShareStatus(malformed),error=>error.code==='AGENT_INVALID_RESPONSE');
+}
+const folderShare={...singleShare,folder:'captures',file:null,fileTypes:['images'],publicBaseUrl:'https://example.trycloudflare.com/captures/',publicFileUrl:null};
+assert.equal(w.context.normalizeWorkspaceShareStatus(folderShare).fileTypes[0],'images');
+assert.throws(()=>w.context.normalizeWorkspaceShareStatus({...folderShare,fileTypes:[]}));
+const inactiveShare={...singleShare,state:'inactive',file:null,publicFileUrl:null,methods:[]};
+assert.equal(w.context.normalizeWorkspaceShareStatus(inactiveShare).state,'inactive');
 for(const name of BROWSER_TOOL_NAMES) {
  const tool=definitions.find(t=>t.name===name);assert.ok(tool,'generated bundle must expose '+name);
  assert.equal(tool.inputSchema.additionalProperties,false);assert.ok(tool.inputSchema.required.includes('chatTabId'));

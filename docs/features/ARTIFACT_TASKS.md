@@ -25,7 +25,7 @@ The last four tools now use the same public task lifecycle as the others, even w
 - `composerPolicy` defaults to `requireEmpty`. With delivery enabled, `clear` explicitly discards initial text and attachments once, before uploading. Later text edits stop Send and leave attachments in place. Delivery verifies only the attachment count; same-count file replacement is allowed.
 - `sendDelaySeconds` defaults to zero. Positive values pause after the files are accepted in Composer. Readiness is still checked separately. The current-chat task reports `sendNotBefore` in UTC and `remainingSeconds` during `waitingToSend`.
 
-`addToChat` supplies actual file attachments to ChatGPT. `media_show` displays a local viewer and does not supply visual input. Do not call `media_to_chat` again for outputs whose creation task already requested delivery.
+`addToChat` supplies actual file attachments to ChatGPT. `media_show` displays a local viewer and does not supply visual input. Do not call `media_view` again for outputs whose creation task already requested delivery.
 
 For speech, `addToChat` requires `outputMode: file` or `both`; speakers-only is rejected before starting work. Clipboard text may complete locally with the default flag; with `addToChat: true`, creation completes but delivery fails with `MEDIA_ARTIFACT_NO_FILES`. Text is never submitted implicitly.
 
@@ -48,7 +48,7 @@ With delivery disabled, completed creation completes the overall task. With deli
 
 ## Originating tab and automation
 
-Creation tools use the same compact inline service widget as `media_to_chat`, not the media viewer. With delivery enabled its private handshake binds an exact Chrome tab and conversation at launch, before potentially long processing. No focused/active-tab fallback exists. A missing handshake, duplicated conversation, closed tab or changed conversation prevents delivery. The widget does not hold a Composer lock or change the draft during creation. The bound chat reservation holds no placeholder file.
+Creation tools use the same compact inline service widget as `media_view`, not the media viewer. With delivery enabled its private handshake binds an exact Chrome tab and conversation at launch, before potentially long processing. No focused/active-tab fallback exists. A missing handshake, duplicated conversation, closed tab or changed conversation prevents delivery. The widget does not hold a Composer lock or change the draft during creation. The bound chat reservation holds no placeholder file.
 
 The host may reuse a service-widget iframe for successive tool results. Each distinct task starts a fresh binding window, including after a creation-only task, a completed handshake or a timeout. Older result metadata and acknowledgments cannot replace the current task. Canonical tool-result notifications take precedence over compatibility globals; completed handshakes stop their retry timer.
 
@@ -66,7 +66,7 @@ Cancellation prevents later upload/Send, stops native asynchronous work where su
 
 `camera_record_stop` remains a graceful early stop: finalization can still be followed by requested chat delivery. Use `media_task_cancel` to stop recording and suppress delivery.
 
-The Extension persists bounded supervisor metadata. Suspension resumes known native creation/status and guarded pre-Send delay stages without replaying work. An interrupted unacknowledged start or single Agent operation fails meaningfully; it is never rerun automatically. Interrupted uploads remain governed by `media_to_chat`'s no-resend contract. Agent restart or task-history eviction can lose native handles; completed files remain in Workspace. Terminal histories use `limits.completedTaskHistoryLimit`.
+The Extension persists bounded supervisor metadata. Suspension resumes known native creation/status and guarded pre-Send delay stages without replaying work. An interrupted unacknowledged start or single Agent operation fails meaningfully; it is never rerun automatically. Interrupted uploads remain governed by `media_view`'s no-resend contract. Agent restart or task-history eviction can lose native handles; completed files remain in Workspace. Terminal histories use `limits.completedTaskHistoryLimit`.
 
 ## Workspace arguments
 

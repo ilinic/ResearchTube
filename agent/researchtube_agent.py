@@ -44,7 +44,7 @@ except ImportError:
     from task_history import TaskHistory
     from browser_resources import save_browser_resource
 
-AGENT_VERSION = "2.3.2"
+AGENT_VERSION = "2.3.3"
 INTERFACE_VERSION = 79
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024

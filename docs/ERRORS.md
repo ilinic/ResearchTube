@@ -95,7 +95,7 @@ ResearchTube uses stable public error codes so an assisting chat can distinguish
 | Code | Meaning | Corrective action |
 | --- | --- | --- |
 | `MEDIA_TO_CHAT_INVALID` | Invalid batch, configured count exceeded, wrong active tab, changed conversation, invalid Composer policy, existing draft/attachments, or user editing during upload | Inspect the Composer before retrying. Use an empty Composer or explicitly choose composerPolicy clear for initial text/attachments; neither policy clears edits made during upload. Count rejections include the maximum. |
-| `MEDIA_TO_CHAT_TASK_NOT_FOUND` | Unknown current-chat submission task ID | Use the task ID returned by `media_to_chat`. |
+| `MEDIA_TO_CHAT_TASK_NOT_FOUND` | Unknown current-chat submission task ID | Use the task ID returned by `media_view`. |
 | `LIBRARY_STORE_INVALID` | Invalid Library file batch or configured count exceeded | Correct logical file paths and the batch count. |
 
 These are ordinary structured rejections with `isError: false`. Oversized individual files are reported in task `skippedFiles`, rather than rejecting eligible files. Browser upload failures are reported in the task's terminal state.

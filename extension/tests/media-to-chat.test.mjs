@@ -9,7 +9,7 @@ import { webcrypto } from "node:crypto";
 import { resolveChatComposer, chatComposerPageExpression, chatComposerAttachmentNamesMatch, inspectChatComposer, clickChatComposerAttachmentRemoval, resetChatComposerFileInputs, installChatComposerGuard, readChatComposerGuard, disposeChatComposerGuard } from "../chat-composer.js";
 
 const source = await readFile(new URL("../background.js", import.meta.url), "utf8");
-for (const name of ["media_show", "media_to_chat", "media_to_chat_status", "media_to_chat_cancel"]) assert.match(source, new RegExp(`name: "${name}"`));
+for (const name of ["media_show", "media_view", "media_view_status", "media_view_cancel"]) assert.match(source, new RegExp(`name: "${name}"`));
 assert.doesNotMatch(source, /name: "media_image_show"/);
 const section = (start, end) => {
   const first = source.indexOf(start);
@@ -167,7 +167,7 @@ await context.drainMediaToChatQueue();
 const completed = await context.mediaToChatStatus(partial.task.taskId);
 assert.equal(completed.status, "completed");
 assert.equal(completed.progressPercent, 100);
-assert.deepEqual(telemetry.filter((entry) => entry.tool === "media_to_chat").slice(-5).map((entry) => entry.progress), [10, 25, 65, 80, 100]);
+assert.deepEqual(telemetry.filter((entry) => entry.tool === "media_view").slice(-5).map((entry) => entry.progress), [10, 25, 65, 80, 100]);
 assert.equal(completed.submittedFiles[0].workspacePath, "report.pdf");
 assert.equal(completed.skippedFiles[0].workspacePath, "large.bin");
 assert.ok(!JSON.stringify(completed).includes("/workspace/"));

@@ -38,7 +38,7 @@
     },
     "mediaToChatMaxFiles": {
       "value": 5,
-      "comment": "Maximum Workspace files in one media_to_chat or Browser Agent resourceIds batch; default 5, range 1–100. Independent of the Library limit."
+      "comment": "Maximum Workspace files in one media_view or Browser Agent resourceIds batch; default 5, range 1–100. Independent of the Library limit."
     },
     "mediaToChatMaxFileSizeMiB": {
       "value": 20,
@@ -63,7 +63,7 @@
   },
   "composerMediaRetryIntervalSeconds": {
     "value": 2,
-    "comment": "Seconds between Composer media checks. Default 2; integer 1–60. With 15 retries the normal budget is about 30 seconds plus operation latency. Successful acceptance/readiness/acknowledgement ends polling immediately; no fixed delay is imposed when ready. Applies to media_to_chat, artifact addToChat, Browser Agent resources and Library transfers."
+    "comment": "Seconds between Composer media checks. Default 2; integer 1–60. With 15 retries the normal budget is about 30 seconds plus operation latency. Successful acceptance/readiness/acknowledgement ends polling immediately; no fixed delay is imposed when ready. Applies to media_view, artifact addToChat, Browser Agent resources and Library transfers."
   },
   "browserStudyDetailedLogging": {
     "value": true,

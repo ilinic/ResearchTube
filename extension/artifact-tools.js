@@ -38,7 +38,7 @@ export function publicWorkspaceArguments(tool,args,definitions) {
 }
 export function artifactToolDefinitions(definitions,chatSchema,widgetUri,readAnnotations,writeAnnotations) {
   // A private tab reservation exists before there are artifacts. It has an
-  // empty real-file list; ordinary media_to_chat still requires a nonempty batch.
+  // empty real-file list; ordinary media_view still requires a nonempty batch.
   const workflowChatSchema={...chatSchema,properties:{...chatSchema.properties,
     files:{...chatSchema.properties.files,minItems:0}}};
   const dataSchemas=Object.fromEntries(definitions.filter(t=>ARTIFACT_TOOLS.includes(t.name)).map(t=>[t.name,
