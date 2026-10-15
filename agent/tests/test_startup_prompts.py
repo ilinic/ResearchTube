@@ -105,6 +105,20 @@ class StartupPromptTests(unittest.IsolatedAsyncioTestCase):
                         await asyncio.gather(runner, return_exceptions=True)
                     self.assertFalse(servers[-1].is_serving())
 
+    async def test_legacy_active_prompt_warns_without_replacing_or_logging_text(self):
+        original={'studyThisSitePrompt':'PRIVATE custom task: use site_send_message then site_chat_read. [chat_tab_id]'}
+        with patch.object(agent,'configured_startup_prompts',return_value=original), \
+             patch.object(agent,'STARTUP_PROMPTS',{}), \
+             patch.object(agent,'startup_workspace_path',return_value=Path('/unused')), \
+             patch.object(agent,'initialize_health_snapshot',return_value={}), \
+             patch.object(agent,'log') as log, \
+             patch.object(asyncio,'start_server',side_effect=RuntimeError('fixture stop before bind')):
+            with self.assertRaises(RuntimeError):await agent.serve(0)
+            self.assertEqual(agent.STARTUP_PROMPTS,original)
+            self.assertEqual(log.call_count,1)
+            self.assertIn('site_board_post/read/open',log.call_args.args[0])
+            self.assertNotIn('PRIVATE',log.call_args.args[0])
+
     async def test_invalid_prompt_stops_startup_before_binding(self):
         with tempfile.TemporaryDirectory() as folder:
             config = Path(folder) / 'agent-config.json'

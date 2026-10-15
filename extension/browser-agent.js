@@ -115,14 +115,16 @@ export function createBrowserAgent(host) {
     return ++pageEpoch;
   };
   let groups;
-  const journal = createGroupChatController({ ...host, notifyChat: (...args) => host.notifyChat(...args), groupChatRequest: (...args) => host.groupChatRequest(...args), openGroupView: (...args) => host.openGroupView(...args), safeUrl: safePageUrl, check: (...args) => groups.check(...args), refresh: group => groups.refresh(group), scheduleDelay: host.scheduleDelay || ((work, ms) => setTimeout(() => { void work().catch(() => {}); }, ms)) });
+  const journal = createGroupChatController({ ...host,
+    groupChatRequest: (...args) => host.groupChatRequest(...args),
+    openGroupView: (...args) => host.openGroupView(...args),
+    safeUrl: safePageUrl, check: (...args) => groups.check(...args)
+  });
   groups = createBrowserGroups({ ...host,
     onGroupSnapshot: group => journal.sync(group),
-    notifyChat: (...args) => host.notifyChat(...args),
     studyOptions: host.studyOptions || (async () => ({ detailedLogging: false })),
     removed: async (group, tabId, code) => { cancelForTab(group, tabId); await dropTarget(group, tabId, code); },
-    conversationChanged: async (group, tabId) => { cancelForTab(group, tabId); },
-    scheduleDelay: host.scheduleDelay || ((work, ms) => setTimeout(() => { void work().catch(() => {}); }, ms))
+    conversationChanged: async (group, tabId) => { cancelForTab(group, tabId); }
   });
   const command = async (tabId, method, params = {}, childSessionId = null) => {
     try {
@@ -170,7 +172,11 @@ export function createBrowserAgent(host) {
     if (session.error) throw browserError(session.error.code, session.error.message);
     if (targets.get(session.agentTabId) !== session) throw browserError("TAB_LEFT_GROUP", "This page no longer belongs to the current group automation.");
     const tab = await groups.check(session.group, session.agentTabId);
-    if (mutation && session.operation) await groups.check(session.group, session.operation.chatTabId, session.operation.chatPath);
+    if (mutation && session.operation) {
+      await groups.check(session.group, session.operation.chatTabId, session.operation.chatPath);
+      if (isChatTab(tab) && session.agentTabId !== session.operation.chatTabId && !["scroll", "hover"].includes(session.operation.action))
+        throw browserError("BROWSER_INVALID", "Other ChatGPT tabs are read-only: publish research with site_board_post.");
+    }
     if (mutation && session.group.state !== "running") throw browserError("BROWSER_SESSION_NOT_READY", "Wait for study initialization.");
     if (session.url !== tab.url) { session.url = tab.url; session.pageVersion = nextPageVersion(); session.revision++; session.page.invalidate(); }
     session.title = tab.title || "";
@@ -218,7 +224,7 @@ export function createBrowserAgent(host) {
     await host.updateStatus?.([tabId], { state: "stopped", phase: "stopped", statusMessage: "Participant automation stopped.", error: null });
   }
   async function stopGroup(group) {
-    group.state = "stopped"; group.phase = "stopped"; group.pending.clear();
+    group.state = "stopped"; group.phase = "stopped";
     for (const task of tasks.values()) if (task.groupId === group.groupId) cancelTask(task);
     for (const tabId of [...group.targets.keys()]) await dropTarget(group, tabId, "BROWSER_SESSION_STOPPED");
     await host.updateStatus?.([...group.members.keys()], { state: "stopped", phase: "stopped", statusMessage: "Group automation stopped.", error: null });
@@ -441,22 +447,39 @@ export function createBrowserAgent(host) {
   async function execute(name, argumentsValue) {
     const input = validateBrowserInput(name, argumentsValue);
     const { group, member } = await groups.forChat(input.chatTabId);
-    const caller = { group, chatTabId: input.chatTabId, chatPath: member.chatPath, tool: name };
+    const result = await executeInGroup(name, input, group, member);
+    await groups.check(group, input.chatTabId, member.chatPath, { allowStopped: true });
+    const fullSnapshot = ["site_list_tabs", "site_session_status"].includes(name) && result.group.revision === group.revision;
+    const changes = groups.reportChanges(group, input.chatTabId, member.chatPath, fullSnapshot);
+    let board;
+    try { board = await journal.summary(group, input.chatTabId); }
+    catch {
+      try { host.diagnostic?.({stage:"board.summary",code:"AGENT_UNAVAILABLE"})?.catch?.(() => {}); log("Board summary unavailable", {groupId:group.groupId}); } catch {}
+    }
+    // Only a successful result acknowledges the membership snapshot. Metadata is
+    // independent of page payload budgets, IDs, text and file continuation.
+    const response = { ...result, ...(board ? { board } : {}), ...(changes.groupChanges ? { groupChanges: changes.groupChanges } : {}) };
+    changes.commit();
+    return response;
+  }
+  async function executeInGroup(name, input, group, member) {
+    const caller = { group, chatTabId: input.chatTabId, chatPath: member.chatPath, tool: name, action: input.action };
     if (["site_list_tabs", "site_session_status"].includes(name)) {
-      groups.acknowledge(group, input.chatTabId); return { chatTabId: input.chatTabId, group: groups.project(group, input.offset, input.limit) };
+      return { chatTabId: input.chatTabId, group: groups.project(group, input.offset, input.limit) };
     }
     if (["site_files_status", "site_files_cancel"].includes(name)) {
       const task = tasks.get(input.taskId);
       if (!task || task.groupId !== group.groupId) throw browserError("BROWSER_TASK_NOT_FOUND", "This task is not in your current group, or its history expired.");
-      groups.acknowledge(group, input.chatTabId);
       return name === "site_files_status" ? publicTask(task) : { cancelled: cancelTask(task), task: publicTask(task) };
     }
-    if (name === "site_chat_read") return journal.read(group, input);
-    if (name === "site_chat_open") return { chatTabId: input.chatTabId, ...await journal.open(group) };
+    if (name === "site_board_read") return journal.read(group, input);
+    if (name === "site_board_open") return { chatTabId: input.chatTabId, ...await journal.open(group, input.chatTabId) };
     if (name === "site_session_stop") return { chatTabId: input.chatTabId, group: await stopGroup(group) };
     await groups.check(group, input.chatTabId, caller.chatPath);
-    if (name === "site_send_message") return journal.send(group, input);
+    if (name === "site_board_post") return journal.post(group, input);
     const tab = await groups.check(group, input.tabId);
+    if (name === "site_interact" && isChatTab(tab) && input.tabId !== input.chatTabId && !["scroll", "hover"].includes(input.action))
+      throw browserError("BROWSER_INVALID", "Other ChatGPT tabs are read-only: publish research with site_board_post.");
     const target = targetFor(group, tab);
     const result = await queue(input.tabId, async () => {
       target.operation = caller;
@@ -486,9 +509,9 @@ export function createBrowserAgent(host) {
         });
       } finally { target.operation = null; }
     });
-    if (Object.hasOwn(result, "taskId")) { groups.acknowledge(group, input.chatTabId); return result; }
+    if (Object.hasOwn(result, "taskId")) return result;
     await groups.check(group, input.chatTabId, caller.chatPath);
-    await groups.refresh(group); groups.acknowledge(group, input.chatTabId);
+    await groups.refresh(group);
     return { ...result, chatTabId: input.chatTabId, tabId: input.tabId, group: groups.project(group),
       ...(result.observation ? { observation: { ...result.observation, chatTabId: input.chatTabId, group: groups.project(group) } } : {}) };
   }
@@ -587,7 +610,6 @@ export function createBrowserAgent(host) {
     const tabs = await host.queryChatTabs?.() || [];
     const seen = new Set();
     await Promise.allSettled(tabs.filter(tab => Number.isSafeInteger(tab.groupId) && tab.groupId >= 0 && host.conversationPath(tab.url) && !seen.has(tab.groupId) && seen.add(tab.groupId)).map(tab => groups.forChat(tab.id)));
-    await Promise.allSettled([...groups.values()].map(group => journal.pump(group)));
   }
   return { start, execute, connectGroup, recoverGroups, onEvent, onRemoved, onDetached, onUpdated, onCreated: groups.changed, onReplaced: groups.changed,
     localStatus, ownsTab: id => [...groups.values()].some(group => !["stopped", "failed"].includes(group.state) && group.members.has(id)) };

@@ -9,7 +9,7 @@ const f=fixture();const started=await f.agent.start(10);
 assert.equal(started.chatTabId,22);assert.equal(started.group.groupId,100);
 assertSchema(definitions.find(t=>t.name==='site_list_tabs').outputSchema,{chatTabId:22,group:started.group});
 const prompt=f.events.find(e=>e[0]==='prompt')[2];
-assert.match(prompt,/GPT tab\(s\) 23 in group 100/);assert.match(prompt,/chatTabId: 22/);
+assert.match(prompt,/independent researcher/);assert.match(prompt,/chatTabId: 22/);
 assert.deepEqual(started.chatTabIds,[22,23]);assert.equal(started.group.tabs.filter(t=>t.role==='service').length,1);assert.equal(f.events.filter(e=>e[0]==='prompt').length,2);
 assert.doesNotMatch(prompt,/sessionId|bas_|site_get_images|site_get_files/);
 for(const tool of definitions){assert.ok(!tool.inputSchema.properties.sessionId);assert.ok(tool.inputSchema.required.includes('chatTabId'));}
@@ -57,10 +57,10 @@ assert.notEqual(a.nodes.find(n=>n.role==='image').nodeId,b.nodes.find(n=>n.role=
 await assert.rejects(multi.run('site_get_node',{tabId:31,nodeId:a.nodes[0].nodeId}),{code:'PAGE_CHANGED'});
 const peer=await multi.run('site_read',{tabId:30});assert.equal(peer.tabId,30,'peer chat reads use the same page tools');
 assert.ok(multi.events.some(e=>e[0]==='Accessibility.getFullAXTree'&&e[1]===30));
-const toPeer=await multi.run('site_send_message',{recipientTabIds:[30],text:'Please compare these sources.'});
-assert.equal(toPeer.status,'recorded');assert.deepEqual(toPeer.recipientTabIds,[30]);
-assert.ok((await multi.run('site_chat_read')).entries.some(e=>e.id===toPeer.messageId&&e.text==='Please compare these sources.'));
-await assert.rejects(multi.run('site_send_message',{recipientTabIds:[31],text:'Hello'}),{code:'BROWSER_INVALID'});
+const toPeer=await multi.run('site_board_post',{text:'Compared these sources.'});
+assert.equal(toPeer.status,'recorded');assert.equal(toPeer.recipientTabIds,undefined);
+assert.ok((await multi.run('site_board_read')).entries.some(e=>e.id===toPeer.messageId&&e.text==='Compared these sources.'));
+await assert.rejects(multi.run('site_board_post',{recipientTabIds:[31],text:'Hello'}),{code:'BROWSER_INVALID'});
 
 // Source closure cancels its work only, and another ChatGPT participant lives on.
 const queuedA=await multi.run('site_get_images',{resourceId:a.nodes.find(n=>n.role==='image').resources[0].resourceId});
@@ -170,7 +170,7 @@ assert.equal(await waitForBrowserConversation(chatHost,22),saved);assert.equal(t
 assert.equal(browserStudyGroupTitle({title:'Marketplace - Insulation | Facebook',url:'https://facebook.com/item'}),'RT · Insulation');
 assert.equal(Array.from(browserStudyGroupTitle({title:'😀'.repeat(30)})).length,25);
 for(const input of [{sessionId:'bas_abcdefghij'},{chatTabId:22,tabId:21,depth:21},{chatTabId:22,tabId:21,mode:'subtree'}])assert.throws(()=>validateBrowserInput('site_read',input),{code:'BROWSER_INVALID'});
-assert.throws(()=>validateBrowserInput('site_send_message',{chatTabId:22,tabId:30,text:' '}),{code:'BROWSER_INVALID'});
+assert.throws(()=>validateBrowserInput('site_board_post',{chatTabId:22,tabId:30,text:' '}),{code:'BROWSER_INVALID'});
 console.log('Browser groups: prompt, strict schemas, exact multiple tabs, peer messages, resource delivery, closure, movement, restart discovery, notifications and cancellation: ok');
 
 // Protected OOP targets never receive domain-enable or tree-read commands.

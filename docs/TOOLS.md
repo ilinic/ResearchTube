@@ -201,7 +201,7 @@ The original Workspace files are unchanged. A restarted Extension worker marks q
 
 ## Browser Agent
 
-Start **Study this site** from the popup. It requires the Local Agent and groups a page copy, two GPT conversations and a read-only journal view, leaving the source in place. Each prompt supplies its own `chatTabId`, peers and group context. Every site tool takes that initiating `chatTabId`; page tools also take a target `tabId` discovered from the group. Multiple sites and ChatGPT participants can work together. Closing/leaving one participant cancels only its work. Chrome is the live source of membership; no public session ID or stored group session is used. See [Browser Agent](features/BROWSER_AGENT.md).
+Start **Study this site** from the popup. It requires the Local Agent and groups a page copy, two independent GPT researchers and a read-only Shared Board view, leaving the source in place. Each default prompt supplies its own `chatTabId`; researchers discover peers with `site_list_tabs`. Every site tool takes that initiating `chatTabId`; page tools also take a target `tabId` discovered from the group. Multiple sites and ChatGPT participants can work together. Closing/leaving one participant cancels only its work. Chrome is the live source of membership; no public session ID or stored group session is used. See [Browser Agent](features/BROWSER_AGENT.md).
 
 | Tool | Behavior |
 | --- | --- |
@@ -210,12 +210,12 @@ Start **Study this site** from the popup. It requires the Local Agent and groups
 | `site_get_children` | Expand current children with depth and pagination. |
 | `site_get_node` | Inspect AX details, safe DOM geometry and resource references. |
 | `site_get_text` | Read deferred subtree text with offset/limit. |
-| `site_interact` | Click, hover, type, key, scroll or select in an exact group site or peer ChatGPT tab. |
+| `site_interact` | Click, type, key, select, scroll or hover on sites; peer GPT chats allow only reading, scrolling and hovering. |
 | `site_get_images` | Download observed images from the target tab and optionally attach/send an ordered batch to the initiating chat; labelled screenshot fallbacks. |
 | `site_get_files` | Download observed documents/audio/video from the target and optionally attach/send one batch to the initiating chat. |
-| `site_send_message` | Save a shared-journal message and notify one, several or all other group GPT participants; returns recorded after saving. |
-| `site_chat_read` | Read bounded pages of recent/older messages and group events, optionally filtering addressed messages. |
-| `site_chat_open` | Open the read-only local journal view; closing it leaves messaging active. |
+| `site_board_post` | Publish a useful research finding to the shared Board, without waking other GPTs. |
+| `site_board_read` | Read contributions from your saved position, or browse older publications without changing it. |
+| `site_board_open` | Open the read-only Board: a simple research log that remains available when views close. |
 | `site_files_status` | Read file task progress, saved files and confirmed submission. |
 | `site_files_cancel` | Cancel file work before Send commits, preserving outputs and drafts. |
 | `site_session_status` | Read current group participants and automation state using chatTabId, without a session token. |

@@ -46,8 +46,8 @@ except ImportError:
     from task_history import TaskHistory
     from browser_resources import save_browser_resource
 
-AGENT_VERSION = "2.4.0"
-INTERFACE_VERSION = 81
+AGENT_VERSION = "2.5.0"
+INTERFACE_VERSION = 82
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
 MAX_GOOGLE_TRANSLATE_AUDIO_BYTES = 16 * 1024 * 1024
@@ -6477,6 +6477,8 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
 async def serve(port: int) -> None:
     global WORKSPACE_PATH, STARTUP_PROMPTS
     STARTUP_PROMPTS = configured_startup_prompts()
+    if re.search(r'\b(?:site_send_message|site_chat_read|site_chat_open)\b', STARTUP_PROMPTS.get('studyThisSitePrompt', '')):
+        log('Update the active studyThisSitePrompt in agent-config.json: use site_board_post/read/open. The custom prompt has been preserved.')
     # Freeze the root for this run: live edits must not redirect active tasks,
     # media viewers or shares into a different directory mid-operation.
     WORKSPACE_PATH = startup_workspace_path()

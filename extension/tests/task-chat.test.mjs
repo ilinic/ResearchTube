@@ -202,7 +202,7 @@ for (const name of ["site_get_images", "site_get_files"]) {
  assert.ok(tool.outputSchema.properties.chatTabId);
  assert.ok(!tool.inputSchema.properties.sessionId);
 }
-for (const name of ["site_send_message", "site_chat_read", "site_chat_open"]) { const tool=tools.find(t=>t.name===name); assert.ok(tool.inputSchema.required.includes("chatTabId")); assert.ok(!tool.inputSchema.properties.tabId); }
+for (const name of ["site_board_post", "site_board_read", "site_board_open"]) { const tool=tools.find(t=>t.name===name); assert.ok(tool.inputSchema.required.includes("chatTabId")); assert.ok(!tool.inputSchema.properties.tabId); }
 assert.ok(worker.mediaToChatTaskSchema.properties.tabId, "nested artifact chat schema permits context");
 const custom = worker.customToolDefinition({ name: "custom_test", title: "Test", description: "Test",
  inputSchema: { type: "object", properties: {}, required: [], additionalProperties: false },

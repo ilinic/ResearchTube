@@ -1,6 +1,6 @@
 # Browser Agent: group automation
 
-**Study this site** requires the Local Agent. It duplicates the site, opens two collaborating GPT conversations and a read-only shared journal view in a blue `RT · …` group. The original tab stays in place. Both configured prompts receive their own `chatTabId`, peer IDs and the group ID. No browser session token is passed to ChatGPT. See [Shared group chat](GROUP_CHAT.md).
+**Study this site** requires the Local Agent. It duplicates the site, opens two independent GPT researchers and a read-only Shared Board view in a blue `RT · …` group. The original tab stays in place. The default prompt supplies each researcher’s own `chatTabId`; custom templates may also include peer and group IDs. No browser session token is passed to ChatGPT. See [Shared Board](GROUP_CHAT.md).
 
 Reload the Extension and refresh the ResearchTube MCP catalog after upgrading. Start a new study chat, or use `system_get_chat_context` to connect an existing grouped ChatGPT tab without knowing its ID. Old `sessionId` arguments are rejected.
 
@@ -37,21 +37,21 @@ Missing entries use the built-in defaults. Describe this video also supports off
 
 ## Participants and identity
 
-A session is an in-memory object keyed by Chrome `groupId`, containing sites, ChatGPT participants, page connections, tasks and pending notifications. Chrome remains the source of membership. Every site tool requires the initiating `chatTabId`; page operations also require a target `tabId` from `site_list_tabs`. MCP does not authenticate the originating tab: this is explicit caller routing, not proof of request origin. The Extension checks the actual live tabs and group before operations; it never chooses the active tab or a similar URL.
+A session is an in-memory object keyed by Chrome `groupId`, containing sites, ChatGPT participants, page connections, tasks and passive membership snapshots. Chrome remains the source of membership. Every site tool requires the initiating `chatTabId`; page operations also require a target `tabId` from `site_list_tabs`. MCP does not authenticate the originating tab: this is explicit caller routing, not proof of request origin. The Extension checks the actual live tabs and group before operations; it never chooses the active tab or a similar URL.
 
 `site_list_tabs` discovers titles, safe addresses, participant roles and automation state. Large groups use `offset`/`limit` pagination (50 entries by default, up to 200 per call); restart from offset 0 if the group revision changes. There is no configured cap on participants. Page/task responses carry the current group revision and its first page of participants.
 
-New tabs join when placed in the group. Leaving or closing a participant cancels only its pending work and releases its page connection. Other chats/sites continue. With no site tabs, status is `idle`; adding a site makes it available again. Renaming, collapsing or reordering the group does not select a different target. Ordinary browser pages and peer ChatGPT conversations can be read and operated through the same page tools. Internal Chrome pages are excluded.
+New tabs join when placed in the group. Leaving or closing a participant cancels only its pending work and releases its page connection. Other chats/sites continue. With no site tabs, status is `idle`; adding a site makes it available again. Renaming, collapsing or reordering the group does not select a different target. Ordinary browser pages support page reading and interaction. Peer ChatGPT conversations allow reading, scrolling and hovering; input, clicks, keys and selection are refused. Internal Chrome pages are excluded.
 
-Tab IDs are valid only in the current browser session. After a service-worker restart, the next call rediscovers the group from the supplied `chatTabId`; page content must be read again and old element/resource IDs are invalid. File tasks and their history are in memory and cannot resume after worker restart; the shared journal/outbox is durable in the Agent. Browser restart or Extension reload requires a fresh tab ID. No group-session or task records are saved in Chrome Storage.
+Tab IDs are valid only in the current browser session. After a service-worker restart, the next call rediscovers the group from the supplied `chatTabId`; page content must be read again and old element/resource IDs are invalid. File tasks and their history are in memory and cannot resume after worker restart; the Board and reading cursors are durable in the Agent. Browser restart or Extension reload requires a fresh tab ID. No group-session or task records are saved in Chrome Storage.
 
 ## Queues and chat collaboration
 
 `tab-automation.js` supplies a shared queue per physical tab. Work in different tabs can proceed independently. Page input, Composer messages and file delivery in one tab are serialized. Resource extraction releases its source queue before waiting for the receiving chat, preventing cross-chat delivery deadlocks. Temporary file/Composer operations borrow debugger leases and cannot detach a retained page connection.
 
-`site_send_message` records text in the Local Agent's persistent shared journal. Use optional `recipientTabIds` for one/many recipients; omit it to notify all other saved GPT chats in the group. It returns `recorded` after saving, independently of notification delivery. `site_chat_read` pages current/older history; `site_chat_open` opens a read-only view. Group events use this same mechanism. Busy recipients wait, notifications coalesce, and uncertain insertion/Send is not replayed. See [Shared group chat](GROUP_CHAT.md).
+`site_board_post` publishes a useful finding to the persistent Shared Board, without recipients or wake-ups. `site_board_read` reads forward from a durable per-conversation cursor; explicit `afterId`/`beforeId` browses history without advancing it. `site_board_open` opens a read-only log with no header. Successful Site results passively report unread publications and `groupChanges`; idle GPTs remain idle. See [Shared Board](GROUP_CHAT.md).
 
-`site_files_status` and `site_files_cancel` cover file tasks. Their history remains worker-local. `site_session_status` and `site_session_stop` operate on the caller's current group without a session ID. Stop cancels file/page work and pauses journal notification delivery; it preserves tabs, files, drafts, journal history and pending messages. Explicit `system_get_chat_context` reconnection resumes delivery; status reads and recovery alarms do not undo Stop.
+`site_files_status` and `site_files_cancel` cover file tasks. Their history remains worker-local. `site_session_status` and `site_session_stop` operate on the caller's current group without a session ID. Stop cancels file/page work and prevents new Board posts, preserving tabs, files, drafts and Board history. Explicit `system_get_chat_context` reconnection resumes the group; status reads and recovery do not undo Stop.
 
 ## Observation and navigation
 
@@ -93,7 +93,7 @@ Existing guarded file/startup delivery uses `composerMediaRetryCount` (15) and `
 
 ## Verification
 
-Run the normal Extension suite, including browser-agent, browser-resource-groups, tab-automation, browser-page-updates, browser-visible-images, browser-diagnostics and task-chat tests; Agent byte-ingestion tests remain required. Actual Chrome/ChatGPT verification must cover adding/removing/duplicating sites, multiple ChatGPT participants, peer messages, background reads, authenticated images, busy/draft recipients, navigation and closing one participant. Mocked protocol tests do not establish that an external site or the current ChatGPT UI passed a live browser test.
+Run the normal Extension suite, including browser-agent, browser-resource-groups, tab-automation, browser-page-updates, browser-visible-images, browser-diagnostics and task-chat tests; Agent byte-ingestion tests remain required. Actual Chrome/ChatGPT verification must cover adding/removing/duplicating sites, multiple ChatGPT participants, Board posts without wake-ups, passive unread/membership changes, Viewer scrolling, background reads, authenticated images, navigation and closing one participant. Mocked protocol tests do not establish that an external site or the current ChatGPT UI passed a live browser test.
 
 ## Errors available to ChatGPT
 
