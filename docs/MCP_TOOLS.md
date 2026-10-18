@@ -51,23 +51,20 @@ Find and organize files in ResearchTube's local working folder.
 
 ## Browser Agent
 
-Study websites together in a Chrome tab group. Add sites or ChatGPT conversations to the group; participants can read pages, inspect images and exchange messages. Each tab works independently, so closing one does not end everyone else's research.
+Research several websites from one leading ChatGPT chat. Drag site tabs into its Chrome group, remove them or close them while working. All images and files arrive in the leading chat. Additional ChatGPT tabs cannot use Site tools; closing the leader stops the group.
 
 | Tool | What you can do |
 | --- | --- |
-| **Cancel site task** | Stop a website download or pending message, keeping saved files and drafts. |
-| **Site task status** | Follow file downloads and messages and see confirmed results. |
+| **Cancel site task** | Stop a website download or pending file delivery, keeping saved files and drafts. |
+| **Site task status** | Follow file downloads and delivery and see confirmed results. |
 | **Get site node children** | Explore items inside a page section, list, menu or form. |
 | **Get site documents, audio and video** | Download files found on a page and optionally send them to the requesting chat. |
 | **Get site images** | Download selected images for ChatGPT to inspect, or save them locally. |
 | **Inspect site node** | Examine an element and discover details, images or files. |
 | **Read site node text** | Read a selected section in more detail. |
-| **Interact with site element** | Click, type, select, hover or scroll in a group site or peer chat. |
-| **List group tabs** | Discover all participating sites and ChatGPT conversations. |
-| **Read site page** | Read a site's or peer chat's accessible content and discover available files. |
-| **Read group chat history** | Read recent or older shared messages and group events. |
-| **Open group chat journal** | Open a read-only view of the team conversation; closing it leaves collaboration running. |
-| **Send message to group chat** | Ask another ChatGPT participant to research, compare or review results. |
+| **Interact with site element** | Click, type, select, hover or scroll on a site page. |
+| **List group tabs** | Discover current sites and the leading chat. |
+| **Read site page** | Read a site's accessible content and discover available files. |
 | **Group automation status** | Check the group's participants and current automation state. |
 | **Stop group automation** | End group automation while leaving tabs, files and drafts in place. |
 

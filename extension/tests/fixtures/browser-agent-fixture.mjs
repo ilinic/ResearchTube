@@ -1,4 +1,3 @@
-import {fakeGroupChat} from "./group-chat-fixture.mjs";
 import assert from 'node:assert/strict';
 import {webcrypto} from 'node:crypto';
 import {createBrowserAgent,waitForBrowserDocument,waitForBrowserConversation,browserStudyGroupTitle} from '../../browser-agent.js';
@@ -11,11 +10,15 @@ const attr=value=>({value});
 const ax=(nodeId,role,name,childIds=[],backendDOMNodeId=Number(nodeId)+100)=>({nodeId,role:attr(role),name:attr(name),childIds,backendDOMNodeId,ignored:false});
 export const initialTree=[ax('1','RootWebArea','Site',['2']),ax('2','generic','',['3','4','5','6','7']),ax('3','heading','Article',['8']),ax('4','image','Diagram'),ax('5','textbox','Search'),ax('6','combobox','Choice'),ax('7','button','Open'),ax('8','StaticText','Detailed content',['9']),ax('9','InlineTextBox','Detailed content')];
 for(const raw of initialTree)for(const child of raw.childIds)initialTree.find(node=>node.nodeId===child).parentId=raw.nodeId;
-export function fixture({multipleImages=false,nonImages=false}={}){
+export function fixture({multipleImages=false,nonImages=false,imageCount=1}={}){
  let nextGroup=100; let nextTab=20,tree=structuredClone(initialTree),clock=1_700_000_000_000;
- if(multipleImages){
-  tree.find(node=>node.nodeId==='2').childIds.push('10','11');
-  for(const id of ['10','11'])tree.push({...ax(id,'image','Additional diagram'),parentId:'2'});
+ const imageBackends=new Set([104]);
+ if(multipleImages||imageCount>1){
+  const count=multipleImages?3:imageCount;
+  for(let index=0;index<count-1;index++){
+   const id=String(index+10);tree.find(node=>node.nodeId==='2').childIds.push(id);
+   tree.push({...ax(id,'image','Additional diagram'),parentId:'2'});imageBackends.add(Number(id)+100);
+  }
  }
  if(nonImages){
   tree.find(node=>node.nodeId==='2').childIds.push('12','13','14');
@@ -27,18 +30,16 @@ export function fixture({multipleImages=false,nonImages=false}={}){
   video: {mimeType:'video/mp4',ext:'mp4',bytes:Buffer.from([0,0,0,20,102,116,121,112,105,115,111,109])}
  };
  const tabs=new Map([[10,{id:10,url:'https://site.test/article?token=PRIVATE',title:'Site',active:true,index:3,windowId:2}]]);
- const messages=[],notifications=[]; const events=[],scheduled=[],uploads=[],saved=[],logs=[],domValues=new Map();let closed=false,failOriginal=false,tooLarge=false,onAttach=null,onSave=null;
- const journal=fakeGroupChat();
- const host={groupChatReady:async()=>({available:true}),groupChatRequest:journal.request,
- openGroupView:async(group,roomId)=>{const existing=[...tabs.values()].find(t=>t.groupId===group.groupId&&t.url===`http://127.0.0.1:17843/group-chat/${roomId}`);if(existing)return existing;const tab={id:++nextTab,url:`http://127.0.0.1:17843/group-chat/${roomId}`,groupId:group.groupId};tabs.set(tab.id,tab);events.push(["view",tab.id]);return tab;},
+ const events=[],scheduled=[],uploads=[],saved=[],logs=[],domValues=new Map();let closed=false,failOriginal=false,tooLarge=false,onAttach=null,onSave=null;
+ const ownerMarkers=new Map();
+ const host={readOwner:async id=>structuredClone(ownerMarkers.get(id) || null),writeOwner:async(id,record)=>{if(!tabs.has(id))throw Error('closed');ownerMarkers.set(id,structuredClone(record));},
  now:()=>clock,sleep:async()=>{clock+=500;await new Promise(resolve=>setImmediate(resolve));},getTab:async id=>{if(!tabs.has(id))throw Error('closed');return tabs.get(id);},
  duplicateTab:async id=>{const tab={...tabs.get(id),id:++nextTab,active:false,index:4};tabs.set(tab.id,tab);events.push(['duplicate',id]);return tab;},restoreSource:async id=>events.push(['restore',id]),
  createChatTab:async(source,agent)=>{const tab={id:++nextTab,url:'https://chatgpt.com/',index:5,windowId:2,active:false};tabs.set(tab.id,tab);events.push(['createChat',source.id,agent.id]);return tab;},waitReady:async id=>events.push(['documentReady',id]),
  attach:async id=>events.push(['attach',id]),detach:async id=>events.push(['detach',id]),conversationPath:url=>url.match(/\/c\/[^/]+/)?.[0]||null,
  startChat:async(id,prompt)=>{events.push(['prompt',id,prompt]);tabs.get(id).url='https://chatgpt.com/c/study'+id;return '/c/study'+id;},
  groupTabs:async(ids,title)=>{const groupId=nextGroup++;for(const id of ids)tabs.get(id).groupId=groupId;events.push(['group',ids,title]);return groupId;}, queryTabs:async groupId=>[...tabs.values()].filter(tab=>tab.groupId===groupId),
- scheduleDelay:work=>notifications.push(work), notifyChat:async(tabId,text,options)=>{await options.beforeSend?.();await options.beforeInsert?.();options.onSendCommit?.();messages.push({tabId,text});return {sent:true};},
- updateStatus:async(ids,status)=>events.push(['toolbar',ids,structuredClone(status)]),resourceLimit:async()=>1024,resourceCountLimit:async()=>5,historyLimit:()=>2,schedule:work=>scheduled.push(work),log:(label,value)=>logs.push({label,value}),
+ updateStatus:async(ids,status)=>events.push(['toolbar',ids,structuredClone(status)]),resourceLimit:async()=>1024,resourceCountLimit:async()=>20,historyLimit:()=>2,schedule:work=>scheduled.push(work),log:(label,value)=>logs.push({label,value}),
  saveResource:async(taskId,bytes,mimeType,resourceId)=>{saved.push({taskId,bytes,mimeType,resourceId});await onSave?.();return {workspacePath:`study-this-site/${resourceId.replace(/^r_/,"res_")} [${taskId}].${Object.values(media).find(item=>item.mimeType===mimeType)?.ext || 'png'}`,mimeType,sizeBytes:bytes.length};},
  resolveFiles:async paths=>paths.map(path=>'/PRIVATE/'+path),
  attachFiles:async(files,options)=>{uploads.push({files,options});options.checkCancelled();await options.onPhase('composerAccepted');await onAttach?.(options);await options.beforeSend();options.checkCancelled();options.onSendCommit();},
@@ -55,7 +56,7 @@ export function fixture({multipleImages=false,nonImages=false}={}){
     const kind=id===112?'document':id===113?'audio':'video';
     return {result:{value:{tag:id===112?'a':kind,attributes:[],bounds:{x:10,y:20,width:50,height:40},resources:[{kind,url:'https://cdn.test/'+kind+'?signature=PRIVATE',rendering:null}],editable:false,password:false}}};
    }
-   if(params.functionDeclaration.includes('function inspectBrowserElement'))return {result:{value:{tag:[104,110,111].includes(id)?'img':id===105?'input':id===106?'select':'div',attributes:[],bounds:{x:10,y:20,width:50,height:40},resources:[104,110,111].includes(id)?[{kind:'image',url:'https://cdn.test/image.png?signature=PRIVATE',rendering:null}]:[],editable:id===105,password:false}}};
+   if(params.functionDeclaration.includes('function inspectBrowserElement'))return {result:{value:{tag:imageBackends.has(id)?'img':id===105?'input':id===106?'select':'div',attributes:[],bounds:{x:10,y:20,width:50,height:40},resources:imageBackends.has(id)?[{kind:'image',url:'https://cdn.test/image.png?signature=PRIVATE',rendering:null}]:[],editable:id===105,password:false}}};
    if(params.functionDeclaration.includes('elementFromPoint'))return {result:{value:true}};
    if(params.functionDeclaration.includes('this.options'))return {result:{value:args[0]==='a'}};
    if(params.functionDeclaration.includes('this.value'))return {result:{value:domValues.get(id)}};
@@ -79,5 +80,5 @@ export function fixture({multipleImages=false,nonImages=false}={}){
  };
  const agent=createBrowserAgent(host);
  const run=async(name,args={})=>{const targeted=definitions.find(tool=>tool.name===name)?.inputSchema.properties.tabId;const input={chatTabId:22,...(targeted?{tabId:21}:{}),...args};const result=await agent.execute(name,input);checkSchema(name,result);return result;};
- return {agent,run,host,journal,tabs,events,scheduled,notifications,messages,uploads,saved,logs,setTree:value=>tree=value,setOriginalFailure:()=>failOriginal=true,setTooLarge:()=>tooLarge=true,onAttach:fn=>onAttach=fn,onSave:fn=>onSave=fn};
+ return {agent,run,host,ownerMarkers,tabs,events,scheduled,uploads,saved,logs,setTree:value=>tree=value,setOriginalFailure:()=>failOriginal=true,setTooLarge:()=>tooLarge=true,onAttach:fn=>onAttach=fn,onSave:fn=>onSave=fn};
 }

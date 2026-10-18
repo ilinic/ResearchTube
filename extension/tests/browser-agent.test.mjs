@@ -9,11 +9,11 @@ const f=fixture();const started=await f.agent.start(10);
 assert.equal(started.chatTabId,22);assert.equal(started.group.groupId,100);
 assertSchema(definitions.find(t=>t.name==='site_list_tabs').outputSchema,{chatTabId:22,group:started.group});
 const prompt=f.events.find(e=>e[0]==='prompt')[2];
-assert.match(prompt,/independent researcher/);assert.match(prompt,/chatTabId: 22/);
-assert.deepEqual(started.chatTabIds,[22,23]);assert.equal(started.group.tabs.filter(t=>t.role==='service').length,1);assert.equal(f.events.filter(e=>e[0]==='prompt').length,2);
+assert.match(prompt,/leading chatTabId/);assert.match(prompt,/chatTabId: 22/);
+assert.equal(started.group.chatTabId,22);assert.equal(started.group.totalTabs,2);assert.equal(f.events.filter(e=>e[0]==='prompt').length,1);
 assert.doesNotMatch(prompt,/sessionId|bas_|site_get_images|site_get_files/);
 for(const tool of definitions){assert.ok(!tool.inputSchema.properties.sessionId);assert.ok(tool.inputSchema.required.includes('chatTabId'));}
-assert.deepEqual(f.events.find(e=>e[0]==='group'),['group',[21,22,23],'RT · Site']);
+assert.deepEqual(f.events.find(e=>e[0]==='group'),['group',[21,22],'RT · Site']);
 assert.equal(f.tabs.get(10).groupId,undefined,'the original tab is not moved');
 assert.ok(!f.events.some(e=>e[0]==='Accessibility.getFullAXTree'),'startup does not pre-read the page');
 assert.ok(!f.events.some(e=>['Runtime.addBinding','Page.addScriptToEvaluateOnNewDocument'].includes(e[0])));
@@ -43,26 +43,23 @@ f.tabs.get(21).url='https://site.test/next';await f.agent.onEvent({tabId:21},'Pa
 await assert.rejects(f.run('site_get_node',{nodeId:byRole('image').nodeId}),{code:'PAGE_CHANGED'});
 await f.run('site_read');
 await f.run('site_session_stop');assert.equal((await f.run('site_session_status')).group.state,'stopped');
-assert.equal(f.tabs.size,5);await assert.rejects(f.run('site_read'),{code:'BROWSER_SESSION_STOPPED'});
+assert.equal(f.tabs.size,3);await assert.rejects(f.run('site_read'),{code:'BROWSER_SESSION_STOPPED'});
 
-// Multiple sites and peer chats are live members, not copies of a saved list.
+// The leading chat controls all current sites; extra ChatGPT tabs are ignored.
 const multi=fixture();await multi.agent.start(10);
-multi.tabs.set(30,{id:30,url:'https://chatgpt.com/c/peer',title:'Peer',groupId:100,windowId:2});
+multi.tabs.set(30,{id:30,url:'https://chatgpt.com/c/other',title:'Other chat',groupId:100,windowId:2});
 multi.tabs.set(31,{id:31,url:'https://site.test/second?token=PRIVATE',title:'Second',groupId:100,windowId:2});
 await multi.agent.onCreated();
-assert.equal((await multi.run('site_list_tabs')).group.tabs.length,6);
-const a=await multi.run('site_read');const b=await multi.run('site_read',{chatTabId:30,tabId:31});
-assert.equal(b.chatTabId,30);assert.equal(b.tabId,31);
+assert.equal((await multi.run('site_list_tabs')).group.tabs.length,3);
+const a=await multi.run('site_read');const b=await multi.run('site_read',{tabId:31});
+assert.equal(b.chatTabId,22);assert.equal(b.tabId,31);
 assert.notEqual(a.nodes.find(n=>n.role==='image').nodeId,b.nodes.find(n=>n.role==='image').nodeId);
 await assert.rejects(multi.run('site_get_node',{tabId:31,nodeId:a.nodes[0].nodeId}),{code:'PAGE_CHANGED'});
-const peer=await multi.run('site_read',{tabId:30});assert.equal(peer.tabId,30,'peer chat reads use the same page tools');
-assert.ok(multi.events.some(e=>e[0]==='Accessibility.getFullAXTree'&&e[1]===30));
-const toPeer=await multi.run('site_board_post',{text:'Compared these sources.'});
-assert.equal(toPeer.status,'recorded');assert.equal(toPeer.recipientTabIds,undefined);
-assert.ok((await multi.run('site_board_read')).entries.some(e=>e.id===toPeer.messageId&&e.text==='Compared these sources.'));
-await assert.rejects(multi.run('site_board_post',{recipientTabIds:[31],text:'Hello'}),{code:'BROWSER_INVALID'});
+await assert.rejects(multi.run('site_read',{tabId:30}),{code:'BROWSER_INVALID'});
+await assert.rejects(multi.run('site_read',{chatTabId:30,tabId:31}),{code:'BROWSER_NOT_GROUP_OWNER'});
+await assert.rejects(multi.agent.connectGroup(30),{code:'BROWSER_NOT_GROUP_OWNER'});
 
-// Source closure cancels its work only, and another ChatGPT participant lives on.
+// Removing one site cancels its work only; removing all sites leaves idle state.
 const queuedA=await multi.run('site_get_images',{resourceId:a.nodes.find(n=>n.role==='image').resources[0].resourceId});
 multi.tabs.delete(21);await multi.agent.onRemoved(21);
 assert.equal((await multi.run('site_files_status',{taskId:queuedA.taskId})).status,'cancelled');
@@ -70,11 +67,13 @@ await multi.scheduled.shift()();assert.equal(multi.saved.length,0);
 assert.equal((await multi.run('site_session_status')).group.state,'running');
 await multi.run('site_read',{tabId:31});
 const queuedB=await multi.run('site_get_images',{tabId:31,resourceId:b.nodes.find(n=>n.role==='image').resources[0].resourceId});
-multi.tabs.delete(22);await multi.agent.onRemoved(22);
-assert.equal((await multi.run('site_files_status',{chatTabId:30,taskId:queuedB.taskId})).status,'cancelled');
-await multi.scheduled.shift()();await multi.run('site_read',{chatTabId:30,tabId:31});
 multi.tabs.delete(31);await multi.agent.onRemoved(31);
-assert.equal((await multi.run('site_list_tabs',{chatTabId:30})).group.state,'idle');
+assert.equal((await multi.run('site_files_status',{taskId:queuedB.taskId})).status,'cancelled');
+await multi.scheduled.shift()();
+assert.equal((await multi.run('site_list_tabs')).group.state,'idle');
+multi.tabs.delete(22);await multi.agent.onRemoved(22);
+await assert.rejects(multi.run('site_list_tabs',{chatTabId:30}),{code:'BROWSER_NOT_GROUP_OWNER'});
+await assert.rejects(multi.agent.connectGroup(30),{code:'BROWSER_NOT_GROUP_OWNER'});
 
 // Group exclusion and queued actions are revalidated against actual Chrome state.
 const moved=fixture();await moved.agent.start(10);
@@ -93,7 +92,7 @@ moved.tabs.get(22).groupId=-1;await assert.rejects(moved.run('site_list_tabs'),{
 const fresh=fixture();await fresh.agent.start(10);
 const oldIds=await fresh.run('site_read');
 const recreated=createBrowserAgent(fresh.host);
-const rediscovered=await recreated.execute('site_list_tabs',{chatTabId:22});assert.equal(rediscovered.group.tabs.length,4);
+const rediscovered=await recreated.execute('site_list_tabs',{chatTabId:22});assert.equal(rediscovered.group.tabs.length,2);
 // Use a separate fake debugger lease here; real workers lose their connections.
 const newRead=await recreated.execute('site_read',{chatTabId:22,tabId:21});
 assert.notEqual(oldIds.nodes[0].nodeId,newRead.nodes[0].nodeId);
@@ -137,9 +136,9 @@ assert.equal((await released.run('site_files_status',{taskId:uploadTask.taskId})
 // Participant count is unbounded; result pages remain bounded.
 const large=fixture();await large.agent.start(10);
 for(let id=1000;id<1250;id++)large.tabs.set(id,{id,url:'https://site.test/'+id,groupId:100});
-const firstPage=await large.run('site_list_tabs',{limit:50});assert.equal(firstPage.group.totalTabs,254);assert.equal(firstPage.group.tabs.length,50);
+const firstPage=await large.run('site_list_tabs',{limit:50});assert.equal(firstPage.group.totalTabs,252);assert.equal(firstPage.group.tabs.length,50);
 const secondPage=await large.run('site_list_tabs',{offset:50,limit:200});assert.equal(secondPage.group.tabs.length,200);assert.equal(secondPage.group.nextOffset,250);
-const lastPage=await large.run('site_list_tabs',{offset:250});assert.equal(lastPage.group.tabs.length,4);assert.equal(lastPage.group.nextOffset,null);
+const lastPage=await large.run('site_list_tabs',{offset:250});assert.equal(lastPage.group.tabs.length,2);assert.equal(lastPage.group.nextOffset,null);
 
 // Old grouping preference cannot disable the now-required working group.
 const required=fixture();required.host.studyOptions=async()=>({groupTabs:false,detailedLogging:false});await required.agent.start(10);assert.ok(required.events.some(e=>e[0]==='group'));
@@ -170,8 +169,7 @@ assert.equal(await waitForBrowserConversation(chatHost,22),saved);assert.equal(t
 assert.equal(browserStudyGroupTitle({title:'Marketplace - Insulation | Facebook',url:'https://facebook.com/item'}),'RT · Insulation');
 assert.equal(Array.from(browserStudyGroupTitle({title:'😀'.repeat(30)})).length,25);
 for(const input of [{sessionId:'bas_abcdefghij'},{chatTabId:22,tabId:21,depth:21},{chatTabId:22,tabId:21,mode:'subtree'}])assert.throws(()=>validateBrowserInput('site_read',input),{code:'BROWSER_INVALID'});
-assert.throws(()=>validateBrowserInput('site_board_post',{chatTabId:22,tabId:30,text:' '}),{code:'BROWSER_INVALID'});
-console.log('Browser groups: prompt, strict schemas, exact multiple tabs, peer messages, resource delivery, closure, movement, restart discovery, notifications and cancellation: ok');
+console.log('Browser groups: one controller, dynamic sites, strict schemas, resource delivery, closure, movement, worker recovery and cancellation: ok');
 
 // Protected OOP targets never receive domain-enable or tree-read commands.
 const protectedFrame=fixture();await protectedFrame.agent.start(10);

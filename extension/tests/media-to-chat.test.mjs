@@ -266,6 +266,22 @@ await context.cdpAttachFilesNow(['/workspace/report.pdf'], { currentChatTarget: 
 assert.deepEqual(sentBatches.at(-1), { draftEmpty: false, files: ['unknown.bin', 'report.pdf'] });
 assert.equal(resetInputs, 0);
 
+// A configured twenty-file batch passes validation and the actual shared
+// chooser/Composer/Send flow once, with no silent split or five-file clamp.
+const savedLimits=context.configuredToolLimits,savedResolver=context.resolveLibraryStoreFiles;
+context.configuredToolLimits=async()=>({mediaToChatMaxFiles:20});
+context.resolveLibraryStoreFiles=async files=>({localPaths:files.map(f=>'/workspace/'+f.workspacePath),submittedFiles:files,skippedFiles:[]});
+attachmentNames=[];draftEmpty=true;afterAcceptance=()=>{};
+const twentyFiles=Array.from({length:20},(_,i)=>({workspacePath:'batch-'+i+'.png'}));
+await assert.rejects(context.mediaToChatStart({files:[...twentyFiles,{workspacePath:'batch-20.png'}]}),error=>error.code==='MEDIA_TO_CHAT_INVALID');
+const twenty=await context.mediaToChatStart({files:twentyFiles});await bind(twenty.task.taskId);
+vm.runInContext('mediaToChatDraining = false',context);await context.drainMediaToChatQueue();
+assert.equal((await context.mediaToChatStatus(twenty.task.taskId)).status,'completed');
+assert.equal(sentBatches.at(-1).files.length,20);
+assert.deepEqual(sentBatches.at(-1).files,twentyFiles.map(f=>f.workspacePath));
+assert.equal(commands.filter(c=>c.method==='DOM.setFileInputFiles').at(-1).params.files.length,20);
+context.configuredToolLimits=savedLimits;context.resolveLibraryStoreFiles=savedResolver;
+
 // Run the real page expressions through the complete attachment flow. The old
 // #prompt-textarea is hidden and empty while the live rich Composer is occupied.
 const live = pageFixture();

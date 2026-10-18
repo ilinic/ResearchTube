@@ -255,6 +255,31 @@ class WorkspacePathResolverTests(unittest.TestCase):
         self.assertEqual((folder / "notes.txt").read_bytes(), b"notes")
         self.assertEqual((folder / "large.zip").stat().st_size, 1024 * 1024 + 1)
 
+    def test_current_chat_default_accepts_twenty_files(self) -> None:
+        folder = agent.WORKSPACE_PATH / 'uploads'
+        folder.mkdir(parents=True)
+        files = []
+        for index in range(21):
+            path = folder / f'file-{index}.txt'
+            path.write_text(str(index), encoding='utf-8')
+            files.append({'workspacePath': f'uploads/{path.name}'})
+        config = self.root / 'defaults.json'
+        config.write_text('{}', encoding='utf-8')
+        with patch.object(agent, 'CONFIG_PATH', config):
+            result = agent.media_to_chat_files({'files': files[:20]})
+            self.assertEqual(len(result['files']), 20)
+            self.assertEqual(result['skippedFiles'], [])
+            with self.assertRaises(agent.AgentApiError) as raised:
+                agent.media_to_chat_files({'files': files})
+            self.assertEqual(raised.exception.code, 'MEDIA_TO_CHAT_INVALID')
+            self.assertIn('20 items', raised.exception.message)
+            # A user's smaller local setting is still authoritative.
+            config.write_text(json.dumps({'limits': {'mediaToChatMaxFiles': {'value': 7}}}), encoding='utf-8')
+            self.assertEqual(len(agent.media_to_chat_files({'files': files[:7]})['files']), 7)
+            with self.assertRaises(agent.AgentApiError):
+                agent.media_to_chat_files({'files': files[:8]})
+        self.assertEqual(len(list(folder.iterdir())), 21)
+
     def test_default_twenty_mib_boundary_for_library_and_chat(self) -> None:
         agent.WORKSPACE_PATH.mkdir(parents=True)
         maximum = 20 * 1024 * 1024

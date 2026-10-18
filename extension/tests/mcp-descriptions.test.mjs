@@ -53,7 +53,7 @@ for (const name of ['site_get_images', 'site_get_files']) {
   assert.match(tool.inputSchema.properties.addToChat.description, /save Workspace files only.*no chat attachment or message/);
   assert.match(tool.inputSchema.properties.resourceId.description, /observed in this exact tab.*URLs are not accepted/);
   assert.match(tool.inputSchema.properties.resourceIds.description, /same target tab/);
-  assert.match(tool.inputSchema.properties.chatTabId.description, /Your ChatGPT chatTabId/);
+  assert.match(tool.inputSchema.properties.chatTabId.description, /leading chatTabId/);
   assert.ok(!Object.hasOwn(tool.inputSchema.properties, 'url'));
   assert.ok(!Object.hasOwn(tool.inputSchema.properties, 'chatId'));
 }

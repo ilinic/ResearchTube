@@ -9,7 +9,7 @@ const error = { ...object({ code: text, message: text }), type: ["object", "null
 export function systemToolDefinitions(widgetUri) {
   return [{
     name: "system_get_chat_context", title: "Connect this chat to its tab group",
-    description: "Identify this exact ChatGPT tab through the ResearchTube widget and connect its existing Chrome tab group. Call with no arguments to start; poll with taskId at pollIntervalMs. Returns chatTabId and group tabs for site tools. cancel=true with taskId cancels binding. No popup launch is required; no tabs or drafts are changed. Finish the response if the client delays mounting the widget.",
+    description: "Connect the single leading ChatGPT tab to its Chrome group through the widget. Existing groups refuse other chats; new manual groups must contain exactly one ChatGPT tab. Call with no arguments to start; poll with taskId at pollIntervalMs. Returns chatTabId and group tabs for site tools. cancel=true with taskId cancels binding. No popup launch is required; no tabs or drafts are changed. Finish the response if the client delays mounting the widget.",
     inputSchema: object({ taskId, cancel: { type: "boolean", default: false } }, []),
     outputSchema: object({ taskId, status: { enum: ["working", "completed", "failed", "cancelled"] }, phase: text, progressPercent: { type: "number", minimum: 0, maximum: 100 }, pollIntervalMs: { type: "integer", minimum: 100 }, chatTabId: nullableId, group: { ...browserGroupSchema, type: ["object", "null"] }, error }),
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },

@@ -14,7 +14,7 @@ function fixture(observation) {
   const urls = new Map([[103, "https://private.test/photo.jpg?signed=PRIVATE"], [121, "https://private.test/ad.jpg?token=PRIVATE"]]);
   const commands = [];
   let withFrame = false, action = null, duringRead = null, failRead = false;
-  const host = { context: () => ({ chatTabId: 22, group: { groupId: 7, revision: 1, state: "running", totalTabs: 0, nextOffset: null, tabs: [], error: null } }), check: async () => {}, command: async (tab, method, params, targetSessionId) => {
+  const host = { context: () => ({ chatTabId: 22, group: { groupId: 7, chatTabId: 22, revision: 1, state: "running", totalTabs: 0, nextOffset: null, tabs: [], error: null } }), check: async () => {}, command: async (tab, method, params, targetSessionId) => {
     commands.push({ method, params });
     if (method === "Page.getFrameTree") return targetSessionId ? { frameTree: { frame: { id: "ad", parentId: "main" } } } : { frameTree: { frame: { id: "main" }, childFrames: withFrame ? [{ frame: { id: "ad", parentId: "main" } }] : [] } };
     if (method === "Accessibility.getFullAXTree") {

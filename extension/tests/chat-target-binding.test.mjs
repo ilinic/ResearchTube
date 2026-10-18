@@ -16,7 +16,7 @@ const tabB={id:81,windowId:2,url:'https://chatgpt.com/c/other',active:true};
 function worker({initialStorage={},initialNow=Date.now()}={}) {
  let listener;
  let now=initialNow;
- const tabs=new Map([[42,{...tabA}],[81,{...tabB}]]);
+ const tabs=new Map([[42,{...tabA}],[81,{...tabB}]]),ownerPages=new Map();
  const storage=JSON.parse(JSON.stringify(initialStorage)),alarms=new Map(),mutations=[],queries=[],logs=[];
  class Clock extends Date {static now(){return now;}}
  const context=vm.createContext({URL,Intl,TextEncoder,TextDecoder,AbortController,structuredClone,crypto:webcrypto,Date:Clock,setTimeout,clearTimeout,
@@ -24,6 +24,11 @@ function worker({initialStorage={},initialNow=Date.now()}={}) {
   chrome:{runtime:{ getManifest: () => ({ version: "9.8.7" }),id:'extension-id',getURL:path=>path,onInstalled:{addListener(){}},onStartup:{addListener(){}},onMessage:{addListener(fn){listener=fn;}}},
    alarms:{onAlarm:{addListener(){}},create:async(name,value)=>alarms.set(name,value),clear:async name=>alarms.delete(name)},
    tabs:{query:async query=>{queries.push(query);assert.deepEqual(JSON.parse(JSON.stringify(query)),{},'never query active or last-focused tabs');return [...tabs.values()];},get:async id=>{if(!tabs.has(id))throw new Error('closed');return tabs.get(id);}},
+   scripting:{executeScript:async options=>{
+    let page=ownerPages.get(options.target.tabId);
+    if(!page){page=vm.createContext({location:{origin:new URL(tabs.get(options.target.tabId).url).origin}});ownerPages.set(options.target.tabId,page);}
+    page.record=options.args?.[0];return [{result:vm.runInContext('('+options.func.toString()+')(record)',page)}];
+   }},
    storage:{local:{get:async()=>storage,set:async value=>Object.assign(storage,value)}}}
  });
  vm.runInContext(bundle,context);
@@ -323,7 +328,6 @@ groupWorker.tabs.get(42).groupId=7;
 groupWorker.tabs.set(51,{id:51,groupId:7,url:'https://forum.test/thread',title:'Forum'});
 groupWorker.context.chrome.tabs.query=async query=>[...groupWorker.tabs.values()].filter(tab=>query.groupId==null || tab.groupId===query.groupId);
 groupWorker.context.configuredBrowserStudyOptions=async()=>({detailedLogging:false});
-groupWorker.context.agentJsonRequest=async(path)=>path.endsWith('/sync')?{roomId:'gc_0123456789012345678901',latestId:1,state:'running'}:{batches:[]};
 const callContext=args=>groupWorker.context.handleMcpRequest({id:10,method:'tools/call',params:{name:'system_get_chat_context',arguments:args}});
 const groupStart=await callContext({});
 assert.equal(groupStart.result.structuredContent.status,'working');
