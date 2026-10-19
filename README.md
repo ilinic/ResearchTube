@@ -17,14 +17,33 @@
 
 ### ResearchTube in Action
 
-<p align="center">
-  <a href="docs/picSite.png">
-    <img src="docs/picSite.png" width="48%" alt="ChatGPT exploring a website with ResearchTube">
-  </a>
-  <a href="docs/picVideo.png">
-    <img src="docs/picVideo.png" width="48%" alt="ChatGPT analyzing a YouTube video with ResearchTube">
-  </a>
-</p>
+See what ChatGPT can do with ResearchTube in three short, real-world demos. **Click a thumbnail to watch on YouTube.**
+
+<table>
+  <tr>
+    <td width="33%" align="center" valign="top">
+      <a href="https://www.youtube.com/watch?v=MCERzuiS0mg">
+        <img src="https://i.ytimg.com/vi_webp/MCERzuiS0mg/maxresdefault.webp" alt="Watch ChatGPT analyze OK Go's YouTube video" width="300">
+      </a>
+      <br><strong>See Inside YouTube Videos</strong>
+      <br><sub>Visual analysis, frames and storyboards · 34 sec</sub>
+    </td>
+    <td width="33%" align="center" valign="top">
+      <a href="https://www.youtube.com/watch?v=SKQO4lzK-Mc">
+        <img src="https://i.ytimg.com/vi_webp/SKQO4lzK-Mc/maxresdefault.webp" alt="Watch ChatGPT compare two Facebook Marketplace cars" width="300">
+      </a>
+      <br><strong>Explore Websites Behind Your Login</strong>
+      <br><sub>Compare cars across browser tabs · 24 sec</sub>
+    </td>
+    <td width="33%" align="center" valign="top">
+      <a href="https://www.youtube.com/watch?v=_OJSxAjZUF4">
+        <img src="https://i.ytimg.com/vi/_OJSxAjZUF4/maxresdefault.jpg" alt="Watch ChatGPT investigate hundreds of YouTube videos and thousands of comments" width="300">
+      </a>
+      <br><strong>Research Hundreds of Videos</strong>
+      <br><sub>Large-scale YouTube and comment research · 25 sec</sub>
+    </td>
+  </tr>
+</table>
 
 ## What Can ResearchTube Do?
 
