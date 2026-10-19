@@ -15,8 +15,8 @@ class StartupPromptTests(unittest.IsolatedAsyncioTestCase):
         active = {key: shipped[key]['value'] for key in keys}
         original = {key: shipped[key + '1']['value'] for key in keys}
         for key in keys:
-            self.assertIn('in English', active[key])
-            self.assertNotIn('in my language', active[key])
+            self.assertIn('in my language', active[key])
+            self.assertNotIn('in English', active[key])
             self.assertIn('in my language', original[key])
         with tempfile.TemporaryDirectory() as folder:
             config = Path(folder) / 'agent-config.json'

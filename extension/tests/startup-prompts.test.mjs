@@ -8,7 +8,8 @@ import { fixture } from './fixtures/browser-agent-fixture.mjs';
 const config = JSON.parse(await readFile(new URL('../../agent/agent-config.json', import.meta.url), 'utf8'));
 for (const [key, value] of Object.entries(DEFAULT_STARTUP_PROMPTS)) {
   assert.equal(config[key].value, value, 'shipped and offline defaults agree');
-  assert.match(value, /in English/, 'active prompts explicitly request English');
+  assert.match(value, /in my language/, 'active prompts follow the user language');
+  assert.doesNotMatch(value, /in English/, 'active prompts do not force English');
   assert.match(config[key + '1'].value, /in my language/, 'saved variants retain their original language instruction');
 }
 assert.doesNotMatch(config.describeThisVideoPrompt1.value, /storyboards|visual maps/, 'the saved original video prompt is unchanged');
