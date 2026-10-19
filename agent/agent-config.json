@@ -74,7 +74,7 @@
     "comment": "Saved original prompt (in my language); inactive because the key ends in 1. Any positive integer suffix stores another variant. To activate, rename studyThisSitePrompt to studyThisSitePrompt2 (or another unused number), then rename this key to studyThisSitePrompt. Restart the Agent. Only the exact key without digits is used."
   },
   "describeThisVideoPrompt": {
-    "value": "@ResearchTube [video_title] [video_link]\nStudy this video and explain it in my language. Download storyboards or create visual maps, load them into this chat, and analyze the visuals. Use tabId: [chat_tab_id] for async tasks.",
+    "value": "@ResearchTube [video_link] [video_title]\nStudy this video and explain it in my language. Use tabId: [chat_tab_id] for async tasks.",
     "comment": "Active startup prompt (no numeric suffix). Describe this video startup prompt. Placeholders: [video_title] = current video title, [video_link] = canonical YouTube URL, [chat_tab_id] = new ChatGPT tab ID. Keep [video_link] and [chat_tab_id] for video selection and task routing. Loaded once at Agent startup. Restart the Agent after editing. Use \"\\n\" for newlines."
   },
   "describeThisVideoPrompt1": {

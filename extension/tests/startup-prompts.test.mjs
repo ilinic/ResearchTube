@@ -12,6 +12,8 @@ for (const [key, value] of Object.entries(DEFAULT_STARTUP_PROMPTS)) {
   assert.doesNotMatch(value, /in English/, 'active prompts do not force English');
   assert.match(config[key + '1'].value, /in my language/, 'saved variants retain their original language instruction');
 }
+assert.match(DEFAULT_STARTUP_PROMPTS.describeThisVideoPrompt, /^@ResearchTube \[video_link\] \[video_title\]/, 'video link precedes its title');
+assert.doesNotMatch(DEFAULT_STARTUP_PROMPTS.describeThisVideoPrompt, /storyboards|visual maps|visuals/i, 'video startup does not request visual downloads');
 assert.doesNotMatch(config.describeThisVideoPrompt1.value, /storyboards|visual maps/, 'the saved original video prompt is unchanged');
 assert.deepEqual(normalizeStartupPrompts(), DEFAULT_STARTUP_PROMPTS);
 assert.equal(renderStartupPrompt('describeThisVideoPrompt', { describeThisVideoPrompt: '[video_title]\n[video_link] → [chat_tab_id] [chat_tab_id]' }, {
