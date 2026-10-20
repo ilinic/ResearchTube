@@ -9,3 +9,6 @@ agent/workspace/*
 agent/workspace/demo/*
 !agent/workspace/demo/README.md
 !agent/workspace/demo/researchtube-demo.mp4
+
+# Local desktop diagnostics
+agent/logs/

@@ -47,7 +47,7 @@ class FrozenRuntimeTests(unittest.TestCase):
             for name, data in {'README.md': 'guide', 'agent/researchtube_agent.py': 'AGENT_VERSION = "1.0.2"\n',
                                'extension/manifest.json': '{"version":"1.0.3"}',
                                'release.json': '{"prerelease":true}',
-                               'agent/runtime_paths.py': '# paths', 'agent/windows_speech.py': '# speech',
+                               'agent/researchtube_agent.pyw': '# tray launcher', 'agent/runtime_paths.py': '# paths', 'agent/windows_speech.py': '# speech',
                                'agent/agent-config.json': json.dumps({'workspacePath': {'value': 'PRIVATE', 'comment': 'keep'}}),
                                'agent/workspace/demo/demo.mp4': 'demo', 'agent/workspace/secret.txt': 'private',
                                'agent/__pycache__/cache.pyc': 'cache', 'agent/agent/old.py': 'legacy',
@@ -68,6 +68,7 @@ class FrozenRuntimeTests(unittest.TestCase):
                 names = archive.namelist()
                 self.assertIn('ResearchTube/agent/ResearchTubeAgent.exe', names)
                 self.assertIn('ResearchTube/agent/researchtube_agent.py', names)
+                self.assertIn('ResearchTube/agent/researchtube_agent.pyw', names)
                 metadata = json.loads(archive.read('ResearchTube/release-info.json'))
                 self.assertEqual(metadata['agentVersion'], '1.0.2')
                 self.assertEqual(metadata['extensionVersion'], '1.0.3')
@@ -75,7 +76,7 @@ class FrozenRuntimeTests(unittest.TestCase):
                 self.assertIn('ResearchTube/agent/tools/timezones/zoneinfo.zip', names)
                 self.assertIn('ResearchTube/agent/tools/yt-dlp/yt-dlp-plugins/bgutil-ytdlp-pot-provider.zip', names)
                 self.assertFalse(any('secret' in name or '__pycache__' in name or 'node_modules' in name or '/agent/agent/' in name for name in names))
-                self.assertEqual(json.loads(archive.read('ResearchTube/agent/agent-config.json'))['workspacePath']['value'], '')
+                self.assertEqual(json.loads(archive.read('ResearchTube/agent/agent-config.json'))['workspacePath']['value'], 'workspace')
                 self.assertIsNone(archive.testzip())
             with zipfile.ZipFile(source_output) as archive:
                 names = archive.namelist()

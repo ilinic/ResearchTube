@@ -16,7 +16,7 @@ if sys.platform == "win32":
             raise RuntimeError("Install agent/requirements-build.txt before building: " + module)
     # pkgutil recursion does not discover the windows/* namespace parents.
     # Include projection wrappers as well as their native modules explicitly.
-    hidden = sorted(set(projections + collect_submodules("winrt", on_error="raise")))
+    hidden = sorted(set(projections + collect_submodules("winrt", on_error="raise") + ["pystray._win32"]))
     data = collect_data_files("winrt")
 
 a = Analysis([str(root / "researchtube_agent.py")], pathex=[str(root)],
@@ -25,4 +25,4 @@ a = Analysis([str(root / "researchtube_agent.py")], pathex=[str(root)],
 pyz = PYZ(a.pure)
 exe = EXE(pyz, a.scripts, a.binaries, a.datas, [], name="ResearchTubeAgent",
           debug=False, bootloader_ignore_signals=False, strip=False,
-          upx=False, console=True, icon=str(root.parent / "icons" / "researchtube.ico"))
+          upx=False, console=True, hide_console="hide-early", icon=str(root.parent / "icons" / "researchtube.ico"))

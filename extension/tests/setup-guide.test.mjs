@@ -88,6 +88,11 @@ assert.doesNotMatch(installationStep,/agent-port|ResearchTubeAgent\.exe|We also 
 const agentStep = settings.slice(settings.indexOf("<h3>Step 5 —"), settings.indexOf('<h3 id="silent-automation-heading">'));
 assert.match(agentStep,/agent\/ResearchTubeAgent\.exe/);
 assert.match(agentStep,/Basic YouTube features work without the Local Agent/);
+assert.match(agentStep,/system tray/);
+assert.match(agentStep,/live log/);
+assert.match(agentStep,/researchtube_agent\.pyw/);
+assert.match(agentStep,/workspacePath\.value/);
+assert.doesNotMatch(agentStep,/Workspace prompt|press <strong>Enter/);
 assert.match(agentStep,/“<code>python researchtube_agent\.py<\/code>”/);
 assert.match(agentStep,/“<code>python3 researchtube_agent\.py<\/code>”/);
 assert.match(agentStep,/id="agent-port"/);

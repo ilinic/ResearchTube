@@ -34,7 +34,7 @@ Open ResearchTube **Settings** from the toolbar popup or Chrome's extension deta
 
 ## 3. Start the Local Agent
 
-On Windows, open `agent/ResearchTubeAgent.exe` from the extracted Windows archive. Keep its console open. On Linux/macOS, use the Python source in the matching platform archive.
+On Windows, open `agent/ResearchTubeAgent.exe` from the extracted Windows archive. It runs in the tray with the same ResearchTube icon as the Extension. Click for the live log; closing the log keeps the server running. Right-click → **Exit** stops it. On Linux/macOS, use the Python source in the matching platform archive.
 
 On Linux/macOS, from a terminal in the release root:
 
@@ -42,29 +42,29 @@ On Linux/macOS, from a terminal in the release root:
 python3 agent/researchtube_agent.py
 ```
 
-On Windows with Python installed, use `py agent/researchtube_agent.py`. Or run from the `agent/` directory:
+For Python mode on Windows, first install `python -m pip install -r agent/requirements-windows.txt`. Then open `agent/researchtube_agent.pyw` without a terminal, or run from the `agent/` directory:
 
 ```sh
 python researchtube_agent.py
 ```
 
-Both launch modes read the same external `agent/agent-config.json`, `tools/` and `custom-tools/` beside the script or EXE, independently of the terminal directory. The Agent binds to `127.0.0.1` and normally uses port `17843`. Before listening, it reads `workspacePath`; an empty value asks for a folder as described below.
+Both launch modes read the same external `agent/agent-config.json`, `tools/` and `custom-tools/` beside the script or EXE, independently of the terminal directory. The Agent binds to `127.0.0.1` and normally uses port `17843`. Before listening, it reads `workspacePath` and creates the directory if missing; startup never prompts. Add `--console` for the traditional Windows terminal mode. A second Windows launch on the same port does not start another instance.
 
-The Agent starts listening and prints its version/interface and Workspace summary before its background diagnostics finish. Component results appear in the console as each one-time startup check completes; health initially reports `checking` for unfinished checks. Repeated status requests read the saved startup snapshot. Restart the Agent after changing tools or Chrome launch flags to refresh it. Physical paths appear only in this local console.
+The Agent starts listening and prints its version/interface and Workspace summary before its background diagnostics finish. Component results appear in the console as each one-time startup check completes; health initially reports `checking` for unfinished checks. Repeated status requests read the saved startup snapshot. Restart the Agent after changing tools or Chrome launch flags to refresh it. Physical paths appear only in the local log. Windows tray logs are retained with rotation in `agent/logs/agent.log`.
 
 In Extension Settings, select **Test connection** under **How to Set Up ResearchTube → Step 5 — Start the Local Agent**. A successful result should show compatible Extension/Agent interface versions and component statuses.
 
 ### Choose the Workspace directory
 
-The shipped `workspacePath.value` is empty. At startup the Agent asks `Workspace folder [<absolute path to agent/workspace>]:`. Press **Enter** to accept that folder, or type another relative or absolute path. The Workspace can grow large, so choose a location on a drive with enough free space. It creates a missing folder, preserves an existing folder and its files, and saves the choice in `agent-config.json`. Accepting the default saves `workspace`, so the installation remains portable. Later launches use the saved value without asking.
+The shipped `workspacePath.value` is `workspace`, relative to the Agent installation. Startup creates a missing folder, preserves existing files and never asks for input. Missing or blank settings in older configurations use the same default without rewriting the config. The Workspace can grow large; choose a drive with enough free space.
 
-You can also edit `workspacePath.value` directly. Relative paths resolve beside `researchtube_agent.py` or `ResearchTubeAgent.exe`; an absolute path selects another location, for example `"value": "D:/ResearchTubeWorkspace"`. Forward slashes avoid JSON backslash escaping. For a noninteractive launch, set a nonempty value beforehand. Clearing the value requests the folder again on the next launch.
+To change the folder, edit `workspacePath.value`. Relative paths resolve beside `researchtube_agent.py` or `ResearchTubeAgent.exe`; an absolute path selects another drive, for example `"value": "D:/ResearchTubeWorkspace"`. Forward slashes avoid JSON backslash escaping.
 
 Restart the Agent after changing it. A missing directory is created when accessible. Existing files remain in the old location; copy/move them yourself while the Agent is stopped if you want them in the new Workspace. Tools continue using logical paths such as `downloads/video.mp4`.
 
 ## 4. Verify the included media tools
 
-Each platform archive includes matching FFmpeg/ffprobe, yt-dlp, Deno and cloudflared executables. The Agent checks its `agent/tools/` directory first, then system `PATH`. Keep the complete extracted directory together so FFmpeg support libraries remain beside the executable. Python-mode Windows speech additionally requires `python -m pip install -r agent/requirements-windows.txt`; the Windows EXE includes these speech dependencies.
+Each platform archive includes matching FFmpeg/ffprobe, yt-dlp, Deno and cloudflared executables. The Agent checks its `agent/tools/` directory first, then system `PATH`. Keep the complete extracted directory together so FFmpeg support libraries remain beside the executable. Python-mode Windows tray, Chrome checks and speech require `python -m pip install -r agent/requirements-windows.txt`; the Windows EXE includes these dependencies.
 
 Typical bundled layouts are:
 

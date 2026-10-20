@@ -29,7 +29,7 @@ def release_files(root):
     roots = [root / 'docs', root / 'icons', root / 'extension', root / 'agent/tools', root / 'agent/custom-tools',
              root / 'agent/workspace/demo']
     files = [root / 'README.md', root / 'AGENTS.md', root / 'release.json']
-    files += [p for p in (root / 'agent').iterdir() if p.is_file() and (p.suffix in {'.py', '.json', '.txt'} or p.name == 'README.md')]
+    files += [p for p in (root / 'agent').iterdir() if p.is_file() and (p.suffix in {'.py', '.pyw', '.json', '.txt'} or p.name == 'README.md')]
     for directory in roots:
         if directory.exists():
             files.extend(p for p in directory.rglob('*') if p.is_file())
@@ -63,7 +63,7 @@ def package_release(root, executable, output, platform='windows-x64'):
             name = 'ResearchTube/' + rel.as_posix()
             if rel.as_posix() == 'agent/agent-config.json':
                 config = json.loads(path.read_text(encoding='utf-8'))
-                config['workspacePath']['value'] = ''
+                config['workspacePath']['value'] = 'workspace'
                 archive.writestr(name, json.dumps(config, ensure_ascii=False, indent=2) + '\n')
             else:
                 archive.write(path, name)

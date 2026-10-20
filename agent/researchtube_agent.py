@@ -36,15 +36,19 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 from urllib.request import Request, urlopen
 
 try:
+    from .desktop import InstanceLock, child_process_options, launch_pythonw, restore_console, run_tray, show_error
+    from .chrome_processes import chrome_process_report
     from .runtime_paths import installation_root
     from .task_history import TaskHistory
     from .browser_resources import save_browser_resource
 except ImportError:
+    from desktop import InstanceLock, child_process_options, launch_pythonw, restore_console, run_tray, show_error
+    from chrome_processes import chrome_process_report
     from runtime_paths import installation_root
     from task_history import TaskHistory
     from browser_resources import save_browser_resource
 
-AGENT_VERSION = "2.6.2"
+AGENT_VERSION = "2.7.0"
 INTERFACE_VERSION = 83
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
@@ -219,14 +223,14 @@ def log(message: str, *, error: bool = False, color: str | None = None) -> None:
     line = f"{prefix} {'ERROR ' if error else ''}{message}"
     # Keep redirected logs plain, while making the first interactive startup
     # line easy to spot in the Agent console.
-    if color == "red" and stream.isatty():
+    if color == "red" and stream is not None and stream.isatty():
         line = f"\x1b[31m{line}\x1b[0m"
     print(line, file=stream, flush=True)
 
 
 def clear_console() -> None:
     """Clear an interactive terminal before the Agent prints its startup health."""
-    if not sys.stdout.isatty():
+    if sys.stdout is None or not sys.stdout.isatty():
         return
     try:
         os.system("cls" if os.name == "nt" else "clear")
@@ -278,47 +282,19 @@ def configured_port() -> int:
 def configured_workspace_path() -> Path:
     """Resolve the trusted local setting once per run, before Workspace I/O."""
     value = read_agent_config().get("workspacePath", "workspace")
-    if not isinstance(value, str) or not value.strip() or "\0" in value:
-        raise AgentApiError("CONFIG_INVALID", "workspacePath must be a non-empty directory path.")
+    if not isinstance(value, str) or "\0" in value:
+        raise AgentApiError("CONFIG_INVALID", "workspacePath must be a directory path.")
     try:
-        path = Path(value.strip())
+        path = Path(value.strip() or "workspace")
         return (path if path.is_absolute() else ROOT / path).resolve()
     except (OSError, ValueError, RuntimeError) as error:
         raise AgentApiError("CONFIG_INVALID", "workspacePath could not be resolved.") from error
 
 
 def startup_workspace_path() -> Path:
-    """Ask only for an explicitly unset root and persist the choice locally."""
-    config = read_agent_config()
-    value = config.get("workspacePath", "workspace")
-    if not isinstance(value, str):
-        raise AgentApiError("CONFIG_INVALID", "workspacePath must be text.")
-    if value.strip():
-        return configured_workspace_path()
-    default = (ROOT / "workspace").resolve()
-    try:
-        chosen = input(f"Workspace folder [{default}]: ").strip() or "workspace"
-    except (EOFError, KeyboardInterrupt) as error:
-        raise AgentApiError("WORKSPACE_SETUP_REQUIRED", "Set workspacePath in agent-config.json or start the Agent in an interactive terminal.") from error
-    if "\0" in chosen:
-        raise AgentApiError("CONFIG_INVALID", "workspacePath must be a valid directory path.")
-    path = Path(chosen)
-    path = (path if path.is_absolute() else ROOT / path).resolve()
+    """Use the configured root without prompting; empty legacy settings use workspace."""
+    path = configured_workspace_path()
     path.mkdir(parents=True, exist_ok=True)
-    document = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-    entry = document.get("workspacePath", {})
-    document["workspacePath"] = {**entry, "value": chosen}
-    # Replace only the configuration after writing a complete JSON document.
-    temporary = None
-    try:
-        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=CONFIG_PATH.parent, prefix=".agent-config-", suffix=".tmp", delete=False) as stream:
-            temporary = Path(stream.name)
-            json.dump(document, stream, ensure_ascii=False, indent=2)
-            stream.write("\n")
-        temporary.replace(CONFIG_PATH)
-    finally:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
     return path
 
 
@@ -573,6 +549,7 @@ async def health_process_output(command: tuple[str, ...], timeout: float) -> tup
     """Bound one startup probe and reap its process on timeout or shutdown."""
     process = await asyncio.create_subprocess_exec(
         *command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        **child_process_options(),
     )
     try:
         output = await asyncio.wait_for(process.communicate(), timeout=timeout)
@@ -671,7 +648,7 @@ async def collect_startup_health(snapshot: dict[str, Any]) -> None:
     await asyncio.gather(*(collect_component(name) for name in snapshot["components"]))
     log("Startup checks completed. Waiting for Extension requests.")
     # The loopback server is already serving. Yield after the last startup log
-    # before spawning the unrelated Windows/PowerShell Chrome process check.
+    # before the unrelated native Chrome process check.
     await asyncio.sleep(0)
     await collect_chrome()
 
@@ -704,12 +681,16 @@ def summarize_debug_banner_process_report(report: Any) -> dict[str, Any]:
     chrome_running = report.get("chromeRunning")
     browser_instances = report.get("browserInstances")
     enabled_instances = report.get("enabledInstances")
+    unreadable = report.get("unreadableProcesses", 0)
     if not isinstance(chrome_running, bool) or not isinstance(browser_instances, int) or isinstance(browser_instances, bool) \
             or not isinstance(enabled_instances, int) or isinstance(enabled_instances, bool) \
-            or browser_instances < 0 or enabled_instances < 0 or enabled_instances > browser_instances:
+            or browser_instances < 0 or enabled_instances < 0 or enabled_instances > browser_instances \
+            or not isinstance(unreadable, int) or isinstance(unreadable, bool) or unreadable < 0:
         return debug_banner_unknown("Chrome process information could not be read.")
     if not chrome_running:
         return debug_banner_unknown("Chrome is not currently running.", chrome_running=False)
+    if unreadable:
+        return debug_banner_unknown("Some Chrome command lines could not be read; flag state is unknown.", chrome_running=True)
     if browser_instances == 0:
         return debug_banner_unknown("Chrome is running, but its browser instances could not be identified.", chrome_running=True)
     if enabled_instances == browser_instances:
@@ -731,37 +712,16 @@ def summarize_debug_banner_process_report(report: Any) -> dict[str, Any]:
 
 
 async def debug_banner_status() -> dict[str, Any]:
-    """Inspect only aggregate Chrome launch-flag state for the current request.
-
-    The PowerShell side deliberately emits counts only. Raw command lines, PIDs,
-    profiles and paths never cross into the Agent result or its loopback API.
-    """
+    """One startup scan, independent of PowerShell and the EXE's environment."""
     if os.name != "nt":
         return debug_banner_unknown("Chrome startup switches can be checked by this ResearchTube Agent only on Windows.")
-    script = r'''
-$ErrorActionPreference = 'Stop'
-$chrome = @(Get-CimInstance -ClassName Win32_Process -Filter "Name = 'chrome.exe'")
-$browser = @($chrome | Where-Object {
-  $commandLine = [string]$_.CommandLine
-  $commandLine -notmatch '(?i)(?:^|\s)--type(?:=|\s)'
-})
-$enabled = @($browser | Where-Object {
-  ([string]$_.CommandLine) -match '(?i)(?:^|\s)--silent-debugger-extension-api(?:\s|$)'
-})
-[pscustomobject]@{
-  chromeRunning = ($chrome.Count -gt 0)
-  browserInstances = $browser.Count
-  enabledInstances = $enabled.Count
-} | ConvertTo-Json -Compress
-'''
     try:
-        stdout, _stderr = await health_process_output(
-            ("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script), 5,
-        )
-        report = json.loads(stdout.decode("utf-8-sig", errors="replace"))
+        report = await asyncio.wait_for(asyncio.to_thread(chrome_process_report), timeout=5)
         return summarize_debug_banner_process_report(report)
-    except (OSError, asyncio.TimeoutError, json.JSONDecodeError):
-        return debug_banner_unknown("Chrome process information could not be read.")
+    except ImportError:
+        return debug_banner_unknown("Chrome process inspection needs requirements-windows.txt in Python mode; the Windows EXE includes it.")
+    except (OSError, asyncio.TimeoutError):
+        return debug_banner_unknown("Chrome process inspection failed or timed out; flag state is unknown.")
 
 
 async def chrome_automation_status() -> dict[str, Any]:
@@ -1016,7 +976,7 @@ async def youtube_download_formats(payload: Any) -> dict[str, Any]:
         f"https://www.youtube.com/watch?v={video_id}",
     ]
     try:
-        process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, **child_process_options())
         stdout, _stderr = await asyncio.wait_for(process.communicate(), timeout=YTDLP_FORMATS_TIMEOUT_SECONDS)
     except asyncio.TimeoutError:
         process.kill()
@@ -1805,7 +1765,7 @@ def visual_map_extract_timestamp(requested: float, video_duration: float, frame_
 async def ffprobe_streams_for_file(physical_path: Path, executable: str) -> list[dict[str, Any]]:
     command = [executable, "-v", "error", "-show_streams", "-of", "json", str(physical_path)]
     try:
-        process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, **child_process_options())
         stdout, _stderr = await asyncio.wait_for(process.communicate(), timeout=MEDIA_PROBE_TIMEOUT_SECONDS)
     except asyncio.TimeoutError as error:
         process.kill()
@@ -1965,7 +1925,7 @@ async def capture_screen_macos(payload: Any) -> dict[str, Any]:
         encoder_args, mime_type = capture_encoder_arguments({**options["image"], "compressionLevel": 6 if options["image"]["format"] == "png" else None})
         command.extend(["-filter_complex", ";".join(filters), "-map", f"[{output_label}]", "-frames:v", "1", *encoder_args, "-y", str(destination_path)])
         try:
-            process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+            process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE, **child_process_options())
             await asyncio.wait_for(process.communicate(), timeout=CAPTURE_FRAME_TIMEOUT_SECONDS)
         except asyncio.TimeoutError as error:
             process.kill()
@@ -2001,7 +1961,7 @@ async def x11_virtual_desktop() -> tuple[dict[str, int], int]:
     if not xrandr:
         raise AgentApiError("SCREEN_CAPTURE_UNAVAILABLE", "Linux/X11 screen capture requires xrandr to report the virtual desktop and monitor count.")
     try:
-        process = await asyncio.create_subprocess_exec(xrandr, "--query", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        process = await asyncio.create_subprocess_exec(xrandr, "--query", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, **child_process_options())
         stdout, _stderr = await asyncio.wait_for(process.communicate(), timeout=MEDIA_PROBE_TIMEOUT_SECONDS)
     except asyncio.TimeoutError as error:
         process.kill()
@@ -2057,7 +2017,7 @@ async def capture_screen_x11(payload: Any) -> dict[str, Any]:
             "-map", "0:v:0", "-an", "-frames:v", "1", *encoder_args, "-y", str(destination_path),
         ]
         try:
-            process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+            process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE, **child_process_options())
             await asyncio.wait_for(process.communicate(), timeout=CAPTURE_FRAME_TIMEOUT_SECONDS)
         except asyncio.TimeoutError as error:
             process.kill()
@@ -2147,7 +2107,7 @@ async def capture_screen_windows(payload: Any) -> dict[str, Any]:
             "-map", "0:v:0", "-an", "-frames:v", "1", *encoder_args, "-y", str(destination_path),
         ]
         try:
-            process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+            process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE, **child_process_options())
             await asyncio.wait_for(process.communicate(), timeout=CAPTURE_FRAME_TIMEOUT_SECONDS)
         except asyncio.TimeoutError as error:
             process.kill()
@@ -2201,7 +2161,7 @@ def showinfo_timestamp(stderr: bytes) -> float | None:
 async def visual_map_video_metadata(item: ResolvedWorkspacePath, executable: str) -> tuple[float, int, int, int, float | None]:
     command = [executable, "-v", "error", "-show_entries", "format=duration:stream=index,codec_type,width,height,duration,avg_frame_rate,r_frame_rate:stream_side_data=rotation", "-of", "json", str(item.physical_path)]
     try:
-        process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, **child_process_options())
         stdout, _stderr = await asyncio.wait_for(process.communicate(), timeout=MEDIA_PROBE_TIMEOUT_SECONDS)
     except (asyncio.TimeoutError, OSError) as error:
         raise AgentApiError("VISUAL_MAP_FAILED", "ffprobe could not inspect the workspace video.") from error
@@ -2256,7 +2216,7 @@ async def run_visual_map_ffmpeg(command: list[str], timeout: float) -> tuple[int
     """Run one visual-map FFmpeg command without emitting diagnostic output."""
     process: asyncio.subprocess.Process | None = None
     try:
-        process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+        process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE, **child_process_options())
         _stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
     except asyncio.TimeoutError:
         if process is not None and process.returncode is None:
@@ -2284,7 +2244,7 @@ async def detect_visual_map_scenes(source: ResolvedWorkspacePath, executable: st
     command = [executable, "-hide_banner", "-nostdin", "-v", "error", "-i", str(source.physical_path), "-map", f"0:{stream_index}", "-an", "-vf", filters, "-f", "null", "-"]
     process: asyncio.subprocess.Process | None = None
     try:
-        process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, **child_process_options())
         stdout, _stderr = await asyncio.wait_for(process.communicate(), timeout=VISUAL_MAP_TIMEOUT_SECONDS)
     except asyncio.TimeoutError as error:
         if process is not None and process.returncode is None:
@@ -2422,6 +2382,9 @@ def windows_speech_python() -> str:
         raise AgentApiError("SPEECH_NOT_SUPPORTED", "Windows text-to-speech is available only on Windows.")
     if not getattr(sys, "frozen", False) and not WINDOWS_SPEECH_SCRIPT_PATH.is_file():
         raise AgentApiError("SPEECH_NOT_AVAILABLE", "The Windows text-to-speech helper is not installed.")
+    executable = Path(sys.executable)
+    if sys.platform == "win32" and executable.stem.lower() == "pythonw":
+        return str(executable.with_name("python.exe"))
     return sys.executable
 
 
@@ -2502,7 +2465,7 @@ async def system_speech_list_voices(payload: Any) -> dict[str, Any]:
         raise AgentApiError("SPEECH_INVALID", "system_speech_list_voices does not accept arguments.")
     executable = windows_speech_python()
     try:
-        process = await asyncio.create_subprocess_exec(*windows_speech_command(executable), "--action", "list-voices", env=windows_speech_environment(), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        process = await asyncio.create_subprocess_exec(*windows_speech_command(executable), "--action", "list-voices", env=windows_speech_environment(), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, **child_process_options())
         stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=15)
     except asyncio.TimeoutError as error:
         process.kill(); await process.communicate()
@@ -2529,6 +2492,7 @@ async def system_speech_voice_name(executable: str, voice_id: str | None) -> str
             *windows_speech_command(executable), "--action", "voice-info",
             "--voice-id-base64", speech_base64(voice_id),
             env=windows_speech_environment(), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            **child_process_options(),
         )
         stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=15)
     except asyncio.TimeoutError as error:
@@ -2741,6 +2705,7 @@ class SpeechTaskManager:
                 "--output-path-base64", speech_base64(str(temporary_output) if temporary_output is not None else None),
                 "--play-through-speakers", "true" if task.output_mode in {"speakers", "both"} else "false",
                 env=windows_speech_environment(), stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                **child_process_options(),
             )
             assert task.process.stdin is not None
             task.process.stdin.write(speech_base64(task.text).encode("ascii"))
@@ -2995,7 +2960,7 @@ def camera_mode_for_target_fps(modes: tuple[CameraMode, ...], target_fps: float)
 async def camera_ffmpeg_lines(command: list[str], *, operation: str) -> list[str]:
     """Run an internal FFmpeg camera command; keep its output for parsing only."""
     try:
-        process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, **child_process_options())
         stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=CAMERA_CAPTURE_TIMEOUT_SECONDS)
     except asyncio.TimeoutError:
         log(f"camera ffmpeg {operation} timed out", error=True)
@@ -3224,7 +3189,7 @@ def camera_rational(value: Any) -> float | None:
 async def camera_recording_metadata(path: Path, ffprobe_executable: str) -> dict[str, Any]:
     command = [ffprobe_executable, "-v", "error", "-show_entries", "format=duration:stream=codec_type,width,height,avg_frame_rate,nb_frames,duration", "-of", "json", str(path)]
     try:
-        process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, **child_process_options())
         stdout, _stderr = await asyncio.wait_for(process.communicate(), timeout=MEDIA_PROBE_TIMEOUT_SECONDS)
     except (asyncio.TimeoutError, OSError) as error:
         raise AgentApiError("CAMERA_RECORD_FAILED", "ffprobe could not inspect the camera recording.") from error
@@ -3282,7 +3247,7 @@ async def camera_capture_frame(payload: Any) -> dict[str, Any]:
     encoder, mime_type = camera_encoder_arguments(image_format)
     command = [ffmpeg.executable, "-hide_banner", "-nostdin", "-v", "info", *camera_input_arguments(device), "-frames:v", "1", *encoder, "-y", str(destination.physical_path)]
     try:
-        process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+        process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE, **child_process_options())
         stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=CAMERA_CAPTURE_TIMEOUT_SECONDS)
     except asyncio.TimeoutError as error:
         process.kill(); await process.communicate()
@@ -3426,7 +3391,7 @@ class CameraRecordTaskManager:
                 command = [ffmpeg.executable, "-hide_banner", "-v", "error", *camera_input_arguments(device, mode, include_audio=True), "-t", str(task.requested_duration_seconds), "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-movflags", "+faststart", "-y", str(temporary_path)]
             else:
                 command = [ffmpeg.executable, "-hide_banner", "-v", "error", *camera_audio_input_arguments(device), "-t", str(task.requested_duration_seconds), "-vn", "-c:a", "aac", "-movflags", "+faststart", "-y", str(temporary_path)]
-            task.process = await asyncio.create_subprocess_exec(*command, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+            task.process = await asyncio.create_subprocess_exec(*command, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE, **child_process_options())
             task.phase, task.started_monotonic = "recording", time.monotonic()
             task.touch(f"Recording camera {task.recording_kind}.")
             await asyncio.wait_for(task.process.wait(), timeout=task.requested_duration_seconds + CAMERA_CAPTURE_TIMEOUT_SECONDS)
@@ -3522,7 +3487,7 @@ async def capture_frame_from_workspace_options(options: dict[str, Any]) -> dict[
         encoder_args, mime_type = capture_encoder_arguments(options["image"])
         command.extend(["-map", f"0:{selected_index}", "-an", "-frames:v", "1", "-vf", capture_filter(options), *encoder_args, "-y", str(destination_path)])
         try:
-            process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+            process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE, **child_process_options())
             _stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=CAPTURE_FRAME_TIMEOUT_SECONDS)
         except asyncio.TimeoutError as error:
             process.kill()
@@ -3658,7 +3623,7 @@ async def capture_youtube_frame(options: dict[str, Any]) -> dict[str, Any]:
     partial_item: ResolvedWorkspacePath | None = None
     try:
         try:
-            process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, **child_process_options())
             stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=YOUTUBE_CAPTURE_FRAME_TIMEOUT_SECONDS)
         except asyncio.TimeoutError as error:
             process.kill()
@@ -3900,7 +3865,7 @@ async def capture_youtube_frames(
                     f"https://www.youtube.com/watch?v={youtube['videoId']}",
                 ]
                 try:
-                    process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+                    process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, **child_process_options())
                     file_progress_stopped = asyncio.Event()
 
                     def report_download_progress(line: bytes) -> None:
@@ -4135,6 +4100,7 @@ async def media_clip_format_info(output_format: str, executable: str) -> dict[st
         process = await asyncio.create_subprocess_exec(
             executable, "-hide_banner", "-h", f"muxer={muxer}",
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            **child_process_options(),
         )
         stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=MEDIA_PROBE_TIMEOUT_SECONDS)
     except (asyncio.TimeoutError, asyncio.CancelledError) as error:
@@ -4166,7 +4132,7 @@ async def media_clip_check_command(command: list[str]) -> tuple[int, bytes]:
     """Bound and cancel private FFmpeg capability checks, including child cleanup."""
     process = None
     try:
-        process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, **child_process_options())
         stdout, _stderr = await asyncio.wait_for(process.communicate(), timeout=MEDIA_PROBE_TIMEOUT_SECONDS)
         return process.returncode, stdout
     except (asyncio.TimeoutError, asyncio.CancelledError) as error:
@@ -4323,7 +4289,7 @@ async def media_clip_probe_file(path: Path, executable: str, format_details: dic
     command = [executable, "-v", "error", "-show_streams", "-show_format", "-of", "json", str(path)]
     process: asyncio.subprocess.Process | None = None
     try:
-        process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, **child_process_options())
         stdout, _stderr = await asyncio.wait_for(process.communicate(), timeout=MEDIA_PROBE_TIMEOUT_SECONDS)
     except asyncio.CancelledError:
         if process is not None and process.returncode is None:
@@ -4524,7 +4490,7 @@ class MediaClipTaskManager:
         command.extend(["-f", format_info["muxer"], "-n", str(temporary)])
         stderr_task: asyncio.Task[bytes] | None = None
         try:
-            task.process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            task.process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, **child_process_options())
             assert task.process.stderr is not None
             stderr_task = asyncio.create_task(task.process.stderr.read())
             await asyncio.gather(self.read_progress(task, segment_index, duration), task.process.wait())
@@ -4738,7 +4704,7 @@ async def image_crop(payload: Any) -> dict[str, Any]:
             *encoder_args, "-y", str(destination_path),
         ]
         try:
-            process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+            process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE, **child_process_options())
             await asyncio.wait_for(process.communicate(), timeout=CAPTURE_FRAME_TIMEOUT_SECONDS)
         except asyncio.TimeoutError as error:
             process.kill()
@@ -5050,7 +5016,7 @@ async def clipboard_get(payload: Any) -> dict[str, Any]:
         ffmpeg = find_component("ffmpeg", COMPONENTS["ffmpeg"][0])
         if not ffmpeg.executable:
             raise AgentApiError("FFMPEG_NOT_AVAILABLE", "ffmpeg is required to materialize a clipboard image into the workspace.")
-        process = await asyncio.create_subprocess_exec(ffmpeg.executable, "-hide_banner", "-nostdin", "-v", "error", "-f", "image2pipe", "-vcodec", "bmp", "-i", "pipe:0", "-frames:v", "1", "-c:v", "png", "-y", str(destination_path), stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+        process = await asyncio.create_subprocess_exec(ffmpeg.executable, "-hide_banner", "-nostdin", "-v", "error", "-f", "image2pipe", "-vcodec", "bmp", "-i", "pipe:0", "-frames:v", "1", "-c:v", "png", "-y", str(destination_path), stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE, **child_process_options())
         _stdout, _stderr = await asyncio.wait_for(process.communicate(bmp), timeout=CAPTURE_FRAME_TIMEOUT_SECONDS)
         if process.returncode != 0 or not destination_path.is_file():
             raise AgentApiError("CLIPBOARD_UNSUPPORTED", "The clipboard image could not be converted to PNG.")
@@ -5096,7 +5062,7 @@ async def clipboard_set(payload: Any) -> dict[str, Any]:
         raise AgentApiError("INVALID_IMAGE", "The workspace file is not a valid decodable image.")
     if width * height > MAX_CLIPBOARD_IMAGE_PIXELS or width * height * 4 > MAX_CLIPBOARD_IMAGE_DIB_BYTES:
         raise AgentApiError("CLIPBOARD_TOO_LARGE", "The workspace image exceeds the configured pixel or decoded-size limit.")
-    process = await asyncio.create_subprocess_exec(ffmpeg.executable, "-hide_banner", "-nostdin", "-v", "error", "-i", str(source.physical_path), "-frames:v", "1", "-f", "image2pipe", "-vcodec", "bmp", "pipe:1", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    process = await asyncio.create_subprocess_exec(ffmpeg.executable, "-hide_banner", "-nostdin", "-v", "error", "-i", str(source.physical_path), "-frames:v", "1", "-f", "image2pipe", "-vcodec", "bmp", "pipe:1", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, **child_process_options())
     bmp, _stderr = await asyncio.wait_for(process.communicate(), timeout=CAPTURE_FRAME_TIMEOUT_SECONDS)
     if process.returncode != 0 or len(bmp) < 15 or not bmp.startswith(b"BM"):
         raise AgentApiError("INVALID_IMAGE", "The workspace image could not be decoded for the clipboard.")
@@ -5204,7 +5170,7 @@ async def media_probe(payload: Any) -> dict[str, Any]:
         "-of", "json", str(item.physical_path),
     ]
     try:
-        process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, **child_process_options())
         stdout, _stderr = await asyncio.wait_for(process.communicate(), timeout=MEDIA_PROBE_TIMEOUT_SECONDS)
     except asyncio.TimeoutError as error:
         process.kill()
@@ -5459,7 +5425,7 @@ class DownloadTaskManager:
                 "--output", output_template, task.url,
             ])
             task.touch("Preparing yt-dlp download.")
-            task.process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            task.process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, **child_process_options())
             self.record_event(task, "processStarted", message="yt-dlp process started.", process="ytDlp")
             stdout_task = asyncio.create_task(self.consume_stream(task, task.process.stdout, source="stdout"))
             stderr_task = asyncio.create_task(self.consume_stream(task, task.process.stderr, source="stderr"))
@@ -5950,6 +5916,7 @@ async def start_public_share_tunnel(port: int) -> None:
         PUBLIC_TUNNEL_PROCESS = await asyncio.create_subprocess_exec(
             cloudflared.executable, "tunnel", "--url", f"http://127.0.0.1:{port}",
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            **child_process_options(),
         )
     except OSError as error:
         raise AgentApiError("CLOUDFLARED_START_FAILED", "cloudflared could not start.") from error
@@ -6449,7 +6416,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             pass
 
 
-async def serve(port: int) -> None:
+async def serve(port: int, on_started: Callable[[], None] | None = None) -> None:
     global WORKSPACE_PATH, STARTUP_PROMPTS
     STARTUP_PROMPTS = configured_startup_prompts()
     # Freeze the root for this run: live edits must not redirect active tasks,
@@ -6458,6 +6425,8 @@ async def serve(port: int) -> None:
     initial_health = initialize_health_snapshot()
     server = await asyncio.start_server(handle_client, host="127.0.0.1", port=port)
     log_startup_health(initial_health, port)
+    if on_started is not None:
+        on_started()
     diagnostics = asyncio.create_task(collect_startup_health(initial_health), name="startup-health")
     try:
         async with server:
@@ -6478,39 +6447,70 @@ async def serve(port: int) -> None:
         await CUSTOM_TOOLS.shutdown()
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the ResearchTube Local Agent Task service.")
     parser.add_argument("--port", type=int, help="Override agent-config.json for this run.")
-    args = parser.parse_args()
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--tray", dest="tray", action="store_true", help="Windows tray with a live log window (Windows default).")
+    mode.add_argument("--console", dest="tray", action="store_false", help="Keep the Agent in this terminal.")
+    parser.set_defaults(tray=sys.platform == "win32")
+    args = parser.parse_args(argv)
     if args.port is not None and not 1 <= args.port <= 65535:
         parser.error("--port must be between 1 and 65535")
     return args
 
 
-def main() -> int:
-    if sys.argv[1:2] == ["--windows-speech-helper"]:
+async def run_server(port, on_started=None):
+    # Tray GUI/native modules are loaded before this callback starts the worker.
+    # External tools must not inherit the frozen application's DLL lookup path.
+    if getattr(sys, "frozen", False) and sys.platform == "win32":
+        if not ctypes.windll.kernel32.SetDllDirectoryW(None):
+            raise OSError("Could not restore the Windows external-program DLL search path.")
+    await serve(port, on_started=on_started)
+
+
+def main(argv=None) -> int:
+    arguments = sys.argv[1:] if argv is None else argv
+    if arguments[:1] == ["--windows-speech-helper"]:
         try:
             from .windows_speech import main as speech_main
         except ImportError:
             from windows_speech import main as speech_main
-        return speech_main(sys.argv[2:])
-    args = parse_args()
-    clear_console()
+        return speech_main(arguments[1:])
+    args = parse_args() if argv is None else parse_args(argv)
+    tray = getattr(args, "tray", False)
+    lock = None
     try:
-        # PyInstaller's DLL search directory must not leak into FFmpeg/yt-dlp.
-        # Speech runs in a fresh self-exec helper and restores its own bundle.
+        if tray and launch_pythonw(Path(__file__).resolve(), arguments):
+            return 0
+        port = args.port if args.port is not None else configured_port()
+        lock = InstanceLock(port)
+        if not lock.acquire():
+            if tray:
+                show_error(f"ResearchTube Agent is already running on port {port}. Use its tray icon.")
+            else:
+                log(f"ResearchTube Agent is already running on port {port}.")
+            return 0
+        if tray:
+            return run_tray(lambda ready: run_server(port, on_started=ready), ROOT,
+                            lambda: WORKSPACE_PATH, AGENT_VERSION)
+        clear_console()
+        # PyInstaller hides its owned console early; --console explicitly restores it.
         if getattr(sys, "frozen", False) and sys.platform == "win32":
-            if not ctypes.windll.kernel32.SetDllDirectoryW(None):
-                raise OSError("Could not restore the Windows external-program DLL search path.")
-        asyncio.run(serve(args.port if args.port is not None else configured_port()))
+            restore_console()
+        asyncio.run(run_server(port))
     except KeyboardInterrupt:
         return 0
-    except AgentApiError as error:
-        log(f"ResearchTube Local Agent could not start: {error.code}: {error.message}", error=True)
+    except Exception as error:
+        message = f"ResearchTube Local Agent could not start: {getattr(error, 'code', type(error).__name__)}: {error}"
+        if tray:
+            show_error(message + "\nFor Python tray mode, install agent/requirements-windows.txt (Python must include Tcl/Tk).")
+        else:
+            log(message, error=True)
         return 1
-    except OSError as error:
-        log(f"ResearchTube Local Agent could not start: {error}", error=True)
-        return 1
+    finally:
+        if lock is not None:
+            lock.close()
     return 0
 
 

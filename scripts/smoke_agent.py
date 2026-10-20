@@ -16,8 +16,8 @@ import zipfile
 def check_agent(agent_dir, executable=None, windows_speech=False):
     config_path = agent_dir / 'agent-config.json'
     config = json.loads(config_path.read_text(encoding='utf-8'))
-    # Test Enter/default in source mode and a different relative root in EXE.
-    config['workspacePath']['value'] = ''
+    # Test the noninteractive default in source mode and a custom relative root in EXE.
+    config['workspacePath']['value'] = 'selected Workspace' if executable else 'workspace'
     config_path.write_text(json.dumps(config), encoding='utf-8')
     name = 'exe' if executable else 'source'
     workspace = agent_dir / ('selected Workspace' if executable else 'workspace')
@@ -48,13 +48,10 @@ def check_agent(agent_dir, executable=None, windows_speech=False):
                 probe.bind(('127.0.0.1', 0))
                 port = probe.getsockname()[1]
             with tempfile.TemporaryFile(mode='w+b') as log:
-                process = subprocess.Popen(command + ['--port', str(port)], cwd=cwd, stdin=subprocess.PIPE,
+                process = subprocess.Popen(command + ['--console', '--port', str(port)], cwd=cwd, stdin=subprocess.PIPE,
                                            stdout=log, stderr=log)
                 try:
-                    if attempt == 0:
-                        process.stdin.write(b'selected Workspace\n' if executable else b'\n')
-                        process.stdin.flush()
-                    process.stdin.close()
+                    process.stdin.close()  # No startup interaction, even on the first launch.
 
                     def request(path, body=None, timeout=2):
                         payload = json.dumps(body).encode() if body is not None else None
@@ -100,7 +97,7 @@ def check_agent(agent_dir, executable=None, windows_speech=False):
                         assert (workspace / f'audio/{name}.wav').read_bytes()[:4] == b'RIFF'
                     log.seek(0)
                     prompts = log.read().decode(errors='replace').count('Workspace folder [')
-                    assert prompts == (1 if attempt == 0 else 0), prompts
+                    assert prompts == 0, prompts
                 finally:
                     if sys.platform == 'win32':
                         # Kill only this test's process tree, including diagnostics
@@ -114,7 +111,7 @@ def check_agent(agent_dir, executable=None, windows_speech=False):
                     except subprocess.TimeoutExpired:
                         process.kill()
                         process.wait(timeout=10)
-            print(name + ': prompt/save/restart, unrelated cwd, Workspace preservation, public privacy and external Custom Tools passed', flush=True)
+            print(name + ': noninteractive startup/restart, unrelated cwd, Workspace preservation, public privacy and external Custom Tools passed', flush=True)
 
 
 def main():

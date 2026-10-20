@@ -4,8 +4,12 @@
 from __future__ import annotations
 
 import unittest
+import sys
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from agent import researchtube_agent as agent
+from agent.chrome_processes import chrome_process_report
 
 
 class DebugBannerTests(unittest.TestCase):
@@ -41,6 +45,44 @@ class DebugBannerTests(unittest.TestCase):
         invalid = agent.summarize_debug_banner_process_report({"chromeRunning": True, "browserInstances": 1, "enabledInstances": 2})
         self.assertEqual(invalid["configuration"], "unknown")
         self.assertIsNone(invalid["chromeRunning"])
+
+    def test_native_report_ignores_renderers_and_never_exposes_arguments(self):
+        class Gone(Exception):
+            pass
+        class Denied(Exception):
+            pass
+        def process(name, arguments):
+            def cmdline():
+                if isinstance(arguments, Exception):
+                    raise arguments
+                return arguments
+            return SimpleNamespace(info={'name': name}, cmdline=cmdline)
+        processes = [process('chrome.exe', ['chrome.exe', '--silent-debugger-extension-api', '--profile-directory=PRIVATE']),
+                     process('chrome.exe', ['chrome.exe', '--type=renderer']),
+                     process('other.exe', []), process('chrome.exe', Gone())]
+        psutil = SimpleNamespace(process_iter=lambda _attrs: processes, NoSuchProcess=Gone, AccessDenied=Denied)
+        with patch.dict(sys.modules, {'psutil': psutil}):
+            report = chrome_process_report()
+            self.assertEqual(report, {'chromeRunning': True, 'browserInstances': 1,
+                                      'enabledInstances': 1, 'unreadableProcesses': 0})
+            self.assertEqual(agent.summarize_debug_banner_process_report(report)['configuration'], 'banner_suppressed')
+            for unavailable in [[], Denied(), OSError()]:
+                processes.append(process('chrome.exe', unavailable))
+                result = agent.summarize_debug_banner_process_report(chrome_process_report())
+                self.assertEqual(result['configuration'], 'unknown')
+                self.assertNotIn('PRIVATE', str(result))
+                self.assertNotIn('commandLine', result)
+
+
+class NativeProbeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_native_scan_works_without_powershell_in_source_and_frozen(self):
+        with patch.object(agent.os, 'name', 'nt'), patch.object(agent, 'chrome_process_report', return_value={
+                'chromeRunning': True, 'browserInstances': 1, 'enabledInstances': 1}) as scan, \
+             patch.object(agent, 'health_process_output', side_effect=AssertionError('no PowerShell')):
+            for frozen in [False, True]:
+                with patch.object(sys, 'frozen', frozen, create=True):
+                    self.assertEqual((await agent.chrome_automation_status())['state'], 'enabled')
+            self.assertEqual(scan.call_count, 2)
 
 
 if __name__ == "__main__":

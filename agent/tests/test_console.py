@@ -9,6 +9,12 @@ from agent import researchtube_agent as agent
 
 
 class ConsoleTests(unittest.TestCase):
+    def test_pythonw_without_standard_streams_is_safe(self):
+        with patch.object(agent.sys, 'stdout', None), patch.object(agent.sys, 'stderr', None):
+            agent.clear_console()
+            agent.log('Startup', color='red')
+            agent.log('Failure', error=True)
+
     @patch("agent.researchtube_agent.os.system")
     @patch("agent.researchtube_agent.sys.stdout.isatty", return_value=True)
     def test_clear_console_uses_platform_command_for_interactive_terminal(self, _isatty, system) -> None:

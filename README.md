@@ -97,6 +97,8 @@ Study this page and its images. Summarize the important information, explain wha
 @ResearchTube Inspect demo/researchtube-demo.mp4, create a visual map of the video, and extract two frames. Keep the original file unchanged.
 ```
 
+On Windows, the Local Agent runs quietly in the system tray. Click its ResearchTube icon to view the live log; close the window to keep it running, or choose **Exit** from the tray menu to stop. Files use `agent/workspace` by default; change `workspacePath.value` in `agent/agent-config.json` to choose another location.
+
 ## Getting Started
 
 1. **Download ResearchTube.** Open [GitHub Releases](https://github.com/ilinic/ResearchTube/releases) and choose the ZIP for your operating system under **Assets** (Windows x64, Linux x64, macOS Apple silicon, or macOS Intel). **Do not download a "Source code" archive** — it does not contain the ready-to-use package.

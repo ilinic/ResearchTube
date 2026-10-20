@@ -1,4 +1,7 @@
-# Optional for Python mode; included in the Windows EXE build.
+# Windows tray, Chrome diagnostics and speech; included in the Windows EXE build.
+pystray>=0.19.5,<0.20; sys_platform == "win32"
+Pillow>=10.4,<13; sys_platform == "win32"
+psutil>=7,<8; sys_platform == "win32"
 winrt-runtime>=3.2,<4; sys_platform == "win32"
 winrt-Windows.Foundation>=3.2,<4; sys_platform == "win32"
 winrt-Windows.Foundation.Collections>=3.2,<4; sys_platform == "win32"

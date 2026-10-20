@@ -20,6 +20,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit, urlunsplit, parse_qsl, urlencode
 
+try:
+    from .desktop import child_process_options
+except ImportError:
+    from desktop import child_process_options
+
 MAX_SHEET_BYTES = 20 * 1024 * 1024
 DIAGNOSTIC_SAMPLE_BYTES = 4096
 MAX_FRAMES = 1_000_000
@@ -592,7 +597,7 @@ class StoryboardService:
             command = [component.executable, *self.host.yt_dlp_youtube_arguments(self.host.resolve_deno_runtime()),
                        '--ignore-config', '--no-playlist', '--skip-download', '--no-warnings', '--ignore-no-formats-error',
                        '--dump-single-json', f'https://www.youtube.com/watch?v={vid}']
-            process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+            process = await asyncio.create_subprocess_exec(*command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL, **child_process_options())
             stdout, _ = await asyncio.wait_for(process.communicate(), 30)
             if process.returncode:
                 return None

@@ -188,7 +188,12 @@ sys.stdout.buffer.flush()
         self.assertIsNone(started["progressPercent"])
         self.assertEqual(started["phase"], "preparing")
         task = manager.get(started["taskId"])
-        await asyncio.sleep(0.06)
+        # Process startup is slower under a loaded runner / instrumentation.
+        # Wait for the observed progress event, rather than guessing its timing.
+        async def started_video():
+            while task.phase == "preparing" and task.status == "working":
+                await asyncio.sleep(0.005)
+        await asyncio.wait_for(started_video(), timeout=2)
         current = manager.snapshot(task)
         self.assertEqual(current["status"], "working", current)
         self.assertEqual(current["phase"], "downloadingVideo")
