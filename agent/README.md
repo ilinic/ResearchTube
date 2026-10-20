@@ -2,7 +2,7 @@
 
 The Local Agent is an asyncio service bound only to `127.0.0.1`. Each platform release ZIP includes matching FFmpeg/ffprobe, yt-dlp, Deno and cloudflared binaries with Python Agent sources for Python 3.10+. The Windows archive also includes `ResearchTubeAgent.exe`, which does not need a separate Python installation. It owns the path-safe Workspace, executable discovery, media processing, local downloads, speech callbacks and byte-range media serving used by the Chrome Extension.
 
-On Windows, open `ResearchTubeAgent.exe` from the fully extracted release. It runs in the system tray using the Extension's ResearchTube icon. Click the icon to open the live log; closing the log keeps the Agent running. The tray menu also offers **Open Workspace** and **Exit**. Logs are retained in `agent/logs/agent.log` with bounded rotation. A second launch on the same port does not start another Agent.
+On Windows, open `ResearchTubeAgent.exe` from the fully extracted release. It runs in the system tray using the Extension's ResearchTube icon. Click the icon to open the live log; closing the log keeps the Agent running. **Copy log** copies selected text when present, otherwise the full retained log. The tray menu also offers **Open Workspace** and **Exit**. Logs are retained in `agent/logs/agent.log` with bounded rotation. A second launch on the same port does not start another Agent.
 
 For source mode on Windows, install the dependencies once from this directory:
 

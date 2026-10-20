@@ -62,7 +62,7 @@ class DesktopTests(unittest.TestCase):
     def test_tray_show_close_reopen_and_exit_with_threaded_server(self):
         # Exercise the host lifecycle without claiming native Windows GUI coverage.
         ready, cleaned = threading.Event(), threading.Event()
-        roots, icons, texts = [], [], []
+        roots, icons, texts, buttons = [], [], [], {}
 
         class Value:
             def __init__(self, value=None): self.value = value
@@ -70,12 +70,16 @@ class DesktopTests(unittest.TestCase):
             def set(self, value): self.value = value
 
         class Widget:
-            def __init__(self, *args, **kwargs): self.command = kwargs.get('command')
+            def __init__(self, *args, **kwargs):
+                self.command = kwargs.get('command')
+                if self.command:
+                    buttons[kwargs.get('text')] = self
             def pack(self, **kwargs): pass
 
         class Text(Widget):
             def __init__(self, *args, **kwargs):
                 self.text = ''
+                self.selection = ''
                 texts.append(self)
             def configure(self, **kwargs): pass
             def insert(self, where, value): self.text += value
@@ -84,6 +88,8 @@ class DesktopTests(unittest.TestCase):
             def index(self, where): return f'{self.text.count(chr(10)) + 1}.0'
             def count(self, *args): return (len(self.text),)
             def see(self, where): pass
+            def tag_ranges(self, tag): return ('sel.first', 'sel.last') if self.selection else ()
+            def get(self, first, last): return self.selection
 
         class Root:
             def __init__(self):
@@ -101,6 +107,8 @@ class DesktopTests(unittest.TestCase):
             def protocol(self, name, fn): self.protocols[name] = fn
             def after(self, _delay, fn): self.callbacks.append(fn)
             def destroy(self): self.destroyed = True
+            def clipboard_clear(self): self.clipboard = ''
+            def clipboard_append(self, value): self.clipboard += value
             def mainloop(self):
                 self_test.assertTrue(ready.wait(2))
                 self_test.assertTrue(self.hidden, 'no log window at startup')
@@ -114,6 +122,12 @@ class DesktopTests(unittest.TestCase):
                         callback()
                     if phase == 0 and not self.hidden:
                         self_test.assertIn('Live log after startup', texts[0].text)
+                        texts[0].selection = 'log after startup'
+                        buttons['Copy log'].command()
+                        self_test.assertEqual(self.clipboard, 'log after startup')
+                        texts[0].selection = ''
+                        buttons['Copy log'].command()
+                        self_test.assertEqual(self.clipboard, 'Live log after startup\n')
                         self.protocols['WM_DELETE_WINDOW']()
                         self_test.assertTrue(self.hidden)
                         self_test.assertFalse(cleaned.is_set(), 'closing log must not cancel the server')

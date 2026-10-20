@@ -246,8 +246,10 @@ def run_tray(serve, installation: Path, workspace, version: str) -> int:
     ttk.Checkbutton(toolbar, text="Auto-scroll", variable=follow).pack(side="right")
 
     def copy_log():
+        selection = text.tag_ranges("sel")
+        value = text.get(*selection) if selection else store.read()[2]
         root.clipboard_clear()
-        root.clipboard_append(store.read()[2])
+        root.clipboard_append(value)
 
     ttk.Button(toolbar, text="Copy log", command=copy_log).pack(side="right", padx=8)
     text = ScrolledText(root, wrap="word", state="disabled", font=("Consolas", 10))
