@@ -10,6 +10,17 @@ This guide is for human contributors and coding agents. Read repository-root `AG
 - FFmpeg and ffprobe for real media integration tests.
 - yt-dlp and Deno when testing local YouTube downloads and the PO-token provider.
 
+The independent TypeScript Cloudflare server lives in
+[`cloudflare-worker/`](../cloudflare-worker/README.md). It requires Node.js 22+
+and has its own lockfile, D1 migrations, build and local workerd integration
+tests. Run `npm ci`, `npm run check` and `npm test` in that directory. Its
+generated catalog and validators come from the built Extension and are not
+committed. This server change does not enable a public connection in the
+shipped Extension or require an Agent/Extension version bump. Follow its
+protocol document before wiring the Chrome client; no device/focus-based
+fallback may replace exact chat binding. CI checks this package without
+deploying or requiring Cloudflare/provider credentials.
+
 Install Extension dependencies with:
 
 ```sh

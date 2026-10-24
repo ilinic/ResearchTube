@@ -20,6 +20,14 @@ The tunnel is outbound-only from the Extension. The Agent binds only to loopback
 
 ## Components
 
+The optional public-server implementation is developed separately in
+[`cloudflare-worker/`](../cloudflare-worker/README.md). It adds a Cloudflare
+MCP/OAuth entry point, D1 accounts and installation credentials, and a
+WebSocket relay isolated by user and verified tab/document bindings. It is not
+yet connected to the shipped Extension; the tunnel topology above remains the
+current runtime. See its [Chrome protocol](../cloudflare-worker/PROTOCOL.md)
+for the required enrollment, widget and delivery checks before rollout.
+
 | Component | Main sources | Responsibility |
 | --- | --- | --- |
 | MCP service worker | `extension/background.js` | Tunnel polling, MCP schemas, validation, task orchestration, Settings state and browser automation |

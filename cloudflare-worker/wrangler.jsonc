@@ -1,0 +1,22 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "researchtube",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-24",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "observability": { "enabled": false },
+  "vars": {
+    "PUBLIC_ORIGIN": "http://localhost:8787",
+    "EXTENSION_ORIGINS": "[]",
+    "ALLOW_LOCAL_DEVELOPMENT": "true"
+  },
+  "d1_databases": [{
+    "binding": "DB",
+    "database_name": "researchtube",
+    "database_id": "00000000-0000-0000-0000-000000000000",
+    "migrations_dir": "migrations"
+  }],
+  "durable_objects": { "bindings": [{ "name": "BROWSER_ROOMS", "class_name": "BrowserRoom" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["BrowserRoom"] }]
+}
