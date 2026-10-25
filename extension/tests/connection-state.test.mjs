@@ -13,9 +13,11 @@ function worker(script, initial = {}) {
   let response = async () => ({ status: 204, ok: true });
   const context = {
     DEFAULTS: { tunnelId: "", runtimeApiKey: "", lastTunnelConnection: null, lastConnectionTest: null, agentPort: 17843 },
+
+    serverConnection: {stop:async()=>{},connect:async()=>({ok:true})},SERVER_ORIGIN:"https://rtube.win",
     EXTENSION_VERSION: "test", REQUIRED_AGENT_INTERFACE_VERSION: 78, CONTROL_PLANE_BASE_URL: "https://api.openai.com",
     POLL_RETRY_DELAY_MS: 10, AbortController, Date, consoleAction() {}, cameraRecordingBadgeKind: null,
-    chrome: { storage: { local: {
+    chrome: { runtime: {id:"a".repeat(32)}, storage: { local: {
       get: async defaults => ({ ...defaults, ...structuredClone(data) }),
       set: async changes => Object.assign(data, structuredClone(changes)),
     } } },
@@ -119,6 +121,20 @@ function ui(script, sendMessage, storage = {}) {
   vm.runInNewContext(script, context);
   return { context, element, notify: changes => storageListener(changes, "local") };
 }
+// The selected transport is exclusive; switching retains both configurations.
+for (const script of [source, bundle]) {
+  const w = worker(script, {connectionMode:"tunnel",tunnelId:"tunnel_saved",runtimeApiKey:"sk-PRIVATE",serverInstallationToken:"PRIVATE-SERVER-TOKEN",lastServerConnection:{state:"ready"}});
+  await w.context.saveConnection({connectionMode:"server"});
+  assert.equal(w.data.tunnelId,"tunnel_saved");assert.equal(w.data.runtimeApiKey,"sk-PRIVATE");
+  assert.equal((await w.context.pollOnce()).reason,"server-mode");assert.equal(w.requests.length,0);
+  assert.equal((await w.context.testConnection()).mode,"server");
+  const state=await w.context.getPublicConnectionState({includeAgent:false});
+  assert.equal(state.connectionMode,"server");assert.equal(state.serverSignedIn,true);
+  assert.doesNotMatch(JSON.stringify(state),/PRIVATE-SERVER-TOKEN|sk-PRIVATE/);
+  await w.context.saveConnection({connectionMode:"tunnel"});
+  assert.equal(w.data.serverInstallationToken,"PRIVATE-SERVER-TOKEN");
+}
+
 let calls = [], failSave = false, throwTest = false;
 const s = ui(settings, async message => {
   calls.push(plain(message));
@@ -133,7 +149,7 @@ for (const fields of [{ tunnelId: "", apiKey: "sk-PRIVATE" }, { tunnelId: "tunne
   s.element("tunnel-id").value = fields.tunnelId; s.element("api-key").value = fields.apiKey; calls = [];
   await s.element("test-connection").listeners.click();
   assert.deepEqual(calls.map(message => message.type), ["save-connection", "test-connection"]);
-  assert.deepEqual(calls[0].payload, fields);
+  assert.deepEqual(calls[0].payload, {connectionMode:"tunnel",...fields});
   assert.equal(s.element("api-key").value, fields.apiKey, "success does not empty or replace the actual key field");
   assert.equal(s.element("test-connection").disabled, false);
 }

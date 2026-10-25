@@ -20,13 +20,16 @@ The tunnel is outbound-only from the Extension. The Agent binds only to loopback
 
 ## Components
 
-The optional public-server implementation is developed separately in
-[`cloudflare-worker/`](../cloudflare-worker/README.md). It adds a Cloudflare
-MCP/OAuth entry point, D1 accounts and installation credentials, and a
-WebSocket relay isolated by user and verified tab/document bindings. It is not
-yet connected to the shipped Extension; the tunnel topology above remains the
-current runtime. See its [Chrome protocol](../cloudflare-worker/PROTOCOL.md)
-for the required enrollment, widget and delivery checks before rollout.
+The Chrome Extension offers mutually exclusive **ResearchTube server** and
+**My OpenAI tunnel** transports. Both call the same `handleMcpRequest`; tool
+implementations remain local. The public path is ChatGPT → Cloudflare MCP/OAuth
+Worker → authenticated WebSocket → Extension → optional loopback Agent. Its
+source is [`cloudflare-worker/`](../cloudflare-worker/README.md), and
+[`PROTOCOL.md`](../cloudflare-worker/PROTOCOL.md) defines exact installation,
+tab, top-document and conversation binding. The selected transport and private
+per-profile credential live in local Extension storage; credentials never enter
+MCP output. Switching transports preserves settings and invalidates live routes.
+The original tunnel topology above remains supported independently.
 
 | Component | Main sources | Responsibility |
 | --- | --- | --- |

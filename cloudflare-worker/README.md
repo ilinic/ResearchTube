@@ -5,12 +5,12 @@ Cloudflare Workers, Better Auth handles Google/Microsoft sign-in and OAuth 2.1,
 D1 stores accounts and installation credentials, and SQLite-backed Durable
 Objects route requests to authenticated extension WebSockets.
 
-**This is the server implementation, not a deployed or Store-approved plugin.**
-The existing Chrome Extension still uses the OpenAI Secure MCP Tunnel. Its public
-connection Settings, sign-in/enrollment bridge, cloud widget listener and relay
-client are not wired into the shipped Extension yet. Implement those using
-[PROTOCOL.md](PROTOCOL.md), then test real Chrome/ChatGPT before public rollout.
-The Worker never launches a browser, reads cookies or runs FFmpeg/yt-dlp.
+**This is the public backend; Store approval is a separate step.**
+The Chrome Extension offers **ResearchTube server** and **My OpenAI tunnel**
+connection methods. Its public path includes sign-in/enrollment, the dedicated
+cloud widget listener and authenticated WebSocket relay. See [PROTOCOL.md](PROTOCOL.md)
+and test real Chrome/ChatGPT before public rollout. The Worker never launches
+a browser, reads its cookies or runs FFmpeg/yt-dlp.
 
 ## Implemented
 
@@ -152,7 +152,7 @@ only confirms an HTTP response, not provider or browser readiness.
 
 The ChatGPT MCP address is **`https://rtube.win/mcp`**. Use a personal custom MCP
 connection with OAuth/DCR for testing before Store submission. Actual browser
-calls still require the Extension integration described above. Test provider
+calls require a signed-in Extension profile and a fresh chat-widget binding. Test provider
 redirects with real accounts; automated tests seed local sessions and do not
 complete external social login.
 
@@ -177,6 +177,25 @@ missing redirect restores the button and displays a bounded error. Diagnostics
 show only HTTP status and a safe error code, never provider response bodies,
 secrets or authorization URLs. After deployment, test the real provider redirect
 and callback in Chrome; `/health` alone does not exercise authentication.
+
+## Allow the Chrome Extension
+
+Open Extension Settings and select **ResearchTube server**. Under **Server setup
+details**, copy its Extension ID. In `env.production.vars.EXTENSION_ORIGINS`,
+allow its exact origin, for example:
+
+```json
+"EXTENSION_ORIGINS": "[\"chrome-extension://<actual-32-letter-id>\"]"
+```
+
+Deploy this change before clicking **Sign in and connect**. Do not add wildcard
+origins. Unpacked IDs depend on their installation; a published extension has a
+fixed approved ID. Updating the Extension code does not configure the Worker's
+allowlist automatically. Chrome needs the new `https://rtube.win/*` host access;
+reload the Extension and refresh existing ChatGPT tabs to install its bridges.
+After profile connection, connect `https://rtube.win/mcp` with OAuth in ChatGPT,
+call `system_connect_browser`, then `system_connection_status`. Switching back
+to the tunnel retains its ID/key and stops the server socket.
 
 ## Accounts and revocation
 
@@ -204,8 +223,9 @@ old route instead of electing a browser. A copied conversation's old widget
 cannot reuse a consumed nonce.
 
 The server alone cannot detect another computer displaying a historical copy
-of the same conversation. The Extension integration must reject duplicate
-controllers and require fresh binding on resumed/moved chats. Do not claim
+of the same conversation. The Extension rejects duplicate
+controllers in its profile and requires fresh binding after disconnect, restart
+or document changes. Do not claim
 transparent multi-device support or enable public rollout based solely on
 the protocol simulator. Test identical conversation copies on different
 computers/profiles, not just different conversations.

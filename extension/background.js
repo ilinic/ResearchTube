@@ -1,3 +1,4 @@
+import { createServerConnection, SERVER_ORIGIN } from "./server-connection.js";
 import { createBrowserOwner } from "./browser-owner.js";
 import { taskTabSchema, normalizeTaskTabId, createTaskCompletionDelivery, installComposerWatchdog } from "./task-chat.js";
 import { waitForComposerMedia } from "./composer-media-retry.js";
@@ -28,6 +29,11 @@ const EXTERNAL_URLS = Object.freeze({
   support: "https://ko-fi.com/ilinic"
 });
 const DEFAULTS = {
+  connectionMode: "tunnel",
+  serverInstallationId: "",
+  serverInstallationToken: "",
+  lastServerConnection: null,
+  serverEnrollment: null,
   tunnelId: "",
   runtimeApiKey: "",
   onboardingCompleted: false,
@@ -2576,6 +2582,8 @@ function chatConversationPath(value) {
 }
 
 async function requireCurrentChatTarget(target) {
+  if (target?.cloudTarget) await serverConnection.verify(target.cloudTarget);
+  else if (!target?.newChat && (await getConfig()).connectionMode === "server") throw localAgentError("BROWSER_BINDING_CHANGED", "Connect this chat again before sending files.");
   if (!Number.isInteger(target?.tabId) || !target.chatPath) {
     throw localAgentError("MEDIA_TO_CHAT_TARGET_NOT_FOUND", "The originating ChatGPT tab could not be identified; no Composer changes were made.");
   }
@@ -2863,7 +2871,7 @@ async function drainLibraryStoreQueue() {
   }
 }
 
-async function libraryStoreStart(filesValue, tabIdValue = null) {
+async function libraryStoreStart(filesValue, tabIdValue = null, cloudTarget = null) {
   const tabId = normalizeTaskTabId(tabIdValue);
   if (tabId != null) await startComposerWatchdog(tabId).catch(() => {});
   await ensureLibraryStoreLoaded();
@@ -2871,7 +2879,7 @@ async function libraryStoreStart(filesValue, tabIdValue = null) {
   const files = normalizeLibraryStoreFiles(filesValue, limits.libraryStoreMaxFiles);
   const createdAt = libraryStoreNow();
   const task = {
-    taskId: `library_${crypto.randomUUID()}`, tabId, status: "queued", phase: "queued", files, submittedFiles: [], skippedFiles: [], createdAt, updatedAt: createdAt,
+    taskId: `library_${crypto.randomUUID()}`, tabId, cloudTarget, status: "queued", phase: "queued", files, submittedFiles: [], skippedFiles: [], createdAt, updatedAt: createdAt,
     submittedAt: null, libraryAvailability: "not_requested", message: "Queued for the dedicated ChatGPT Library service tab.", error: null
   };
   libraryStoreTasks.set(task.taskId, task); libraryStoreQueue.push(task.taskId);
@@ -3140,7 +3148,9 @@ async function drainMediaToChatQueue() {
   }
 }
 
-async function mediaToChatStart(argumentsValue = {}, { awaitingArtifacts = false } = {}) {
+async function mediaToChatStart(argumentsValue = {}, { awaitingArtifacts = false, cloudTarget = null } = {}) {
+  if (cloudTarget) await serverConnection.verify(cloudTarget);
+  const cloudChatPath = cloudTarget ? chatConversationPath((await chrome.tabs.get(cloudTarget.tabId)).url) : null;
   if (!argumentsValue || typeof argumentsValue !== "object" || Array.isArray(argumentsValue) || Object.keys(argumentsValue).some((name) => !["files", "sendDelaySeconds", "tabId"].includes(name))) {
     throw localAgentError("MEDIA_TO_CHAT_INVALID", "media_view accepts only files, sendDelaySeconds and optional tabId.");
   }
@@ -3154,15 +3164,17 @@ async function mediaToChatStart(argumentsValue = {}, { awaitingArtifacts = false
   let taskId;
   do { taskId = createAsyncTaskId(); } while (mediaToChatTasks.has(taskId));
   const task = {
-    taskId, tabId, suppressCompletionNotification: awaitingArtifacts, awaitingArtifacts, target: null, bindingToken: crypto.randomUUID(), bindingDeadline: Date.now() + MEDIA_TO_CHAT_BIND_TIMEOUT_MS,
+    taskId, tabId, cloudTarget, suppressCompletionNotification: awaitingArtifacts, awaitingArtifacts, target: cloudTarget ? {tabId:cloudTarget.tabId,chatPath:cloudChatPath,cloudTarget} : null, bindingToken: crypto.randomUUID(), bindingDeadline: Date.now() + MEDIA_TO_CHAT_BIND_TIMEOUT_MS,
     sendDelaySeconds, sendNotBefore: null, sendStarted: false,
     status: "queued", phase: "queued", progressPercent: 0,
     files, submittedFiles: [], skippedFiles: [], createdAt, updatedAt: createdAt, submittedAt: null,
     message: "Waiting for the originating chat widget to identify its exact Chrome tab. Finish the current assistant response so Send can become available.", error: null
   };
   mediaToChatTasks.set(task.taskId, task); mediaToChatQueue.push(task.taskId);
+  if (cloudTarget) task.bindingToken = null;
   await persistMediaToChatTasks();
-  await chrome.alarms.create(`media-chat-bind:${task.taskId}`, { when: task.bindingDeadline });
+  if (cloudTarget) void drainMediaToChatQueue();
+  else await chrome.alarms.create(`media-chat-bind:${task.taskId}`, { when: task.bindingDeadline });
   return { task: mediaToChatTaskDocument(task) };
 }
 
@@ -3470,7 +3482,7 @@ const taskCompletionDelivery = createTaskCompletionDelivery({
   now: () => Date.now(), historyLimit: () => completedTaskHistoryLimit,
   load: async () => (await chrome.storage.local.get({ researchtubeBackgroundTaskRecordsV1: [] })).researchtubeBackgroundTaskRecordsV1,
   save: records => chrome.storage.local.set({ researchtubeBackgroundTaskRecordsV1: records }),
-  schedule: scheduleBackgroundTaskPoll, send: sendComposerWhenReady, log: consoleAction,
+  schedule: scheduleBackgroundTaskPoll, send: sendComposerWhenReady, verifyContext: verifyTaskCloudContext, log: consoleAction,
   status: async (kind, taskId) => kind === "timer"
     ? normalizeTimerResult("timer_status", await agentJsonRequest("/tasks/timer/" + encodeURIComponent(taskId)))
     : customToolStatus(taskId)
@@ -3493,12 +3505,12 @@ function taskContextDefinitions(definitions) {
       outputSchema: output(tool.outputSchema), ...(starts ? { annotations: { ...tool.annotations, readOnlyHint: false, openWorldHint: true } } : {}) };
   });
 }
-async function registerBackgroundChatTask(tool, task, tabId) {
+async function registerBackgroundChatTask(tool, task, tabId, cloudTarget = null) {
   const kind = tool === "timer_start" ? "timer" : customToolByName(tool)?._meta?.["researchtube/customTool"]?.execution === "task" ? "custom" : null;
   if (!kind || !task?.taskId) return task;
   const normalized = normalizeTaskTabId(tabId);
   if (normalized != null) await startComposerWatchdog(normalized).catch(() => {});
-  return taskCompletionDelivery.register(task, kind, normalized);
+  return taskCompletionDelivery.register(task, kind, normalized, cloudTarget);
 }
 
 const artifactTaskManager = createArtifactTaskManager({
@@ -3513,12 +3525,12 @@ const artifactTaskManager = createArtifactTaskManager({
   report: task => { void reportMcpToolToAgent(task.tool, task); },
   completed: (task, persist) => taskCompletionDelivery.completed(task, persist),
   schedule: scheduleArtifactTask, unschedule: unscheduleArtifactTask,
-  reserveChat: async ({ sendDelaySeconds, tabId }) => (await mediaToChatStart({ sendDelaySeconds, tabId }, { awaitingArtifacts: true })).task.taskId,
+  reserveChat: async ({ sendDelaySeconds, tabId, cloudTarget }) => (await mediaToChatStart({ sendDelaySeconds, tabId }, { awaitingArtifacts: true, cloudTarget })).task.taskId,
   releaseChat: releaseArtifactChat, chatStatus: mediaToChatStatus,
   cancelChat: mediaToChatCancel, chatMetadata: mediaToChatWidgetMetadata
 });
 
-async function startArtifactTask(tool, argumentsValue) {
+async function startArtifactTask(tool, argumentsValue, cloudTarget = null) {
   const args = { ...argumentsValue };
   const tabId = normalizeTaskTabId(args.tabId);
   if (tabId != null) await startComposerWatchdog(tabId).catch(() => {});
@@ -3533,11 +3545,11 @@ async function startArtifactTask(tool, argumentsValue) {
     throw localAgentError("SPEECH_INVALID", "addToChat requires outputMode file or both; speakers creates no file.");
   }
   await refreshTaskHistorySettings();
-  return artifactTaskManager.start(tool, args, { addToChat, sendDelaySeconds, tabId });
+  return artifactTaskManager.start(tool, args, { addToChat, sendDelaySeconds, tabId, cloudTarget });
 }
 
 async function executeArtifactStart(id, tool, args) {
-  const response = await executeToolCall(id, tool, args, () => startArtifactTask(tool, args));
+  const response = await executeToolCall(id, tool, args, () => startArtifactTask(tool, args, cloudContextForRequest(id)));
   const task = response.result?.structuredContent;
   if (task?.taskId) {
     const metadata = await artifactTaskManager.metadata(task.taskId);
@@ -3810,8 +3822,8 @@ const chatContext = createChatContext({
 // Alarm revives a suspended worker; only live exact conversations reconnect.
 chrome.debugger?.onEvent?.addListener((source, method, params) => { void browserAgent.onEvent(source, method, params).catch(error => consoleAction(`[ResearchTube Browser] ${error.code || "BROWSER_UNAVAILABLE"}`)); });
 chrome.debugger?.onDetach?.addListener((source, reason) => { debuggerLeases.lost(source.tabId); void browserAgent.onDetached(source, reason).catch(() => {}); });
-chrome.tabs?.onRemoved?.addListener(tabId => { void browserAgent.onRemoved(tabId).catch(() => {}).finally(() => { browserAutomationBadges.delete(tabId); browserAutomationToolbarTabs.delete(tabId); }); });
-chrome.tabs?.onUpdated?.addListener((tabId, change) => { void browserAgent.onUpdated(tabId, change).catch(() => {}); });
+chrome.tabs?.onRemoved?.addListener(tabId => { void serverConnection.changed(tabId).catch(() => {}); void browserAgent.onRemoved(tabId).catch(() => {}).finally(() => { browserAutomationBadges.delete(tabId); browserAutomationToolbarTabs.delete(tabId); }); });
+chrome.tabs?.onUpdated?.addListener((tabId, change) => { if (change.url || change.status) void serverConnection.changed(tabId).catch(() => {}); void browserAgent.onUpdated(tabId, change).catch(() => {}); });
 chrome.tabs?.onCreated?.addListener(() => { void browserAgent.onCreated().catch(() => {}); });
 chrome.tabs?.onReplaced?.addListener(() => { void browserAgent.onReplaced().catch(() => {}); });
 
@@ -3830,6 +3842,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({ ok: false, errorCode: error.code || "MEDIA_TO_CHAT_TARGET_NOT_FOUND", error: safeErrorMessage(error) });
     });
     return true;
+  }
+  if (["server-sign-in", "server-disconnect"].includes(message?.type)) {
+    if(sender?.id!==chrome.runtime.id || sender.tab || sender.url!==chrome.runtime.getURL("settings.html")){sendResponse({ok:false,errorCode:"INVALID_SENDER"});return false;}
+    (message.type==="server-sign-in"?beginServerSignIn():updateConnection(()=>serverConnection.disconnect()).then(()=>({ok:true}))).then(sendResponse).catch(()=>sendResponse({ok:false,errorCode:"SERVER_CONNECTION_FAILED"}));return true;
+  }
+  if(message?.type==="researchtube_server_enroll"){
+    enrollServerProfile(message,sender).then(sendResponse).catch(error=>sendResponse({ok:false,errorCode:error.code||"SERVER_ENROLLMENT_FAILED"}));return true;
+  }
+  if(message?.type==="researchtube_server_bind"){
+    serverConnection.bind(message.nonce,sender).then(sendResponse).catch(error=>sendResponse({ok:false,errorCode:error.code||"BROWSER_BINDING_INVALID"}));return true;
   }
   if (message?.type === "poll-now") {
     startPolling();
@@ -3945,6 +3967,90 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return false;
 });
 
+// Server credentials and enrollment capabilities are private local state.
+const cloudRequestTargets = new Map();
+let serverEnrollmentRunning = false;
+function cloudContextForRequest(id) { return cloudRequestTargets.get(id) || null; }
+function readServerChatDocument() {
+  const path=location.pathname;
+  const match=/\/c\/([A-Za-z0-9_-]+)\/?$/.exec(path);
+  if(location.origin!=="https://chatgpt.com" || !match || match[1].startsWith("local-chatgpt"))return null;
+  return {conversationId:match[1]};
+}
+async function serverChatIdentity(tabId) {
+  const tab=await chrome.tabs.get(tabId);
+  if(!chatConversationPath(tab.url))throw localAgentError("BROWSER_SESSION_NOT_READY","Wait for ChatGPT to save this conversation.");
+  const results=await chrome.scripting.executeScript({target:{tabId,frameIds:[0]},world:"ISOLATED",func:readServerChatDocument});
+  const top=results.find(item=>item.frameId===0), conversationId=top?.result?.conversationId;
+  if(!top?.documentId || !conversationId || chatConversationPath(tab.url)?.split("/c/").pop()!==conversationId)
+    throw localAgentError("BROWSER_TARGET_MISMATCH","The ChatGPT document changed.");
+  const copies=(await chrome.tabs.query({url:"https://chatgpt.com/*"})).filter(item=>chatConversationPath(item.url)?.split("/c/").pop()===conversationId);
+  if(copies.length!==1 || copies[0].id!==tabId)throw localAgentError("BROWSER_CONTEXT_AMBIGUOUS","Close duplicate tabs of this conversation, then reconnect.");
+  return {tabId,documentId:top.documentId,conversationId};
+}
+const serverConnection = createServerConnection({
+  extensionId:chrome.runtime.id,config:getConfig,now:Date.now,fetch:(...args)=>fetch(...args),socket:url=>new WebSocket(url),
+  setTimeout:(...args)=>setTimeout(...args),clearTimeout:id=>clearTimeout(id),setInterval:(...args)=>setInterval(...args),clearInterval:id=>clearInterval(id),
+  identity:serverChatIdentity,
+  claimGroup:async tabId=>{if((await chrome.tabs.get(tabId)).groupId>=0)await browserAgent.connectGroup(tabId);},
+  tool:name=>toolDefinitions().find(tool=>tool.name===name),
+  execute:async(request,target)=>{
+    cloudRequestTargets.set(request.id,target);
+    try{return await handleMcpRequest(request);}finally{cloudRequestTargets.delete(request.id);}
+  },
+  status:async value=>{await chrome.storage.local.set({lastServerConnection:value});await refreshActionBadge();},
+  clearCredential:()=>chrome.storage.local.set({serverInstallationId:"",serverInstallationToken:"",serverEnrollment:null}),
+  invalidate:async binding=>{
+    await updateComposerWatchdog(binding.tabId, "suppress").catch(()=>{});
+    for(const task of mediaToChatTasks.values())if(task.target?.cloudTarget?.bindingId===binding.bindingId && ["queued","working"].includes(task.status))await mediaToChatCancel(task.taskId).catch(()=>{});
+    await browserAgent.onRemoved(binding.tabId).catch(()=>{});
+  }
+});
+async function verifyTaskCloudContext(task) {
+  const cloudTarget=task.cloudTarget || task.caller?.cloudTarget;
+  if(cloudTarget)await serverConnection.verify(cloudTarget);
+  else if((await getConfig()).connectionMode==="server")throw localAgentError("BROWSER_BINDING_CHANGED","This task has no current server chat binding.");
+}
+async function beginServerSignIn() {
+  const config=await getConfig();
+  if(config.connectionMode!=="server")return {ok:false,errorCode:"SERVER_MODE_DISABLED",message:"Select ResearchTube server first."};
+  const nonce=crypto.randomUUID()+crypto.randomUUID();
+  const tab=await chrome.tabs.create({url:"about:blank",active:true});
+  await chrome.storage.local.set({serverEnrollment:{nonce,tabId:tab.id,expiresAt:Date.now()+10*60_000}});
+  await chrome.tabs.update(tab.id,{url:SERVER_ORIGIN+"/connect-extension?extensionId="+chrome.runtime.id+"&nonce="+nonce});
+  return {ok:true,message:"Finish sign-in in the opened tab."};
+}
+async function enrollServerProfile(message,sender) {
+  const config=await getConfig(), pending=config.serverEnrollment;
+  if(!pending || config.connectionMode!=="server" || sender?.id!==chrome.runtime.id || sender.frameId!==0 || typeof sender.documentId!=="string" || sender.tab?.id!==pending?.tabId || pending.expiresAt<=Date.now() || message.nonce!==pending.nonce)
+    throw localAgentError("SERVER_ENROLLMENT_EXPIRED","Start connection setup again from ResearchTube Settings.");
+  const url=new URL(sender.url);
+  if(url.origin!==SERVER_ORIGIN || url.pathname!=="/connect-extension" || url.searchParams.get("nonce")!==pending.nonce || url.searchParams.get("extensionId")!==chrome.runtime.id)
+    throw localAgentError("SERVER_ENROLLMENT_INVALID","Invalid server setup page.");
+  if(serverEnrollmentRunning)throw localAgentError("SERVER_ENROLLMENT_BUSY","Connection setup is already running.");
+  serverEnrollmentRunning=true;
+  try {
+  const injection=(await chrome.scripting.executeScript({target:{tabId:sender.tab.id,documentIds:[sender.documentId]},world:"ISOLATED",func:async extensionId=>{
+    const r=await fetch("/api/installations",{method:"POST",signal:AbortSignal.timeout(15000),credentials:"same-origin",redirect:"error",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:"Chrome profile",extensionOrigin:"chrome-extension://"+extensionId})});
+    const data=await r.json();return r.ok?{ok:true,installationId:data.installationId,installationToken:data.installationToken}:{ok:false,errorCode:data?.error?.code};
+  },args:[chrome.runtime.id]}))[0];
+  const result=injection?.result;
+  if(injection?.documentId!==sender.documentId)throw localAgentError("SERVER_ENROLLMENT_INVALID","The setup document changed.");
+  if(!result?.ok)throw localAgentError(/^[A-Z][A-Z0-9_]{0,63}$/.test(result?.errorCode || "")?result.errorCode:"SERVER_ENROLLMENT_FAILED","This Chrome profile could not be connected.");
+  if(!/^[a-f0-9-]{36}$/.test(result.installationId || "") || !/^[a-f0-9-]{72}$/.test(result.installationToken || ""))throw localAgentError("SERVER_INVALID_RESPONSE","Invalid server credential.");
+  const latest=await getConfig();
+  if(latest.connectionMode!=="server" || latest.serverEnrollment?.nonce!==pending.nonce)throw localAgentError("CONNECTION_CHANGED","Connection settings changed.");
+  await serverConnection.stop();
+  if(config.serverInstallationToken)await serverConnection.api("/api/installations/revoke-current",{},config).catch(()=>{});
+  await updateConnection(async()=>{
+    const current=await getConfig();
+    if(current.connectionMode!=="server" || current.serverEnrollment?.nonce!==pending.nonce)throw localAgentError("CONNECTION_CHANGED","Connection setup was cancelled.");
+    await chrome.storage.local.set({serverInstallationId:result.installationId,serverInstallationToken:result.installationToken,serverEnrollment:null,lastServerConnection:null});
+  });
+  return serverConnection.connect();
+  } finally { serverEnrollmentRunning=false; }
+}
+
 async function getConfig() {
   return { ...DEFAULTS, ...(await chrome.storage.local.get({ ...DEFAULTS, lastStatus: "" })) };
 }
@@ -3955,13 +4061,17 @@ async function getPublicConnectionState({ includeAgent = true } = {}) {
   const agent = includeAgent ? await getAgentStatus(agentPort) : null;
   const remainingMs = Math.max(0, Number(config.youtubeSearchCooldownUntil || 0) - Date.now());
   return {
-    configured: Boolean(config.tunnelId && config.runtimeApiKey),
+    connectionMode: config.connectionMode,
+    serverOrigin: SERVER_ORIGIN,
+    serverExtensionId: chrome.runtime.id,
+    serverSignedIn: Boolean(config.serverInstallationToken),
+    configured: config.connectionMode === "server" ? Boolean(config.serverInstallationToken) : Boolean(config.tunnelId && config.runtimeApiKey),
     tunnelId: config.tunnelId,
     apiKeyPresent: Boolean(config.runtimeApiKey),
     polling,
     lastStatus: config.lastStatus || "",
     lastConnectionTest: config.lastConnectionTest || null,
-    connection: tunnelConnectionState(config),
+    connection: activeConnectionState(config),
     agentPort,
     agent,
     extensionVersion: EXTENSION_VERSION,
@@ -6061,6 +6171,10 @@ function saveConnection(payload = {}) {
   return updateConnection(async () => {
     const config = await getConfig();
     const changes = {};
+    if (Object.hasOwn(payload, "connectionMode")) {
+      if (!["tunnel", "server"].includes(payload.connectionMode)) throw localAgentError("INVALID_ARGUMENT", "Select tunnel or server.");
+      changes.connectionMode = payload.connectionMode;
+    }
     // Explicit empty fields clear credentials. Omitted fields preserve them for
     // internal metadata-only updates; Settings always supplies both fields.
     if (Object.hasOwn(payload, "tunnelId")) changes.tunnelId = String(payload.tunnelId ?? "").trim();
@@ -6068,18 +6182,26 @@ function saveConnection(payload = {}) {
     const changed = Object.entries(changes).some(([name, value]) => config[name] !== value);
     if (changed) {
       connectionRevision++;
+      await serverConnection.stop();
       tunnelPollController?.abort();
       if (pollLoopTimer !== null) clearTimeout(pollLoopTimer);
       pollLoopTimer = null; pollLoopScheduled = false;
-      Object.assign(changes, { lastConnectionTest: null, lastTunnelConnection: null, lastStatus: "", onboardingCompleted: false });
+      Object.assign(changes, { lastConnectionTest: null, lastTunnelConnection: null, lastServerConnection: null, lastStatus: "", onboardingCompleted: false });
     }
     if (Object.hasOwn(payload, "onboardingCompleted")) changes.onboardingCompleted = payload.onboardingCompleted === true;
     await chrome.storage.local.set(changes);
     await refreshActionBadge();
     const saved = await getConfig();
-    if (saved.tunnelId && saved.runtimeApiKey) void startPolling();
+    if (saved.connectionMode === "server") void serverConnection.connect();
+    else if (saved.tunnelId && saved.runtimeApiKey) void startPolling();
     return { ok: true, apiKeyPresent: Boolean(saved.runtimeApiKey) };
   });
+}
+
+function activeConnectionState(config) {
+  if(config.connectionMode!=="server")return tunnelConnectionState(config);
+  if(!config.serverInstallationToken)return {state:"not-configured",errorCode:"SERVER_SIGN_IN_REQUIRED"};
+  return config.lastServerConnection || {state:"unchecked",errorCode:null};
 }
 
 function tunnelConnectionState(config) {
@@ -6106,6 +6228,7 @@ function recordTunnelConnection(revision, result, lastStatus, manual = false) {
 }
 
 function startPolling() {
+  void getConfig().then(config => { if (config.connectionMode === "server") void serverConnection.connect(); });
   // All callers share one scheduled loop. The former implementation allowed
   // concurrent callers to attach their own successor timer after the same
   // poll, which could multiply timers even though the poll itself was shared.
@@ -6121,7 +6244,7 @@ function schedulePollLoop(delayMs) {
     pollLoopTimer = null;
     const result = await pollOnce();
     const config = await getConfig();
-    if (config.tunnelId && config.runtimeApiKey) {
+    if (config.connectionMode !== "server" && config.tunnelId && config.runtimeApiKey) {
       schedulePollLoop(POLL_RETRY_DELAY_MS);
     } else {
       await refreshActionBadge();
@@ -6152,6 +6275,7 @@ async function pollOnce() {
 async function pollOnceInternal(revision = connectionRevision) {
   const config = await getConfig();
   if (revision !== connectionRevision) return { ok: false, reason: "connection-changed" };
+  if (config.connectionMode === "server") return { ok: false, reason: "server-mode" };
   if (!config.tunnelId || !config.runtimeApiKey) {
     return { ok: false, reason: "not-configured" };
   }
@@ -6336,7 +6460,7 @@ function updateCameraRecordingBadge(task) {
 async function refreshActionBadge() {
   if (cameraRecordingBadgeKind) return paintCameraRecordingBadge();
   const config = await getConfig();
-  const connection = tunnelConnectionState(config);
+  const connection = activeConnectionState(config);
   if (connection.state === "error") return setActionBadge("connection-error");
   if (connection.state !== "ready") return setActionBadge("setup");
   if (Number(config.youtubeSearchCooldownUntil || 0) > Date.now()) {
@@ -6350,6 +6474,10 @@ async function testConnection() {
   const revision = connectionRevision;
   await setActionBadge("working");
   const config = await getConfig();
+  if (config.connectionMode === "server") {
+    const result = await serverConnection.connect();
+    return { ...result, mode: "server", message: result.ok ? "ResearchTube server connected." : "Sign in or reconnect this Chrome profile." };
+  }
   let result;
   if (!config.tunnelId) {
     result = connectionFailure("TUNNEL_ID_MISSING", "Enter your Tunnel ID.");
@@ -6499,7 +6627,17 @@ async function handleMcpRequest(request) {
       let input;
       try { input = validateSystemInput(name, request.params.arguments ?? {}); }
       catch (error) { recordSystemDiagnostic({ source: "tool", tool: name, stage: "validation", code: error.code, message: error.message }); return toolError(request.id, error); }
-      const response = await executeToolCall(request.id, name, input, () => name === "system_get_chat_context" ? chatContext.call(input) : systemDiagnostics.get(input));
+      const response = await executeToolCall(request.id, name, input, async () => {
+        if (name !== "system_get_chat_context") return systemDiagnostics.get(input);
+        const task = await chatContext.call(input), cloud = cloudContextForRequest(request.id);
+        if (cloud && !input.taskId) {
+          await serverConnection.verify(cloud);
+          const metadata = chatContext.metadata(task.taskId);
+          await chatContext.bind(metadata, {id:chrome.runtime.id,tab:await chrome.tabs.get(cloud.tabId)});
+          return chatContext.call({taskId:task.taskId});
+        }
+        return task;
+      });
       const metadata = name === "system_get_chat_context" ? chatContext.metadata(response.result?.structuredContent?.taskId) : null;
       if (name === "system_get_chat_context" && response.result?.structuredContent?.taskId) response.result._meta = { "researchtube/chatContext": response.result.structuredContent, ...(metadata ? { "researchtube/chatTarget": metadata } : {}) };
       return response;
@@ -6511,7 +6649,7 @@ async function handleMcpRequest(request) {
     try { args = publicWorkspaceArguments(name, request.params.arguments ?? {}, toolDefinitions()); }
     catch (error) { return toolError(request.id, error); }
     if (ARTIFACT_TOOLS.includes(name)) return executeArtifactStart(request.id, name, args);
-    if (BROWSER_TOOL_NAMES.includes(name)) return executeToolCall(request.id, name, args, () => browserAgent.execute(name, args));
+    if (BROWSER_TOOL_NAMES.includes(name)) return executeToolCall(request.id, name, args, () => browserAgent.execute(name, args, cloudContextForRequest(request.id)));
     const taskId = args.taskId;
     if (name === "media_task_status" || Object.hasOwn(ARTIFACT_STATUS_TOOLS, name)) {
       return executeToolCall(request.id, name, { taskId }, async () => {
@@ -6602,7 +6740,7 @@ async function handleMcpRequest(request) {
   }
   if (request?.method === "tools/call" && request.params?.name === "library_store_start") {
     const files = request.params.arguments?.files;
-    return executeToolCall(request.id, "library_store_start", { files, tabId: request.params.arguments?.tabId }, () => libraryStoreStart(files, request.params.arguments?.tabId));
+    return executeToolCall(request.id, "library_store_start", { files, tabId: request.params.arguments?.tabId }, () => libraryStoreStart(files, request.params.arguments?.tabId, cloudContextForRequest(request.id)));
   }
   if (request?.method === "tools/call" && request.params?.name === "library_store_status") {
     const taskId = String(request.params.arguments?.taskId ?? "").trim();
@@ -6734,7 +6872,7 @@ async function handleMcpRequest(request) {
   }
   if (request?.method === "tools/call" && request.params?.name === "media_view") {
     const args = request.params.arguments ?? {};
-    const response = await executeToolCall(request.id, "media_view", args, () => mediaToChatStart(args));
+    const response = await executeToolCall(request.id, "media_view", args, () => mediaToChatStart(args, {cloudTarget:cloudContextForRequest(request.id)}));
     const metadata = mediaToChatWidgetMetadata(response.result?.structuredContent?.task?.taskId);
     if (metadata) response.result._meta = { "researchtube/chatTarget": metadata };
     return response;
@@ -6918,7 +7056,7 @@ async function executeToolCall(id, tool, input, work, operation = null) {
     let value = await work();
     const task = value?.task?.taskId ? value.task : value;
     if (task?.taskId) {
-      let contextual = await registerBackgroundChatTask(tool, task, input.tabId);
+      let contextual = await registerBackgroundChatTask(tool, task, input.tabId, cloudContextForRequest(id));
       if (["timer_status", "timer_cancel", "custom_tool_status", "custom_tool_cancel"].includes(tool)) contextual = await taskCompletionDelivery.observe(contextual);
       value = value?.task?.taskId ? { ...value, task: contextual } : contextual;
     }

@@ -37,14 +37,14 @@ export function createTaskCompletionDelivery(host) {
     // Busy/missing tabs consume the notification: there is no pending wake-up.
     task.chatCompletionHandled = true;
     await persist();
-    try { await host.send(task.tabId, { completionText: "ResearchTube task " + task.taskId + " completed." }); }
+    try { await host.verifyContext?.(task); await host.send(task.tabId, { completionText: "ResearchTube task " + task.taskId + " completed.", beforeSend: () => host.verifyContext?.(task) }); }
     catch (error) { host.log?.("Task completion notification stopped", { taskId: task.taskId, code: error.code || "CHAT_UNAVAILABLE" }); }
   }
-  async function register(task, kind, tabId) {
+  async function register(task, kind, tabId, cloudTarget = null) {
     await ensure();
     if (tabId == null) return task;
     let record = records.find(item => item.taskId === task.taskId);
-    if (!record) { record = { ...task, kind, tabId }; records.push(record); }
+    if (!record) { record = { ...task, kind, tabId, cloudTarget }; records.push(record); }
     else Object.assign(record, task);
     await save();
     await completed(record, save);

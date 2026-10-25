@@ -40,6 +40,14 @@ async function route(request: Request, env: Env): Promise<Response> {
   if (path === "/consent") return page("consent", env);
   if (path === "/auth-ui.js") return authScript();
   const auth = await createAuth(env);
+  if (path === "/connect-extension" && request.method === "GET") {
+    const extensionId = url.searchParams.get("extensionId"), nonce = url.searchParams.get("nonce");
+    if (!/^[a-p]{32}$/.test(extensionId || "") || !/^[a-f0-9-]{72}$/.test(nonce || ""))
+      throw new PublicError("INVALID_REQUEST", "Open connection setup from ResearchTube Settings.");
+    const session = await auth.api.getSession({ headers: request.headers });
+    if (!session) return Response.redirect(`${base}/sign-in?extensionId=${extensionId}&nonce=${nonce}`, 302);
+    return page("extension-connect", env);
+  }
   if (path === "/.well-known/oauth-authorization-server/api/auth" || path === "/.well-known/openid-configuration/api/auth") {
     const endpoint = path.includes("openid") ? "openid-configuration" : "oauth-authorization-server";
     return auth.handler(new Request(`${base}/api/auth/.well-known/${endpoint}`, request));
@@ -90,6 +98,12 @@ async function route(request: Request, env: Env): Promise<Response> {
       env.DB.prepare("INSERT INTO rt_relay_ticket (token_hash, installation_id, expires_at) VALUES (?, ?, ?)").bind(await digest(ticket), device.id, expiresAt)
     ]);
     return json({ ticket, expiresAt });
+  }
+  if (path === "/api/installations/revoke-current" && request.method === "POST") {
+    const device = await installation(request, env);
+    await env.DB.prepare("UPDATE rt_installation SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL").bind(Date.now(), device.id).run();
+    await roomRequest(env, device.user_id, "/revoke", { installationId: device.id });
+    return json({ revoked: true });
   }
   if (path === "/relay" && request.method === "GET") {
     if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") return new Response(null, { status: 426 });

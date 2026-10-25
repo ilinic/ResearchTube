@@ -405,7 +405,7 @@ export function createBrowserAgent(host) {
         checkTask(task, session);
         const continuation = `Requested browser resource(s) ${task.resourceIds.join(", ")} attached. Continue the current Study Page task using chatTabId: ${task.chatTabId} and source tabId: ${task.tabId}.`;
         await host.attachFiles(files, {
-          target: { tabId: task.chatTabId, chatPath: task.caller.chatPath }, continuation,
+          target: { tabId: task.chatTabId, chatPath: task.caller.chatPath, ...(task.caller.cloudTarget ? {cloudTarget:task.caller.cloudTarget} : {}) }, continuation,
           trace: session.trace, taskId: task.taskId,
           checkCancelled: () => checkTask(task, session),
           beforeSend: async () => {
@@ -428,10 +428,10 @@ export function createBrowserAgent(host) {
       pruneCompletedTasks(tasks, host.historyLimit?.() || 2000);
     }
   }
-  async function execute(name, argumentsValue) {
+  async function execute(name, argumentsValue, cloudTarget = null) {
     const input = validateBrowserInput(name, argumentsValue);
     const { group, member } = await groups.forChat(input.chatTabId);
-    const result = await executeInGroup(name, input, group, member);
+    const result = await executeInGroup(name, input, group, member, cloudTarget);
     await groups.check(group, input.chatTabId, member.chatPath, { allowStopped: true });
     const fullSnapshot = ["site_list_tabs", "site_session_status"].includes(name) && result.group.revision === group.revision;
     const changes = groups.reportChanges(group, fullSnapshot);
@@ -439,8 +439,8 @@ export function createBrowserAgent(host) {
     changes.commit();
     return response;
   }
-  async function executeInGroup(name, input, group, member) {
-    const caller = { group, chatTabId: input.chatTabId, chatPath: member.chatPath, tool: name, action: input.action };
+  async function executeInGroup(name, input, group, member, cloudTarget = null) {
+    const caller = { group, cloudTarget, chatTabId: input.chatTabId, chatPath: member.chatPath, tool: name, action: input.action };
     if (["site_list_tabs", "site_session_status"].includes(name)) {
       return { chatTabId: input.chatTabId, group: groups.project(group, input.offset, input.limit) };
     }

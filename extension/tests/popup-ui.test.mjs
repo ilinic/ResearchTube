@@ -15,7 +15,7 @@ assert.match(html, /Study this site/);
 assert.match(script, /type: "study-site", tabId: tab.id/);
 assert.match(html, /<nav><button id="settings"[^>]*>Settings<\/button><button id="help" class="link">Help<\/button><button id="support"[^>]*><span class="support-heart" aria-hidden="true">♥<\/span> Support<\/button><\/nav>/, "Help must appear between Settings and Support on the same row with the same link style");
 assert.match(html, /<dt>Extension<\/dt><dd id="extension-status">/);
-assert.match(html, /<dt>OpenAI Tunnel<\/dt>/);
+assert.match(html, /<dt id="connection-label">OpenAI Tunnel<\/dt>/);
 assert.match(html, /<dt>YouTube<\/dt>/);
 assert.match(html, /<dt>Local Agent<\/dt>/);
 assert.match(html, /<dt>Interface<\/dt>/);

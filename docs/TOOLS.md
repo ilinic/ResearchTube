@@ -2,6 +2,20 @@
 
 This is a behavioral index, not a duplicate of the JSON Schemas. Exact schemas and defaults are authoritative in the owning Extension modules: `background.js`, `browser-tools.js`, `storyboards.js`, `timers.js` and `artifact-tools.js`. Custom tools come from their package manifests. See [Development](DEVELOPMENT.md) for ownership.
 
+## Server connection
+
+These three tools are provided by the public Worker in server mode:
+
+| Tool | Purpose |
+| --- | --- |
+| `system_connect_browser` | Connect this saved Chrome chat through its widget. |
+| `system_connection_status` | Check the connection and obtain this chat's `browserBindingId`. |
+| `system_disconnect_browser` | Release this conversation's bindings without disconnecting other chats. |
+
+Other server tools require that binding ID. The built-in definitions otherwise
+match the Extension. Source `tabId` still selects a site; chat delivery is fixed
+to the authenticated chat. See [connection setup](HELP.md#3-set-up-the-openai-connection).
+
 ## Artifact tasks and paths
 
 Every artifact producer accepts `addToChat` (false by default) and `sendDelaySeconds` (zero by default). Captures, cropping and clipboard reads are asynchronous as well. One task covers creation plus optional upload/Send in the originating chat. Use `media_task_status` and `media_task_cancel`; specialized status/cancel commands return the same complete workflow. `files[].workspacePath` selects created outputs uniformly; native results and counters are in `creation.data`, upload and delay information in `chat`. See [Artifact tasks](features/ARTIFACT_TASKS.md) for limits, cancellation and restart behavior.

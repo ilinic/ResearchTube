@@ -57,6 +57,7 @@ const context = vm.createContext({
     storage: { local: { set: async () => {}, get: async () => ({}) } }
   },
   cdpError: (message) => new Error(message),
+  getConfig: async () => ({connectionMode:"tunnel"}),
   localAgentError: (code, message) => Object.assign(new Error(message), { code }),
   consoleAction: () => {},
   logBrowserTabState: async () => {},

@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "minimum_chrome_version": "125",
-  "name": "ResearchTube — YouTube Research for ChatGPT",
-  "version": "2.9.3",
+  "name": "ResearchTube \u2014 YouTube Research for ChatGPT",
+  "version": "2.10.0",
   "description": "Public YouTube research tools for ChatGPT through a local MCP connection.",
   "icons": {
     "16": "icons/researchtube-16.png",
@@ -27,7 +27,8 @@
     "https://chatgpt.com/*",
     "https://web-sandbox.oaiusercontent.com/*",
     "https://*.web-sandbox.oaiusercontent.com/*",
-    "http://127.0.0.1/*"
+    "http://127.0.0.1/*",
+    "https://rtube.win/*"
   ],
   "background": {
     "service_worker": "dist/background.js",
@@ -101,6 +102,29 @@
       "all_frames": true,
       "match_about_blank": true,
       "match_origin_as_fallback": true
+    },
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://web-sandbox.oaiusercontent.com/*",
+        "https://*.web-sandbox.oaiusercontent.com/*"
+      ],
+      "js": [
+        "server-widget-bridge.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": true,
+      "match_about_blank": true,
+      "match_origin_as_fallback": true
+    },
+    {
+      "matches": [
+        "https://rtube.win/connect-extension*"
+      ],
+      "js": [
+        "server-enrollment-bridge.js"
+      ],
+      "run_at": "document_idle"
     }
   ],
   "web_accessible_resources": [

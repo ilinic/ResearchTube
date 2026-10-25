@@ -3,11 +3,12 @@ import { WORKER_VERSION } from "./version";
 
 const style = "body{font:17px/1.5 system-ui,sans-serif;max-width:620px;margin:64px auto;padding:0 24px;color:#1f2937;background:#fff}button{font:inherit;padding:10px 18px;margin:8px 8px 8px 0;cursor:pointer}small{color:#4b5563}#status{white-space:pre-wrap}";
 const escape = (value: string) => value.replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
-export function page(kind: "sign-in" | "consent" | "account", env: Env): Response {
+export function page(kind: "sign-in" | "consent" | "account" | "extension-connect", env: Env): Response {
   const providers = [env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET ? "google" : null,
     env.MICROSOFT_CLIENT_ID && env.MICROSOFT_CLIENT_SECRET ? "microsoft" : null].filter(Boolean);
   const body = kind === "sign-in" ? `<h1>Sign in to ResearchTube</h1><p>Connect ChatGPT to your ResearchTube extension in Chrome.</p>${providers.map(provider => `<button data-provider="${provider}">Continue with ${provider === "google" ? "Google" : "Microsoft"}</button>`).join("")}${providers.length ? "" : "<p>Sign-in is not configured yet. The server administrator must configure Google or Microsoft.</p>"}`
     : kind === "consent" ? '<h1>Connect ResearchTube</h1><p>Allow this application to use ResearchTube tools in your connected Chrome profile, including browser research and available local media operations?</p><p id="scopes"></p><button id="allow">Allow</button><button id="deny">Cancel</button>'
+    : kind === 'extension-connect' ? '<h1>Connect ResearchTube</h1><p>Connecting this Chrome profile to ResearchTube…</p>'
     : '<h1>ResearchTube</h1><p>You are signed in. Continue setup in the ResearchTube Chrome extension.</p><button id="sign-out">Sign out</button>';
   return new Response(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ResearchTube</title><style>${style}</style></head><body data-page="${escape(kind)}">${body}<p id="status" role="status"></p><script src="/auth-ui.js" defer></script></body></html>`, {
     headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store",
@@ -48,7 +49,9 @@ async function submit(button,action){
   }
 }
 document.querySelectorAll('[data-provider]').forEach(button=>button.onclick=()=>submit(button,async()=>{
-  const callbackURL=location.search?location.origin+'/api/auth/oauth2/authorize'+location.search:location.origin+'/account';
+  const params=new URLSearchParams(location.search), extensionId=params.get('extensionId'), nonce=params.get('nonce');
+  const setup=/^[a-p]{32}$/.test(extensionId||'')&&/^[a-f0-9-]{72}$/.test(nonce||'');
+  const callbackURL=setup?location.origin+'/connect-extension?extensionId='+extensionId+'&nonce='+nonce:location.search?location.origin+'/api/auth/oauth2/authorize'+location.search:location.origin+'/account';
   redirect(await send('/api/auth/sign-in/social',{provider:button.dataset.provider,callbackURL,disableRedirect:true}));
 }));
 const scopes=document.getElementById('scopes');if(scopes)scopes.textContent='Requested permissions: '+(new URLSearchParams(location.search).get('scope')||'ResearchTube tools');
@@ -80,7 +83,7 @@ export function bindingWidget(): string {
  function start(){if(timer===null)timer=setInterval(announce,500);}
  window.addEventListener('openai:set_globals',e=>consume(e.detail?.globals?.toolResponseMetadata));
  window.addEventListener('message',e=>{if(e.source!==parent)return;const v=e.data;
-   if(v?.source===source&&v.nonce===current?.nonce&&v.type==='result'&&v.ok){clearInterval(timer);timer=null;status.textContent='This Chrome chat is connected.';}
+   if(v?.source===source&&v.nonce===current?.nonce&&v.type==='result'){clearInterval(timer);timer=null;status.textContent=v.ok?'This Chrome chat is connected.':'Open ResearchTube Settings to connect this Chrome profile, then call system_connect_browser again.';}
    if(v?.method==='ui/notifications/tool-result')consume(v.params);
    if(v?.id==='rt-cloud-init'&&v.result)parent.postMessage({jsonrpc:'2.0',method:'ui/notifications/initialized',params:{}},'*');
    if(v?.method==='ui/resource-teardown'){clearInterval(timer);timer=null;parent.postMessage({jsonrpc:'2.0',id:v.id,result:{}},'*');}

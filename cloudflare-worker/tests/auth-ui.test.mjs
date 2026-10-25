@@ -24,6 +24,12 @@ test('Google click obtains a JSON redirect before navigating, preserving OAuth c
     body: { provider: 'google', disableRedirect: true, callbackURL: 'https://rt.test/api/auth/oauth2/authorize?client_id=test&sig=signed' } });
   expect(view.destinations).toEqual(['https://accounts.google.com/o/oauth2/v2/auth?state=test']);
 });
+test('extension sign-in resumes only the fixed enrollment route with its nonce', async () => {
+  const query = '?extensionId=' + 'a'.repeat(32) + '&nonce=' + 'b'.repeat(72);
+  const view = await ui(async () => Response.json({ url: 'https://accounts.google.com/o/oauth2/v2/auth' }), query);
+  await view.button.onclick();
+  expect(view.requests[0].body.callbackURL).toBe('https://rt.test/connect-extension' + query);
+});
 test.each([
   [() => Response.json({}), 'did not return'],
   [() => Response.json({ url: 'javascript:alert(1)' }), 'invalid redirect'],

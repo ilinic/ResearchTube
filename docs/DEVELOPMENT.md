@@ -15,10 +15,9 @@ The independent TypeScript Cloudflare server lives in
 and has its own lockfile, D1 migrations, build and local workerd integration
 tests. Run `npm ci`, `npm run check` and `npm test` in that directory. Its
 generated catalog and validators come from the built Extension and are not
-committed. This server change does not enable a public connection in the
-shipped Extension or require an Agent/Extension version bump. Follow its
-protocol document before wiring the Chrome client; no device/focus-based
-fallback may replace exact chat binding. CI checks this package without
+committed. The Extension server transport lives in `server-connection.js`, with dedicated
+widget and enrollment content scripts. Follow the protocol document; no
+device/focus-based fallback may replace exact chat binding. CI checks this package without
 deploying or requiring Cloudflare/provider credentials.
 
 Install Extension dependencies with:
@@ -267,6 +266,33 @@ Browser resource batches resolve all IDs before creating a task, enforce the exi
 ## Optional task chat context
 
 See [Task chat context and automatic Send](features/TASK_CHAT.md). Startup prompts provide ChatGPT tabId once. Asynchronous launches accept it optionally; public workflow completion notifies only idle ChatGPT. The independent Composer watchdog shares the existing Send controller and configurable stability timeout. Task IDs remain unchanged.
+
+## Server connection mode
+
+Settings persists `connectionMode` as `tunnel` (legacy default) or `server`.
+Only the selected transport may run. Keep tunnel credentials and installation
+credentials separate, local and out of public status/diagnostics. `server-connection.js`
+owns one-time relay tickets, WebSockets, a 20-second heartbeat, bounded reconnect
+backoff, request deduplication and immutable document bindings. Ticket auth
+failures stop automatic retries until credentials change. Never replay a
+possibly executed MCP request after a disconnect or timeout.
+
+Enrollment opens an exact extension-created `/connect-extension` tab with a
+one-use local nonce/deadline. The background checks Chrome sender ID, top frame,
+tab, URL and nonce, then uses a fixed isolated-world `executeScript` function to
+call the cookie-authenticated API. Its private result returns directly to the
+background; no page message or DOM contains an installation credential. The
+server's explicit extension-origin allowlist remains required.
+
+Cloud requests reuse `handleMcpRequest` with their unique request ID. Private
+context follows artifact, media delivery, Browser Agent and completion records,
+without becoming a public argument or response. Document identity comes from
+the top-frame injection result, never widget document IDs or active-tab guesses.
+Each Composer check/Send revalidates this immutable context. Restart, disconnect,
+server invalidation and duplicate conversations fail closed while preserving
+Workspace outputs. Run the server transport/bridge tests and Worker integration
+suite, then verify real Chrome/ChatGPT separately; simulators do not prove
+physical multi-device identity for copied historical conversations.
 
 ## Saved tunnel connection state
 

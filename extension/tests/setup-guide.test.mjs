@@ -31,7 +31,7 @@ assert.doesNotMatch(stepEight,/select\b/i);
 assert.match(stepEight,/Copy the example prompt below/);
 assert.match(stepEight,/Open a new ChatGPT chat/);
 assert.match(stepEight,/Paste and send this prompt/);
-const troubleshootingStep = settings.slice(settings.indexOf("<h3>Step 9 —"), settings.indexOf("</details>"));
+const troubleshootingStep = settings.slice(settings.indexOf("<h3>Step 9 —"), settings.indexOf("</details>", settings.indexOf("<h3>Step 9 —")));
 assert.match(troubleshootingStep,/Troubleshooting/);
 assert.match(troubleshootingStep,/<strong>Help<\/strong>/);
 assert.match(troubleshootingStep,/ResearchTube popup/);
@@ -45,7 +45,7 @@ assert.equal(JSON.parse(await readFile(root("manifest.json"),"utf8")).options_pa
 for (const path of ["onboarding.html","onboarding.css","onboarding.js"]) {
   assert.equal(existsSync(root(path)),false,`obsolete ${path} must be removed`);
 }
-assert.equal((settings.match(/<details\b/g)||[]).length,1,"only the setup guide should collapse");
+assert.equal((settings.match(/<details\b/g)||[]).length,2,"setup guide and server setup details may collapse");
 assert.match(settings,/<p class="field-help setup-requirements"><strong>Requirements:<\/strong> The latest version of Google Chrome and a paid ChatGPT subscription\. ResearchTube is tested with ChatGPT Plus\.<\/p>/);
 assert.match(style,/\.setup-guide-body > \.setup-requirements \{ color: #fff; \}/);
 const guideSource=guide.slice(guide.indexOf("function openSetupGuideFromHash() {"),guide.indexOf('window.addEventListener("hashchange", openSetupGuideFromHash)'));
@@ -102,8 +102,8 @@ const silentStep = settings.slice(settings.indexOf('<h3 id="silent-automation-he
 assert.match(silentStep,/id="silent-automation-flag"/);
 assert.match(silentStep,/id="copy-silent-automation-flag"/);
 assert.match(silentStep,/Restart the Local Agent/);
-for (const status of ["OpenAI Tunnel", "Local Agent", "Ready", "Interface", "Silent file automation", "Enabled"]) assert.ok(silentStep.includes(status), status);
-const setupBody = settings.slice(settings.indexOf('<details id="setup-guide"'), settings.indexOf('</details>'));
+for (const status of ["Connection", "Local Agent", "Ready", "Interface", "Silent file automation", "Enabled"]) assert.ok(silentStep.includes(status), status);
+const setupBody = settings.slice(settings.indexOf('<details id="setup-guide"'), settings.indexOf('</details>', settings.indexOf('<details id="setup-guide"')));
 for (const id of ["agent-port", "test-agent", "agent-result", "silent-automation-flag", "copy-silent-automation-flag"]) {
   assert.equal((settings.match(new RegExp(`id="${id}"`, "g")) || []).length, 1, `${id} must remain unique`);
   assert.ok(setupBody.includes(`id="${id}"`), `${id} must be inside the guide`);
@@ -139,7 +139,7 @@ for (const {connection, configured, visible, expected} of [
   {connection:{state:"failed",errorCode:"NETWORK_ERROR"},configured:true,visible:true,expected:"Network error"},
   {connection:{state:"ready"},configured:true,visible:false,expected:"tunnel_1234"}
 ]) {
-  const nodes={"tunnel-status":{className:""},"tunnel-status-value":{textContent:""},"tunnel-help":{hidden:true}};
+  const nodes={"tunnel-status":{className:""},"connection-label":{textContent:""}, "tunnel-status-value":{textContent:""},"tunnel-help":{hidden:true}};
   render({connection,configured,tunnelId:"tunnel_1234"},nodes);
   assert.equal(nodes["tunnel-help"].hidden,!visible);
   assert.equal(nodes["tunnel-status-value"].textContent,expected);

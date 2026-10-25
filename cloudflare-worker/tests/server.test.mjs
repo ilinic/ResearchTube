@@ -3,6 +3,28 @@ import { start, seedSession, rpc, post, BASE, EXTENSION } from "./helpers.mjs";
 let mf, db;
 beforeAll(async () => { ({ mf, db } = await start()); });
 afterAll(async () => { await mf?.dispose(); });
+test("extension setup requires a browser login and keeps credentials out of HTML", async () => {
+  const params = new URLSearchParams({ extensionId: "a".repeat(32), nonce: "a".repeat(72) });
+  const missing = await mf.dispatchFetch(BASE + "/connect-extension?" + params, { redirect: "manual" });
+  expect(missing.status).toBe(302);
+  expect(missing.headers.get("Location")).toBe(BASE + "/sign-in?" + params);
+  const session = await seedSession(db);
+  const page = await mf.dispatchFetch(BASE + "/connect-extension?" + params, { headers: { Cookie: session.cookie } });
+  expect(page.status).toBe(200);
+  const html = await page.text();
+  expect(html).toContain('data-page="extension-connect"');
+  expect(html).not.toContain("installationToken");
+  expect((await mf.dispatchFetch(BASE + "/connect-extension?extensionId=invalid&nonce=invalid")).status).toBe(400);
+});
+test("an installation can revoke only its own credential", async () => {
+  const session = await seedSession(db);
+  const enroll = async () => (await mf.dispatchFetch(BASE + "/api/installations", post({ name: "Chrome", extensionOrigin: EXTENSION }, { Cookie: session.cookie, Origin: BASE }))).json();
+  const first = await enroll(), second = await enroll();
+  const auth = { Authorization: "Bearer " + first.installationToken };
+  expect((await mf.dispatchFetch(BASE + "/api/installations/revoke-current", post({}, auth))).status).toBe(200);
+  expect((await mf.dispatchFetch(BASE + "/api/relay-ticket", post({}, auth))).status).toBe(401);
+  expect((await mf.dispatchFetch(BASE + "/api/relay-ticket", post({}, { Authorization: "Bearer " + second.installationToken }))).status).toBe(200);
+});
 test("public pages do not start auth initialization or require its secret", async () => {
   const { mf: pages } = await start({ BETTER_AUTH_SECRET: "" });
   try {
@@ -69,4 +91,49 @@ test("enrolls a separate credential per installation, stores only its hash and c
   const revoked = await mf.dispatchFetch(BASE + "/api/installations/" + one.installationId, { method: "DELETE", headers: { Cookie: cookie, Origin: BASE } });
   expect(revoked.status).toBe(200);
   expect((await mf.dispatchFetch(BASE + "/api/relay-ticket", post({}, auth))).status).toBe(401);
+});
+
+test("the Chrome adapter binds a tab and answers through the real Worker relay", async () => {
+  const { createServerConnection, SERVER_ORIGIN } = await import('../../extension/server-connection.js');
+  const { randomUUID } = await import('node:crypto');
+  const { doRoom, roomPost } = await import('./helpers.mjs');
+  const session = await seedSession(db);
+  const enrollment = await (await mf.dispatchFetch(BASE + '/api/installations', post({ name:'Adapter Chrome', extensionOrigin:EXTENSION }, { Cookie:session.cookie, Origin:BASE }))).json();
+  const target = {tabId:77,documentId:'real-top-document',conversationId:'real-chat'};
+  let nextResult;
+  class BrowserSocket extends EventTarget {
+    readyState=0; socket;
+    constructor(url) {
+      super();
+      void mf.dispatchFetch(url.replace('wss://rtube.win',BASE), { headers:{Upgrade:'websocket',Origin:EXTENSION} }).then(response=>{
+        if(response.status!==101)throw Error('WebSocket failed');
+        this.socket=response.webSocket;this.socket.accept();this.readyState=1;
+        this.socket.addEventListener('message',event=>this.dispatchEvent(new MessageEvent('message',{data:event.data})));
+        this.dispatchEvent(new Event('open'));
+      });
+    }
+    send(data){this.socket.send(data);}
+    close(){this.readyState=3;this.socket?.close();this.dispatchEvent(new Event('close'));}
+  }
+  const adapter=createServerConnection({
+    extensionId:'a'.repeat(32),now:Date.now,config:async()=>({connectionMode:'server',serverInstallationId:enrollment.installationId,serverInstallationToken:enrollment.installationToken}),
+    setTimeout,clearTimeout,setInterval,clearInterval,status:async()=>{},invalidate:async()=>{},identity:async()=>target,
+    socket:url=>new BrowserSocket(url),fetch:(url,options)=>mf.dispatchFetch(url.replace(SERVER_ORIGIN,BASE),options),
+    tool:()=>({inputSchema:{properties:{tabId:{}}}}),
+    execute:async(request,context)=>{
+      nextResult={request,context};return {jsonrpc:'2.0',id:request.id,result:{content:[{type:'text',text:'Adapter acknowledged'}]}};
+    }
+  });
+  try {
+    expect((await adapter.connect()).ok).toBe(true);
+    const room=await doRoom(mf,session.userId);
+    const challenge=await (await roomPost(room,'/challenge',{session:'adapter-conversation'})).json();
+    expect((await adapter.bind(challenge.nonce,{id:'a'.repeat(32),tab:{id:77}})).ok).toBe(true);
+    const state=await (await roomPost(room,'/status',{session:'adapter-conversation'})).json();
+    const response=await roomPost(room,'/dispatch',{bindingId:state.bindings[0].bindingId,session:'adapter-conversation',request:{jsonrpc:'2.0',method:'tools/call',params:{name:'media_capture_frame',arguments:{workspacePath:'test.mp4'}}}});
+    expect(response.status).toBe(200);
+    expect((await response.json()).result.content[0].text).toBe('Adapter acknowledged');
+    expect(nextResult.request.params.arguments.tabId).toBe(77);
+    expect(nextResult.context.documentId).toBe('real-top-document');
+  } finally {await adapter.stop();}
 });

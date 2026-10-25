@@ -6,7 +6,7 @@ This is the starting guide for installation, everyday use and troubleshooting. C
 
 Read this guide first, then open only the linked reference relevant to the user's question. Give short, concrete steps in the user's language. Ask what they need help with instead of immediately reciting the installation procedure. If the source cannot be read, say so and ask for the relevant section; do not claim to have studied it. GitHub's **Raw** button provides the Markdown text if the normal page cannot be read.
 
-When diagnosing a failure, establish which layer failed: Chrome Extension, OpenAI tunnel/ChatGPT connection, Local Agent, component, or one task. If ResearchTube tools are available and the user wants diagnosis, `system_agent_status` supplies public readiness information and `system_get_diagnostics` returns recent sanitized errors. If tools are absent, use the user's Settings/popup result instead. Do not call media-creation tools merely to answer a setup question. Label actions the user must do locally. Never ask for API keys, Tunnel IDs, cookies, signed URLs, complete browser profiles or unredacted logs.
+When diagnosing a failure, establish which layer failed: Chrome Extension, server or OpenAI tunnel/ChatGPT connection, Local Agent, component, or one task. If ResearchTube tools are available and the user wants diagnosis, `system_agent_status` supplies public readiness information and `system_get_diagnostics` returns recent sanitized errors. If tools are absent, use the user's Settings/popup result instead. Do not call media-creation tools merely to answer a setup question. Label actions the user must do locally. Never ask for API keys, Tunnel IDs, cookies, signed URLs, complete browser profiles or unredacted logs.
 
 ## What ResearchTube does
 
@@ -14,8 +14,9 @@ ResearchTube connects ChatGPT to public YouTube research, local media tools and 
 
 | Part | What it does | When needed |
 | --- | --- | --- |
-| Chrome Extension | Publishes the MCP tools, runs the private OpenAI tunnel connection, reads YouTube and controls browser tasks | Keep Chrome open and the Extension enabled when using tools |
-| OpenAI Secure MCP Tunnel | Connects ChatGPT to the Extension without opening an inbound port | Required for ChatGPT to call ResearchTube tools |
+| Chrome Extension | Publishes the MCP tools, runs the selected server or private tunnel connection, reads YouTube and controls browser tasks | Keep Chrome open and the Extension enabled when using tools |
+| ResearchTube server | HTTPS/OAuth entry point at `https://rtube.win/mcp`, relaying commands to this Chrome profile | An alternative to your own OpenAI tunnel |
+| OpenAI Secure MCP Tunnel | Connects ChatGPT to the Extension without opening an inbound port | An alternative to the ResearchTube server |
 | Local Agent | Windows EXE or Python process serving local media tools and Workspace on `127.0.0.1`, normally port `17843` | Required for downloads, local files/media and other Agent-backed operations |
 | Workspace | Local files in the configured directory, default `agent/workspace/` | Use logical paths such as `downloads/example.mp4` in chat |
 
@@ -27,7 +28,7 @@ Browser-based YouTube research works with the Agent stopped. Local media require
 
 - Chrome/Chromium on Windows, macOS or Linux; **Study this site** needs Chrome 125 or newer for nested iframe support.
 - This private-connection setup assumes **ChatGPT Plus or higher**, with access to private MCP connections. Account/workspace permissions also matter; a subscription alone does not guarantee that the controls are available.
-- An OpenAI Platform account/organization allowed to create/use Secure MCP Tunnels. ChatGPT subscription settings and Platform tunnel permissions are separate.
+- For tunnel mode, an OpenAI Platform account/organization allowed to create/use Secure MCP Tunnels. ChatGPT subscription settings and Platform tunnel permissions are separate.
 - Python 3.10 or newer for source-mode Agent on Linux/macOS or Windows. The Windows archive includes an EXE with Python inside; every platform archive includes matching runtime tools. Node.js is needed for development, not a prebuilt release.
 
 Windows-only operations include the built-in clipboard, desktop capture and Windows speech engine. Some camera/media capabilities depend on the platform and installed components; inspect status before assuming support.
@@ -45,6 +46,32 @@ Download the matching platform archive under **Assets** on [GitHub Releases](htt
 **Settings → How to Set Up ResearchTube → Step 1** lists the setup sequence: download the platform ZIP from **GitHub Releases → Assets**, not **Source code**; extract it to a convenient place; open Chrome Extensions, enable Developer mode and load “`ResearchTube/extension`” using **Load unpacked**. Check the Extension is loaded and enabled, keep the extracted folder in place and pin it to the toolbar. The next steps create the tunnel and restricted key.
 
 ### 3. Set up the OpenAI connection
+
+
+Choose **Connection method** in Settings. Switching preserves the other method's
+saved settings and stops its connection; only one transport runs at a time.
+
+**ResearchTube server:** select that mode and click **Sign in and connect**.
+Complete Google/Microsoft sign-in in the opened tab and wait for the Chrome
+profile connection confirmation. Add `https://rtube.win/mcp` in ChatGPT using
+OAuth. In each saved conversation, ask ResearchTube to connect this browser:
+`system_connect_browser`, followed by `system_connection_status`. ChatGPT uses
+the returned `browserBindingId` with subsequent tools. No browser picker or
+active-tab fallback is used. Refresh existing ChatGPT tabs after reloading the
+Extension so its new bridge is installed.
+
+For an unpacked extension, **Server setup details** shows its Extension ID. The
+server administrator must add its exact `chrome-extension://<id>` origin to the
+Worker's `EXTENSION_ORIGINS` allowlist and deploy. A published extension uses
+its approved fixed ID. If the server refuses enrollment, do not send credentials
+or bypass this check. Keep only one tab of each conversation open. After a
+server disconnect, browser restart or document change, reconnect that chat;
+old deliveries keep their original destination and are suppressed if it is lost.
+**Disconnect profile** revokes this profile's server credential, not other
+computers or your Google account. Custom Tool catalogs are currently available
+through the tunnel; the server publishes the built-in catalog.
+
+**My OpenAI tunnel:** follow these steps:
 
 1. Use Settings' **OpenAI Tunnels** link to [Platform tunnel settings](https://platform.openai.com/settings/organization/tunnels). Create/select a tunnel in the intended organization. Creation requires **Tunnels Read + Manage**; runtime use needs **Read + Use**. Associate it with the ChatGPT workspace that should use it.
 2. In [OpenAI API Keys](https://platform.openai.com/settings/organization/api-keys), create a dedicated **Restricted** runtime key with **Tunnels Read + Use**. Keep management permissions on your account, not the Extension runtime key.

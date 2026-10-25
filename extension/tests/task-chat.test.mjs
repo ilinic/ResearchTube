@@ -202,3 +202,13 @@ const custom = worker.customToolDefinition({ name: "custom_test", title: "Test",
  _meta: { "researchtube/customTool": { packageId: "test", groupTitle: "Test", execution: "task" } } });
 assert.ok(custom.inputSchema.properties.tabId); assert.ok(custom.outputSchema.properties.tabId);
 console.log("task chat: completion, cancellation, watchdog, shared Send and shipped schemas ok");
+
+// Private cloud context survives Agent status updates, but never enters a
+// returned public document. An invalid route consumes the notification safely.
+let allowCloud=true, cloudSends=0, cloudRecords=[];
+const cloudDelivery=createTaskCompletionDelivery({now:()=>0,historyLimit:()=>20,load:async()=>[],save:async value=>{cloudRecords=structuredClone(value);},schedule:()=>{},
+  verifyContext:async task=>{assert.equal(task.cloudTarget.bindingId,"original");if(!allowCloud)throw Error("revoked");},
+  send:async(_tab,options)=>{await options.beforeSend();cloudSends++;}});
+const publicStart=await cloudDelivery.register({taskId:"cloud-test",status:"working"},"timer",42,{bindingId:"original"});
+assert.ok(!Object.hasOwn(publicStart,"cloudTarget"));assert.equal(cloudRecords[0].cloudTarget.bindingId,"original");
+allowCloud=false;await cloudDelivery.observe({taskId:"cloud-test",status:"completed"});assert.equal(cloudSends,0);

@@ -6,12 +6,14 @@ let connectionReadRevision = 0;
 function renderConnectionStatus(state) {
   const errorLabels = {
     NOT_CONFIGURED: "Not Configured", API_KEY_MISSING: "API key missing", TUNNEL_ID_MISSING: "Tunnel ID missing",
-    API_KEY_INVALID: "API key rejected", TUNNEL_PERMISSION_DENIED: "Access denied", TUNNEL_NOT_FOUND: "Tunnel not found", NETWORK_ERROR: "Network error"
+    API_KEY_INVALID: "API key rejected", TUNNEL_PERMISSION_DENIED: "Access denied", TUNNEL_NOT_FOUND: "Tunnel not found", NETWORK_ERROR: "Network error", SERVER_SIGN_IN_REQUIRED: "Sign in required", SERVER_DISCONNECTED: "Disconnected", SERVER_NETWORK_ERROR: "Network error"
   };
   const connection = state.connection || (state.configured ? { state: "unchecked" } : { state: "not-configured", errorCode: "NOT_CONFIGURED" });
+  const server = state.connectionMode === "server";
+  $("connection-label").textContent = server ? "ResearchTube Server" : "OpenAI Tunnel";
   const element = $("tunnel-status");
   const notConfigured = !state.configured || connection.state === "not-configured";
-  $("tunnel-status-value").textContent = notConfigured ? "Not Configured" : connection.state === "ready" ? shortTunnel(state.tunnelId) : connection.state === "unchecked" ? "Not tested" : errorLabels[connection.errorCode] || "Connection failed";
+  $("tunnel-status-value").textContent = notConfigured ? "Not Configured" : connection.state === "ready" ? (server ? "rtube.win" : shortTunnel(state.tunnelId)) : connection.state === "connecting" ? "Connecting…" : connection.state === "unchecked" ? "Not tested" : errorLabels[connection.errorCode] || "Connection failed";
   $("tunnel-help").hidden = connection.state === "ready";
   element.className = connection.state === "ready" ? "good" : connection.state === "unchecked" || connection.errorCode === "NOT_CONFIGURED" ? "warn" : "bad";
 }
@@ -117,7 +119,7 @@ $("help").addEventListener("click", () => {
 });
 $("support").addEventListener("click", () => call({ type: "open-external", target: "support" }));
 chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === "local" && ["tunnelId", "runtimeApiKey", "lastConnectionTest", "lastTunnelConnection"].some(name => Object.hasOwn(changes, name))) {
+  if (area === "local" && ["tunnelId", "runtimeApiKey", "lastConnectionTest", "lastTunnelConnection", "connectionMode", "serverInstallationId", "lastServerConnection"].some(name => Object.hasOwn(changes, name))) {
     void loadConnectionStatus().catch(() => {});
   }
 });

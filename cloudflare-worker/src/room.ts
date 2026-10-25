@@ -184,6 +184,8 @@ export class BrowserRoom extends DurableObject<Env> {
   async webSocketMessage(socket: WebSocket, data: string | ArrayBuffer) {
     const identity = socket.deserializeAttachment() as SocketIdentity;
     if (!identity || identity.expiresAt <= Date.now()) { this.rejectSocket(socket, "BROWSER_DISCONNECTED", "Reconnect the extension."); socket.close(1008, "Expired"); return; }
+    // Heartbeats keep Chrome's MV3 worker alive without replaying tool calls.
+    if (data === '{"type":"ping"}') { socket.send('{"type":"pong"}'); return; }
     if (typeof data !== "string" || new TextEncoder().encode(data).length > MAX_BYTES) { socket.close(1009, "Invalid payload"); this.rejectSocket(socket, "BROWSER_PROTOCOL_ERROR", "The browser returned an invalid response."); return; }
     try {
       const msg = z.object({ type: z.literal("response"), requestId: z.string().uuid(), target: targetSchema,

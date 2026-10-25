@@ -45,6 +45,10 @@ See what ChatGPT can do with ResearchTube in three short, real-world demos. **Cl
   </tr>
 </table>
 
+Connect using the **ResearchTube server** with Google/Microsoft sign-in, or
+choose **My OpenAI tunnel** in Extension Settings. See the
+[connection guide](docs/HELP.md#3-set-up-the-openai-connection).
+
 ## What Can ResearchTube Do?
 
 ResearchTube turns everyday ChatGPT conversations into hands-on research and media workflows. You describe what you want; ChatGPT uses ResearchTube to investigate and get things done.

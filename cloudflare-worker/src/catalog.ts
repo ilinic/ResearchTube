@@ -3,7 +3,7 @@ export interface CatalogTool { name: string; title?: string; description: string
 export const catalog = rawCatalog as unknown as { extensionVersion: string; tools: CatalogTool[]; resources: {uri: string; name: string; mimeType: string; text: string; _meta?: Record<string, any>}[] };
 import { MCP_SCOPE } from "./auth";
 
-export const WIDGET_URI = "ui://researchtube/cloud-browser-v1.html";
+export const WIDGET_URI = "ui://researchtube/cloud-browser-v2.html";
 const annotations = { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: false };
 const securitySchemes = [{ type: "oauth2", scopes: [MCP_SCOPE] }];
 const bootstrap = [

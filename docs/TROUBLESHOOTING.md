@@ -22,6 +22,20 @@ Ask which of these best describes the failure:
 
 If tools are callable, begin with `system_agent_status`. Report the Extension version, Agent availability, Agent version, both interface versions, Workspace status and relevant component statuses. Do not request physical paths through MCP.
 
+## Server connection
+
+Check the selected Connection method first. A green `/health` confirms HTTP
+availability, not Chrome enrollment. In server mode, use Settings **Sign in and
+connect**, and wait for **Connected to rtube.win**. For an unpacked extension,
+check its ID under Server setup details against the Worker's explicit allowlist.
+After upgrading, reload the Extension and refresh ChatGPT pages. Reconnect a
+saved chat using `system_connect_browser`, then `system_connection_status`.
+Do not reuse an old binding from another chat or browser. Close duplicate tabs
+of the same conversation. A browser disconnect/restart or document change
+invalidates old deliveries; Workspace files remain. Do not automatically retry
+an action whose execution was not acknowledged. See the Worker README for
+server deployment; installing the Extension alone does not deploy its backend.
+
 ## ResearchTube is missing from ChatGPT
 
 Check in this order:
