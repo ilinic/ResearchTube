@@ -34,7 +34,7 @@
       "d1_databases": [{
         "binding": "DB",
         "database_name": "researchtube",
-        "database_id": "00000000-0000-0000-0000-000000000000",
+        "database_id": "4b5f3302-1cff-4f0f-8775-d2397084217d",
         "migrations_dir": "migrations"
       }],
       "durable_objects": { "bindings": [{ "name": "BROWSER_ROOMS", "class_name": "BrowserRoom" }] }
