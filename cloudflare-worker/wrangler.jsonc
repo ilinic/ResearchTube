@@ -18,5 +18,26 @@
     "migrations_dir": "migrations"
   }],
   "durable_objects": { "bindings": [{ "name": "BROWSER_ROOMS", "class_name": "BrowserRoom" }] },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["BrowserRoom"] }]
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["BrowserRoom"] }],
+  "env": {
+    "production": {
+      "name": "researchtube",
+      "account_id": "bb4ba8acee199cf7da2a9aabddf2c8fd",
+      "workers_dev": false,
+      "preview_urls": false,
+      "routes": [{ "pattern": "rtube.win", "custom_domain": true }],
+      "vars": {
+        "PUBLIC_ORIGIN": "https://rtube.win",
+        "EXTENSION_ORIGINS": "[]",
+        "ALLOW_LOCAL_DEVELOPMENT": "false"
+      },
+      "d1_databases": [{
+        "binding": "DB",
+        "database_name": "researchtube",
+        "database_id": "00000000-0000-0000-0000-000000000000",
+        "migrations_dir": "migrations"
+      }],
+      "durable_objects": { "bindings": [{ "name": "BROWSER_ROOMS", "class_name": "BrowserRoom" }] }
+    }
+  }
 }

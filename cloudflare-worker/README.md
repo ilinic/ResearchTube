@@ -84,56 +84,81 @@ Generated `src/catalog.json` and `src/validators.js` are ignored by Git. Runtime
 schema validation uses generated code, without `eval`/`new Function` in Workers.
 The generated catalog is not an independently maintained copy of tool schemas.
 
-## Configure a public address
+## Publish on rtube.win
 
-1. Create a D1 database with `npx wrangler d1 create researchtube`. Put its ID in
-   `wrangler.jsonc` instead of the zero placeholder.
-2. Set `PUBLIC_ORIGIN` to the exact HTTPS origin, without a trailing slash,
-   and set `ALLOW_LOCAL_DEVELOPMENT` to `false`. A `workers.dev` origin can be
-   used before the custom domain is ready. Host checks intentionally reject
-   other addresses, so update this setting when changing the public origin.
-3. Put the exact allowed Chrome extension origins in `EXTENSION_ORIGINS`, for
-   example `["chrome-extension://<32-letter-extension-id>"]`. An unpacked
-   development extension's ID may differ from a published extension's ID.
-4. Configure at least one provider and upload its secrets:
+The `production` environment in `wrangler.jsonc` targets the root domain
+`https://rtube.win` in Cloudflare account `bb4ba8acee199cf7da2a9aabddf2c8fd`.
+It disables local-development mode, workers.dev and preview URLs. No static
+folder or Pages project is required. The default environment remains local;
+`npm run dev` and `npm run db:local` still use localhost and local D1.
+
+Run these commands from `cloudflare-worker/` with your Cloudflare account:
 
 ```sh
-npx wrangler secret put BETTER_AUTH_SECRET
-npx wrangler secret put GOOGLE_CLIENT_ID
-npx wrangler secret put GOOGLE_CLIENT_SECRET
-npx wrangler secret put MICROSOFT_CLIENT_ID
-npx wrangler secret put MICROSOFT_CLIENT_SECRET
+npx wrangler login
+npx wrangler d1 create researchtube --env production
 ```
 
-Register the web callback URLs with the respective providers:
+Put the returned database ID into **`env.production.d1_databases[0].database_id`**,
+replacing the zero placeholder. If the database already exists, use its ID
+instead of creating another. Leave the top-level local binding unchanged.
+Bindings and variables are explicitly repeated because named environments do
+not inherit them. `EXTENSION_ORIGINS` starts empty: add only the exact approved
+Chrome extension origins before enabling enrollment, for example
+`["chrome-extension://<32-letter-extension-id>"]`. An unpacked extension's ID
+may differ from its published ID.
+
+Generate a fresh random `BETTER_AUTH_SECRET` of at least 32 characters and
+upload it using Wrangler's hidden input. Configure at least one login provider;
+Google and Microsoft are independent options. Do not commit or send secrets.
+
+```sh
+npx wrangler secret put BETTER_AUTH_SECRET --env production
+npx wrangler secret put GOOGLE_CLIENT_ID --env production
+npx wrangler secret put GOOGLE_CLIENT_SECRET --env production
+npx wrangler secret put MICROSOFT_CLIENT_ID --env production
+npx wrangler secret put MICROSOFT_CLIENT_SECRET --env production
+```
+
+Register these Web callback URLs with the corresponding providers:
 
 ```text
-https://<your-host>/api/auth/callback/google
-https://<your-host>/api/auth/callback/microsoft
+https://rtube.win/api/auth/callback/google
+https://rtube.win/api/auth/callback/microsoft
 ```
 
-For Microsoft, register a Web application accepting both personal Microsoft
-accounts and accounts in organizational directories. Corporate consent policies
-still apply. These provider credentials belong only to the Worker; they are
-different from ChatGPT's OAuth client registration.
+For Microsoft, accept both personal Microsoft accounts and accounts in
+organizational directories. Corporate consent policies still apply. Provider
+credentials belong to the Worker and differ from ChatGPT's client registration.
 
-Apply reviewed migrations before deployment:
+Before switching the domain, remove its association with the old static project
+(for Pages, its Custom domains setting). If an old root CNAME remains, remove
+that conflicting record only. Keep unrelated DNS and email records. The
+production Custom Domain route lets Cloudflare provision the Worker's DNS and
+HTTPS certificate. Review the database migrations, then run:
 
 ```sh
+npm run check
+npm run build:production
 npm run db:remote
 npm run deploy
 ```
 
-For a custom domain, add an appropriate `routes` entry with `custom_domain: true`
-in Wrangler. This repository does not create DNS records, provision provider
-applications, upload secrets or deploy automatically. The CI workflow only
-builds and tests.
+The last two commands explicitly select `production`. A dry-run build does not
+create D1, upload secrets, modify DNS or deploy. CI builds and tests both
+configurations, without publishing. After deployment, check
+`https://rtube.win/health`, `https://rtube.win/` and the OAuth metadata. Health
+only confirms an HTTP response, not provider or browser readiness.
 
-Connect the public URL `https://<your-host>/mcp` as a personal custom MCP plugin
-in ChatGPT to test before Store submission. Actual browser calls also require
-the Extension integration described above. Test the Google and Microsoft
-redirects with real accounts after configuring the domain. The automated tests
-seed local test sessions; they do not pretend to complete external social login.
+The ChatGPT MCP address is **`https://rtube.win/mcp`**. Use a personal custom MCP
+connection with OAuth/DCR for testing before Store submission. Actual browser
+calls still require the Extension integration described above. Test provider
+redirects with real accounts; automated tests seed local sessions and do not
+complete external social login.
+
+To change domains later, update the production route, `PUBLIC_ORIGIN` and the
+provider callback registrations together. Host checks intentionally reject
+other public addresses.
 
 ## Accounts and revocation
 
