@@ -30,7 +30,9 @@ export function authOptions(env: Env): BetterAuthOptions {
     trustedOrigins: [base, ...extensionOrigins(env)],
     emailAndPassword: { enabled: false },
     account: { accountLinking: { enabled: false }, encryptOAuthTokens: true },
-    advanced: { database: { generateId: () => crypto.randomUUID() }, ipAddress: { ipAddressHeaders: ["cf-connecting-ip"] } },
+    // Migrations and CI validate the schema. The library's automatic schema
+    // probe is fire-and-forget and must not escape a Workers request lifetime.
+    advanced: { database: { generateId: () => crypto.randomUUID(), validateSchema: false }, ipAddress: { ipAddressHeaders: ["cf-connecting-ip"] } },
     logger: { disabled: true },
     rateLimit: { enabled: true, storage: "database" as const, window: 60, max: 60 },
     socialProviders: {
@@ -60,22 +62,41 @@ export interface Auth {
     verifyResearchTubeToken(options: { body: { token: string } }): Promise<ActiveAccessTokenPayload>;
   };
 }
-const instances = new WeakMap<object, { key: string; auth: Auth }>();
-export function createAuth(env: Env): Auth {
-  const key = JSON.stringify([env.PUBLIC_ORIGIN, env.EXTENSION_ORIGINS, env.BETTER_AUTH_SECRET,
-    env.GOOGLE_CLIENT_ID, env.GOOGLE_CLIENT_SECRET, env.MICROSOFT_CLIENT_ID, env.MICROSOFT_CLIENT_SECRET]);
-  const cached = instances.get(env.DB);
-  if (cached?.key === key) return cached.auth;
-  const auth = betterAuth(authOptions(env)) as unknown as Auth;
-  instances.set(env.DB, { key, auth });
-  return auth;
+export async function createAuth(env: Env): Promise<Auth> {
+  // Never share pending initialization or database adapter promises across
+  // requests: an aborted Workers IoContext can strand the cached promise.
+  const deadline = Date.now() + 20_000;
+  async function run<T>(operation: () => Promise<T>): Promise<T> {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw new PublicError("AUTH_TIMEOUT", "Authentication timed out. Please try again.", 503);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([operation(), new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new PublicError("AUTH_TIMEOUT",
+          "Authentication timed out. Please try again.", 503)), remaining);
+      })]);
+    } finally { clearTimeout(timer); }
+  }
+  const instance = betterAuth(authOptions(env));
+  await run(() => instance.$context);
+  const auth = instance as unknown as Auth;
+  return {
+    handler: request => run(() => auth.handler(request)),
+    api: {
+      getSession: options => run(() => auth.api.getSession(options)),
+      verifyResearchTubeToken: options => run(() => auth.api.verifyResearchTubeToken(options))
+    }
+  };
 }
 
 export async function authenticateMcp(request: Request, env: Env, auth: Auth): Promise<string> {
   const token = bearer(request);
   let claims;
   try { claims = await auth.api.verifyResearchTubeToken({ body: { token } }); }
-  catch { throw new PublicError("AUTHENTICATION_REQUIRED", "Reconnect your ResearchTube account.", 401); }
+  catch (error) {
+    if (error instanceof PublicError && error.code === "AUTH_TIMEOUT") throw error;
+    throw new PublicError("AUTHENTICATION_REQUIRED", "Reconnect your ResearchTube account.", 401);
+  }
   const audiences = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
   const scopes = typeof claims.scope === "string" ? claims.scope.split(" ") : [];
   if (claims.cnf || claims.iss !== `${origin(env)}/api/auth` || !audiences.includes(`${origin(env)}/mcp`) ||

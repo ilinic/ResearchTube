@@ -160,6 +160,24 @@ To change domains later, update the production route, `PUBLIC_ORIGIN` and the
 provider callback registrations together. Host checks intentionally reject
 other public addresses.
 
+## Sign-in troubleshooting
+
+If Continue with Google stays disabled without navigating, update and redeploy
+this Worker. Authentication instances and D1 adapters are scoped to one request;
+public pages do not start auth initialization. Never cache an in-flight auth
+context across Cloudflare invocations: an interrupted initialization can leave
+later requests waiting forever. Initialization is awaited, automatic background
+schema checks are disabled, and reviewed migrations plus CI remain authoritative.
+Initialization and auth execution share a 20-second deadline; a timeout returns
+`AUTH_TIMEOUT` (HTTP 503), without automatically retrying an OAuth operation.
+
+The page requests a JSON redirect explicitly and allows 25 seconds for the full
+HTTP response, including its body. A timeout, HTTP failure, invalid JSON or
+missing redirect restores the button and displays a bounded error. Diagnostics
+show only HTTP status and a safe error code, never provider response bodies,
+secrets or authorization URLs. After deployment, test the real provider redirect
+and callback in Chrome; `/health` alone does not exercise authentication.
+
 ## Accounts and revocation
 
 Each provider identity maps to a ResearchTube account. Automatic cross-provider

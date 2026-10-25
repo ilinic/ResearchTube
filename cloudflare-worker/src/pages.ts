@@ -16,13 +16,47 @@ export function page(kind: "sign-in" | "consent" | "account", env: Env): Respons
   });
 }
 export function authScript(): Response {
-  return new Response(`
+  return new Response(String.raw`
 const status=document.getElementById('status');
-async function send(path,body){const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body),credentials:'same-origin'});const v=await r.json();if(!r.ok)throw Error('Unable to complete sign-in. Please retry.');return v;}
-document.querySelectorAll('[data-provider]').forEach(button=>button.onclick=async()=>{try{button.disabled=true;const callbackURL=location.search?location.origin+'/api/auth/oauth2/authorize'+location.search:location.origin+'/account';const v=await send('/api/auth/sign-in/social',{provider:button.dataset.provider,callbackURL});if(v.url)location.assign(v.url);}catch(e){status.textContent=e.message;button.disabled=false;}});
+async function send(path,body){
+  const controller=new AbortController();let timer;
+  const request=(async()=>{
+    const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body),credentials:'same-origin',redirect:'error',signal:controller.signal});
+    let v;try{v=await r.json();}catch{throw Error('The server returned an invalid response (HTTP '+r.status+').');}
+    if(!r.ok){
+      const candidate=v?.error?.code||v?.code;
+      const code=typeof candidate==='string'&&/^[A-Z][A-Z0-9_]{0,63}$/.test(candidate)?'; '+candidate:'';
+      throw Error('Authentication failed (HTTP '+r.status+code+'). Please try again.');
+    }
+    return v;
+  })();
+  try{return await Promise.race([request,new Promise((_,reject)=>{
+    timer=setTimeout(()=>{reject(Error('Authentication timed out. Please try again.'));controller.abort();},25000);
+  })]);}finally{clearTimeout(timer);}
+}
+function redirect(value){
+  if(typeof value?.url!=='string'||!value.url)throw Error('The server did not return a sign-in redirect. Please try again.');
+  let url;try{url=new URL(value.url,location.origin);}catch{throw Error('The server returned an invalid redirect.');}
+  if(url.username||url.password||(url.protocol!=='https:'&&!(url.protocol==='http:'&&url.origin===location.origin)))throw Error('The server returned an invalid redirect.');
+  location.assign(url.href);
+}
+async function submit(button,action){
+  button.disabled=true;status.textContent='Connecting…';
+  try{await action();}catch(error){
+    status.textContent=error instanceof TypeError?'Unable to reach the authentication server. Please try again.':error.message;
+    button.disabled=false;
+  }
+}
+document.querySelectorAll('[data-provider]').forEach(button=>button.onclick=()=>submit(button,async()=>{
+  const callbackURL=location.search?location.origin+'/api/auth/oauth2/authorize'+location.search:location.origin+'/account';
+  redirect(await send('/api/auth/sign-in/social',{provider:button.dataset.provider,callbackURL,disableRedirect:true}));
+}));
 const scopes=document.getElementById('scopes');if(scopes)scopes.textContent='Requested permissions: '+(new URLSearchParams(location.search).get('scope')||'ResearchTube tools');
-for(const id of ['allow','deny']){const b=document.getElementById(id);if(b)b.onclick=async()=>{try{b.disabled=true;const v=await send('/api/auth/oauth2/consent',{accept:id==='allow',oauth_query:location.search.slice(1)});if(v.url)location.assign(v.url);}catch(e){status.textContent=e.message;b.disabled=false;}};}
-const out=document.getElementById('sign-out');if(out)out.onclick=async()=>{await send('/api/auth/sign-out',{});location.assign('/sign-in');};
+for(const id of ['allow','deny']){const button=document.getElementById(id);if(button)button.onclick=()=>submit(button,async()=>{
+  redirect(await send('/api/auth/oauth2/consent',{accept:id==='allow',oauth_query:location.search.slice(1)}));
+});}
+const out=document.getElementById('sign-out');if(out)out.onclick=()=>submit(out,async()=>{await send('/api/auth/sign-out',{});location.assign('/sign-in');});
+
 `, { headers: { "Content-Type": "text/javascript; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
 }
 

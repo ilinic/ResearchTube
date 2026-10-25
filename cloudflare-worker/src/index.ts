@@ -34,7 +34,12 @@ async function route(request: Request, env: Env): Promise<Response> {
   if (path === "/health" && request.method === "GET") return json({ service: "ResearchTube", version: WORKER_VERSION, status: "ok" });
   if (path === "/.well-known/oauth-protected-resource" || path === "/.well-known/oauth-protected-resource/mcp")
     return json({ resource: `${base}/mcp`, authorization_servers: [`${base}/api/auth`], scopes_supported: [MCP_SCOPE], bearer_methods_supported: ["header"] });
-  const auth = createAuth(env);
+  // These pages must not start asynchronous auth/D1 work that outlives their
+  // response. Only endpoints that use authentication initialize it below.
+  if (path === "/" || path === "/sign-in") return page("sign-in", env);
+  if (path === "/consent") return page("consent", env);
+  if (path === "/auth-ui.js") return authScript();
+  const auth = await createAuth(env);
   if (path === "/.well-known/oauth-authorization-server/api/auth" || path === "/.well-known/openid-configuration/api/auth") {
     const endpoint = path.includes("openid") ? "openid-configuration" : "oauth-authorization-server";
     return auth.handler(new Request(`${base}/api/auth/.well-known/${endpoint}`, request));
@@ -51,9 +56,6 @@ async function route(request: Request, env: Env): Promise<Response> {
     }
     return auth.handler(request);
   }
-  if (path === "/" || path === "/sign-in") return page("sign-in", env);
-  if (path === "/consent") return page("consent", env);
-  if (path === "/auth-ui.js") return authScript();
   if (path === "/account") { await browserUser(request, auth); return page("account", env); }
   if (path === "/mcp") return mcpResponse(request, env, auth);
   if (path === "/api/installations" && request.method === "POST") {

@@ -4,10 +4,10 @@ import { createHmac, randomUUID } from "node:crypto";
 export const BASE = "https://rt.test";
 export const EXTENSION = "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 export const AUTH_SECRET = "test-only-random-auth-secret-12345678901234567890";
-export async function start() {
+export async function start(bindings = {}) {
   const mf = new Miniflare(convertV4MiniflareOptions({
     modules: true, scriptPath: "dist/index.js", compatibilityDate: "2026-10-24", compatibilityFlags: ["nodejs_compat"],
-    bindings: { PUBLIC_ORIGIN: BASE, EXTENSION_ORIGINS: JSON.stringify([EXTENSION]), BETTER_AUTH_SECRET: AUTH_SECRET },
+    bindings: { PUBLIC_ORIGIN: BASE, EXTENSION_ORIGINS: JSON.stringify([EXTENSION]), BETTER_AUTH_SECRET: AUTH_SECRET, ...bindings },
     d1Databases: ["DB"], durableObjects: { BROWSER_ROOMS: { className: "BrowserRoom", useSQLite: true } },
     cf: false, logRequests: false
   }));

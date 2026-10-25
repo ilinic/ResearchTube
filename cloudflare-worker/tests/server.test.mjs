@@ -3,6 +3,29 @@ import { start, seedSession, rpc, post, BASE, EXTENSION } from "./helpers.mjs";
 let mf, db;
 beforeAll(async () => { ({ mf, db } = await start()); });
 afterAll(async () => { await mf?.dispose(); });
+test("public pages do not start auth initialization or require its secret", async () => {
+  const { mf: pages } = await start({ BETTER_AUTH_SECRET: "" });
+  try {
+    for (const path of ["/", "/sign-in", "/consent", "/auth-ui.js"])
+      expect((await pages.dispatchFetch(BASE + path)).status).toBe(200);
+  } finally { await pages.dispose(); }
+});
+test("Google sign-in starts with a real D1 state cookie and the exact callback", async () => {
+  const { mf: google } = await start({ GOOGLE_CLIENT_ID: "client.test", GOOGLE_CLIENT_SECRET: "test-only-google-secret" });
+  try {
+    await google.dispatchFetch(BASE + "/");
+    const response = await google.dispatchFetch(BASE + "/api/auth/sign-in/social",
+      post({ provider: "google", callbackURL: BASE + "/account", disableRedirect: true }, { Origin: BASE }));
+    expect(response.status).toBe(200);
+    const result = await response.json(), url = new URL(result.url);
+    expect(result.redirect).toBe(false);
+    expect(url.origin).toBe("https://accounts.google.com");
+    expect(url.searchParams.get("redirect_uri")).toBe(BASE + "/api/auth/callback/google");
+    expect(url.searchParams.get("state")).toBeTruthy();
+    expect(response.headers.get("Set-Cookie")).toContain("state");
+    expect((await google.dispatchFetch(BASE + "/api/auth/get-session")).status).toBe(200);
+  } finally { await google.dispose(); }
+});
 test("serves bounded public status and OAuth discovery without a browser", async () => {
   expect(await (await mf.dispatchFetch(BASE + "/health")).json()).toMatchObject({ status: "ok" });
   const resource = await (await mf.dispatchFetch(BASE + "/.well-known/oauth-protected-resource/mcp")).json();
