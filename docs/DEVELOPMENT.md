@@ -16,23 +16,20 @@ and has its own lockfile, D1 migrations, build and local workerd integration
 tests. Run `npm ci`, `npm run check` and `npm test` in that directory. Its
 generated catalog and validators come from the built Extension and are not
 committed. `extension/cloud-connection.js` implements enrollment and the outbound
-adapter; `chatgpt-cloud-bridge.js` owns the separate widget handshake. Setup
+adapter and local exact-document guards. Setup
 starts in ChatGPT with root-origin MCP/OAuth before local installation. Follow
 [Public connection](features/PUBLIC_CONNECTION.md) and the protocol document;
-no device/focus-based fallback may replace exact chat binding. CI checks this package without
+each account has one active extension, and explicit tab targets are pinned locally without connection widgets. CI checks this package without
 deploying or requiring Cloudflare/provider credentials.
 
-Productive calls resolve the authenticated conversation's binding inside the
-server dispatch. Keep startup free of model-side status checks and routing IDs.
-Connection repair follows an actual connection error; it must not become a
-preflight before ordinary work. Unbound calls fail immediately without queueing.
+Productive calls route straight to the authenticated account's active extension. Keep startup free of connection widgets and model-side status checks. New enrollment revokes the old credential and stops its retries. Tab-free tools must not read ChatGPT; delivery needs explicit tabId/chatTabId and fails immediately if absent. Pin the live document inside execution and preserve navigation/closure/disconnect guards for delayed work.
 
 `npm run test:chrome` in `cloudflare-worker/` runs the real unpacked Extension
 in an isolated Windows Chromium profile against local workerd. It needs an
 available Playwright module (optionally set `RESEARCHTUBE_PLAYWRIGHT_MODULE` to
 its directory) and defaults to installed Microsoft Edge. Override
 `RESEARCHTUBE_BROWSER_CHANNEL` for another browser supporting unpacked-extension
-launch flags. Browser page/widget origins and provider session are simulated;
+launch flags. Browser host/YouTube pages and provider session are simulated;
 extension messaging, sender identity, document IDs, dispatch and WebSockets are
 real. The test routes extension transport to loopback and blocks production
 DNS. It does not replace real Google/ChatGPT rollout verification.

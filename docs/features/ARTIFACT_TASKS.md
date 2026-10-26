@@ -48,9 +48,9 @@ With delivery disabled, completed creation completes the overall task. With deli
 
 ## Originating tab and automation
 
-Creation tools use the same compact inline service widget as `media_view`, not the media viewer. With delivery enabled its private handshake binds an exact Chrome tab and conversation at launch, before potentially long processing. No focused/active-tab fallback exists. A missing handshake, duplicated conversation, closed tab or changed conversation prevents delivery. The widget does not hold a Composer lock or change the draft during creation. The bound chat reservation holds no placeholder file.
+For public MCP delivery, provide the exact tabId from the startup prompt. The extension pins the live Chrome document and saved conversation during the productive call; no connection widget or handshake is needed. Missing targets fail before creation. Navigation, duplicate conversations, closed tabs and connection replacement stop delivery without switching destinations. The reservation holds no placeholder file and does not change the draft during creation. Existing output files survive later delivery failure.
 
-The host may reuse a service-widget iframe for successive tool results. Each distinct task starts a fresh binding window, including after a creation-only task, a completed handshake or a timeout. Older result metadata and acknowledgments cannot replace the current task. Canonical tool-result notifications take precedence over compatibility globals; completed handshakes stop their retry timer.
+The compact service widget remains a progress surface for artifact tools. Its legacy local-only handshake is not used by the public account relay, which supplies an already pinned document.
 
 For `visual_map_create`, `sceneDetectThreshold` is optional for scene-detect/hybrid selection and is omitted for uniform selection. Uniform result metadata reports it as null; that result-only null is not copied into the subsequently validated task input.
 

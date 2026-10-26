@@ -322,45 +322,22 @@ const legacySpeech=pageHarness({metadata:{'researchtube/artifactTask':{taskId:'t
 assert.equal(legacySpeech.status.textContent,'Synthesizing speech…');
 console.log('Artifact captions: operation-specific speech, no file claim or current-chat binding in speakers mode: ok');
 
-// The same packaged service widget connects a manually assembled tab group.
+// Manual group inspection uses an explicit tab directly, without a widget.
 const groupWorker=worker();
 groupWorker.tabs.get(42).groupId=7;
 groupWorker.tabs.set(51,{id:51,groupId:7,url:'https://forum.test/thread',title:'Forum'});
 groupWorker.context.chrome.tabs.query=async query=>[...groupWorker.tabs.values()].filter(tab=>query.groupId==null || tab.groupId===query.groupId);
 groupWorker.context.configuredBrowserStudyOptions=async()=>({detailedLogging:false});
 const callContext=args=>groupWorker.context.handleMcpRequest({id:10,method:'tools/call',params:{name:'system_get_chat_context',arguments:args}});
-const groupStart=await callContext({});
-assert.equal(groupStart.result.structuredContent.status,'working');
-assert.equal(groupStart.result._meta['researchtube/chatTarget'].mode,'group');
-assert.doesNotMatch(JSON.stringify(groupStart.result.structuredContent),/bindingToken/);
-const groupPage=pageHarness({metadata:groupStart.result._meta,runtime:message=>groupWorker.receive(message,sender())});
-await settle();await settle();
-assert.equal(groupPage.pageMessages[0].mode,'group');
-assert.equal(groupPage.status.textContent,'Group connected · 1 sites, 1 chats');
-groupPage.globals(groupStart.result._meta);
-assert.equal(groupPage.status.textContent,'Group connected · 1 sites, 1 chats','late pending globals cannot regress a confirmed connection');
-const groupStatus=await callContext({taskId:groupStart.result.structuredContent.taskId});
-assert.equal(groupStatus.result.structuredContent.chatTabId,42);
-assert.equal(groupStatus.result.structuredContent.group.groupId,7);
-assert.deepEqual(JSON.parse(JSON.stringify(groupStatus.result.structuredContent.group.tabs.map(tab=>tab.tabId))),[42,51]);
-assert.equal(groupWorker.mutations.length,0,'connecting does not edit the Composer');
-const statusPage=pageHarness({metadata:groupStatus.result._meta});
-assert.equal(statusPage.status.textContent,'Group connected · 1 sites, 1 chats','a fresh status iframe must not claim file delivery');
-assert.equal(statusPage.pageMessages.length,0,'terminal context metadata does not bind again');
-// A reused widget must change captions and restore the media delivery mode.
-const modes=pageHarness({metadata:createOnly});
-modes.message({jsonrpc:'2.0',method:'ui/notifications/tool-result',params:groupStart.result});
-assert.equal(modes.status.textContent,'Connecting tab group…');
-modes.local({source:'researchtube-chat-target-widget',taskId:groupStart.result.structuredContent.taskId,ok:true,context:groupStatus.result.structuredContent});
-assert.match(modes.status.textContent,/Group connected/);
-modes.message({jsonrpc:'2.0',method:'ui/notifications/tool-result',params:{_meta:{'researchtube/chatTarget':followingBinding}}});
-await settle();await settle();
-assert.equal(modes.status.textContent,'Adding files to chat…');
-const noGroup=worker();const noGroupStart=await noGroup.context.handleMcpRequest({id:11,method:'tools/call',params:{name:'system_get_chat_context',arguments:{}}});
-const noGroupPage=pageHarness({metadata:noGroupStart.result._meta,runtime:message=>noGroup.receive(message,sender())});
-await settle();await settle();
-assert.equal(noGroupPage.status.textContent,'Place this chat and the sites in one tab group.');
+const groupStart=await callContext({chatTabId:42});
+assert.equal(groupStart.result.structuredContent.status,'completed');
+assert.equal(groupStart.result._meta,undefined);
+assert.equal(groupStart.result.structuredContent.chatTabId,42);
+assert.deepEqual(JSON.parse(JSON.stringify(groupStart.result.structuredContent.group.tabs.map(tab=>tab.tabId))),[42,51]);
+assert.equal(groupWorker.mutations.length,0);
+assert.equal((await callContext({})).result.structuredContent.status,'rejected','missing target never opens a setup widget');
+const noGroup=worker();const noGroupStart=await noGroup.context.handleMcpRequest({id:11,method:'tools/call',params:{name:'system_get_chat_context',arguments:{chatTabId:42}}});
+assert.equal(noGroupStart.result.structuredContent.status,'rejected');
 const diagnosticResult=await noGroup.context.handleMcpRequest({id:12,method:'tools/call',params:{name:'system_get_diagnostics',arguments:{}}});
-assert.ok(diagnosticResult.result.structuredContent.events.some(item=>item.code==='BROWSER_GROUP_NOT_FOUND'));
-assert.doesNotMatch(JSON.stringify(diagnosticResult.result.structuredContent),new RegExp(noGroupStart.result._meta['researchtube/chatTarget'].bindingToken));
-console.log('Shared widget: manual-group routing, authoritative context results, no Composer mutation and failure diagnostics passed');
+assert.equal(noGroupStart.result.structuredContent.error.code,'BROWSER_GROUP_NOT_FOUND',JSON.stringify(noGroupStart.result.structuredContent));
+console.log('Direct group context: exact supplied tab, no widget, preserved Composer and failure diagnostics passed');

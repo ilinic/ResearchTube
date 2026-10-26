@@ -2,15 +2,11 @@
 
 **Study this site** duplicates the site and opens one leading ChatGPT conversation in a blue `RT · …` Chrome group. The source stays in place. The prompt supplies the leading `chatTabId`. Add other site tabs to this group by dragging them in; remove, close or duplicate sites during research. All file results and continuations go to the leading chat.
 
-Reload the Extension and refresh the ResearchTube MCP catalog after upgrading. Start a new study chat, or use `system_get_chat_context` to connect an existing grouped ChatGPT tab without knowing its ID. Old `sessionId` arguments are rejected.
+Reload the Extension and refresh the MCP catalog after upgrading. Study this site supplies the exact chatTabId in its startup prompt. First productive Site calls identify the group automatically without a connection widget. Explicit `system_get_chat_context` with chatTabId reads or resumes a stopped group immediately.
 
 ## Manually created groups
 
-Place exactly one existing saved ChatGPT conversation and the desired sites in one Chrome tab group. Ask ResearchTube to research the group. `system_get_chat_context` without arguments returns an immediate standard task and uses the same compact service widget as file delivery, with a “Connecting tab group…” caption. The widget sends a private capability through the Extension bridge; Chrome supplies the exact sender tab. No focus, selected window, page text or URL similarity is used to choose the tab. It does not attach a debugger or change tabs, files or drafts.
-
-Poll the same tool with `taskId` no faster than its one-second interval. Completion requires verified identity and group membership, and returns `chatTabId` plus the first page of current participants. Use `site_list_tabs` for larger groups. If the client delays mounting the widget until the assistant response ends, finish that response and check the task on the next turn. `cancel: true` with the task ID cancels a pending binding. The binding deadline is 30 seconds; start again after timeout or worker restart. Pending bindings are bounded to 100 and terminal history to 2000.
-
-A chat outside a group gets `BROWSER_GROUP_NOT_FOUND`. Duplicate browser views of the same conversation are ambiguous: close the duplicate before connecting. An existing group accepts only its leading ChatGPT tab. Extra ChatGPT tabs are ignored and cannot bind, call Site tools or take over when the owner closes. New groups with multiple unbound ChatGPT tabs are refused rather than choosing one. Polling refreshes membership but rejects a moved, closed or changed chat and never silently retargets it. Explicit new connection can resume a stopped group; previously cancelled tasks are not restarted.
+A manually created group needs its exact leading chatTabId. When that ID is available, the first Site call can claim a group containing exactly one saved ChatGPT conversation. Unknown IDs are never guessed from focus; use Study this site to create a study with a supplied ID. Extra chats cannot take over an existing owner, and ambiguous unowned groups are refused. A moved, closed, duplicate or changed leading chat fails closed. Stop is preserved until explicit resume; cancelled tasks are never restarted.
 
 ## Prompt templates
 
@@ -36,7 +32,7 @@ Missing entries use the built-in defaults. Both shortcuts support offline defaul
 
 ## Participants and identity
 
-A group has one exact leading `chatTabId`, a live site roster, page connections and file tasks. Every Site tool checks that its supplied caller ID is this group's controller. Page tools additionally require a site `tabId` from `site_list_tabs`; ChatGPT pages cannot be targeted. MCP transport does not authenticate the originating tab: `chatTabId` remains explicit routing, not proof of request origin. The widget binds manual connections through Chrome's sender identity. No focus, similar-URL guess or election chooses a controller.
+A group has one exact leading `chatTabId`, a live site roster, page connections and file tasks. Every Site tool checks that its supplied caller ID is this group's controller. Page tools additionally require a site `tabId` from `site_list_tabs`; ChatGPT pages cannot be targeted. MCP transport does not authenticate the originating tab: `chatTabId` remains explicit routing, not proof of request origin. The active account authorizes its extension; it pins the explicitly supplied chat document inside execution. No focus, similar-URL guess or election chooses a controller.
 
 `site_list_tabs` lists the leading chat and manageable sites, with safe URLs, roles and automation state. Additional ChatGPT tabs are excluded. `offset`/`limit` pagination defaults to 50 and allows up to 200 per page; restart at offset 0 if revision changes. There is no configured site count cap.
 

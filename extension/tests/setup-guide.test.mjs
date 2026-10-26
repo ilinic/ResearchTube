@@ -12,9 +12,10 @@ for (const id of ['agent-port', 'test-agent', 'agent-result', 'silent-automation
 }
 const renderSource = popup.slice(popup.indexOf('function renderConnectionStatus(state) {'), popup.indexOf('async function loadConnectionStatus()'));
 for (const [cloud, text, style] of [
-  [{ state: 'not-configured', configured: false }, 'Waiting for chat', 'warn'],
+  [{ state: 'not-configured', configured: false }, 'Waiting for connection', 'warn'],
   [{ state: 'connecting', configured: true }, 'Connecting…', 'warn'],
   [{ state: 'ready', configured: true }, 'Connected', 'good'],
+  [{ state: 'error', configured: true, errorCode: 'EXTENSION_REPLACED' }, 'Disconnected', 'bad'],
   [{ state: 'offline', configured: true }, 'Offline', 'warn'],
   ...['BROWSER_ACCOUNT_MISMATCH', 'BROWSER_SIGN_IN_REQUIRED', 'CLOUD_UNAVAILABLE'].map(errorCode => [{ state: 'error', configured: true, errorCode }, 'Sign-in or connection error', 'bad'])
 ]) {

@@ -1,123 +1,67 @@
 import { beforeAll, afterAll, expect, test } from "vitest";
 import { randomUUID } from "node:crypto";
-import { start, doRoom, roomPost, socketFor, target, bind, message } from "./helpers.mjs";
+import { start, doRoom, roomPost, socketFor, message } from "./helpers.mjs";
 let mf; const sockets = [];
 beforeAll(async () => { ({ mf } = await start()); });
 afterAll(async () => { for (const socket of sockets) { try { socket.close(); } catch {} } await mf?.dispose(); });
-async function setup() { const stub = await doRoom(mf, randomUUID()); const connection = await socketFor(stub); sockets.push(connection.socket); return { stub, ...connection }; }
-test("pins a request and its reply to installation + tab + document", async () => {
-  const { stub, socket, installationId } = await setup();
-  const binding = await bind(stub, installationId);
-  const incoming = message(socket);
-  const pending = roomPost(stub, "/dispatch", { bindingId: binding.bindingId, session: "chat-1", request: { jsonrpc: "2.0", method: "tools/call", params: { name: "youtube_get_video", arguments: { videoId: "aqz-KE-bpKQ" } } } });
-  const request = await incoming;
-  expect(request.target.tabId).toBe(7);
-  socket.send(JSON.stringify({ type: "response", requestId: request.requestId, target: target(), result: { content: [{ type: "text", text: "correct tab" }] } }));
-  expect(await (await pending).json()).toEqual({ result: { content: [{ type: "text", text: "correct tab" }] } });
+const request = (name = "youtube_get_transcript", args = {videoId:"aqz-KE-bpKQ"}) => ({request:{jsonrpc:"2.0",method:"tools/call",params:{name,arguments:args}}});
+async function setup(ready = true) {
+  const stub = await doRoom(mf, randomUUID()), connection = await socketFor(stub); sockets.push(connection.socket);
+  if (ready) {
+    const ack = new Promise(resolve => connection.socket.addEventListener("message", event => resolve(event.data), {once:true}));
+    connection.socket.send("direct-tools-v1"); expect(await ack).toBe("direct-tools-ready");
+  }
+  return {stub,...connection};
+}
+test("productive dispatch needs only the account extension and returns its first response", async () => {
+  const {stub,socket,installationId} = await setup();
+  const incoming = message(socket), pending = roomPost(stub,"/dispatch",request()), command = await incoming;
+  expect(command).toMatchObject({type:"request",installationId});expect(command).not.toHaveProperty("target");
+  socket.send(JSON.stringify({type:"response",requestId:command.requestId,result:{content:[{type:"text",text:"transcript"}]}}));
+  expect(await (await pending).json()).toEqual({result:{content:[{type:"text",text:"transcript"}]}});
 });
-test("another conversation or user cannot use a binding", async () => {
-  const { stub, installationId } = await setup();
-  const binding = await bind(stub, installationId);
-  const body = { bindingId: binding.bindingId, session: "other-chat", request: { jsonrpc: "2.0", method: "tools/list" } };
-  expect((await roomPost(stub, "/dispatch", body)).status).toBe(409);
-  expect((await roomPost(await doRoom(mf, randomUUID()), "/dispatch", { ...body, session: "chat-1" })).status).toBe(409);
+test("offline and old extensions fail immediately without a queued request", async () => {
+  const empty = await doRoom(mf,randomUUID());
+  expect((await (await roomPost(empty,"/dispatch",request())).json()).error.code).toBe("EXTENSION_OFFLINE");
+  const {stub} = await setup(false);
+  expect((await (await roomPost(stub,"/dispatch",request())).json()).error.code).toBe("EXTENSION_UPDATE_REQUIRED");
 });
-
-test("implicit conversation routing executes directly and never falls back to another chat or user", async () => {
-  const { stub, socket, installationId } = await setup();
-  await bind(stub, installationId);
-  const request = { jsonrpc: "2.0", method: "tools/list" };
-  const incoming = message(socket);
-  const pending = roomPost(stub, "/dispatch", { session: "chat-1", request });
-  const command = await incoming;
-  expect(command.target.tabId).toBe(7);
-  socket.send(JSON.stringify({ type: "response", requestId: command.requestId, target: target(), result: { tools: [] } }));
-  expect((await (await pending).json()).result).toEqual({ tools: [] });
-  const absent = await roomPost(stub, "/dispatch", { session: "other-chat", request });
-  expect((await absent.json()).error.code).toBe("BROWSER_BINDING_REQUIRED");
-  const anotherUser = await roomPost(await doRoom(mf, randomUUID()), "/dispatch", { session: "chat-1", request });
-  expect((await anotherUser.json()).error.code).toBe("BROWSER_BINDING_REQUIRED");
-  const foreignTarget = await roomPost(stub, "/dispatch", { session: "chat-1", request: { jsonrpc: "2.0", method: "tools/call", params: { name: "timer_start", arguments: { tabId: 999 } } } });
-  expect((await foreignTarget.json()).error.code).toBe("BROWSER_TARGET_MISMATCH");
+test("unknown or extra arguments cannot enter the relay", async () => {
+  const {stub} = await setup();
+  for (const body of [request("constructor",{}),request("youtube_get_video",{videoId:"x",tabId:9}),request("timer_start",{durationSeconds:1,unknown:true})])
+    expect((await roomPost(stub,"/dispatch",body)).status).toBe(400);
+  expect((await roomPost(stub,"/dispatch",{...request(),session:"legacy"})).status).toBe(400);
+  expect((await roomPost(stub,"/challenge",{session:"legacy"})).status).toBe(404);
 });
-test("one-time widget proof cannot be replayed or bound offline", async () => {
-  const { stub, installationId } = await setup();
-  const challenge = await (await roomPost(stub, "/challenge", { session: "chat" })).json();
-  const body = { installationId, nonce: challenge.nonce, target: target() };
-  expect((await roomPost(stub, "/bind", body)).status).toBe(200);
-  expect((await roomPost(stub, "/bind", body)).status).toBe(409);
-  const other = await (await roomPost(stub, "/challenge", { session: "chat" })).json();
-  expect((await roomPost(stub, "/bind", { ...body, nonce: other.nonce, installationId: randomUUID() })).status).toBe(409);
+test("another account cannot resolve a pending request even with its requestId", async () => {
+  const one = await setup(), two = await setup();
+  const incoming = message(one.socket), pending = roomPost(one.stub,"/dispatch",request()), command = await incoming;
+  two.socket.send(JSON.stringify({type:"response",requestId:command.requestId,result:{content:[{type:"text",text:"foreign"}]}}));
+  one.socket.send(JSON.stringify({type:"response",requestId:command.requestId,result:{content:[{type:"text",text:"owner"}]}}));
+  expect((await (await pending).json()).result.content[0].text).toBe("owner");
 });
-test("heartbeat preserves socket authentication and reconnect invalidates old document proofs", async () => {
-  const { stub, socket, installationId } = await setup();
-  const binding = await bind(stub, installationId);
-  const pong = new Promise(resolve => socket.addEventListener("message", event => resolve(event.data), { once: true }));
-  socket.send("ping"); expect(await pong).toBe("pong");
-  const replacement = await socketFor(stub, installationId); sockets.push(replacement.socket);
-  const status = await (await roomPost(stub, "/status", { session: "chat-1" })).json();
-  expect(status).toMatchObject({ extensionConnected: true, connected: false, bindings: [] });
-  const replay = await roomPost(stub, "/dispatch", { bindingId: binding.bindingId, session: "chat-1", request: { jsonrpc: "2.0", method: "tools/list" } });
-  expect(replay.status).toBe(409);
+test("heartbeat survives hibernation state and same-installation reconnect rejects pending work", async () => {
+  const {stub,socket,installationId} = await setup();
+  const pong = new Promise(resolve=>socket.addEventListener("message",event=>resolve(event.data),{once:true}));socket.send("ping");expect(await pong).toBe("pong");
+  const incoming = message(socket), pending = roomPost(stub,"/dispatch",request());await incoming;
+  const next = await socketFor(stub,installationId);sockets.push(next.socket);
+  expect((await (await pending).json()).error.code).toBe("EXTENSION_OFFLINE");
+  expect((await (await roomPost(stub,"/status",{})).json()).extensionConnected).toBe(true);
+  const rejected = await stub.fetch("https://room.internal/connect",{headers:{Upgrade:"websocket","X-Installation-Id":randomUUID()}});
+  expect(rejected.status).toBe(401);
 });
-test("same conversation observed in a second installation blocks both instead of switching", async () => {
-  const { stub, socket, installationId } = await setup();
-  const first = await bind(stub, installationId);
-  const second = await socketFor(stub); sockets.push(second.socket);
-  const challenge = await (await roomPost(stub, "/challenge", { session: "chat-1" })).json();
-  const invalidated = message(socket);
-  const conflict = await roomPost(stub, "/bind", { installationId: second.installationId, nonce: challenge.nonce, target: target(9) });
-  expect((await conflict.json()).error.code).toBe("BROWSER_CONTEXT_AMBIGUOUS");
-  const direct = await roomPost(stub, "/dispatch", { session: "chat-1", request: { jsonrpc: "2.0", method: "tools/list" } });
-  expect((await direct.json()).error.code).toBe("BROWSER_CONTEXT_AMBIGUOUS");
-  expect((await invalidated).bindingId).toBe(first.bindingId);
-  const result = await roomPost(stub, "/dispatch", { bindingId: first.bindingId, session: "chat-1", request: { jsonrpc: "2.0", method: "tools/list" } });
-  expect((await result.json()).error.code).toBe("BROWSER_CONTEXT_AMBIGUOUS");
-  const retry = await (await roomPost(stub, "/challenge", { session: "chat-1" })).json();
-  const oldController = await roomPost(stub, "/bind", { installationId, nonce: retry.nonce, target: target() });
-  expect((await oldController.json()).error.code).toBe("BROWSER_CONTEXT_AMBIGUOUS");
+test("malformed response closes only its socket and settles its pending request", async () => {
+  const {stub,socket} = await setup();
+  const incoming = message(socket), pending = roomPost(stub,"/dispatch",request());await incoming;
+  socket.send(JSON.stringify({type:"response",requestId:randomUUID(),result:{},error:{code:-1,message:"both"}}));
+  expect((await (await pending).json()).error.code).toBe("BROWSER_PROTOCOL_ERROR");
 });
-test("document navigation rejects an otherwise matching response", async () => {
-  const { stub, socket, installationId } = await setup(); const binding = await bind(stub, installationId);
-  const incoming = message(socket);
-  const pending = roomPost(stub, "/dispatch", { bindingId: binding.bindingId, session: "chat-1", request: { jsonrpc: "2.0", method: "tools/list" } });
-  const request = await incoming;
-  socket.send(JSON.stringify({ type: "response", requestId: request.requestId, target: { ...target(), documentId: "new-document" }, result: { tools: [] } }));
-  expect((await (await pending).json()).error.code).toBe("BROWSER_TARGET_MISMATCH");
-});
-test("disconnect fails an in-flight request and never forwards it to another browser", async () => {
-  const { stub, socket, installationId } = await setup(); const binding = await bind(stub, installationId);
-  const incoming = message(socket);
-  const pending = roomPost(stub, "/dispatch", { bindingId: binding.bindingId, session: "chat-1", request: { jsonrpc: "2.0", method: "tools/list" } });
-  await incoming;
-  socket.close();
-  expect((await (await pending).json()).error.code).toBe("BROWSER_DISCONNECTED");
-});
-test("a caller cannot override the bound leading chat ID", async () => {
-  const { stub, installationId } = await setup(); const binding = await bind(stub, installationId);
-  const response = await roomPost(stub, "/dispatch", { bindingId: binding.bindingId, session: "chat-1", request: { jsonrpc: "2.0", method: "tools/call", params: { name: "site_list_tabs", arguments: { chatTabId: 100 } } } });
-  expect((await response.json()).error.code).toBe("BROWSER_TARGET_MISMATCH");
-  const notification = await roomPost(stub, "/dispatch", { bindingId: binding.bindingId, session: "chat-1", request: { jsonrpc: "2.0", method: "tools/call", params: { name: "timer_start", arguments: { tabId: 100 } } } });
-  expect((await notification.json()).error.code).toBe("BROWSER_TARGET_MISMATCH");
-});
-test("concurrent claims consume a nonce only once without resetting other sockets", async () => {
-  const { stub, installationId } = await setup();
-  const challenge = await (await roomPost(stub, "/challenge", { session: "race-chat" })).json();
-  const body = { installationId, nonce: challenge.nonce, target: target() };
-  const responses = await Promise.all([roomPost(stub, "/bind", body), roomPost(stub, "/bind", body)]);
-  expect(responses.map(r => r.status).sort()).toEqual([200, 409]);
-  expect((await (await roomPost(stub, "/status", { session: "race-chat" })).json()).connected).toBe(true);
-  const existing = (await responses.find(r => r.status === 200).json()).bindingId;
-  expect((await bind(stub, installationId, "race-chat")).bindingId).toBe(existing);
-});
-test("a different installation cannot settle or release the originating request", async () => {
-  const { stub, socket, installationId } = await setup(); const binding = await bind(stub, installationId);
-  const second = await socketFor(stub); sockets.push(second.socket);
-  const received = message(socket);
-  const pending = roomPost(stub, "/dispatch", { bindingId: binding.bindingId, session: "chat-1", request: { jsonrpc: "2.0", method: "tools/list" } });
-  const command = await received;
-  second.socket.send(JSON.stringify({ type: "response", requestId: command.requestId, target: target(), result: { tools: ["wrong browser"] } }));
-  expect((await roomPost(stub, "/release", { installationId: second.installationId, bindingId: binding.bindingId })).status).toBe(404);
-  socket.send(JSON.stringify({ type: "response", requestId: command.requestId, target: target(), result: { tools: ["correct browser"] } }));
-  expect((await (await pending).json()).result.tools).toEqual(["correct browser"]);
+test("revocation fails in-flight work and leaves the account offline", async () => {
+  const {stub,socket,installationId} = await setup();
+  const incoming = message(socket), pending = roomPost(stub,"/dispatch",request());await incoming;
+  await roomPost(stub,"/revoke",{installationId});
+  expect((await (await pending).json()).error.code).toBe("EXTENSION_OFFLINE");
+  expect((await (await roomPost(stub,"/status",{})).json()).extensionConnected).toBe(false);
+  const stale = await stub.fetch("https://room.internal/connect", {headers:{Upgrade:"websocket","X-Installation-Id":installationId}});
+  expect(stale.status).toBe(401,"late reconnect cannot revive a revoked installation");
 });

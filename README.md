@@ -122,7 +122,7 @@ On Windows, the Local Agent runs quietly in the system tray. Click its ResearchT
 
 ## Free, Open Source, and Local-first
 
-ResearchTube has **no ResearchTube subscription or hosted processing fee**. The extension and its companion Agent run on your computer. Local video and audio processing stays local unless you choose to share results with ChatGPT or another service. The public server authenticates and relays tool requests. Cloud transcripts and mobile execution are not provided.
+ResearchTube has **no ResearchTube subscription or hosted processing fee**. The extension and its companion Agent run on your computer. Local video and audio processing stays local unless you choose to share results with ChatGPT or another service. The public server authenticates and relays tool requests. Tools run through your connected desktop extension; server-side transcripts are not provided.
 
 ResearchTube is not currently distributed through the Chrome Web Store; download the packaged release from GitHub using the link above.
 

@@ -5,48 +5,19 @@ Cloudflare Workers, Better Auth handles Google/Microsoft sign-in and OAuth 2.1,
 D1 stores accounts and installation credentials, and SQLite-backed Durable
 Objects route requests to authenticated extension WebSockets.
 
-Setup starts in ChatGPT: add the root URL, choose OAuth, sign in and install
-the personal plugin. Catalog publication is not required. The website
-provides installation instructions. Productive tools are called directly; status
-is optional diagnostics rather than a startup step. Install and pair the
-Chrome Extension afterwards; start the optional Agent for local operations.
-There are no cloud transcripts, free quotas or mobile execution.
-
-The Extension implements public connection Settings, nonce-bound enrollment,
-the dedicated widget listener and outbound relay adapter.  Deployment and real provider/Chrome/ChatGPT
-verification are separate rollout steps; tests do not confirm a deployed or
-Store-approved plugin. The Worker never launches a browser or runs FFmpeg/yt-dlp.
+Setup starts in ChatGPT: add the root URL, choose OAuth and sign in. Install the Chrome Extension afterwards; it connects automatically through the ResearchTube website session in that Chrome profile. Start the optional Agent for local work. Tools run through the single active desktop extension; there are no server-side transcripts or free transcript quotas.
 
 ## Implemented
 
-- Stateless Streamable HTTP MCP at `/`, using the official MCP SDK. Browser GET requests at the root show setup instructions; MCP POST requests execute the protocol. No `/mcp` alias is provided.
-- The built-in Extension catalog and existing UI resources are exported from the
-  shipped Extension bundle, with three cloud connection tools added. Each
-  proxied tool resolves its binding internally from the authenticated conversation; original arguments/results and local
-  task IDs remain the Extension's contract. Custom Tool catalogs are not yet
-  published by the cloud server.
-- Google and Microsoft sign-in buttons, explicit OAuth consent, protected-resource
-  and authorization-server discovery, public-client DCR, S256 PKCE, resource-bound
-  five-minute access tokens, rotating refresh tokens and a refresh revocation
-  endpoint. No passwords or email delivery service are configured.
-- OAuth issuer: `PUBLIC_ORIGIN/api/auth`; protected resource:
-  `PUBLIC_ORIGIN`. For the personal ChatGPT connection, select OAuth with
-  dynamic client registration (DCR). CIMD is not configured in this version.
-- Separate random credentials per extension installation; only SHA-256 hashes
-  are stored. A one-use, 15-second ticket opens its WebSocket. The long-lived
-  installation credential is never placed in a URL or MCP response.
-- One-use, 30-second widget binding challenges; user-isolated rooms; exact
-  installation/tab/document/conversation routing; no active-tab or alternate-
-  device fallback. Bindings and socket authentication last one hour.
-- Explicit browser-binding release and installation revocation. Disconnect,
-  navigation mismatch, conflicting binds and transport failures fail closed.
-  A timed-out dispatched request reports an unknown outcome and is never retried.
+- Stateless Streamable HTTP MCP at `/` using the official SDK. Browser GET shows installation instructions; MCP POST executes the protocol. No `/mcp` alias.
+- Canonical built-in Extension tools and media UI resources, plus optional `system_connection_status` diagnostics. No connect/disconnect-chat tools, conversation widgets or preliminary status calls. Custom Tool catalogs are not yet published by the cloud server.
+- Google/Microsoft sign-in, OAuth consent, protected-resource and authorization-server discovery, public-client DCR, S256 PKCE, resource-bound five-minute access tokens and rotating/revocable refresh tokens. OAuth issuer is `PUBLIC_ORIGIN/api/auth`; protected resource is `PUBLIC_ORIGIN`.
+- Separate random installation credentials; only their SHA-256 hashes are stored. One-use 15-second tickets open outbound WebSockets. Credentials never enter URLs or MCP.
+- One active extension installation per account. New enrollment revokes the previous credential, closes its socket and stops its retries. User-isolated rooms route productive tools directly to the active installation, without openai/session or per-chat binding.
+- Explicit tabId/chatTabId for chat actions. The Extension pins and validates the exact live document inside execution; no focus-based fallback. Tab-free YouTube/local reads do not inspect ChatGPT.
+- Bounded pending requests and replay history, socket-bound replies and no automatic action replay after disconnect/timeout. Toolbar and popup display disconnected/replaced status.
 
-Google/Microsoft prove account ownership; they do not select a browser profile
-or provide its YouTube session. Existing browser work stays in the Extension,
-and local file/media work stays in the loopback Agent. Text and tool results
-pass through Cloudflare; large media should stay on the existing local delivery
-path. Codex has no supported browser binding in this design.
+Provider login identifies the ResearchTube account; it does not provide YouTube credentials. Existing browser work stays in the extension; local files/media stay in the loopback Agent. Text/tool results pass through Cloudflare. Account-scoped calls can originate in another client while the connected desktop remains online. See [protocol](PROTOCOL.md) and [public connection](../docs/features/PUBLIC_CONNECTION.md).
 
 ## Local development
 
@@ -157,7 +128,7 @@ only confirms an HTTP response, not provider or browser readiness.
 
 The ChatGPT MCP address is **`https://rtube.win`**. Use a personal custom MCP
 connection with OAuth/DCR for testing before Store submission. Actual browser
-calls require a paired Extension and a fresh exact-chat widget binding. Test provider
+calls require the active Extension; targeted chat actions require an explicit tab ID pinned locally inside execution. Test provider
 redirects with real accounts; automated tests seed local sessions and do not
 complete external social login.
 
@@ -193,8 +164,7 @@ Do not mark an unverified provider email as verified for OpenAI domain policies.
 
 Revoking a refresh token stops new token issuance. Signed access tokens remain
 valid for at most five minutes; the library does not revoke individual JWT
-access tokens. Releasing a browser binding or revoking an installation blocks
-that browser route immediately, independently of token expiry.
+access tokens. Revoking an installation blocks its route immediately, independently of token expiry.
 
 The first enrollment request runs on the signed-in, same-origin setup page,
 not as an LLM tool. It must hand its credential only to the initiating allowed
@@ -202,18 +172,7 @@ extension. There is no device-selection UI and no implicit pairing by email.
 
 ## Routing limits to verify in Chrome
 
-`openai/session` correlates a conversation; it is not a Chrome tab ID or proof
-of which physical copy of the conversation initiated a request. A fresh widget
-handshake must supply that proof. Detected conflicting bindings quarantine the
-old route instead of electing a browser. A copied conversation's old widget
-cannot reuse a consumed nonce.
-
-The server alone cannot detect another computer displaying a historical copy
-of the same conversation. The Extension integration must reject duplicate
-controllers and require fresh binding on resumed/moved chats. Do not claim
-transparent multi-device support or enable public rollout based solely on
-the protocol simulator. Test identical conversation copies on different
-computers/profiles, not just different conversations.
+One account authorizes one active extension. Numeric tab IDs are explicit routing within that installation, not proof of a physical caller's origin. New enrollment replaces the old installation; old credentials and unused tickets must fail. Verify replacement notice, stopped retries, popup/badge state, restart and delayed chat-delivery guards. No per-chat widget is used.
 
 ## Verification and costs
 
@@ -224,8 +183,7 @@ npm test
 
 The optional `npm run test:chrome` exercises the actual unpacked Extension in an
 isolated Chromium profile against local workerd, with seeded test login and
-simulated ChatGPT/widget pages. It verifies native external messaging, sender
-tab/document identity, dispatch, navigation invalidation and revocation. See
+simulated ChatGPT/YouTube pages. It verifies native enrollment, first-call transcript dispatch without widgets, exact tab/document guards, replacement status and revocation. See
 [Development](../docs/DEVELOPMENT.md) for its browser/runtime requirements.
 
 Tests build and run the actual Worker in Cloudflare's local workerd/Miniflare

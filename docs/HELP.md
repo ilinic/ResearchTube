@@ -6,7 +6,7 @@ This is the starting guide for installation, everyday use and troubleshooting. C
 
 Read this guide first, then open only the linked reference relevant to the user's question. Give short, concrete steps in the user's language. Ask what they need help with instead of immediately reciting the installation procedure. If the source cannot be read, say so and ask for the relevant section; do not claim to have studied it. GitHub's **Raw** button provides the Markdown text if the normal page cannot be read.
 
-When diagnosing a failure, establish which layer failed: public MCP/OAuth, Chrome Extension, Local Agent, component, or one task. For an actual task, call the requested productive tool immediately. Connection routing and exact-tab authorization are checked inside that request. Use `system_connection_status` only for requested diagnostics or after a connection error; it works before local installation. Once a browser is bound, `system_agent_status` supplies readiness information and `system_get_diagnostics` returns recent sanitized errors. If tools are absent, use the user's Settings/popup result. Never call media tools merely for setup diagnosis or ask for credentials, cookies, signed URLs, browser profiles or unredacted logs.
+When diagnosing a failure, establish which layer failed: public MCP/OAuth, Chrome Extension, Local Agent, component, or one task. For an actual task, call the requested productive tool immediately. Connection routing and exact-tab authorization are checked inside that request. Use `system_connection_status` only for requested diagnostics or after a connection error; it works before local installation. Once the extension is connected, `system_agent_status` supplies readiness information and `system_get_diagnostics` returns recent sanitized errors. If tools are absent, use the user's Settings/popup result. Never call media tools merely for setup diagnosis or ask for credentials, cookies, signed URLs, browser profiles or unredacted logs.
 
 ## What ResearchTube does
 
@@ -15,7 +15,7 @@ ResearchTube connects ChatGPT to public YouTube research, local media tools and 
 | Part | What it does | When needed |
 | --- | --- | --- |
 | Public ResearchTube server | OAuth, setup and bounded request routing at `https://rtube.win` | Add it in ChatGPT first; a catalog listing is not required |
-| Chrome Extension | Implements tools, connects outbound, reads YouTube and controls browser tasks | Install and pair after OAuth; keep Chrome open during browser work |
+| Chrome Extension | Implements tools, connects outbound, reads YouTube and controls browser tasks | Install after OAuth; connects automatically; keep Chrome open during browser work |
 | Local Agent | Windows EXE or Python process serving local media tools and Workspace on `127.0.0.1`, normally port `17843` | Required for downloads, local files/media and other Agent-backed operations |
 | Workspace | Local files in the configured directory, default `agent/workspace/` | Use logical paths such as `downloads/example.mp4` in chat |
 
@@ -28,14 +28,11 @@ The [ResearchTube website](https://rtube.win) links to [GitHub Releases](https:/
 1. Open **ChatGPT Plugins → Add custom MCP server**, enter **https://rtube.win**, select **OAuth**, sign in through Google (or the configured Microsoft provider), authorize ResearchTube and install the personal plugin. Custom MCP access depends on account/workspace permissions.
 2. Follow the installation instructions at [rtube.win](https://rtube.win).
 3. Download the platform ZIP from [GitHub Releases](https://github.com/ilinic/ResearchTube/releases), extract it permanently, then load its `extension/` folder in `chrome://extensions` with Developer mode → Load unpacked. Do not use a Source code archive.
-4. Return to a saved ChatGPT conversation in desktop Chrome and ask ResearchTube to perform your task. It calls the requested tool directly. If that call reports a missing connection, `system_connect_browser` repairs this conversation using the existing browser sign-in.
-5. Once the widget connects, continue with the original productive tool. If it reports a sign-in problem, sign in at `https://rtube.win/setup` in this Chrome profile and reconnect. Close duplicate copies of the conversation.
+4. Keep Chrome open and check **ResearchTube server: Connected** in the popup. The extension connects automatically using the ResearchTube website sign-in in this Chrome profile. If sign-in is missing, open `https://rtube.win/account` and sign in.
+5. Ask ResearchTube to perform your task in ChatGPT. It calls the useful tool immediately. Chat delivery and Site tools use the exact tab ID included by the Extension's startup prompt.
 6. Start the optional Local Agent for downloads, Workspace, local media and Custom Tools. In Extension Settings use **Local Agent (optional) → Test connection**. See [Agent installation](INSTALLATION.md#3-start-the-local-agent).
 
-Browser work runs through desktop Chrome. Local media tools use the Agent. A phone request is never silently
-sent to a connected desktop. The extension reconnects automatically; after a
-socket restart, navigation or moved chat, establish a fresh chat binding with
-`system_connect_browser`. OAuth alone does not authorize a physical tab.
+Each account has one active extension. Connecting a new installation disconnects the old one, which shows Disconnected in its popup and a red toolbar badge. Network failures reconnect automatically; replaced installations stay stopped. No per-chat connection widget is needed. Tools execute through the active desktop extension even when called from another client; chat actions require its explicit target tab. The desktop must stay open.
 
 See [public connection](features/PUBLIC_CONNECTION.md) and
 [public-server troubleshooting](TROUBLESHOOTING.md#public-server-connection).

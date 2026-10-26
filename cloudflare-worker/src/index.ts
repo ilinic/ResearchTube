@@ -70,17 +70,15 @@ async function route(request: Request, env: Env): Promise<Response> {
   if (path === "/api/installations" && request.method === "POST") {
     sameOrigin(request, env);
     const userId = await browserUser(request, auth);
-    const input = z.object({ name: z.string().trim().min(1).max(80), extensionOrigin: z.string(), pairingNonce: z.string().length(72).optional() }).strict().parse(await readJson(request, 2048));
+    const input = z.object({ name: z.string().trim().min(1).max(80), extensionOrigin: z.string() }).strict().parse(await readJson(request, 2048));
     if (!extensionOrigins(env).includes(input.extensionOrigin)) throw new PublicError("EXTENSION_NOT_ALLOWED", "This extension is not configured on the server.", 403);
-    // Automatic enrollment needs both proofs: this browser's authenticated
-    // cookie and the challenge issued to the same MCP account. A widget from
-    // another account cannot enroll this machine even if it knows a nonce.
-    if (input.pairingNonce) await roomRequest(env, userId, "/enrollment-check", { nonce: input.pairingNonce });
     const id = crypto.randomUUID(), token = secret();
-    const result = await env.DB.prepare(`INSERT INTO rt_installation (id, user_id, name, extension_origin, token_hash, created_at)
-      SELECT ?, ?, ?, ?, ?, ? WHERE (SELECT COUNT(*) FROM rt_installation WHERE user_id = ? AND revoked_at IS NULL) < 20`)
-      .bind(id, userId, input.name, input.extensionOrigin, await digest(token), Date.now(), userId).run();
-    if (!result.meta.changes) throw new PublicError("INSTALLATION_LIMIT", "Disconnect an unused extension installation first.", 409);
+    await env.DB.batch([
+      env.DB.prepare("UPDATE rt_installation SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL").bind(Date.now(), userId),
+      env.DB.prepare("INSERT INTO rt_installation (id, user_id, name, extension_origin, token_hash, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+        .bind(id, userId, input.name, input.extensionOrigin, await digest(token), Date.now())
+    ]);
+    await roomRequest(env, userId, "/activate", { installationId: id });
     // This credential goes only to the local setup bridge, never MCP or a URL.
     return json({ installationId: id, installationToken: token }, 201);
   }
@@ -100,14 +98,18 @@ async function route(request: Request, env: Env): Promise<Response> {
   if (path === "/api/relay-ticket" && request.method === "POST") {
     const device = await installation(request, env);
     // Bound ticket issuance and clean expired tickets without a paid cron job.
-    const updated = await env.DB.prepare("UPDATE rt_installation SET ticket_at = ? WHERE id = ? AND (ticket_at IS NULL OR ticket_at < ?)").bind(Date.now(), device.id, Date.now() - 5000).run();
+    const updated = await env.DB.prepare("UPDATE rt_installation SET ticket_at = ? WHERE id = ? AND revoked_at IS NULL AND (ticket_at IS NULL OR ticket_at < ?)").bind(Date.now(), device.id, Date.now() - 5000).run();
     if (!updated.meta.changes) throw new PublicError("RETRY_LATER", "Wait before reconnecting the extension.", 429);
     const ticket = secret(), expiresAt = Date.now() + 15_000;
-    await env.DB.batch([
+    const issued = await env.DB.batch([
+      env.DB.prepare("UPDATE rt_installation SET revoked_at = ? WHERE user_id = ? AND id != ? AND revoked_at IS NULL AND EXISTS (SELECT 1 FROM rt_installation WHERE id = ? AND revoked_at IS NULL)")
+        .bind(Date.now(), device.user_id, device.id, device.id),
       env.DB.prepare("DELETE FROM rt_relay_ticket WHERE expires_at <= ?").bind(Date.now()),
-      env.DB.prepare("INSERT INTO rt_relay_ticket (token_hash, installation_id, expires_at) VALUES (?, ?, ?)").bind(await digest(ticket), device.id, expiresAt)
+      env.DB.prepare("INSERT INTO rt_relay_ticket (token_hash, installation_id, expires_at) SELECT ?, ?, ? WHERE EXISTS (SELECT 1 FROM rt_installation WHERE id = ? AND revoked_at IS NULL)").bind(await digest(ticket), device.id, expiresAt, device.id)
     ]);
-    return json({ ticket, expiresAt });
+    if (!issued[2].meta.changes) throw new PublicError("EXTENSION_AUTHENTICATION_REQUIRED", "This extension connection was replaced.", 401);
+    await roomRequest(env, device.user_id, "/activate", { installationId: device.id });
+    return json({ ticket, expiresAt, capabilities: { directTools: 1 } });
   }
   if (path === "/api/installation/check" && request.method === "POST") {
     const device = await installation(request, env);
@@ -128,17 +130,6 @@ async function route(request: Request, env: Env): Promise<Response> {
     const device = consumed && await env.DB.prepare("SELECT id, user_id FROM rt_installation WHERE id = ? AND revoked_at IS NULL").bind(consumed.installation_id).first<Installation>();
     if (!device) throw new PublicError("EXTENSION_AUTHENTICATION_REQUIRED", "The relay ticket expired or was already used.", 401);
     return room(env, device.user_id).fetch(new Request("https://room.internal/connect", { headers: { Upgrade: "websocket", "X-Installation-Id": device.id } }));
-  }
-  if (path === "/api/browser/bind" && request.method === "POST") {
-    const device = await installation(request, env);
-    const input = z.object({ nonce: z.string().length(72), target: z.object({ tabId: z.number().int().nonnegative(),
-      documentId: z.string().min(1).max(128), conversationId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/) }).strict() }).strict().parse(await readJson(request, 2048));
-    return json(await roomRequest(env, device.user_id, "/bind", { installationId: device.id, ...input }));
-  }
-  if (path === "/api/browser/release" && request.method === "POST") {
-    const device = await installation(request, env);
-    const input = z.object({ bindingId: z.string().uuid() }).strict().parse(await readJson(request, 2048));
-    return json(await roomRequest(env, device.user_id, "/release", { installationId: device.id, ...input }));
   }
   return new Response(null, { status: 404 });
 }

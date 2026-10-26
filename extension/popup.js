@@ -4,7 +4,7 @@ function version(value) { return value ? `v${String(value).replace(/^v/i, "")}` 
 let connectionReadRevision = 0;
 function renderConnectionStatus(state) {
   const cloud = state.cloud;
-  $("server-status-value").textContent = cloud?.state === "ready" ? "Connected" : cloud?.errorCode ? "Sign-in or connection error" : cloud?.state === "connecting" ? "Connecting…" : !cloud?.configured ? "Waiting for chat" : "Offline";
+  $("server-status-value").textContent = cloud?.state === "ready" ? "Connected" : cloud?.errorCode === "EXTENSION_REPLACED" ? "Disconnected" : cloud?.errorCode ? "Sign-in or connection error" : cloud?.state === "connecting" ? "Connecting…" : !cloud?.configured ? "Waiting for connection" : "Offline";
   $("server-status").className = cloud?.state === "ready" ? "good" : cloud?.errorCode ? "bad" : "warn";
 }
 async function loadConnectionStatus() {

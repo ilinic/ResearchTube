@@ -82,7 +82,7 @@ await navigated.scheduled.shift()();assert.equal(navigated.uploads.length,0);
 // Missing markers in an ambiguous old/manual group fail closed, without election.
 const manual=fixture();manual.tabs.set(41,{id:41,url:'https://chatgpt.com/c/manual',groupId:80});
 manual.tabs.set(42,{id:42,url:'https://example.test',groupId:80});
-await assert.rejects(manual.agent.execute('site_list_tabs',{chatTabId:41}),{code:'BROWSER_OWNER_NOT_CONNECTED'});
+assert.equal((await manual.agent.execute('site_list_tabs',{chatTabId:41})).chatTabId,41,'first productive Site call claims an unambiguous manual group');
 assert.equal((await manual.agent.connectGroup(41)).chatTabId,41);
 const ambiguous=fixture();ambiguous.tabs.set(41,{id:41,url:'https://chatgpt.com/c/one',groupId:80});ambiguous.tabs.set(42,{id:42,url:'https://chatgpt.com/c/two',groupId:80});
 await assert.rejects(ambiguous.agent.connectGroup(41),{code:'BROWSER_OWNER_CONFLICT'});

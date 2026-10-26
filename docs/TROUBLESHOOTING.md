@@ -10,32 +10,13 @@ Never ask the user to paste a credential, cookie, PO Token, complete Chrome prof
 
 ## Public server connection
 
-First add **https://rtube.win** in ChatGPT as a custom MCP server with **OAuth**,
-complete account linking and install the personal plugin. The address has no
-`/mcp` suffix. Productive requests call their tool directly. Use
-`system_connection_status` for connection diagnosis after an error or when asked.
-Account/workspace permissions govern whether custom MCP connections are available.
+Add **https://rtube.win** with OAuth in ChatGPT, sign in and load the latest Extension. Keep Chrome open. The popup reports Google login, server connection and optional Agent status independently. A missing Google account stops connection attempts; sign in to ResearchTube at `https://rtube.win/account` in that Chrome profile if its website session is missing.
 
-If the account is connected but no extension is online, load the desktop Chrome
-extension and call `system_connect_browser` in this saved chat. Pairing uses an
-inactive, short-lived ResearchTube setup page and the browser's existing web
-session; no profile-confirmation click is needed. If the widget reports missing
-sign-in or different accounts, sign in at `/setup` in this Chrome profile and
-retry from the saved ChatGPT conversation.
+Tools run immediately through the account's single active extension. No per-chat widget or connection check is needed. A new installation replaces the old connection; the old popup shows Disconnected with a red toolbar badge and stops reconnecting. Transient network failures reconnect automatically with backoff.
 
-If the extension is online but this chat is unbound, open the saved conversation
-in desktop Chrome and call `system_connect_browser`. Close duplicate copies of
-that conversation. A worker/socket restart requires a fresh widget handshake.
-If conflicting bindings are reported, use `system_disconnect_browser`, then
-reconnect from one tab. Never select a different browser as a fallback.
+`EXTENSION_OFFLINE` means the account has no connected extension. `EXTENSION_UPDATE_REQUIRED` means the extension must be updated. Refresh the ChatGPT MCP catalog after upgrading so removed connection tools disappear. For targeted delivery, `BROWSER_CONTEXT_REQUIRED` means an explicit tabId/chatTabId from the startup prompt is missing. A changed or duplicate document fails without choosing another tab. Restart a study from the popup if its target is no longer available. A stopped Site group resumes only through an explicit `system_get_chat_context` call with its exact chatTabId.
 
-For a revoked installation, call `system_connect_browser` again from the saved
-ChatGPT conversation. For a network failure, the extension reconnects automatically
-with backoff. Use the account setup page to revoke an installation's access.
-
-Mobile execution and server-side transcripts are not available. Setup/status
-can explain this without installing an extension on a phone. Agent availability
-is separate: it is optional for browser-only research.
+No server-side transcripts are provided. The optional Agent is independent of browser-only research.
 
 ## First classification
 
@@ -58,7 +39,7 @@ Check in this order:
 1. **Add custom MCP server** is available for this ChatGPT account/workspace. If missing, check permissions and any required Developer Mode setting.
 2. For public setup, add **https://rtube.win** with **OAuth**, finish sign-in/consent and install the personal plugin. This succeeds before Extension or Agent installation.
 3. Select or mention `@ResearchTube` and call `system_connection_status` for setup instructions.
-4. Then load and pair the Extension, verify its server connection and bind the saved ChatGPT conversation in Chrome.
+4. Then load the Extension and verify Connected in its popup.
 5. Refresh the ChatGPT connection after tool/schema updates.
 
 If the Extension popup reports a connection error, use the public server section above. Do not troubleshoot FFmpeg or the Agent until the MCP connection itself is present.
@@ -196,7 +177,7 @@ Do not close the Translate tab as a standard troubleshooting step; reuse is inte
 
 ## Files sent to the current chat
 
-- `media_view` identifies the originating tab through its compact service widget, independent of the active tab/window. It requires an existing conversation URL and creates no new tab. `MEDIA_TO_CHAT_TARGET_NOT_FOUND` means the tab closed or the widget handshake did not arrive within 30 seconds; no alternate tab is used. Check that the current ResearchTube Extension is installed and its content script can run in ChatGPT widget frames. The widget should show “ResearchTube · Adding files to chat…” in one compact row. It reports a 32px height through the documented sizing APIs, but ChatGPT controls the final container size. Binding success alone does not mean the files were sent; use `media_view_status`. ResearchTube no longer injects hiding CSS or changes host container styles. After upgrading from a version with hiding CSS, reload the Extension and then the ChatGPT tab to remove styles already injected into the old document. Refresh MCP tools/resources if an older widget template still appears.
+- The direct public relay supplies the explicit `media_view` tabId and pins its document inside execution. The legacy local widget path identifies the originating tab through its compact service widget, independent of the active tab/window. It requires an existing conversation URL and creates no new tab. `MEDIA_TO_CHAT_TARGET_NOT_FOUND` means the tab closed or the widget handshake did not arrive within 30 seconds; no alternate tab is used. Check that the current ResearchTube Extension is installed and its content script can run in ChatGPT widget frames. The widget should show “ResearchTube · Adding files to chat…” in one compact row. It reports a 32px height through the documented sizing APIs, but ChatGPT controls the final container size. Binding success alone does not mean the files were sent; use `media_view_status`. ResearchTube no longer injects hiding CSS or changes host container styles. After upgrading from a version with hiding CSS, reload the Extension and then the ChatGPT tab to remove styles already injected into the old document. Refresh MCP tools/resources if an older widget template still appears.
 - `MEDIA_TO_CHAT_TARGET_AMBIGUOUS` means that the same conversation is open in multiple tabs. Keep one tab for that conversation before retrying; different conversations may remain open in any windows.
 - A host-reused service widget must start a fresh handshake for every task, even after a preceding `addToChat: false` result or timeout. Older widget code could remain stopped and cause `MEDIA_TO_CHAT_TARGET_NOT_FOUND` only on later calls. Refresh MCP tool/resource descriptors after installing the corrected Extension. Failed tasks remain failed; test with a new task rather than attempting to revive or retarget the old one.
 - Binding refusal logs include `taskId`, `status`, `phase` and `reason`. `missing-task` indicates unavailable/evicted history, `inactive` indicates a task without a live binding capability (for example expired or cancelled before binding), and `token-mismatch` indicates metadata that does not match the task. `target-check` means authenticated-sender or exact-tab/conversation validation failed; consult the error code/message. Use `media_task_status` for creation-and-delivery tasks, or `media_view_status` for standalone delivery. A duplicate handshake for an already-bound task only acknowledges its original destination; it neither revives a failed task nor repeats Send. Untouched unbound delivery tasks survive background-worker suspension with the original 30-second deadline.
@@ -318,7 +299,7 @@ Pass `resourceIds` from the latest observation instead of making separate tasks.
 
 ## Manual group connection and recent errors
 
-For an existing chat, put it and the sites in the same Chrome tab group and ask ResearchTube to connect using `system_get_chat_context`. Refresh the MCP catalog if this tool is missing. Wait for the conversation to receive its saved address. Close duplicate tabs showing that same conversation. No group produces `BROWSER_GROUP_NOT_FOUND`; moving or changing the bound chat requires a fresh connection. A pending widget binding times out after 30 seconds: let the widget load, then retry without an old task ID. Extension restart loses pending context tasks. Explicit reconnect resumes a stopped group, while status calls respect Stop.
+For an existing group, use its exact leading chatTabId. Productive Site calls claim unambiguous groups automatically. Use system_get_chat_context with that ID to resume a stopped group explicitly. If the ID is unavailable, launch Study this site from the popup; its startup prompt supplies the ID. Close duplicate copies of the conversation. No group produces BROWSER_GROUP_NOT_FOUND; moved/closed targets fail without switching to another chat. No connection widget or polling is required.
 
 Ask ChatGPT to call `system_get_diagnostics` for recent errors (20 by default, maximum 100). It can filter by tool, tab or task and see browser stages without needing a pasted DevTools log. The journal is bounded and sanitized; it cannot report OpenAI requests blocked before they reach the Extension. For full download/frame task details use the existing specialized diagnostic tools. It does not grant access to protected extension frames or resolve a native debugger refusal by itself.
 

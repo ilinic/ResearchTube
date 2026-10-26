@@ -22,7 +22,7 @@ The platform archive includes all runtime tools:
 2. Enter **https://rtube.win**, choose **OAuth**, sign in through Google (or the configured Microsoft provider), authorize ResearchTube and install the personal plugin.
 3. Follow the installation instructions at [rtube.win](https://rtube.win).
 4. Download/extract the release and load its Extension as described below.
-5. Return to a saved ChatGPT conversation in desktop Chrome and ask ResearchTube to do your task. Tools resolve this conversation internally. If a call reports a connection error, use the connection widget to repair the chat, then continue with the original tool directly.
+5. Keep Chrome open and ask ResearchTube to do your task in ChatGPT. The extension connects automatically; check its popup for Connected. If sign-in is missing, open https://rtube.win/account in that Chrome profile and sign in.
 
 Follow the setup instructions at [rtube.win](https://rtube.win). For connection recovery, see [troubleshooting](TROUBLESHOOTING.md#public-server-connection).
 
@@ -99,7 +99,7 @@ Current yt-dlp YouTube operations also require the bundled/local BgUtils PO-toke
 ## 5. Verify the installation
 
 For the public connection, verify **ResearchTube server: Connected** in the popup,
-call `system_connection_status` and bind this chat with `system_connect_browser`.
+then ask ChatGPT for a transcript or another useful task. No chat connection widget is required. Use `system_connection_status` only for requested diagnostics.
 Start the optional Agent for local operations and check its readiness/interface
 compatibility.
 

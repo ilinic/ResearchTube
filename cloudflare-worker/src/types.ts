@@ -14,17 +14,6 @@ export interface Env {
 }
 
 export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
-export interface Target {
-  tabId: number;
-  documentId: string;
-  conversationId: string;
-}
-export interface Binding extends Target {
-  installationId: string;
-  bindingId: string;
-  session: string;
-  expiresAt: number;
-}
 export interface RpcRequest {
   jsonrpc: "2.0";
   id?: number | string;
@@ -36,8 +25,7 @@ export class PublicError extends Error {
   constructor(readonly code: string, message: string, readonly status = 400) { super(message); }
 }
 export const MAX_BYTES = 1024 * 1024;
-export const BINDING_TTL = 60 * 60 * 1000;
-export const CHALLENGE_TTL = 30_000;
+export const SOCKET_TTL = 60 * 60 * 1000;
 
 export function json(value: unknown, status = 200, headers?: HeadersInit): Response {
   return Response.json(value, { status, headers: { "Cache-Control": "no-store", ...headers } });

@@ -16,7 +16,7 @@ for (const file of ['background.js', 'dist/background.js']) {
       get: async defaults => ({ ...defaults, ...data }),
       remove: async keys => { for (const key of keys) { removed.push(key); delete data[key]; } }
     } }, alarms: { clear: async name => alarms.push(['clear', name]), create: async name => alarms.push(['create', name]) } },
-    cloudConnection: { status: async () => cloud, start: async () => { starts++; } },
+    cloudConnection: { status: async () => cloud, ensureAccount: async () => { starts++; } },
     normalizeAgentPort: port => port, refreshActionBadge: async () => {},
     getAgentStatus: async () => { throw Error('Status should not contact Agent'); }
   };

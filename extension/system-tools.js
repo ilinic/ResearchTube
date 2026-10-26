@@ -8,12 +8,11 @@ const taskId = { type: "string", pattern: "^tsk_[A-Za-z0-9_-]{10}$" };
 const error = { ...object({ code: text, message: text }), type: ["object", "null"] };
 export function systemToolDefinitions(widgetUri) {
   return [{
-    name: "system_get_chat_context", title: "Connect this chat to its tab group",
-    description: "Connect the single leading ChatGPT tab to its Chrome group through the widget. Existing groups refuse other chats; new manual groups must contain exactly one ChatGPT tab. Call with no arguments to start; poll with taskId at pollIntervalMs. Returns chatTabId and group tabs for site tools. cancel=true with taskId cancels binding. No popup launch is required; no tabs or drafts are changed. Finish the response if the client delays mounting the widget.",
-    inputSchema: object({ taskId, cancel: { type: "boolean", default: false } }, []),
+    name: "system_get_chat_context", title: "Read or resume this tab group",
+    description: "Read or explicitly resume the tab group for the exact chatTabId from the startup prompt. Returns its leading chat and live site tabs immediately. First productive Site calls identify their group automatically; no setup widget or polling is needed. Never guess a chatTabId.",
+    inputSchema: object({ chatTabId: id }),
     outputSchema: object({ taskId, status: { enum: ["working", "completed", "failed", "cancelled"] }, phase: text, progressPercent: { type: "number", minimum: 0, maximum: 100 }, pollIntervalMs: { type: "integer", minimum: 100 }, chatTabId: nullableId, group: { ...browserGroupSchema, type: ["object", "null"] }, error }),
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
-    _meta: { ui: { resourceUri: widgetUri }, "openai/outputTemplate": widgetUri, "openai/toolInvocation/invoking": "Connecting tab group…", "openai/toolInvocation/invoked": "Check tab group connection." }
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }
   }, {
     name: "system_get_diagnostics", title: "Read recent ResearchTube errors",
     description: "Read recent ResearchTube errors and warnings, newest first. Default 20, maximum 100; optionally filter by tool, tabId or taskId. Includes tool names, stages, codes and timings without page/chat contents or credentials. Does not read website consoles or OpenAI blocks that never reached ResearchTube.",
@@ -30,6 +29,6 @@ export function validateSystemInput(name, value = {}) {
     const field = rule.properties[key];
     if (!field || field.type === "boolean" && typeof item !== "boolean" || field.type === "string" && (typeof item !== "string" || field.pattern && !new RegExp(field.pattern).test(item)) || field.type === "integer" && (!Number.isSafeInteger(item) || item < field.minimum || field.maximum != null && item > field.maximum)) invalid();
   }
-  if (name === "system_get_chat_context" && value.cancel && !value.taskId) invalid();
+  if (name === "system_get_chat_context" && !Number.isSafeInteger(value.chatTabId)) invalid();
   return { ...value };
 }

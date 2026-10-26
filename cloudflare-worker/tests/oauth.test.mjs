@@ -29,7 +29,7 @@ async function begin() {
   expect(callback.searchParams.get("iss")).toBe(BASE + "/api/auth");
   return { client, session, code: callback.searchParams.get("code") };
 }
-test("real D1-backed OAuth code + consent + PKCE token authorizes only browser-scoped calls", async () => {
+test("real D1-backed OAuth code + consent + PKCE token authorizes only account-scoped calls", async () => {
   const { client, code } = await begin();
   const response = await mf.dispatchFetch(BASE + "/api/auth/oauth2/token", form({ grant_type: "authorization_code", client_id: client.client_id,
     code, code_verifier: verifier, redirect_uri: CALLBACK, resource: BASE }));
@@ -38,13 +38,12 @@ test("real D1-backed OAuth code + consent + PKCE token authorizes only browser-s
   tokenResponse = { ...tokens, clientId: client.client_id };
   const status = await rpc(mf, "tools/call", { name: "system_connection_status", arguments: {}, _meta: { "openai/session": "chat-oauth" } }, tokens.access_token);
   const value = await status.json(); expect(status.status, JSON.stringify(value)).toBe(200);
-  expect(value.result.structuredContent).toMatchObject({ connected: false, ambiguous: false, bindings: [] });
+  expect(value.result.structuredContent).toMatchObject({ connected: false, extensionConnected: false });
   const noContext = await (await rpc(mf, "tools/call", { name: "system_connection_status", arguments: {} }, tokens.access_token)).json();
-  expect(noContext.result.structuredContent).toMatchObject({ accountConnected: true, contextAvailable: false, cloudToolsAvailable: false, setupUrl: BASE + "/setup" });
-  const waiting = await (await rpc(mf, "tools/call", { name: "system_connect_browser", arguments: {}, _meta: { "openai/session": "new-chat" } }, tokens.access_token)).json();
-  expect(waiting.result.structuredContent).toMatchObject({ status: "binding", setupUrl: BASE + "/setup" });
-  expect(waiting.result.structuredContent).not.toHaveProperty("pollIntervalMs");
-  expect(waiting.result._meta["researchtube/cloudBinding"].nonce).toBeTypeOf("string");
+  expect(noContext.result.structuredContent).toMatchObject({ accountConnected: true, cloudToolsAvailable: false, setupUrl: BASE + "/setup" });
+  const listing = await (await rpc(mf, "tools/list")).json();
+  expect(listing.result.tools.some(tool => ["system_connect_browser", "system_disconnect_browser"].includes(tool.name))).toBe(false);
+
 });
 test("refresh rotates credentials and a revoked refresh token cannot mint new access", async () => {
   expect(tokenResponse).toBeDefined();
@@ -72,7 +71,7 @@ test("rejects an unregistered redirect and a wrong PKCE verifier", async () => {
     code, code_verifier: "wrong-pkce-verifier-of-more-than-forty-three-characters", redirect_uri: CALLBACK, resource: BASE }));
   expect(exchange.status).toBe(400);
 });
-test("routes an OAuth-authenticated MCP call through its widget proof to exactly one extension socket", async () => {
+test("the first OAuth-authenticated tool executes without a conversation or connection widget", async () => {
   const { client, code, session } = await begin();
   const tokens = await (await mf.dispatchFetch(BASE + "/api/auth/oauth2/token", form({ grant_type: "authorization_code", client_id: client.client_id,
     code, code_verifier: verifier, redirect_uri: CALLBACK, resource: BASE }))).json();
@@ -82,37 +81,30 @@ test("routes an OAuth-authenticated MCP call through its widget proof to exactly
   const upgraded = await mf.dispatchFetch(BASE + "/relay?ticket=" + ticket.ticket, { headers: { Upgrade: "websocket", Origin: EXTENSION } });
   const socket = upgraded.webSocket; socket.accept();
   try {
-    const meta = { "openai/session": "end-to-end-chat" };
-    const call = (name, args) => rpc(mf, "tools/call", { name, arguments: args, _meta: meta }, tokens.access_token);
-    const first = await (await call("youtube_get_video", { videoId: "aqz-KE-bpKQ" })).json();
-    expect(first.result.isError).toBe(true);
-    expect(first.result.structuredContent.error.code).toBe("BROWSER_BINDING_REQUIRED");
-    const connection = await (await call("system_connect_browser", {})).json();
-    const nonce = connection.result._meta["researchtube/cloudBinding"].nonce;
-    expect(JSON.stringify(connection.result.structuredContent)).not.toContain(nonce);
-    const bound = await mf.dispatchFetch(BASE + "/api/browser/bind", post({ nonce, target: target() }, headers));
-    expect(bound.status).toBe(200);
-    const browserBindingId = (await bound.json()).bindingId;
-    const received = message(socket);
-    const pending = call("youtube_get_video", { videoId: "aqz-KE-bpKQ" });
-    const command = await received;
-    expect(command.request.params.arguments).toEqual({ videoId: "aqz-KE-bpKQ" });
-    expect(command.target.installationId).toBe(installed.installationId);
-    socket.send(JSON.stringify({ type: "response", requestId: command.requestId, target: target(), result: { content: [{ type: "text", text: "Correct browser response" }] } }));
-    expect((await (await pending).json()).result.content[0].text).toBe("Correct browser response");
+    const ready = new Promise(resolve => socket.addEventListener("message", event => resolve(event.data), { once: true }));
+    socket.send("direct-tools-v1"); expect(await ready).toBe("direct-tools-ready");
+    // No openai/session metadata, challenge, bind call, status check or resource read.
+    const call = (name, args) => rpc(mf, "tools/call", { name, arguments: args }, tokens.access_token);
+    for (const [name,args] of [["youtube_get_transcript",{videoId:"aqz-KE-bpKQ"}],["media_probe",{workspacePath:"a.mp4"}],["timer_start",{duration:1,tabId:7}]]) {
+      const received = message(socket), pending = call(name,args), command = await Promise.race([received,pending.then(async response => {throw Error("Call completed without dispatch: "+await response.clone().text());})]);
+      expect(command.request.params).toEqual({ name, arguments: args });
+      expect(command.installationId).toBe(installed.installationId);
+      expect(command).not.toHaveProperty("target");
+      socket.send(JSON.stringify({ type: "response", requestId: command.requestId, result: { content: [{ type: "text", text: "Direct response" }] } }));
+      expect((await (await pending).json()).result.content[0].text).toBe("Direct response");
+    }
     const invalid = await (await call("youtube_get_video", { videoId: "aqz-KE-bpKQ", unknown: true })).json();
     expect(invalid.result.structuredContent.error.code).toBe("INVALID_ARGUMENT");
-    const forged = await (await call("youtube_get_video", { videoId: "aqz-KE-bpKQ", browserBindingId })).json();
+    const forged = await (await call("youtube_get_video", { videoId: "aqz-KE-bpKQ", browserBindingId: "forged" })).json();
     expect(forged.result.structuredContent.error.code).toBe("INVALID_ARGUMENT");
-    const anotherChat = await (await rpc(mf, "tools/call", { name: "youtube_get_video", arguments: { videoId: "aqz-KE-bpKQ" }, _meta: { "openai/session": "different-chat" } }, tokens.access_token)).json();
-    expect(anotherChat.result.structuredContent.error.code).toBe("BROWSER_BINDING_REQUIRED");
     const unknown = await (await call("constructor", {})).json();
     expect(unknown.result.structuredContent.error.code).toBe("TOOL_NOT_FOUND");
-    const released = await mf.dispatchFetch(BASE + "/api/browser/release", post({ bindingId: browserBindingId }, headers));
-    expect(released.status).toBe(200);
-    const unbound = await (await call("youtube_get_video", { videoId: "aqz-KE-bpKQ" })).json();
-    expect(unbound.result.structuredContent.error.code).toBe("BROWSER_BINDING_REQUIRED");
-    const closed = await (await call("system_connection_status", {})).json();
-    expect(closed.result.structuredContent.connected).toBe(false);
+    const foreign = await begin();
+    const foreignTokens = await (await mf.dispatchFetch(BASE + "/api/auth/oauth2/token", form({ grant_type: "authorization_code", client_id: foreign.client.client_id,
+      code: foreign.code, code_verifier: verifier, redirect_uri: CALLBACK, resource: BASE }))).json();
+    const refused = await (await rpc(mf,"tools/call",{name:"youtube_get_video",arguments:{videoId:"aqz-KE-bpKQ"}},foreignTokens.access_token)).json();
+    expect(refused.result.structuredContent.error.code).toBe("EXTENSION_OFFLINE");
+    const status = await (await call("system_connection_status", {})).json();
+    expect(status.result.structuredContent.connected).toBe(true);
   } finally { socket.close(); }
 });

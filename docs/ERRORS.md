@@ -12,14 +12,16 @@ ResearchTube uses stable public error codes so an assisting chat can distinguish
 | `AGENT_REQUEST_FAILED` | Loopback request failed after connection | Check Agent console and bounded diagnostics; do not expose paths |
 | `CONFIG_INVALID` | A value or structure in `agent-config.json` is invalid | Correct its type/range or Workspace path; retain the `value`/`comment` structure |
 | `TOOL_DISABLED` | Tool is disabled in ResearchTube Settings | Enable it and refresh the ChatGPT schema |
-| `EXTENSION_AUTHENTICATION_REQUIRED` | Installation credential is revoked or invalid | Ask ResearchTube to reconnect this saved ChatGPT conversation |
-| `ENROLLMENT_INVALID` | Setup page, initiating tab, nonce or deadline did not match | Reconnect this saved ChatGPT conversation |
-| `BROWSER_BINDING_REQUIRED` | The productive call has no valid binding for this conversation; nothing ran | Connect this saved conversation with `system_connect_browser`, then continue with the original tool directly |
-| `BROWSER_SIGN_IN_REQUIRED` | Automatic pairing found no ResearchTube website session in this Chrome profile | Sign in at the setup page, then reconnect this chat |
-| `BROWSER_ACCOUNT_MISMATCH` | Automatic pairing challenge belongs to another account or expired | Use the same ResearchTube account as in ChatGPT and reconnect; no automatic account switch |
-| `BROWSER_BINDING_CHANGED` | The original cloud browser binding ended | Reconnect the exact chat; existing files remain saved |
-| `BROWSER_CONTEXT_AMBIGUOUS` | Multiple conversation copies or conflicting bindings | Close duplicates, disconnect this chat's routes and reconnect |
-| `BROWSER_TARGET_MISMATCH` | Document or requested destination differs from the verified target | Reconnect the exact conversation; no fallback or automatic replay |
+| `EXTENSION_AUTHENTICATION_REQUIRED` | Installation credential is revoked or invalid | Check the popup; deliberately enroll this installation if it should be current |
+| `EXTENSION_REPLACED` | Another installation became current | Use the active installation; the old one stays stopped |
+| `EXTENSION_OFFLINE` | No active extension socket | Open Chrome and check the popup |
+| `EXTENSION_UPDATE_REQUIRED` | Extension lacks direct tool transport | Update/reload the extension and refresh the MCP catalog |
+| `ENROLLMENT_INVALID` | Setup page, tab, nonce or deadline did not match | Sign in to ResearchTube in this Chrome profile and retry installation setup |
+| `BROWSER_SIGN_IN_REQUIRED` | Google login or ResearchTube browser session is absent | Sign in using this Chrome profile |
+| `BROWSER_CONTEXT_REQUIRED` | Operation needs an explicit ChatGPT target | Supply tabId/chatTabId from the startup prompt |
+| `BROWSER_CONTEXT_AMBIGUOUS` | Conversation has duplicate local copies | Close the duplicate before a targeted operation |
+| `BROWSER_TARGET_CHANGED` | Pinned document or connection ended | Use a fresh task in the intended tab; existing files remain saved |
+| `BROWSER_TARGET_MISMATCH` | Original document changed | Check the intended tab; no fallback or automatic replay |
 | `BROWSER_OUTCOME_UNKNOWN` | A dispatched request timed out | Inspect its state before repeating an action |
 
 ## Workspace and files

@@ -1,99 +1,33 @@
 # Public ResearchTube connection
 
-## Setup order
+## Setup
 
-Add `https://rtube.win` as a custom MCP server in ChatGPT, choose OAuth, sign in
-through Google (or the configured Microsoft provider), authorize ResearchTube
-and install the resulting personal plugin. Catalog publication is not required.
-The server URL has no `/mcp` suffix. Its OAuth resource identifier is the exact
-configured origin; old endpoint/audience configurations are not supported.
+Add `https://rtube.win` as a custom MCP server in ChatGPT, choose OAuth and sign in through Google (or the configured Microsoft provider). Download the latest [release](https://github.com/ilinic/ResearchTube/releases), extract it and load its `extension/` folder in desktop Chrome. Start the optional Agent for local media work. The root URL is both website and MCP endpoint.
 
-Use the website instructions to install locally. For an actual task, call its
-productive tool immediately. Status is optional diagnostics. It confirms
-account connection and returns `/setup` instructions without requiring an
-extension, Agent, conversation correlation or browser binding. It never fetches
-YouTube data. There are no cloud transcripts, free quotas or mobile execution.
+The extension connects automatically using the ResearchTube website session in that Chrome profile. An inactive, nonce-bound setup page obtains its private installation credential and closes. If the session is missing, sign in to ResearchTube in that Chrome profile. Chrome's Google login is a local availability check, not authentication proof or an email-based account link. An absent local Google account stops connection attempts.
 
-Download and extract a release and load its `extension/` in desktop Chrome.
-If a productive call reports a missing connection, use `system_connect_browser`
-from the saved ChatGPT conversation. Installation
-grants the declared browser capabilities. Pairing is automatic: an inactive
-nonce-bound setup tab uses the existing ResearchTube website session, obtains a
-private installation credential and closes after acknowledgement. If that
-web session is absent, expired or belongs to another account, sign in to
-ResearchTube in this Chrome profile and retry. Chrome/YouTube login state is not
-used as ResearchTube identity proof. The optional Agent needs no separate account.
+## One connection per account
 
-Return to a saved ChatGPT conversation in Chrome. A productive call resolves
-its existing exact binding inside the server using OAuth and conversation
-correlation. An unbound call fails before execution. The connection widget
-repairs that state after an error; the original tool can then be called directly. Desktop/mobile
-client capability is established by this live handshake, not a user-agent guess.
+Each account has one current extension installation. Enrolling a new extension revokes the old installation credential and closes its socket. The old extension displays Disconnected with a red toolbar badge and stays stopped, including after restart. It does not automatically enroll again or reclaim the account. Other users' connections are unaffected. Explicit installation revocation also stops access.
+
+Transient network loss displays an error on the toolbar and connection status in the popup. The current extension reconnects with bounded exponential backoff. An alarm restores its outbound connection after service-worker suspension; bounded heartbeat messages keep it alive between requests. The Agent remains on `127.0.0.1`.
+
+## Productive calls
+
+Every productive MCP call routes directly from the OAuth-authenticated account to its one active extension. There is no conversation connection widget, challenge, binding ID, `openai/session` prerequisite or model-side readiness check. The public catalog has no connect/disconnect-chat tools. `system_connection_status` is optional diagnostics only.
+
+YouTube research and local reads need no ChatGPT tab. Chat delivery requires explicit `tabId` from the startup prompt; Site tools use its `chatTabId`. Missing targets return a structured error without guessing, opening a widget or queueing execution. The extension captures the exact top document and saved conversation inside the useful request, then checks them before delayed browser/Composer actions. Navigation, closure, duplicate conversations and socket replacement invalidate this local context. Existing task files survive failed delivery. Site group ownership is checked inside the productive operation; stopped groups require explicit resume with `system_get_chat_context` and the exact `chatTabId`.
+
+The MCP account authorizes tools on its active extension. Numeric tab IDs are explicit routing within that installation, not proof of the calling chat's physical origin. Clients on other devices can use account-scoped tools while that desktop extension is online. The extension itself requires desktop Chrome; no server-side transcript service or free transcript quota is provided.
 
 ## Boundaries
 
-ResearchTube owns the MCP OAuth authorization server. Google/Microsoft identify
-the account; their tokens do not authorize YouTube access or select a computer.
-The MCP token and each extension installation's random credential are separate.
-Automatic enrollment additionally validates that the MCP challenge belongs to
-the account authenticated by this browser's cookie before creating credentials.
-A foreign plugin/widget nonce therefore cannot link this computer to another
-account. Enrollment challenges expire and are consumed by binding; failed
-automatic attempts are bounded and do not repeat for the same widget nonce.
-Only hashes of installation credentials are stored server-side. Credentials
-never enter tool arguments/results, model context, URLs or diagnostics.
+ResearchTube issues its own resource-bound MCP OAuth tokens. Provider tokens do not authorize YouTube actions. Installation credentials are separate random secrets; D1 stores only their hashes. Cookie-authenticated enrollment checks exact website Origin and allowed extension identity. Chrome external messaging verifies top frame, initiating setup tab, URL, extension ID, nonce, deadline and a single-use receipt. Credentials stay in trusted local extension storage and never enter MCP, URLs or diagnostics.
 
-The extension's packaged public manifest key fixes the unpacked extension ID.
-The Worker explicitly allowlists that origin. The public key is an identity
-configuration, not a secret. A later Web Store distribution must use its actual
-approved identity and update the allowlist accordingly.
+Relay tickets expire in 15 seconds and are consumed once. Ticket issuance rechecks revocation. The socket negotiates the direct-tools protocol before reporting ready. Both server and extension allowlist request envelopes and tool arguments; the existing MCP dispatcher owns normalization and response projection. Replies settle only their original socket's pending request. Replay receipts are bounded; at capacity the socket closes instead of forgetting them. Disconnected or timed-out actions are never automatically replayed.
 
-Enrollment uses Chrome external messaging restricted to the ResearchTube
-origin. The worker verifies the initiating tab, top frame, setup URL, extension
-ID, random nonce, deadline and single-use receipt. Session storage owns the
-pending enrollment; trusted local extension storage owns installation secrets.
-No generic page-message receiver accepts credentials. Pairing verifies the new
-credential before replacing the previous one and attempts to revoke the old one.
+## Verification
 
-The extension obtains a one-use WebSocket ticket and connects outbound to the
-Worker. It exchanges bounded keepalive messages every 20 seconds, reconnects
-with bounded exponential backoff and rotates its socket before hourly expiry.
-Authentication failures stop retrying until the user reconnects the extension.
-An alarm restores the connection after worker suspension.
+Run Extension and Agent suites and Worker `npm run check`, `npm test` and `npm run build:production`. `npm run test:chrome` uses the actual unpacked Extension in an isolated Chromium profile against local workerd, seeded login and simulated host/YouTube pages. It checks automatic enrollment, first-call transcript execution without a chat widget, exact document guards, replacement status and revocation. It does not use the user's profile or live accounts.
 
-Each browser binding identifies one installation, tab, top-level document and
-saved conversation. Chrome supplies tab/document identity; no model input,
-active-tab selection or email match establishes this authority. Duplicate local
-conversation copies and conflicting server bindings fail closed. A new socket
-invalidates its installation's old bindings; the chat needs a fresh handshake.
-
-Requests reuse the existing Extension MCP dispatcher and response projection.
-Replay receipts are bounded; at capacity the socket rotates instead of forgetting
-them and permitting replay. In-flight actions are never retried automatically.
-Timeout means the outcome may be unknown.
-
-Navigation, tab closure, Stop, binding invalidation or installation revocation
-stop routing and suppress dependent chat delivery. Current-document checks run
-before execution and before delayed Composer actions. Local tasks retain their
-original private binding context; a restarted worker cannot revive old delivery
-from a tab number alone. Created Workspace files are preserved on delivery failure.
-
-## Verification and deployment
-
-Run the Extension and Agent suites plus Worker `npm run check`, `npm test` and
-`npm run build:production`. Protocol/runtime tests cover OAuth, enrollment API,
-relay isolation and revocation. Extension tests cover private credential storage,
-nonce/tab/frame validation, reconnect races, exact documents, duplicate chats,
-request replay, navigation and widget origin checks.
-
-The optional Worker `npm run test:chrome` also exercises the unpacked Extension
-with real Chromium sender/document identity and a local workerd relay. It uses
-an isolated profile, a seeded test login and simulated host/widget pages, never
-production traffic or the user's browser. See [Development](../DEVELOPMENT.md).
-
-Production publication is a separate operation. Before rollout test real Chrome
-external messaging, provider redirects, a personal ChatGPT OAuth connection,
-widget frames, duplicate conversations across profiles/computers, worker restart
-and delayed media delivery. Automated tests do not establish that live integration.
-See the [server deployment guide](../../cloudflare-worker/README.md) and
-[relay protocol](../../cloudflare-worker/PROTOCOL.md).
+Real provider redirects and ChatGPT behavior still require live verification after deployment. See [Development](../DEVELOPMENT.md), the [server guide](../../cloudflare-worker/README.md) and [protocol](../../cloudflare-worker/PROTOCOL.md).

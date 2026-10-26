@@ -23,73 +23,23 @@ function setup() {
   const sender = () => ({ id: "extension", tab: { ...f.tabs.get(41) } });
   return { ...f, context, sender, errors, advance: value => clock += value };
 }
-const f = setup(), pending = await f.context.call({});
-check("system_get_chat_context", pending);
-assert.equal(pending.status, "working"); assert.equal(pending.group, null);
-const metadata = f.context.metadata(pending.taskId);
-assert.ok(metadata.bindingToken); assert.doesNotMatch(JSON.stringify(pending), /bindingToken/);
-await assert.rejects(f.context.bind({ ...metadata, bindingToken: "wrong" }, f.sender()), error => error.code === "BROWSER_CONTEXT_INVALID");
-await assert.rejects(f.context.bind(metadata, { ...f.sender(), id: "other" }), error => error.code === "BROWSER_CONTEXT_INVALID");
-const ack = await f.context.bind(metadata, f.sender());
-assert.equal(ack.ok, true);
-const ready = await f.context.call({ taskId: pending.taskId });
+const f = setup(), ready = await f.context.direct(41);
 check("system_get_chat_context", ready);
-assert.equal(ready.chatTabId, 41); assert.equal(ready.group.groupId, 80);
-assert.deepEqual(ready.group.tabs.map(tab => tab.tabId), [41, 42]);
-assert.equal(ready.progressPercent, 100); assert.equal(f.context.metadata(pending.taskId), null);
-assert.ok(!f.events.some(event => ["attach", "duplicate", "prompt", "createChat"].includes(event[0])));
-assert.deepEqual(await f.context.bind(metadata, f.sender()), ack, "duplicate handshake only acknowledges");
-f.tabs.set(43, { id: 43, groupId: 80, url: "https://forum.test/second", title: "Second" });
-assert.equal((await f.context.call({ taskId: pending.taskId })).group.totalTabs, 3);
-await f.agent.execute("site_session_stop", { chatTabId: 41 });
-assert.equal((await f.context.call({ taskId: pending.taskId })).error.code, "BROWSER_SESSION_STOPPED", "polling cannot undo Stop");
-const reconnect = await f.context.call({});
-await f.context.bind(f.context.metadata(reconnect.taskId), f.sender());
-assert.equal((await f.context.call({ taskId: reconnect.taskId })).group.state, "running");
-f.tabs.get(41).groupId = 81;
-assert.equal((await f.context.call({ taskId: reconnect.taskId })).error.code, "TAB_LEFT_GROUP");
-
-for (const kind of ["ungrouped", "duplicate", "closed", "changed", "cancelled", "timeout"]) {
-  const test = setup(), task = await test.context.call({}), meta = test.context.metadata(task.taskId);
-  if (kind === "ungrouped") test.tabs.get(41).groupId = -1;
-  if (kind === "duplicate") test.tabs.set(44, { id: 44, groupId: 80, url: "https://chatgpt.com/c/manual" });
-  if (kind === "closed") test.tabs.delete(41);
-  if (kind === "changed") test.tabs.get(41).url = "https://chatgpt.com/c/changed";
-  if (kind === "cancelled") await test.context.call({ taskId: task.taskId, cancel: true });
-  if (kind === "timeout") test.advance(30001);
-  const originalSender = { id: "extension", tab: { id: 41, url: "https://chatgpt.com/c/manual" } };
-  await assert.rejects(test.context.bind(meta, originalSender));
-  const terminal = await test.context.call({ taskId: task.taskId });
-  assert.ok(["failed", "cancelled"].includes(terminal.status), kind);
-  check("system_get_chat_context", terminal);
+assert.equal(ready.status,"completed");assert.equal(ready.chatTabId,41);
+assert.deepEqual(ready.group.tabs.map(tab=>tab.tabId),[41,42]);
+assert.ok(!f.events.some(event=>["attach","duplicate","prompt","createChat"].includes(event[0])));
+await f.agent.execute("site_session_stop",{chatTabId:41});
+assert.equal((await f.context.direct(41)).group.state,"running","explicit resume only");
+for(const kind of ["ungrouped","duplicate","closed","not-chat"]){
+ const test=setup();
+ if(kind==="ungrouped")test.tabs.get(41).groupId=-1;
+ if(kind==="duplicate")test.tabs.set(44,{id:44,groupId:80,url:"https://chatgpt.com/c/manual"});
+ if(kind==="closed")test.tabs.delete(41);
+ if(kind==="not-chat")test.tabs.get(41).url="https://example.test/";
+ await assert.rejects(test.context.direct(41),undefined,kind);
 }
-const moved = setup(), moving = await moved.context.call({});
-await moved.context.bind(moved.context.metadata(moving.taskId), moved.sender());
-moved.tabs.get(41).url = "https://chatgpt.com/c/new";
-assert.equal((await moved.context.call({ taskId: moving.taskId })).error.code, "BROWSER_CHAT_CHANGED");
-
-const unsaved = setup(), unsavedTask = await unsaved.context.call({});
-unsaved.tabs.get(41).url = "https://chatgpt.com/c/local-chatgpt%3Atemporary";
-await assert.rejects(unsaved.context.bind(unsaved.context.metadata(unsavedTask.taskId), unsaved.sender()), error => error.code === "BROWSER_SESSION_NOT_READY");
-assert.equal((await unsaved.context.call({ taskId: unsavedTask.taskId })).status, "failed");
-// Cancellation/expiry during asynchronous group lookup must win before resume.
-for (const mode of ["cancel", "expire"]) {
-  let release, clock = 0, resumed = false;
-  const gate = new Promise(resolve => { release = resolve; });
-  const context = createChatContext({ extensionId: "extension", now: () => clock, id: () => "tsk_0000000001", token: () => webcrypto.randomUUID(),
-    getTab: async () => ({ id: 1, groupId: 80, url: "https://chatgpt.com/c/chat" }), queryTabs: async () => [{ id: 1, url: "https://chatgpt.com/c/chat" }],
-    conversationPath: value => new URL(value).pathname,
-    connect: async (_, checkPending) => { await gate; checkPending(); resumed = true; return {}; }
-  });
-  const task = await context.call({});
-  const binding = context.bind(context.metadata(task.taskId), { id: "extension", tab: { id: 1, url: "https://chatgpt.com/c/chat" } });
-  await new Promise(resolve => setImmediate(resolve));
-  if (mode === "cancel") await context.call({ taskId: task.taskId, cancel: true });
-  else clock = 30001;
-  release(); await assert.rejects(binding);
-  assert.equal(resumed, false);
-  assert.equal((await context.call({ taskId: task.taskId })).status, mode === "cancel" ? "cancelled" : "failed");
-}
+await assert.rejects(f.context.direct(undefined));
+assert.equal(definitions[0]._meta,undefined);
 
 let stored = [], writes = 0;
 const options = { version: "fixture", capacity: 25, read: async () => stored, write: async value => { stored = structuredClone(value); writes++; } };
@@ -118,6 +68,7 @@ assert.equal(failures.length, 2); assert.doesNotMatch(JSON.stringify(failures), 
 
 for (const value of [{ limit: 0 }, { limit: 101 }, { limit: true }, { tabId: -1 }, { taskId: "bad" }, { url: "https://test" }]) assert.throws(() => validateSystemInput("system_get_diagnostics", value));
 assert.throws(() => validateSystemInput("system_get_chat_context", { cancel: true }));
-assert.throws(() => validateSystemInput("system_get_chat_context", { chatTabId: 41 }));
-assert.deepEqual(validateSystemInput("system_get_chat_context", {}), {});
-console.log("System tools: exact widget identity, manual groups, explicit resume, lifecycle and bounded sanitized diagnostics passed");
+assert.deepEqual(validateSystemInput("system_get_chat_context", { chatTabId: 41 }), { chatTabId: 41 });
+assert.throws(() => validateSystemInput("system_get_chat_context", {}));
+
+console.log("System tools: direct exact targets, manual groups, explicit resume and bounded sanitized diagnostics passed");

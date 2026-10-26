@@ -434,7 +434,7 @@ export function createBrowserAgent(host) {
   async function execute(name, argumentsValue, cloudGuard = null) {
     await cloudGuard?.();
     const input = validateBrowserInput(name, argumentsValue);
-    const { group, member } = await groups.forChat(input.chatTabId);
+    const { group, member } = await groups.forChat(input.chatTabId, { claim: true });
     const result = await executeInGroup(name, input, group, member, cloudGuard);
     await groups.check(group, input.chatTabId, member.chatPath, { allowStopped: true });
     const fullSnapshot = ["site_list_tabs", "site_session_status"].includes(name) && result.group.revision === group.revision;
