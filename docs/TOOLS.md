@@ -10,13 +10,15 @@ These server-owned tools do not require a preexisting browser binding:
 
 | Tool | Behavior |
 | --- | --- |
-| `system_connection_status` | Confirms account connection, returns setup instructions before installation and reports extension/chat readiness. Missing client context is a supported setup state. |
-| `system_connect_browser` | Explains missing extension/client requirements or emits the exact-chat binding widget when an extension is online. |
+| `system_connection_status` | Optional diagnostics and installation help, requested by the user or after a tool error. Never a preflight or routine polling loop. |
+| `system_connect_browser` | Repairs a missing browser connection after an actual tool error, or when the user asks. After its widget connects, continue with the original tool directly. |
 | `system_disconnect_browser` | Removes this conversation's browser routes without revoking other conversations or installations. |
 
-Other public-server tools require `browserBindingId` from the connected chat's
-status. OAuth ownership and conversation correlation are checked independently
-of that ID. There are no cloud transcripts, free quotas or mobile execution.
+For work, call the requested tool immediately. The server resolves the existing
+binding using OAuth ownership and conversation correlation inside that call.
+There is no model-supplied binding argument. Missing, expired or ambiguous
+bindings fail before execution; another conversation or browser is never selected.
+There are no cloud transcripts, free quotas or mobile execution.
 See [Public connection](features/PUBLIC_CONNECTION.md).
 
 ## Artifact tasks and paths

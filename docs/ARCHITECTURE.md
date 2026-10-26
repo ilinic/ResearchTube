@@ -49,7 +49,7 @@ Generated files are `extension/dist/background.js` and `extension/youtube-page-b
 ## Public request lifecycle
 
 1. ChatGPT calls the public MCP endpoint using OAuth.
-2. The server routes the request to the authenticated Extension and exact chat binding.
+2. Inside that productive call, the server resolves this authenticated conversation's exact binding and routes to its Extension. A missing or ambiguous binding fails before execution. Models do not run preliminary status checks or supply routing IDs.
 3. `handleMcpRequest` validates the tool input and executes browser or loopback Agent work.
 4. The Extension normalizes the response before returning it through the relay.
 

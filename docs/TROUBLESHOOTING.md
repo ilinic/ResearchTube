@@ -12,7 +12,8 @@ Never ask the user to paste a credential, cookie, PO Token, complete Chrome prof
 
 First add **https://rtube.win** in ChatGPT as a custom MCP server with **OAuth**,
 complete account linking and install the personal plugin. The address has no
-`/mcp` suffix. Call `system_connection_status` even before installing locally.
+`/mcp` suffix. Productive requests call their tool directly. Use
+`system_connection_status` for connection diagnosis after an error or when asked.
 Account/workspace permissions govern whether custom MCP connections are available.
 
 If the account is connected but no extension is online, load the desktop Chrome

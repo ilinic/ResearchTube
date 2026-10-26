@@ -8,13 +8,15 @@ and install the resulting personal plugin. Catalog publication is not required.
 The server URL has no `/mcp` suffix. Its OAuth resource identifier is the exact
 configured origin; old endpoint/audience configurations are not supported.
 
-Call `system_connection_status` before installing anything locally. It confirms
+Use the website instructions to install locally. For an actual task, call its
+productive tool immediately. Status is optional diagnostics. It confirms
 account connection and returns `/setup` instructions without requiring an
 extension, Agent, conversation correlation or browser binding. It never fetches
 YouTube data. There are no cloud transcripts, free quotas or mobile execution.
 
-Then download and extract a release, load its `extension/` in desktop Chrome and
-call `system_connect_browser` from the saved ChatGPT conversation. Installation
+Download and extract a release and load its `extension/` in desktop Chrome.
+If a productive call reports a missing connection, use `system_connect_browser`
+from the saved ChatGPT conversation. Installation
 grants the declared browser capabilities. Pairing is automatic: an inactive
 nonce-bound setup tab uses the existing ResearchTube website session, obtains a
 private installation credential and closes after acknowledgement. If that
@@ -22,9 +24,10 @@ web session is absent, expired or belongs to another account, sign in to
 ResearchTube in this Chrome profile and retry. Chrome/YouTube login state is not
 used as ResearchTube identity proof. The optional Agent needs no separate account.
 
-Return to a saved ChatGPT conversation in Chrome. `system_connect_browser`
-renders the binding widget; `system_connection_status` then returns the
-nonsecret `browserBindingId` required by browser-backed tools. Desktop/mobile
+Return to a saved ChatGPT conversation in Chrome. A productive call resolves
+its existing exact binding inside the server using OAuth and conversation
+correlation. An unbound call fails before execution. The connection widget
+repairs that state after an error; the original tool can then be called directly. Desktop/mobile
 client capability is established by this live handshake, not a user-agent guess.
 
 ## Boundaries

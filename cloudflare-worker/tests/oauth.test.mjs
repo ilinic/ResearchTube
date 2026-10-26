@@ -43,6 +43,7 @@ test("real D1-backed OAuth code + consent + PKCE token authorizes only browser-s
   expect(noContext.result.structuredContent).toMatchObject({ accountConnected: true, contextAvailable: false, cloudToolsAvailable: false, setupUrl: BASE + "/setup" });
   const waiting = await (await rpc(mf, "tools/call", { name: "system_connect_browser", arguments: {}, _meta: { "openai/session": "new-chat" } }, tokens.access_token)).json();
   expect(waiting.result.structuredContent).toMatchObject({ status: "binding", setupUrl: BASE + "/setup" });
+  expect(waiting.result.structuredContent).not.toHaveProperty("pollIntervalMs");
   expect(waiting.result._meta["researchtube/cloudBinding"].nonce).toBeTypeOf("string");
 });
 test("refresh rotates credentials and a revoked refresh token cannot mint new access", async () => {
@@ -83,27 +84,34 @@ test("routes an OAuth-authenticated MCP call through its widget proof to exactly
   try {
     const meta = { "openai/session": "end-to-end-chat" };
     const call = (name, args) => rpc(mf, "tools/call", { name, arguments: args, _meta: meta }, tokens.access_token);
+    const first = await (await call("youtube_get_video", { videoId: "aqz-KE-bpKQ" })).json();
+    expect(first.result.isError).toBe(true);
+    expect(first.result.structuredContent.error.code).toBe("BROWSER_BINDING_REQUIRED");
     const connection = await (await call("system_connect_browser", {})).json();
     const nonce = connection.result._meta["researchtube/cloudBinding"].nonce;
     expect(JSON.stringify(connection.result.structuredContent)).not.toContain(nonce);
     const bound = await mf.dispatchFetch(BASE + "/api/browser/bind", post({ nonce, target: target() }, headers));
     expect(bound.status).toBe(200);
-    const status = await (await call("system_connection_status", {})).json();
-    const browserBindingId = status.result.structuredContent.bindings[0].bindingId;
-    expect(status.result.structuredContent.connected).toBe(true);
+    const browserBindingId = (await bound.json()).bindingId;
     const received = message(socket);
-    const pending = call("youtube_get_video", { videoId: "aqz-KE-bpKQ", browserBindingId });
+    const pending = call("youtube_get_video", { videoId: "aqz-KE-bpKQ" });
     const command = await received;
     expect(command.request.params.arguments).toEqual({ videoId: "aqz-KE-bpKQ" });
     expect(command.target.installationId).toBe(installed.installationId);
     socket.send(JSON.stringify({ type: "response", requestId: command.requestId, target: target(), result: { content: [{ type: "text", text: "Correct browser response" }] } }));
     expect((await (await pending).json()).result.content[0].text).toBe("Correct browser response");
-    const invalid = await (await call("youtube_get_video", { videoId: "aqz-KE-bpKQ", browserBindingId, unknown: true })).json();
+    const invalid = await (await call("youtube_get_video", { videoId: "aqz-KE-bpKQ", unknown: true })).json();
     expect(invalid.result.structuredContent.error.code).toBe("INVALID_ARGUMENT");
+    const forged = await (await call("youtube_get_video", { videoId: "aqz-KE-bpKQ", browserBindingId })).json();
+    expect(forged.result.structuredContent.error.code).toBe("INVALID_ARGUMENT");
+    const anotherChat = await (await rpc(mf, "tools/call", { name: "youtube_get_video", arguments: { videoId: "aqz-KE-bpKQ" }, _meta: { "openai/session": "different-chat" } }, tokens.access_token)).json();
+    expect(anotherChat.result.structuredContent.error.code).toBe("BROWSER_BINDING_REQUIRED");
     const unknown = await (await call("constructor", {})).json();
     expect(unknown.result.structuredContent.error.code).toBe("TOOL_NOT_FOUND");
     const released = await mf.dispatchFetch(BASE + "/api/browser/release", post({ bindingId: browserBindingId }, headers));
     expect(released.status).toBe(200);
+    const unbound = await (await call("youtube_get_video", { videoId: "aqz-KE-bpKQ" })).json();
+    expect(unbound.result.structuredContent.error.code).toBe("BROWSER_BINDING_REQUIRED");
     const closed = await (await call("system_connection_status", {})).json();
     expect(closed.result.structuredContent.connected).toBe(false);
   } finally { socket.close(); }

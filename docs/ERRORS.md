@@ -14,6 +14,7 @@ ResearchTube uses stable public error codes so an assisting chat can distinguish
 | `TOOL_DISABLED` | Tool is disabled in ResearchTube Settings | Enable it and refresh the ChatGPT schema |
 | `EXTENSION_AUTHENTICATION_REQUIRED` | Installation credential is revoked or invalid | Ask ResearchTube to reconnect this saved ChatGPT conversation |
 | `ENROLLMENT_INVALID` | Setup page, initiating tab, nonce or deadline did not match | Reconnect this saved ChatGPT conversation |
+| `BROWSER_BINDING_REQUIRED` | The productive call has no valid binding for this conversation; nothing ran | Connect this saved conversation with `system_connect_browser`, then continue with the original tool directly |
 | `BROWSER_SIGN_IN_REQUIRED` | Automatic pairing found no ResearchTube website session in this Chrome profile | Sign in at the setup page, then reconnect this chat |
 | `BROWSER_ACCOUNT_MISMATCH` | Automatic pairing challenge belongs to another account or expired | Use the same ResearchTube account as in ChatGPT and reconnect; no automatic account switch |
 | `BROWSER_BINDING_CHANGED` | The original cloud browser binding ended | Reconnect the exact chat; existing files remain saved |

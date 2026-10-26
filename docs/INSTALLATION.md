@@ -20,9 +20,9 @@ The platform archive includes all runtime tools:
 
 1. Open **ChatGPT Plugins → + → Add custom MCP server**.
 2. Enter **https://rtube.win**, choose **OAuth**, sign in through Google (or the configured Microsoft provider), authorize ResearchTube and install the personal plugin.
-3. Ask ResearchTube to check its connection. Account setup works before Extension or Agent installation; follow the returned setup link.
+3. Follow the installation instructions at [rtube.win](https://rtube.win).
 4. Download/extract the release and load its Extension as described below.
-5. Return to a saved ChatGPT conversation in desktop Chrome and ask ResearchTube to connect this chat. The extension pairs automatically using the browser's existing ResearchTube sign-in, then reconnects automatically. Each chat still needs its own verified binding.
+5. Return to a saved ChatGPT conversation in desktop Chrome and ask ResearchTube to do your task. Tools resolve this conversation internally. If a call reports a connection error, use the connection widget to repair the chat, then continue with the original tool directly.
 
 Follow the setup instructions at [rtube.win](https://rtube.win). For connection recovery, see [troubleshooting](TROUBLESHOOTING.md#public-server-connection).
 

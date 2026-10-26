@@ -6,8 +6,9 @@ D1 stores accounts and installation credentials, and SQLite-backed Durable
 Objects route requests to authenticated extension WebSockets.
 
 Setup starts in ChatGPT: add the root URL, choose OAuth, sign in and install
-the personal plugin. Catalog publication is not required. Connection status
-returns `/setup` instructions before local installation. Install and pair the
+the personal plugin. Catalog publication is not required. The website
+provides installation instructions. Productive tools are called directly; status
+is optional diagnostics rather than a startup step. Install and pair the
 Chrome Extension afterwards; start the optional Agent for local operations.
 There are no cloud transcripts, free quotas or mobile execution.
 
@@ -21,7 +22,7 @@ Store-approved plugin. The Worker never launches a browser or runs FFmpeg/yt-dlp
 - Stateless Streamable HTTP MCP at `/`, using the official MCP SDK. Browser GET requests at the root show setup instructions; MCP POST requests execute the protocol. No `/mcp` alias is provided.
 - The built-in Extension catalog and existing UI resources are exported from the
   shipped Extension bundle, with three cloud connection tools added. Each
-  proxied tool requires `browserBindingId`; original arguments/results and local
+  proxied tool resolves its binding internally from the authenticated conversation; original arguments/results and local
   task IDs remain the Extension's contract. Custom Tool catalogs are not yet
   published by the cloud server.
 - Google and Microsoft sign-in buttons, explicit OAuth consent, protected-resource

@@ -103,11 +103,10 @@ try {
  for(let attempt=0;attempt<20&&browser.pages().some(page=>page.url().startsWith(ROOT+'/setup?'));attempt++)await chat.waitForTimeout(100);
  assert.equal(browser.pages().some(page=>page.url().startsWith(ROOT+'/setup?')),false,'automatic setup helper closes after acknowledgement');
  console.log('Automatic pairing: existing browser session, native external messaging, no Settings click, no profile confirmation, no focus change');
- const status=await (await roomPost(room,'/status',{session})).json();assert.equal(status.connected,true);
- const result=await (await roomPost(room,'/dispatch',{bindingId:status.bindings[0].bindingId,session,
+ const result=await (await roomPost(room,'/dispatch',{session,
   request:{jsonrpc:'2.0',method:'tools/call',params:{name:'system_get_diagnostics',arguments:{}}}})).json();
  assert.ok(result.result?.structuredContent);assert.equal(result.error,undefined);
- console.log('Native sandbox widget: Chrome sender tab/document verified; real Extension MCP dispatcher replied');
+ console.log('Native sandbox widget: productive dispatch uses the conversation directly, without a status call or model-supplied binding ID');
  await chat.reload();
  await chat.waitForTimeout(500);
  const moved=await (await roomPost(room,'/status',{session})).json();assert.equal(moved.connected,false);

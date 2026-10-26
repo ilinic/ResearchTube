@@ -110,10 +110,12 @@ acknowledge the widget with:
 }
 ```
 
-ChatGPT obtains the nonsecret routing ID with `system_connection_status` and
-passes it as `browserBindingId` with other tools. The Worker removes that field
-before forwarding original arguments. OAuth ownership and `openai/session`
-are checked independently of the ID. None of this requires a device picker.
+ChatGPT calls the productive tool with its original arguments. Inside dispatch,
+the Worker resolves exactly one active binding for the OAuth-authenticated user
+and `openai/session`. Missing, expired, offline or ambiguous bindings fail before
+execution. No routing ID is supplied by the model and no preliminary status call
+is made. `system_connection_status` is optional diagnostics; `system_connect_browser`
+repairs a connection only after an actual error or an explicit connection request.
 
 `openai/session` identifies a conversation, not a physical browser instance.
 Simultaneous physical copies of one conversation cannot be distinguished from

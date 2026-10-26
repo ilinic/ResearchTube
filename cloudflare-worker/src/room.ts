@@ -140,11 +140,19 @@ export class BrowserRoom extends DurableObject<Env> {
         return json({ revoked: true });
       }
       if (path === "/dispatch") {
-        const body = z.object({ bindingId: z.string().uuid(), session: z.string().min(1).max(512),
+        const body = z.object({ bindingId: z.string().uuid().optional(), session: z.string().min(1).max(512),
           request: z.object({ jsonrpc: z.literal("2.0"), method: z.enum(["tools/list", "tools/call", "resources/list", "resources/read"]),
             params: z.record(z.string(), z.unknown()).optional() }).strict()
         }).strict().parse(await readJson(request));
-        const binding = await this.ctx.storage.get<StoredBinding>(`binding:${body.bindingId}`);
+        let binding: StoredBinding | undefined;
+        if (body.bindingId) binding = await this.ctx.storage.get<StoredBinding>(`binding:${body.bindingId}`);
+        else {
+          const records = await this.ctx.storage.list<StoredBinding>({ prefix: "binding:", limit: 201 });
+          const matches = [...records.values()].filter(value => value.session === body.session && value.expiresAt > Date.now());
+          if (matches.length > 1 || matches.some(value => value.ambiguous))
+            throw new PublicError("BROWSER_CONTEXT_AMBIGUOUS", "Reconnect this conversation from one Chrome tab.", 409);
+          binding = matches[0];
+        }
         if (!binding || binding.expiresAt <= Date.now() || binding.session !== body.session)
           throw new PublicError("BROWSER_BINDING_REQUIRED", "Connect this ChatGPT tab with ResearchTube first.", 409);
         if (binding.ambiguous) throw new PublicError("BROWSER_CONTEXT_AMBIGUOUS", "Disconnect duplicate conversation bindings and reconnect from one tab.", 409);

@@ -22,6 +22,24 @@ test("another conversation or user cannot use a binding", async () => {
   expect((await roomPost(stub, "/dispatch", body)).status).toBe(409);
   expect((await roomPost(await doRoom(mf, randomUUID()), "/dispatch", { ...body, session: "chat-1" })).status).toBe(409);
 });
+
+test("implicit conversation routing executes directly and never falls back to another chat or user", async () => {
+  const { stub, socket, installationId } = await setup();
+  await bind(stub, installationId);
+  const request = { jsonrpc: "2.0", method: "tools/list" };
+  const incoming = message(socket);
+  const pending = roomPost(stub, "/dispatch", { session: "chat-1", request });
+  const command = await incoming;
+  expect(command.target.tabId).toBe(7);
+  socket.send(JSON.stringify({ type: "response", requestId: command.requestId, target: target(), result: { tools: [] } }));
+  expect((await (await pending).json()).result).toEqual({ tools: [] });
+  const absent = await roomPost(stub, "/dispatch", { session: "other-chat", request });
+  expect((await absent.json()).error.code).toBe("BROWSER_BINDING_REQUIRED");
+  const anotherUser = await roomPost(await doRoom(mf, randomUUID()), "/dispatch", { session: "chat-1", request });
+  expect((await anotherUser.json()).error.code).toBe("BROWSER_BINDING_REQUIRED");
+  const foreignTarget = await roomPost(stub, "/dispatch", { session: "chat-1", request: { jsonrpc: "2.0", method: "tools/call", params: { name: "timer_start", arguments: { tabId: 999 } } } });
+  expect((await foreignTarget.json()).error.code).toBe("BROWSER_TARGET_MISMATCH");
+});
 test("one-time widget proof cannot be replayed or bound offline", async () => {
   const { stub, installationId } = await setup();
   const challenge = await (await roomPost(stub, "/challenge", { session: "chat" })).json();
@@ -50,6 +68,8 @@ test("same conversation observed in a second installation blocks both instead of
   const invalidated = message(socket);
   const conflict = await roomPost(stub, "/bind", { installationId: second.installationId, nonce: challenge.nonce, target: target(9) });
   expect((await conflict.json()).error.code).toBe("BROWSER_CONTEXT_AMBIGUOUS");
+  const direct = await roomPost(stub, "/dispatch", { session: "chat-1", request: { jsonrpc: "2.0", method: "tools/list" } });
+  expect((await direct.json()).error.code).toBe("BROWSER_CONTEXT_AMBIGUOUS");
   expect((await invalidated).bindingId).toBe(first.bindingId);
   const result = await roomPost(stub, "/dispatch", { bindingId: first.bindingId, session: "chat-1", request: { jsonrpc: "2.0", method: "tools/list" } });
   expect((await result.json()).error.code).toBe("BROWSER_CONTEXT_AMBIGUOUS");

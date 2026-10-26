@@ -135,22 +135,24 @@ export function bindingWidget(): string {
    const candidates=[value,value?._meta,value?.call_tool_result?._meta,value?.mcp_tool_result?._meta,value?.call_tool_result?.result?._meta,value?.mcp_tool_result?.result?._meta];
    for(const c of candidates){const binding=c?.['researchtube/cloudBinding'];
      if(binding&&typeof binding.nonce==='string'&&/^[a-f0-9-]{72}$/.test(binding.nonce)&&!seen.has(binding.nonce)){
-       seen.add(binding.nonce);current=binding;deadline=Date.now()+30000;status.textContent='Connecting this Chrome chat…';start();break;
+       seen.add(binding.nonce);current=binding;deadline=Date.now()+30000;status.textContent='Connecting this Chrome chat…';break;
      }
    }
  }
- function announce(){consume(window.openai?.toolResponseMetadata);if(!current)return;
+ function announce(){consume(window.openai?.toolResponseMetadata);
    if(Date.now()>deadline){clearInterval(timer);timer=null;status.textContent='Open Chrome with the ResearchTube extension and reconnect.';return;}
+   if(!current)return;
    window.parent.postMessage({source,nonce:current.nonce},'*');
  }
- function start(){if(timer===null)timer=setInterval(announce,500);}
- window.addEventListener('openai:set_globals',e=>consume(e.detail?.globals?.toolResponseMetadata));
+ function start(){if(timer===null){timer=setInterval(announce,500);announce();}}
+ window.addEventListener('openai:set_globals',e=>{consume(e.detail?.globals?.toolResponseMetadata);announce();});
  window.addEventListener('message',e=>{if(e.source!==parent)return;const v=e.data;
    if(v?.source===source&&v.nonce===current?.nonce&&v.type==='result'){
      clearInterval(timer);timer=null;
      status.textContent=v.ok?'This Chrome chat is connected.':v.errorCode==='BROWSER_SIGN_IN_REQUIRED'?'Sign in to ResearchTube in this Chrome profile, then reconnect this chat.':v.errorCode==='BROWSER_ACCOUNT_MISMATCH'?'This browser and the ChatGPT connection use different ResearchTube accounts, or this challenge expired. Sign in to the matching account and reconnect.':v.errorCode==='BROWSER_CONTEXT_AMBIGUOUS'?'Close duplicate copies of this conversation and reconnect.':'ResearchTube could not connect this browser. Check the extension and reconnect this chat.';
+     window.openai?.setWidgetState?.({modelContent:v.ok?'ResearchTube is connected to this conversation. Continue the original task by calling its productive tool directly. Do not call system_connection_status.':'ResearchTube could not connect this conversation. Report the connection error; do not poll status or silently switch browsers.'});
    }
-   if(v?.method==='ui/notifications/tool-result')consume(v.params);
+   if(v?.method==='ui/notifications/tool-result'){consume(v.params);announce();}
    if(v?.id==='rt-cloud-init'&&v.result)parent.postMessage({jsonrpc:'2.0',method:'ui/notifications/initialized',params:{}},'*');
    if(v?.method==='ui/resource-teardown'){clearInterval(timer);timer=null;parent.postMessage({jsonrpc:'2.0',id:v.id,result:{}},'*');}
  });

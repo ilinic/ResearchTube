@@ -48,7 +48,8 @@ test("MCP discovery uses canonical Extension tools; execution challenges missing
   const response = await rpc(mf, "tools/list"); expect(response.status).toBe(200);
   const listing = await response.json(); expect(listing.result.tools).toHaveLength(84);
   const search = listing.result.tools.find(t => t.name === "youtube_search");
-  expect(search.inputSchema.required).toContain("browserBindingId");
+  expect(search.inputSchema.required || []).not.toContain("browserBindingId");
+  expect(search.inputSchema.properties).not.toHaveProperty("browserBindingId");
   const unauthorized = await rpc(mf, "tools/call", { name: "system_connection_status", arguments: {} });
   expect(unauthorized.status).toBe(401); expect(unauthorized.headers.get("WWW-Authenticate")).toContain("oauth-protected-resource");
 });

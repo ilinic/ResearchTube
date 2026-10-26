@@ -50,7 +50,7 @@ export async function mcpResponse(request: Request, env: Env, auth: Auth): Promi
   }
   const server = new Server({ name: "researchtube", version: WORKER_VERSION }, {
     capabilities: { tools: {}, resources: {} },
-    instructions: "Start by adding this public MCP server in ChatGPT and completing OAuth. First call system_connection_status: setup works before Extension or Agent installation. If this chat is not connected, call system_connect_browser in a saved ChatGPT conversation in desktop Chrome. Its widget automatically pairs the installed extension using this browser's existing ResearchTube sign-in and binds the exact tab. Do not ask the user to link a Chrome profile or sign in again unless the widget reports missing sign-in or different accounts. If the extension is missing, show setupUrl for installation and call system_connect_browser afterwards. Poll system_connection_status at pollIntervalMs, then use its browserBindingId. Never select another browser or reuse a different conversation's binding. Mobile execution and cloud transcripts are unavailable; there are no free cloud quotas. Local file/media tools require the optional Agent. Existing Extension contracts and task status/cancel semantics apply."
+    instructions: "For a concrete request, immediately call the requested productive tool. Never begin with system_connection_status, system_connect_browser or another readiness check. The server routes each call using the authenticated account and this conversation; browserBindingId is not a tool argument. Connection and exact-tab authorization are checked inside the requested operation. A missing, expired, offline or ambiguous connection fails immediately without executing or queueing the operation. Only after a connection error, or at the user's explicit request, use system_connect_browser to repair this saved ChatGPT conversation in desktop Chrome. After the widget connects, continue with the original productive tool directly; do not poll system_connection_status. Use status only for requested diagnostics or installation help. Never switch to another chat or browser. Never automatically replay BROWSER_OUTCOME_UNKNOWN or an unacknowledged action. Local file/media tools require the optional Agent. Existing Extension contracts and task status/cancel semantics apply."
   });
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: tools as any }));
   server.setRequestHandler(ListResourcesRequestSchema, async () => ({ resources: [
@@ -78,20 +78,18 @@ export async function mcpResponse(request: Request, env: Env, auth: Auth): Promi
         return toolResult(setupResult(env, Boolean(session), status));
       }
       if (params.name === "system_connect_browser") {
-        const status = await roomRequest(env, userId, "/status", { session: session || "" });
-        const setup = setupResult(env, Boolean(session), status);
+        const setup = setupResult(env, Boolean(session));
         if (!session) return toolResult({ status: "unsupported_client",
-          setupUrl: setup.setupUrl, pollIntervalMs: setup.pollIntervalMs, message: setup.message });
+          setupUrl: setup.setupUrl, message: setup.message });
         const challenge = await roomRequest(env, userId, "/challenge", { session });
-        return toolResult({ status: "binding", setupUrl: setup.setupUrl, pollIntervalMs: 1000, expiresAt: challenge.expiresAt,
-          message: "The installed extension connects automatically using this browser's existing ResearchTube sign-in. Keep this saved ChatGPT conversation open in desktop Chrome, then check system_connection_status. If the extension is missing, install it and call this tool again." },
+        return toolResult({ status: "binding", setupUrl: setup.setupUrl, expiresAt: challenge.expiresAt,
+          message: "The widget is connecting this saved ChatGPT conversation to its Chrome extension. Once connected, call the originally requested tool directly. Connection status polling is unnecessary. If setup fails, report the connection error." },
         { "researchtube/cloudBinding": { nonce: challenge.nonce } });
       }
-      if (!session) throw new PublicError("BROWSER_CONTEXT_REQUIRED", "Browser execution requires this saved ChatGPT conversation in desktop Chrome. Call system_connection_status for setup.", 409);
+      if (!session) throw new PublicError("BROWSER_CONTEXT_REQUIRED", "Open this saved ChatGPT conversation in desktop Chrome with ResearchTube Extension.", 409);
       if (params.name === "system_disconnect_browser") return toolResult(await roomRequest(env, userId, "/disconnect", { session }));
-      const { browserBindingId: bindingId, ...arguments_ } = args;
-      const response = await roomRequest(env, userId, "/dispatch", { bindingId, session,
-        request: { jsonrpc: "2.0", method: "tools/call", params: { name: params.name, arguments: arguments_ } } });
+      const response = await roomRequest(env, userId, "/dispatch", { session,
+        request: { jsonrpc: "2.0", method: "tools/call", params: { name: params.name, arguments: args } } });
       if (response.error) throw new PublicError("BROWSER_TOOL_ERROR", "The browser could not execute this tool. Check ResearchTube diagnostics.");
       return CallToolResultSchema.parse(response.result);
     } catch (error) {

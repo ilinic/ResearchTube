@@ -22,6 +22,11 @@ starts in ChatGPT with root-origin MCP/OAuth before local installation. Follow
 no device/focus-based fallback may replace exact chat binding. CI checks this package without
 deploying or requiring Cloudflare/provider credentials.
 
+Productive calls resolve the authenticated conversation's binding inside the
+server dispatch. Keep startup free of model-side status checks and routing IDs.
+Connection repair follows an actual connection error; it must not become a
+preflight before ordinary work. Unbound calls fail immediately without queueing.
+
 `npm run test:chrome` in `cloudflare-worker/` runs the real unpacked Extension
 in an isolated Windows Chromium profile against local workerd. It needs an
 available Playwright module (optionally set `RESEARCHTUBE_PLAYWRIGHT_MODULE` to

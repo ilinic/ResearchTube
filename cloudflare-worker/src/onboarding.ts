@@ -4,14 +4,14 @@ export const setupProperties = {
   accountConnected: { type: "boolean", const: true }, extensionConnected: { type: "boolean" },
   connected: { type: "boolean" }, ambiguous: { type: "boolean" }, contextAvailable: { type: "boolean" },
   cloudToolsAvailable: { type: "boolean", const: false }, setupUrl: { type: "string", format: "uri" },
-  message: { type: "string" }, pollIntervalMs: { type: "integer", minimum: 2000 },
+  message: { type: "string" },
   bindings: { type: "array", items: { type: "object", additionalProperties: false,
     properties: { bindingId: { type: "string", format: "uuid" }, expiresAt: { type: "number" } }, required: ["bindingId", "expiresAt"] } }
 };
 export function setupResult(env: Env, contextAvailable: boolean, status: Record<string, any> = {}) {
   const connected = status.connected === true, extensionConnected = status.extensionConnected === true, ambiguous = status.ambiguous === true;
   return { accountConnected: true, extensionConnected, connected, ambiguous, contextAvailable, cloudToolsAvailable: false,
-    setupUrl: `${origin(env)}/setup`, pollIntervalMs: 2000,
+    setupUrl: `${origin(env)}/setup`,
     bindings: Array.isArray(status.bindings) ? status.bindings : [],
     message: !contextAvailable ? "Your ResearchTube account is connected. Browser tools require a saved ChatGPT conversation in desktop Chrome with ResearchTube Extension. Mobile execution and cloud transcripts are not available."
       : ambiguous ? "Disconnect this chat's conflicting browser bindings, then reconnect from one Chrome tab."
