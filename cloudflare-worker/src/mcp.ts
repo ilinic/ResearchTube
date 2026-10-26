@@ -26,6 +26,7 @@ function toolResult(value: unknown, meta?: Record<string, unknown>) {
 
 export async function mcpResponse(request: Request, env: Env, auth: Auth): Promise<Response> {
   if (request.method !== "POST") return new Response(null, { status: 405, headers: { Allow: "POST" } });
+  const workerReceivedAtMs = Date.now();
   let body: any;
   try { body = await readJson(request); } catch (error) { return errorResponse(error); }
   // Authenticate before SDK dispatch, including unknown tool calls. Discovery
@@ -65,6 +66,7 @@ export async function mcpResponse(request: Request, env: Env, auth: Auth): Promi
         return toolResult(setupResult(env, await roomRequest(env, userId, "/status", {})));
       }
       const response = await roomRequest(env, userId, "/dispatch", {
+        workerReceivedAtMs,
         request: { jsonrpc: "2.0", method: "tools/call", params: { name: params.name, arguments: args } } });
       if (response.error) throw new PublicError("BROWSER_TOOL_ERROR", "The browser could not execute this tool. Check ResearchTube diagnostics.");
       return CallToolResultSchema.parse(response.result);

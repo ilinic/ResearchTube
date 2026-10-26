@@ -16,6 +16,12 @@ const capture = await recorder.start({ chatTabId: 42, groupId: 75 });
 assertSchema(schema("site_diagnostics_start"), capture);
 assert.deepEqual(validateBrowserInput("site_diagnostics_start", { chatTabId: 42 }), { chatTabId: 42 });
 assert.throws(() => validateBrowserInput("site_diagnostics_start", { chatTabId: 42, maxEvents: 10000 }));
+clock += 100;
+const requestId = "d6a6f818-0b71-4e47-878e-1105f44d3f6b";
+recorder.timing({chatTabId:42,requestId,stage:"worker.received",event:"stamp",atMs:clock-80,url:"https://private.test/SECRET"});
+recorder.timing({chatTabId:42,requestId,stage:"room.forwarded",event:"stamp",atMs:clock-40});
+recorder.timing({chatTabId:42,requestId,stage:"extension.received",event:"stamp",atMs:clock});
+recorder.timing({groupId:75,stage:"page.actionStep",event:"end",stepIndex:0,action:"type",elapsedMs:42,text:"SECRET SEARCH"});
 
 let handle = await recorder.beginTool({ chatTabId: 42, tabId: 55, tool: "site_interact", action: "type", text: "SECRET SEARCH" });
 clock += 75;
@@ -33,14 +39,22 @@ assert.equal(report.completedCalls, 2);
 assert.equal(report.interCallGaps, 1);
 assert.match(report.reportMarkdown, /GAP 8000 ms.*site_interact:type → site_interact:key/);
 assert.match(report.reportMarkdown, /75 ms · tool.site_interact/);
+assert.match(report.reportMarkdown, /page\.actionStep #1 type.*42 ms/);
+assert.match(report.reportMarkdown, /Cloudflare ↔ extension UTC timeline/);
+assert.match(report.reportMarkdown, /room\.forwarded.*Δ 40 ms/);
 assert.doesNotMatch(report.reportMarkdown, /SECRET|token|aliexpress|unrelated|Runtime\.evaluate.*SECRET/);
 assert.equal(report.recording, true);
 
 // A new MV3 worker can resume the already persisted diagnostic session.
 const restarted = createBrowserTimingSessions({ storage, now: () => clock });
+restarted.timing({chatTabId:42,requestId,stage:"room.responded",event:"stamp",atMs:clock});
+await new Promise(resolve=>setImmediate(resolve));
+const persistedStamp = await createBrowserTimingSessions({ storage, now: () => clock }).report({ chatTabId: 42, stop: false });
+assert.match(persistedStamp.reportMarkdown, /room\.responded/, 'the last Cloudflare stamp persists independently of report');
 report = await restarted.report({ chatTabId: 42, stop: true });
 assert.equal(report.completedCalls, 2);
 assert.equal(report.recording, false);
+assert.match(report.reportMarkdown, /room\.responded/);
 assert.equal((await restarted.beginTool({ chatTabId: 42, tool: "site_read" })), null);
 await assert.rejects(restarted.report({ chatTabId: 999 }), { code: "BROWSER_DIAGNOSTICS_NOT_FOUND" });
 

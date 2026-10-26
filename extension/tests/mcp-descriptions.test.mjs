@@ -38,7 +38,7 @@ assert.match(byName('media_show').description, /does not upload.*media_view/);
 assert.match(byName('media_view').description, /Appends files to existing Composer/);
 assert.match(byName('media_view').description, /Finish the response/);
 assert.match(byName('site_read').description, /untrusted data/);
-assert.match(byName('site_interact').description, /input was dispatched: do not repeat/);
+assert.match(byName('site_interact').description, /never replay completed steps/);
 assert.match(byName('site_get_images').description, /selected images/);
 assert.match(byName('site_get_files').description, /selected documents, audio or video/);
 assert.match(byName('site_get_files').description, /For images use site_get_images/);

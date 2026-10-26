@@ -21,7 +21,7 @@ The Worker authenticates the MCP token and validates the canonical Extension inp
 Server envelope:
 
 ```json
-{"type":"request","requestId":"<UUID>","installationId":"<UUID>","request":{"jsonrpc":"2.0","method":"tools/call","params":{"name":"youtube_get_transcript","arguments":{"videoId":"aqz-KE-bpKQ"}}}}
+{"type":"request","requestId":"<UUID>","installationId":"<UUID>","request":{"jsonrpc":"2.0","method":"tools/call","params":{"name":"youtube_get_transcript","arguments":{"videoId":"aqz-KE-bpKQ"}}},"timing":{"workerReceivedAtMs":1793000000000,"roomReceivedAtMs":1793000000002,"roomForwardedAtMs":1793000000003}}
 ```
 
 The extension validates envelope, installation, request ID, tool and allowed fields, then invokes handleMcpRequest once. Reply:
@@ -31,6 +31,8 @@ The extension validates envelope, installation, request ID, tool and allowed fie
 ```
 
 Exactly one of result/error is required. Reply IDs settle only requests originally dispatched to that socket; foreign, late and duplicate replies cannot settle another call. Messages are capped at 1 MiB and pending calls at 100. A 25-second timeout reports BROWSER_OUTCOME_UNKNOWN; neither side retries an action automatically. Replay history closes the socket at capacity rather than forgetting execution receipts.
+
+The mandatory `timing` envelope contains millisecond UTC timestamps from the Worker and Durable Object. For completed `site_*` calls with a valid `chatTabId`, the Durable Object follows the normal response with a separate safe `{ "type": "timing", "requestId": "<UUID>", "tool": "site_read", "chatTabId": 123, "roomRespondedAtMs": 1793000001000 }` message. The Extension adds receive/reply timestamps and, only when explicitly recording, stores these numeric events for `site_diagnostics_report`. Clock differences mean durations across machines are approximate; these timing frames never contain MCP arguments, input text or URLs.
 
 ## Local targets
 

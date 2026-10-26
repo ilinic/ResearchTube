@@ -3679,6 +3679,9 @@ async function logBrowserTabState(trace, tabId, point) {
 }
 const browserOwner = createBrowserOwner({getTab: id => chrome.tabs.get(id), execute: options => chrome.scripting.executeScript(options)});
 const browserAgent = createBrowserAgent({
+  onStep: ({ groupId, tabId, index, action, elapsedMs, outcome, code }) => browserTimingSessions.timing({
+    groupId, tabId, stage: "page.actionStep", event: "end", stepIndex: index, action, elapsedMs, outcome, ...(code ? { code } : {})
+  }),
   readOwner: tabId => browserOwner.read(tabId),
   writeOwner: (tabId, record) => browserOwner.write(tabId, record),
   queryChatTabs: () => chrome.tabs.query({ url: "https://chatgpt.com/*" }),
@@ -3820,6 +3823,7 @@ const chatContext = createChatContext({
   conversationPath: chatConversationPath, connect: (id, checkPending) => browserAgent.connectGroup(id, checkPending)
 });
 const cloudConnection = createCloudConnection({
+  timing: record => browserTimingSessions.timing(record),
   chrome, fetch: (url, options) => fetch(url, options), webSocket: url => new WebSocket(url), uuid: () => crypto.randomUUID(),
   setTimeout: (...args) => globalThis.setTimeout(...args), clearTimeout: id => globalThis.clearTimeout(id),
   setInterval: (...args) => globalThis.setInterval(...args), clearInterval: id => globalThis.clearInterval(id),
@@ -6739,7 +6743,8 @@ async function executeToolCall(id, tool, input, work, operation = null) {
   const cloudTarget = typeof cloudConnection === "undefined" ? null : cloudConnection.targetForRequest(id);
   const startedAt = Date.now();
   const timingHandle = /^site_(?!diagnostics_)/.test(tool) ? await browserTimingSessions.beginTool({
-    chatTabId: input?.chatTabId, tabId: input?.tabId, tool, action: input?.action
+    chatTabId: input?.chatTabId, tabId: input?.tabId, tool,
+    action: tool === "site_interact" ? input.steps?.length === 1 ? input.steps[0].action : "sequence" : undefined
   }).catch(() => null) : null;
   // youtube_download_get_task already reaches /tasks/... and the Agent logs
   // its native percentage there. Library status is Extension-local, so it

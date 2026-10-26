@@ -25,6 +25,8 @@ var write = { readOnlyHint: false, destructiveHint: true, idempotentHint: false,
 var diagnostic = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false };
 var depth = { type: "integer", minimum: 0, maximum: 20, description: "Default 20 for full content, 3 for outline, 1 for children." };
 var budget = { maxNodes: { type: "integer", minimum: 1, maximum: 1e3, description: "Optional lower node limit; the group's configured browserStudyMaxNodes remains the ceiling (default 200)." }, maxChars: { type: "integer", minimum: 100, maximum: 1e5, description: "Optional lower serialized node payload budget; browserStudyMaxChars remains the ceiling (default 48000). Includes IDs and structure, with small metadata/change-summary overhead." }, offset: { type: "integer", minimum: 0, default: 0 } };
+var actionProperties = { action: { enum: ["click", "type", "key", "scroll", "hover", "select"] }, nodeId, text: { type: "string", maxLength: 1e5 }, key: { type: "string", maxLength: 60 }, direction: { enum: ["up", "down", "left", "right"] }, amount: { type: "number", minimum: 1, maximum: 1e4 }, value: string };
+var actionStep = object(actionProperties, ["action"]);
 function browserToolDefinitions() {
   const define = (name2, title, description, properties, required, outputSchema, annotations = read, target = true) => ({ name: name2, title, description, inputSchema: object({ chatTabId, ...target ? { tabId } : {}, ...properties }, ["chatTabId", ...target ? ["tabId"] : [], ...required]), outputSchema, annotations });
   const download = (name2, title, description, kinds) => define(name2, title, description, {
@@ -38,7 +40,7 @@ function browserToolDefinitions() {
     define("site_get_children", "Get site node children", "Expand an observed Accessibility Tree node into bounded children with hierarchy and pagination. Re-observe after PAGE_CHANGED or STALE_NODE.", { nodeId, depth, ...budget }, ["nodeId"], observation),
     define("site_get_node", "Inspect site node", "Inspect an observed node's accessibility data, safe attributes, bounds and resource references. Use site_get_text for long text, site_get_images for images and site_get_files for documents, audio or video.", { nodeId }, ["nodeId"], object({ ...context, page, node, dom: object({ tag: nullableString, attributes: { type: "array", items: object({ name: string, value: string }) }, bounds: { anyOf: [object({ x: { type: "number" }, y: { type: "number" }, width: { type: "number" }, height: { type: "number" } }), { type: "null" }] }, resources: { type: "array", items: resource } }) })),
     define("site_get_text", "Read site node text", "Read full text of an observed node/subtree with pagination. Protected/password values are excluded.", { nodeId, offset: budget.offset, limit: { type: "integer", minimum: 1, maximum: 5e4, default: 12e3 } }, ["nodeId"], object({ ...context, page, nodeId: string, text: string, totalCharacters: integer, nextOffset: { type: ["integer", "null"] } })),
-    define("site_interact", "Interact with site element", "Click, replace text, key, scroll, hover or select in the exact tabId in your group (site pages only; ChatGPT tabs are excluded). Returns changed nodes/resources; use that difference directly. Re-observe when observeAgain is true or later content is expected. observationError means input was dispatched: do not repeat it merely for that error. Stale targets and password typing are refused.", { action: { enum: ["click", "type", "key", "scroll", "hover", "select"] }, nodeId, text: { type: "string", maxLength: 1e5 }, key: { type: "string", maxLength: 60 }, direction: { enum: ["up", "down", "left", "right"], default: "down" }, amount: { type: "number", minimum: 1, maximum: 1e4, default: 600 }, value: string }, ["action"], object({ ...context, action: string, page, observeAgain: { type: "boolean" }, observation: { anyOf: [observation, { type: "null" }] }, observationError: error }), write),
+    define("site_interact", "Interact with site elements", "Run 1\u201320 ordered click, type, key, scroll, hover or select steps in one MCP call, without model round trips or intermediate AX refresh. All nodeIds must come from an existing observation; stop at the first failure or navigation. The result reports completedSteps and failedStep; never replay completed steps. The final observation contains changed nodes/resources; re-observe if observeAgain or observationError indicates uncertainty. Password typing is refused.", { steps: { type: "array", minItems: 1, maxItems: 20, items: actionStep } }, ["steps"], object({ ...context, completedSteps: { type: "integer", minimum: 0 }, failedStep: { anyOf: [object({ index: { type: "integer", minimum: 0 }, code: string, message: string }), { type: "null" }] }, page, observeAgain: { type: "boolean" }, observation: { anyOf: [observation, { type: "null" }] }, observationError: error }), write),
     define("site_diagnostics_start", "Start browser timing capture", "Start a fresh bounded timing capture for this Study this site group. Use before performing a slow browser test, then call site_diagnostics_report to retrieve a pasteable Markdown timeline. Only durations, operation names and safe numeric metadata are captured; no site text, typed values or URLs.", { maxEvents: { type: "integer", minimum: 100, maximum: 800, default: 600 } }, [], object({ chatTabId: integer, groupId: integer, startedAt: string, recording: { type: "boolean" }, maxEvents: integer }), diagnostic, false),
     define("site_diagnostics_report", "Read browser timing report", "Return a copyable Markdown report of site tool durations, the time between tool calls (including the gap between typing and pressing Enter), and the slowest internal Chrome stages. stop=true stops the capture after reporting; false takes a live snapshot. Gaps include client/model/network time and are not exclusively model inference time.", { stop: { type: "boolean", default: true }, limit: { type: "integer", minimum: 1, maximum: 300, default: 120 } }, [], object({ chatTabId: integer, groupId: integer, recording: { type: "boolean" }, completedCalls: integer, interCallGaps: integer, droppedEvents: integer, reportMarkdown: string }), diagnostic, false),
     download("site_get_images", "Get site images", "Download selected images into study-this-site/ without overwriting. Image IDs only. addToChat=true (default) attaches them and sends a continuation to the initiating chat; false saves only. Returns an asynchronous task: poll site_files_status at pollIntervalMs; site_files_cancel stops before Send. Finish your response for delivery. Screenshots are labelled fallbacks.", "image"),
@@ -82,12 +84,24 @@ function validateBrowserInput(name2, input) {
     if (Object.hasOwn(input, "resourceId") === Object.hasOwn(input, "resourceIds")) throw browserError("BROWSER_INVALID", "Provide exactly one of resourceId or resourceIds.");
     if (Object.hasOwn(input, "resourceIds") && (!Array.isArray(input.resourceIds) || !input.resourceIds.length || input.resourceIds.some((value) => typeof value !== "string" || !/^r_[0-9]+_[0-9]+_[0-9]+$/.test(value)) || new Set(input.resourceIds).size !== input.resourceIds.length)) throw browserError("BROWSER_INVALID", "resourceIds must be a nonempty array of distinct current resource identifiers.");
   }
-  if ((name2 === "site_get_children" || name2 === "site_get_node" || name2 === "site_get_text" || name2 === "site_read" && input.mode === "subtree" || name2 === "site_interact" && ["click", "type", "hover", "select"].includes(input.action)) && !input.nodeId) throw browserError("BROWSER_INVALID", "nodeId is required for this operation.");
+  if ((name2 === "site_get_children" || name2 === "site_get_node" || name2 === "site_get_text" || name2 === "site_read" && input.mode === "subtree") && !input.nodeId) throw browserError("BROWSER_INVALID", "nodeId is required for this operation.");
   if (name2 === "site_interact") {
-    const required = { type: "text", key: "key", select: "value" }[input.action];
-    if (required && !Object.hasOwn(input, required)) throw browserError("BROWSER_INVALID", `${required} is required for ${input.action}.`);
-    const allowed = /* @__PURE__ */ new Set(["chatTabId", "tabId", "action", "nodeId", ...{ type: ["text"], key: ["key"], select: ["value"], scroll: ["direction", "amount"] }[input.action] || []]);
-    for (const key of Object.keys(input)) if (!allowed.has(key)) throw browserError("BROWSER_INVALID", `${key} does not apply to action ${input.action}.`);
+    if (!Array.isArray(input.steps) || input.steps.length < 1 || input.steps.length > 20) throw browserError("BROWSER_INVALID", "steps must contain 1\u201320 actions.");
+    let textLength = 0;
+    for (const [index, step] of input.steps.entries()) {
+      if (!step || typeof step !== "object" || Array.isArray(step) || !actionProperties.action.enum.includes(step.action)) throw browserError("BROWSER_INVALID", `Invalid action at step ${index}.`);
+      const required = { type: "text", key: "key", select: "value" }[step.action];
+      if (required && !Object.hasOwn(step, required)) throw browserError("BROWSER_INVALID", `${required} is required at step ${index}.`);
+      if (["click", "type", "hover", "select"].includes(step.action) && !step.nodeId) throw browserError("BROWSER_INVALID", `nodeId is required at step ${index}.`);
+      const allowed = /* @__PURE__ */ new Set(["action", ...["click", "type", "hover", "select"].includes(step.action) ? ["nodeId"] : step.action === "key" || step.action === "scroll" ? ["nodeId"] : [], ...{ type: ["text"], key: ["key"], select: ["value"], scroll: ["direction", "amount"] }[step.action] || []]);
+      for (const [key, value] of Object.entries(step)) {
+        if (!allowed.has(key)) throw browserError("BROWSER_INVALID", `${key} does not apply to step ${index}.`);
+        const rule = actionProperties[key];
+        if (rule.enum && !rule.enum.includes(value) || rule.type === "string" && (typeof value !== "string" || rule.pattern && !new RegExp(rule.pattern).test(value) || rule.maxLength && value.length > rule.maxLength) || rule.type === "number" && (typeof value !== "number" || !Number.isFinite(value) || rule.minimum != null && value < rule.minimum || rule.maximum != null && value > rule.maximum)) throw browserError("BROWSER_INVALID", `Invalid ${key} at step ${index}.`);
+      }
+      textLength += step.text?.length || 0;
+    }
+    if (textLength > 1e5) throw browserError("BROWSER_INVALID", "The total typed text exceeds 100000 characters.");
   }
   return { ...input };
 }
@@ -343,6 +357,21 @@ function createCloudConnection(host) {
   async function receive(data, ws, credential) {
     if (typeof data !== "string" || new TextEncoder().encode(data).length > 1048576) throw fail("CLOUD_PROTOCOL_ERROR", "Invalid relay message.");
     const message = JSON.parse(data), requestGeneration = generation;
+    if (message.type === "timing") {
+      if (Object.keys(message).some((key) => !["type", "requestId", "tool", "chatTabId", "roomRespondedAtMs"].includes(key)) || !UUID.test(message.requestId) || !/^site_[a-z_]+$/.test(message.tool) || !Number.isSafeInteger(message.chatTabId) || message.chatTabId < 0 || !Number.isSafeInteger(message.roomRespondedAtMs))
+        throw fail("CLOUD_PROTOCOL_ERROR", "Invalid relay timing message.");
+      try {
+        host.timing?.({
+          chatTabId: message.chatTabId,
+          requestId: message.requestId,
+          stage: "room.responded",
+          event: "stamp",
+          atMs: message.roomRespondedAtMs
+        });
+      } catch {
+      }
+      return;
+    }
     if (message.type === "disconnect" && message.code === "EXTENSION_REPLACED" && Object.keys(message).length === 2) {
       generation++;
       stopSocket();
@@ -352,8 +381,20 @@ function createCloudConnection(host) {
       await publish("error", "EXTENSION_REPLACED");
       return;
     }
-    if (message.type !== "request" || Object.keys(message).some((key) => !["type", "requestId", "installationId", "request"].includes(key)) || !UUID.test(message.requestId) || message.installationId !== credential.installationId || !message.request || Object.keys(message.request).some((key) => !["jsonrpc", "method", "params"].includes(key)) || message.request.jsonrpc !== "2.0" || message.request.method !== "tools/call" || !message.request.params || Object.keys(message.request.params).some((key) => !["name", "arguments"].includes(key)) || typeof message.request.params.name !== "string" || !message.request.params.arguments || typeof message.request.params.arguments !== "object" || Array.isArray(message.request.params.arguments))
+    if (message.type !== "request" || Object.keys(message).some((key) => !["type", "requestId", "installationId", "request", "timing"].includes(key)) || !UUID.test(message.requestId) || message.installationId !== credential.installationId || !message.timing || Object.keys(message.timing).some((key) => !["workerReceivedAtMs", "roomReceivedAtMs", "roomForwardedAtMs"].includes(key)) || !["workerReceivedAtMs", "roomReceivedAtMs", "roomForwardedAtMs"].every((key) => Number.isSafeInteger(message.timing[key])) || !message.request || Object.keys(message.request).some((key) => !["jsonrpc", "method", "params"].includes(key)) || message.request.jsonrpc !== "2.0" || message.request.method !== "tools/call" || !message.request.params || Object.keys(message.request.params).some((key) => !["name", "arguments"].includes(key)) || typeof message.request.params.name !== "string" || !message.request.params.arguments || typeof message.request.params.arguments !== "object" || Array.isArray(message.request.params.arguments))
       throw fail("CLOUD_PROTOCOL_ERROR", "Invalid relay request.");
+    const toolName = message.request.params.name, chatTabId2 = message.request.params.arguments.chatTabId;
+    const record = (stage, atMs) => {
+      if (!/^site_[a-z_]+$/.test(toolName) || !Number.isSafeInteger(chatTabId2) || chatTabId2 < 0) return;
+      try {
+        host.timing?.({ chatTabId: chatTabId2, requestId: message.requestId, stage, event: "stamp", atMs });
+      } catch {
+      }
+    };
+    record("worker.received", message.timing.workerReceivedAtMs);
+    record("room.received", message.timing.roomReceivedAtMs);
+    record("room.forwarded", message.timing.roomForwardedAtMs);
+    record("extension.received", Date.now());
     if (seen.has(message.requestId)) return;
     seen.add(message.requestId);
     if (seen.size > 4096 || pending.size >= 100) {
@@ -394,6 +435,7 @@ function createCloudConnection(host) {
       pending.delete(message.requestId);
     }
     if (socket !== ws || ws.readyState !== 1) return;
+    record("extension.returned", Date.now());
     const payload = { type: "response", requestId: message.requestId, ...response };
     const text3 = JSON.stringify(payload);
     ws.send(new TextEncoder().encode(text3).length <= 1048576 ? text3 : JSON.stringify({
@@ -1515,7 +1557,7 @@ function createBrowserPage(session, host) {
     await command("Input.dispatchKeyEvent", { ...params, type: text3 === null ? "rawKeyDown" : "keyDown", ...text3 === null ? {} : { text: text3 } }, target);
     await command("Input.dispatchKeyEvent", { ...params, type: "keyUp" }, target);
   }
-  async function act(input) {
+  async function dispatchStep(input) {
     await host.check(session, true);
     const entry = input.nodeId ? await requireNode(input.nodeId) : null;
     if (entry && entry.raw.properties?.some((item) => item.name === "disabled" && item.value?.value === true)) throw browserError("BROWSER_INVALID", "The requested element is disabled.");
@@ -1573,18 +1615,47 @@ function createBrowserPage(session, host) {
       await command("Input.dispatchMouseEvent", { type: "mouseWheel", ...coordinates, deltaX: direction === "left" ? -amount : direction === "right" ? amount : 0, deltaY: direction === "up" ? -amount : direction === "down" ? amount : 0 }, target);
     }
     session.revision += 1;
+  }
+  async function act({ steps }) {
+    const pageVersion = session.pageVersion;
+    let completedSteps = 0, failedStep = null;
+    for (const [index2, step] of steps.entries()) {
+      const started = performance.now();
+      let code = null;
+      try {
+        await host.check(session, true);
+        if (session.pageVersion !== pageVersion) throw browserError("PAGE_CHANGED", "The page navigated during the sequence. Observe it before continuing.");
+        await dispatchStep(step);
+        completedSteps++;
+      } catch (error4) {
+        code = error4?.code || "BROWSER_UNAVAILABLE";
+        failedStep = { index: index2, code, message: error4?.code ? error4.message : "The step may have been dispatched; observe the page before continuing." };
+      } finally {
+        try {
+          host.onStep?.({
+            index: index2,
+            action: step.action,
+            elapsedMs: Math.round((performance.now() - started) * 10) / 10,
+            outcome: failedStep?.index === index2 ? "failed" : "ok",
+            ...code ? { code } : {}
+          });
+        } catch {
+        }
+      }
+      if (failedStep) break;
+    }
     try {
       await refresh();
-      const media = [...index.values()].filter((entry2) => (RESOURCE_ROLES.has(entry2.role) || entry2.visualMedia) && (entry2.resources.length || !reported.nodes.has(entry2.id)));
+      const media = [...index.values()].filter((entry) => (RESOURCE_ROLES.has(entry.role) || entry.visualMedia) && (entry.resources.length || !reported.nodes.has(entry.id)));
       await enrichMedia(media.slice(0, limits.maxNodes));
       await host.check(session, false);
       if (indexedVersion !== session.pageVersion) throw browserError("PAGE_CHANGED", "The page navigated during the post-action read.");
       const delta = difference(reported);
       const observation2 = serialize(delta.entries, {}, delta.changes);
       reported = delta.current;
-      return { ...context2(), action: input.action, page: metadata(), observeAgain: session.observedRevision !== session.revision || observation2.truncated || delta.changes.truncated, observation: observation2, observationError: null };
+      return { ...context2(), completedSteps, failedStep, page: metadata(), observeAgain: Boolean(failedStep) || session.observedRevision !== session.revision || observation2.truncated || delta.changes.truncated, observation: observation2, observationError: null };
     } catch (error4) {
-      return { ...context2(), action: input.action, page: metadata(), observeAgain: true, observation: null, observationError: { code: error4.code || "BROWSER_UNAVAILABLE", message: "The action was dispatched, but its page update is not readable yet. Observe again; do not repeat the action solely for this read failure." } };
+      return { ...context2(), completedSteps, failedStep, page: metadata(), observeAgain: true, observation: null, observationError: { code: error4.code || "BROWSER_UNAVAILABLE", message: "A step may have been dispatched, but its page update is not readable yet. Observe again; do not replay completed steps or repeat an uncertain step solely for this read failure." } };
     }
   }
   function getResource(id2) {
@@ -2174,7 +2245,13 @@ function createBrowserAgent(host) {
       lastPageCallEnd: null
     };
     target.trace = createBrowserDiagnostics({ enabled: group2.options.detailedLogging, groupId: group2.groupId, log, onError: (details) => host.diagnostic?.({ ...details, tool: target.operation?.tool, tabId: target.agentTabId, chatTabId: target.operation?.chatTabId }), now: host.monotonicNow || host.now });
-    target.page = createBrowserPage(target, { command, check, trace: target.trace, context: () => ({ chatTabId: target.operation?.chatTabId ?? target.agentTabId, group: groups.project(group2) }) });
+    target.page = createBrowserPage(target, {
+      command,
+      check,
+      trace: target.trace,
+      onStep: (timing) => host.onStep?.({ ...timing, groupId: group2.groupId, tabId: target.agentTabId }),
+      context: () => ({ chatTabId: target.operation?.chatTabId ?? target.agentTabId, group: groups.project(group2) })
+    });
     group2.targets.set(tab.id, target);
     targets.set(tab.id, target);
     return target;
@@ -2507,7 +2584,14 @@ function createBrowserAgent(host) {
     return response;
   }
   async function executeInGroup(name2, input, group2, member2, cloudGuard) {
-    const caller = { group: group2, chatTabId: input.chatTabId, chatPath: member2.chatPath, tool: name2, action: input.action, cloudGuard };
+    const caller = {
+      group: group2,
+      chatTabId: input.chatTabId,
+      chatPath: member2.chatPath,
+      tool: name2,
+      action: name2 === "site_interact" ? input.steps.length === 1 ? input.steps[0].action : "sequence" : void 0,
+      cloudGuard
+    };
     if (["site_list_tabs", "site_session_status"].includes(name2)) {
       return { chatTabId: input.chatTabId, group: groups.project(group2, input.offset, input.limit) };
     }
@@ -2735,7 +2819,10 @@ var SAFE_TIMING_FIELDS = /* @__PURE__ */ new Set([
   "readyState",
   "tabState",
   "cdpState",
-  "taskId"
+  "taskId",
+  "stepIndex",
+  "action",
+  "requestId"
 ]);
 var safeCode = (value) => typeof value === "string" && /^[A-Z][A-Z0-9_]{0,79}$/.test(value) ? value : null;
 var rounded = (value) => Math.round(Math.max(0, value) * 10) / 10;
@@ -2748,16 +2835,22 @@ function createBrowserTimingSessions({
 } = {}) {
   const sessions = /* @__PURE__ */ new Map();
   let loaded = false;
+  let loading = null;
   let writeTail = Promise.resolve();
   async function load() {
     if (loaded) return;
-    const saved = await storage?.get?.(STORAGE_KEY);
-    for (const entry of saved?.[STORAGE_KEY] || []) {
-      if (!safeInteger(entry.chatTabId) || !safeInteger(entry.groupId) || !Array.isArray(entry.events)) continue;
-      const events = entry.events.filter((event) => event && ["tool", "gap", "timing"].includes(event.kind)).slice(-800);
-      sessions.set(entry.chatTabId, { ...entry, events, pending: /* @__PURE__ */ new Map() });
-    }
-    loaded = true;
+    if (!loading) loading = (async () => {
+      const saved = await storage?.get?.(STORAGE_KEY);
+      for (const entry of saved?.[STORAGE_KEY] || []) {
+        if (!safeInteger(entry.chatTabId) || !safeInteger(entry.groupId) || !Array.isArray(entry.events)) continue;
+        const events = entry.events.filter((event) => event && ["tool", "gap", "timing"].includes(event.kind)).slice(-800);
+        sessions.set(entry.chatTabId, { ...entry, events, pending: /* @__PURE__ */ new Map() });
+      }
+      loaded = true;
+    })().finally(() => {
+      loading = null;
+    });
+    await loading;
   }
   function flush() {
     if (!storage) return Promise.resolve();
@@ -2836,16 +2929,25 @@ function createBrowserTimingSessions({
     await flush();
   }
   function timing(record) {
-    if (!record || !safeInteger(record.groupId)) return;
+    if (!record || !safeInteger(record.groupId) && !safeInteger(record.chatTabId)) return;
+    if (!loaded) {
+      void load().then(() => timing(record)).catch(() => {
+      });
+      return;
+    }
+    const atMs = Number.isSafeInteger(record.atMs) && Math.abs(record.atMs - now()) <= 3e5 ? record.atMs : now();
+    let appended = false;
     for (const session of sessions.values()) {
-      if (!session.recording || session.groupId !== record.groupId) continue;
-      const event = { kind: "timing", atMs: now() };
+      if (!session.recording || (safeInteger(record.chatTabId) ? session.chatTabId !== record.chatTabId : session.groupId !== record.groupId) || atMs < session.startedAtMs) continue;
+      const event = { kind: "timing", atMs };
       for (const [key, value] of Object.entries(record)) {
         if (!SAFE_TIMING_FIELDS.has(key)) continue;
         if (typeof value === "boolean" || typeof value === "number" && Number.isFinite(value) || typeof value === "string" && value.length <= 100 && !/[\/?\\=]/.test(value)) event[key] = value;
       }
       append(session, event);
+      appended = true;
     }
+    if (appended && record.stage === "room.responded") void flush();
   }
   async function report({ chatTabId: chatTabId2, stop = true, limit = 120 }) {
     await load();
@@ -2878,15 +2980,27 @@ function createBrowserTimingSessions({
     }
     lines.push("", "## Slowest internal browser stages");
     const stages = timings.sort((a, b) => b.elapsedMs - a.elapsedMs).slice(0, 15);
-    lines.push(...stages.length ? stages.map((event) => `- ${event.elapsedMs} ms \xB7 ${event.stage}${event.tabId !== void 0 ? ` \xB7 tab ${event.tabId}` : ""}`) : ["- No detailed browser stages captured (check browserStudyDetailedLogging)."]);
+    const stageLabel = (event) => `${event.stage}${event.stage === "page.actionStep" ? ` #${event.stepIndex + 1} ${event.action}` : ""}`;
+    lines.push(...stages.length ? stages.map((event) => `- ${event.elapsedMs} ms \xB7 ${stageLabel(event)}${event.tabId !== void 0 ? ` \xB7 tab ${event.tabId}` : ""}`) : ["- No browser stages captured (enable diagnostics before performing actions)."]);
     lines.push("", "## Browser event log (oldest to newest)");
     const browserEvents = session.events.filter((event) => event.kind === "timing" && (["end", "cdp"].includes(event.event) || event.stage === "cdp.slow")).slice(-limit);
     for (const event of browserEvents) {
       const time = new Date(event.atMs).toISOString().slice(11, 23);
-      lines.push(`- ${time} \xB7 ${event.stage} \xB7 ${event.event || "slow"}${event.method ? ` \xB7 ${event.method}` : ""}${typeof event.elapsedMs === "number" ? ` \xB7 ${event.elapsedMs} ms` : ""}${event.count ? ` \xB7 \xD7${event.count}` : ""}${event.code ? ` \xB7 ${event.code}` : ""}`);
+      lines.push(`- ${time} \xB7 ${stageLabel(event)} \xB7 ${event.event || "slow"}${event.method ? ` \xB7 ${event.method}` : ""}${typeof event.elapsedMs === "number" ? ` \xB7 ${event.elapsedMs} ms` : ""}${event.count ? ` \xB7 \xD7${event.count}` : ""}${event.code ? ` \xB7 ${event.code}` : ""}`);
     }
     if (!browserEvents.length) lines.push("- No detailed browser events captured.");
+    lines.push("", "## Cloudflare \u2194 extension UTC timeline");
+    const stamps = session.events.filter((event) => event.kind === "timing" && event.event === "stamp" && event.requestId).slice(-limit);
+    const previous = /* @__PURE__ */ new Map();
+    for (const event of stamps) {
+      const earlier = previous.get(event.requestId);
+      const delta = earlier === void 0 ? "" : ` \xB7 \u0394 ${event.atMs - earlier} ms`;
+      previous.set(event.requestId, event.atMs);
+      lines.push(`- ${new Date(event.atMs).toISOString()} \xB7 ${event.requestId.slice(0, 8)} \xB7 ${event.stage}${delta}`);
+    }
+    if (!stamps.length) lines.push("- No relay UTC timestamps captured.");
     lines.push("", "Note: GAP is time between one MCP tool's completion in the extension and the next call's arrival. It includes ChatGPT/client/network delay; it is not exclusively model thinking time.");
+    lines.push("Cloudflare and desktop UTC comparisons assume approximately synchronized clocks; negative deltas suggest clock skew. Neither the model's internal processing time nor the MCP client's receipt of the final response is observable here.");
     if (session.events.filter((event) => event.kind !== "timing").length > limit) lines.push(`Timeline limited to the latest ${limit} entries.`);
     if (session.events.filter((event) => event.kind === "timing").length > limit) lines.push(`Browser events limited to the latest ${limit} entries.`);
     const result = {
@@ -7808,6 +7922,17 @@ async function logBrowserTabState(trace, tabId2, point) {
 }
 var browserOwner = createBrowserOwner({ getTab: (id2) => chrome.tabs.get(id2), execute: (options) => chrome.scripting.executeScript(options) });
 var browserAgent = createBrowserAgent({
+  onStep: ({ groupId, tabId: tabId2, index, action, elapsedMs, outcome, code }) => browserTimingSessions.timing({
+    groupId,
+    tabId: tabId2,
+    stage: "page.actionStep",
+    event: "end",
+    stepIndex: index,
+    action,
+    elapsedMs,
+    outcome,
+    ...code ? { code } : {}
+  }),
   readOwner: (tabId2) => browserOwner.read(tabId2),
   writeOwner: (tabId2, record) => browserOwner.write(tabId2, record),
   queryChatTabs: () => chrome.tabs.query({ url: "https://chatgpt.com/*" }),
@@ -7963,6 +8088,7 @@ var chatContext = createChatContext({
   connect: (id2, checkPending) => browserAgent.connectGroup(id2, checkPending)
 });
 var cloudConnection = createCloudConnection({
+  timing: (record) => browserTimingSessions.timing(record),
   chrome,
   fetch: (url, options) => fetch(url, options),
   webSocket: (url) => new WebSocket(url),
@@ -10768,7 +10894,7 @@ async function executeToolCall(id2, tool, input, work, operation = null) {
     chatTabId: input?.chatTabId,
     tabId: input?.tabId,
     tool,
-    action: input?.action
+    action: tool === "site_interact" ? input.steps?.length === 1 ? input.steps[0].action : "sequence" : void 0
   }).catch(() => null) : null;
   const reportsLongOperationStatus = tool === "library_store_status" || tool === "media_view_status" || tool === "media_task_status" || tool === "site_files_status" || Object.hasOwn(ARTIFACT_STATUS_TOOLS, tool);
   void recordCommandDiagnostic("started", { tool, input: summarizeCommandInput(tool, input) });

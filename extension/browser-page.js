@@ -409,7 +409,7 @@ export function createBrowserPage(session, host) {
     await host.check(session, true); await command("Input.dispatchKeyEvent", { ...params, type: text === null ? "rawKeyDown" : "keyDown", ...(text === null ? {} : { text }) }, target);
     await command("Input.dispatchKeyEvent", { ...params, type: "keyUp" }, target);
   }
-  async function act(input) {
+  async function dispatchStep(input) {
     await host.check(session, true);
     const entry = input.nodeId ? await requireNode(input.nodeId) : null;
     if (entry && entry.raw.properties?.some(item => item.name === "disabled" && item.value?.value === true)) throw browserError("BROWSER_INVALID", "The requested element is disabled.");
@@ -449,6 +449,31 @@ export function createBrowserPage(session, host) {
       await command("Input.dispatchMouseEvent", { type: "mouseWheel", ...coordinates, deltaX: direction === "left" ? -amount : direction === "right" ? amount : 0, deltaY: direction === "up" ? -amount : direction === "down" ? amount : 0 }, target);
     }
     session.revision += 1;
+  }
+  async function act({ steps }) {
+    const pageVersion = session.pageVersion;
+    let completedSteps = 0, failedStep = null;
+    for (const [index, step] of steps.entries()) {
+      const started = performance.now();
+      let code = null;
+      try {
+        // A sequence never continues into a different document. Steps referring
+        // to nodes introduced by a preceding action require another MCP call.
+        await host.check(session, true);
+        if (session.pageVersion !== pageVersion) throw browserError("PAGE_CHANGED", "The page navigated during the sequence. Observe it before continuing.");
+        await dispatchStep(step);
+        completedSteps++;
+      } catch (error) {
+        code = error?.code || "BROWSER_UNAVAILABLE";
+        failedStep = { index, code, message: error?.code ? error.message : "The step may have been dispatched; observe the page before continuing." };
+      } finally {
+        // Diagnostic capture is optional, bounded and deliberately excludes
+        // text, node identifiers, addresses and keyboard values.
+        try { host.onStep?.({ index, action: step.action, elapsedMs: Math.round((performance.now() - started) * 10) / 10,
+          outcome: failedStep?.index === index ? "failed" : "ok", ...(code ? { code } : {}) }); } catch {}
+      }
+      if (failedStep) break;
+    }
     // Return the useful local difference with this action, avoiding another
     // model/tool round trip merely to discover a new panel or image.
     try {
@@ -461,11 +486,11 @@ export function createBrowserPage(session, host) {
       const delta = difference(reported);
       const observation = serialize(delta.entries, {}, delta.changes);
       reported = delta.current;
-      return { ...context(), action: input.action, page: metadata(), observeAgain: session.observedRevision !== session.revision || observation.truncated || delta.changes.truncated, observation, observationError: null };
+      return { ...context(), completedSteps, failedStep, page: metadata(), observeAgain: Boolean(failedStep) || session.observedRevision !== session.revision || observation.truncated || delta.changes.truncated, observation, observationError: null };
     } catch (error) {
       // Input has already been dispatched. A loading/context failure must not
       // present the action as failed and invite a duplicate click or submission.
-      return { ...context(), action: input.action, page: metadata(), observeAgain: true, observation: null, observationError: { code: error.code || "BROWSER_UNAVAILABLE", message: "The action was dispatched, but its page update is not readable yet. Observe again; do not repeat the action solely for this read failure." } };
+      return { ...context(), completedSteps, failedStep, page: metadata(), observeAgain: true, observation: null, observationError: { code: error.code || "BROWSER_UNAVAILABLE", message: "A step may have been dispatched, but its page update is not readable yet. Observe again; do not replay completed steps or repeat an uncertain step solely for this read failure." } };
     }
   }
   function getResource(id) {

@@ -32,12 +32,13 @@ function fixture(observation) {
       return { result: { value: true } };
     }
     if (method === "DOM.getBoxModel") return { model: { content: [0, 0, 40, 0, 40, 40, 0, 40] } };
+    if (method === "Page.getLayoutMetrics") return { cssVisualViewport: { clientWidth: 800, clientHeight: 600 } };
     if (method === "Input.dispatchMouseEvent" && params.type === "mouseReleased") await action?.();
     return {};
   } };
   const page = createBrowserPage(session, host);
   const read = async args => { const result = await page.observe(args); assertSchema(browserToolDefinitions().find(tool => tool.name === "site_read").outputSchema, result); return result; };
-  const click = async nodeId => { const result = await page.act({ action: "click", nodeId }); assertSchema(browserToolDefinitions().find(tool => tool.name === "site_interact").outputSchema, result); return result; };
+  const click = async nodeId => { const result = await page.act({ steps: [{ action: "click", nodeId }] }); assertSchema(browserToolDefinitions().find(tool => tool.name === "site_interact").outputSchema, result); return result; };
   return { session, page, host, trees, urls, commands, read, click, frame: () => { withFrame = true; }, onAction: fn => { action = fn; }, onRead: fn => { duringRead = fn; }, failRead: () => { failRead = true; } };
 }
 
@@ -73,6 +74,21 @@ const oldResource = image.resources[0].resourceId;
 const noChange = await first.click(button.nodeId);
 assert.equal(noChange.observeAgain, false);
 assert.deepEqual(noChange.observation.nodes, []);
+const refreshesBeforeBatch=first.commands.filter(row=>row.method==='Accessibility.getFullAXTree').length;
+const batched=await first.page.act({steps:[{action:'click',nodeId:button.nodeId},{action:'click',nodeId:button.nodeId}]});
+assert.equal(batched.completedSteps,2);
+assert.equal(batched.failedStep,null);
+assert.equal(first.commands.filter(row=>row.method==='Accessibility.getFullAXTree').length,refreshesBeforeBatch+1,'one AX refresh for the whole sequence');
+assertSchema(browserToolDefinitions().find(tool=>tool.name==='site_interact').outputSchema,batched);
+const navigating=fixture();
+const navigationRead=await navigating.read();
+const navigationButton=navigationRead.nodes.find(node=>node.role==='button');
+navigating.onAction(()=>{navigating.session.pageVersion+=1;});
+const stopped=await navigating.page.act({steps:[{action:'click',nodeId:navigationButton.nodeId},{action:'scroll',amount:10}]});
+assert.equal(stopped.completedSteps,1);
+assert.equal(stopped.failedStep.index,1);
+assert.equal(stopped.failedStep.code,'PAGE_CHANGED');
+assert.equal(navigating.commands.filter(row=>row.params.type==='mouseWheel').length,0,'navigation cancels the rest of the batch');
 first.onAction(() => {
   first.trees.get("main")[0].childIds.push("8");
   first.trees.get("main").push(ax("8", "image", "New photograph"));
@@ -92,8 +108,14 @@ assert.equal(first.page.getResource(oldResource).entry.id, image.nodeId);
 // image URL creates a fresh resource ID and removes the old one.
 first.trees.get("main").find(node => node.nodeId === "2").name.value = "Different operation";
 const beforeClicks = first.commands.filter(row => row.params.type === "mousePressed").length;
-await assert.rejects(first.click(button.nodeId), { code: "STALE_NODE" });
+assert.equal((await first.click(button.nodeId)).failedStep.code, "STALE_NODE");
 assert.equal(first.commands.filter(row => row.params.type === "mousePressed").length, beforeClicks);
+const partial=await first.page.act({steps:[{action:'scroll',amount:50},{action:'click',nodeId:button.nodeId},{action:'scroll',amount:50}]});
+assert.equal(partial.completedSteps,1);
+assert.equal(partial.failedStep.index,1);
+assert.equal(partial.failedStep.code,'STALE_NODE');
+assert.equal(partial.observeAgain,true);
+assert.equal(first.commands.filter(row=>row.method==='Input.dispatchMouseEvent'&&row.params.type==='mouseWheel').length,1,'later steps are not replayed');
 first.urls.set(103, "https://private.test/replacement.jpg");
 const replacement = await first.read();
 const currentImage = replacement.nodes.find(node => node.nodeId === image.nodeId);
@@ -137,7 +159,7 @@ loading.onAction(() => loading.failRead());
 const dispatched = await loading.click(ready.nodes.find(node => node.role === "button").nodeId);
 assert.equal(dispatched.observation, null);
 assert.equal(dispatched.observeAgain, true);
-assert.match(dispatched.observationError.message, /action was dispatched/);
+assert.match(dispatched.observationError.message, /step may have been dispatched/);
 assert.equal(loading.commands.filter(row => row.params.type === "mousePressed").length, 1);
 
 // Agent options are strict, backward-compatible and never accept booleans as
@@ -158,7 +180,7 @@ const link=docs.nodes.find(node=>node.role==="link");
 assert.equal(link.resources[0].kind,"document");
 assert.doesNotMatch(JSON.stringify(docs),/private\.test|PRIVATE/);
 documents.trees.get("main").find(node=>node.nodeId==="30").properties[0].value.value="https://private.test/different-operation";
-await assert.rejects(documents.click(link.nodeId),{code:"STALE_NODE"});
+assert.equal((await documents.click(link.nodeId)).failedStep.code,"STALE_NODE");
 assert.equal(documents.commands.filter(row=>row.params.type==="mousePressed").length,0);
 console.log("Browser document references: first-read discovery and same-label link destination guard: ok");
 

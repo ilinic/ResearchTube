@@ -7,7 +7,7 @@ const SAFE_TIMING_FIELDS = new Set([
   "returnedNodes", "totalNodes", "characters", "bytes", "extraction", "mode",
   "enabled", "addedNodes", "updatedNodes", "removedNodes", "addedResources",
   "removedResources", "point", "tabId", "tabStatus", "active", "visibilityState",
-  "hidden", "hasFocus", "readyState", "tabState", "cdpState", "taskId"
+  "hidden", "hasFocus", "readyState", "tabState", "cdpState", "taskId", "stepIndex", "action", "requestId"
 ]);
 const safeCode = value => typeof value === "string" && /^[A-Z][A-Z0-9_]{0,79}$/.test(value) ? value : null;
 const rounded = value => Math.round(Math.max(0, value) * 10) / 10;
@@ -19,17 +19,21 @@ export function createBrowserTimingSessions({
 } = {}) {
   const sessions = new Map();
   let loaded = false;
+  let loading = null;
   let writeTail = Promise.resolve();
 
   async function load() {
     if (loaded) return;
-    const saved = await storage?.get?.(STORAGE_KEY);
-    for (const entry of saved?.[STORAGE_KEY] || []) {
-      if (!safeInteger(entry.chatTabId) || !safeInteger(entry.groupId) || !Array.isArray(entry.events)) continue;
-      const events = entry.events.filter(event => event && ["tool", "gap", "timing"].includes(event.kind)).slice(-800);
-      sessions.set(entry.chatTabId, { ...entry, events, pending: new Map() });
-    }
-    loaded = true;
+    if (!loading) loading = (async () => {
+      const saved = await storage?.get?.(STORAGE_KEY);
+      for (const entry of saved?.[STORAGE_KEY] || []) {
+        if (!safeInteger(entry.chatTabId) || !safeInteger(entry.groupId) || !Array.isArray(entry.events)) continue;
+        const events = entry.events.filter(event => event && ["tool", "gap", "timing"].includes(event.kind)).slice(-800);
+        sessions.set(entry.chatTabId, { ...entry, events, pending: new Map() });
+      }
+      loaded = true;
+    })().finally(() => { loading = null; });
+    await loading;
   }
 
   function flush() {
@@ -92,16 +96,28 @@ export function createBrowserTimingSessions({
   }
 
   function timing(record) {
-    if (!record || !safeInteger(record.groupId)) return;
+    if (!record || !safeInteger(record.groupId) && !safeInteger(record.chatTabId)) return;
+    if (!loaded) {
+      // A Cloudflare socket can deliver UTC stamps before the first Site tool
+      // rehydrates the recorder after service-worker suspension.
+      void load().then(() => timing(record)).catch(() => {});
+      return;
+    }
+    const atMs = Number.isSafeInteger(record.atMs) && Math.abs(record.atMs - now()) <= 300000 ? record.atMs : now();
+    let appended = false;
     for (const session of sessions.values()) {
-      if (!session.recording || session.groupId !== record.groupId) continue;
-      const event = { kind: "timing", atMs: now() };
+      if (!session.recording || (safeInteger(record.chatTabId) ? session.chatTabId !== record.chatTabId : session.groupId !== record.groupId) || atMs < session.startedAtMs) continue;
+      const event = { kind: "timing", atMs };
       for (const [key, value] of Object.entries(record)) {
         if (!SAFE_TIMING_FIELDS.has(key)) continue;
         if (typeof value === "boolean" || typeof value === "number" && Number.isFinite(value) || typeof value === "string" && value.length <= 100 && !/[\/?\\=]/.test(value)) event[key] = value;
       }
       append(session, event);
+      appended = true;
     }
+    // The DO's last stamp arrives after the Site call's endTool flush; save
+    // this final event without delaying the browser response or every stamp.
+    if (appended && record.stage === "room.responded") void flush();
   }
 
   async function report({ chatTabId, stop = true, limit = 120 }) {
@@ -135,15 +151,27 @@ export function createBrowserTimingSessions({
     }
     lines.push("", "## Slowest internal browser stages");
     const stages = timings.sort((a, b) => b.elapsedMs - a.elapsedMs).slice(0, 15);
-    lines.push(...(stages.length ? stages.map(event => `- ${event.elapsedMs} ms · ${event.stage}${event.tabId !== undefined ? ` · tab ${event.tabId}` : ""}`) : ["- No detailed browser stages captured (check browserStudyDetailedLogging)."]));
+    const stageLabel = event => `${event.stage}${event.stage === "page.actionStep" ? ` #${event.stepIndex + 1} ${event.action}` : ""}`;
+    lines.push(...(stages.length ? stages.map(event => `- ${event.elapsedMs} ms · ${stageLabel(event)}${event.tabId !== undefined ? ` · tab ${event.tabId}` : ""}`) : ["- No browser stages captured (enable diagnostics before performing actions)."]));
     lines.push("", "## Browser event log (oldest to newest)");
     const browserEvents = session.events.filter(event => event.kind === "timing" && (["end", "cdp"].includes(event.event) || event.stage === "cdp.slow")).slice(-limit);
     for (const event of browserEvents) {
       const time = new Date(event.atMs).toISOString().slice(11, 23);
-      lines.push(`- ${time} · ${event.stage} · ${event.event || "slow"}${event.method ? ` · ${event.method}` : ""}${typeof event.elapsedMs === "number" ? ` · ${event.elapsedMs} ms` : ""}${event.count ? ` · ×${event.count}` : ""}${event.code ? ` · ${event.code}` : ""}`);
+      lines.push(`- ${time} · ${stageLabel(event)} · ${event.event || "slow"}${event.method ? ` · ${event.method}` : ""}${typeof event.elapsedMs === "number" ? ` · ${event.elapsedMs} ms` : ""}${event.count ? ` · ×${event.count}` : ""}${event.code ? ` · ${event.code}` : ""}`);
     }
     if (!browserEvents.length) lines.push("- No detailed browser events captured.");
+    lines.push("", "## Cloudflare ↔ extension UTC timeline");
+    const stamps = session.events.filter(event => event.kind === "timing" && event.event === "stamp" && event.requestId).slice(-limit);
+    const previous = new Map();
+    for (const event of stamps) {
+      const earlier = previous.get(event.requestId);
+      const delta = earlier === undefined ? "" : ` · Δ ${event.atMs - earlier} ms`;
+      previous.set(event.requestId, event.atMs);
+      lines.push(`- ${new Date(event.atMs).toISOString()} · ${event.requestId.slice(0, 8)} · ${event.stage}${delta}`);
+    }
+    if (!stamps.length) lines.push("- No relay UTC timestamps captured.");
     lines.push("", "Note: GAP is time between one MCP tool's completion in the extension and the next call's arrival. It includes ChatGPT/client/network delay; it is not exclusively model thinking time.");
+    lines.push("Cloudflare and desktop UTC comparisons assume approximately synchronized clocks; negative deltas suggest clock skew. Neither the model's internal processing time nor the MCP client's receipt of the final response is observable here.");
     if (session.events.filter(event => event.kind !== "timing").length > limit) lines.push(`Timeline limited to the latest ${limit} entries.`);
     if (session.events.filter(event => event.kind === "timing").length > limit) lines.push(`Browser events limited to the latest ${limit} entries.`);
     const result = { chatTabId, groupId: session.groupId, recording: session.recording,

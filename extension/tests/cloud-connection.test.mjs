@@ -7,7 +7,7 @@ const BASE='https://rt.test', EXT='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 const credential={installationId:randomUUID(),installationToken:randomUUID()+randomUUID()};
 const flush=()=>new Promise(resolve=>setImmediate(resolve));
 function fixture(initial=credential) {
-  const data={connectionMode:'public',researchtubeCloudCredential:initial},sessionData={},sockets=[],timers=new Map(),intervals=new Map(),calls=[],dispatches=[],invalidated=[];
+  const data={connectionMode:'public',researchtubeCloudCredential:initial},sessionData={},sockets=[],timers=new Map(),intervals=new Map(),calls=[],dispatches=[],invalidated=[],timings=[];
   let time=100000,documentId='doc-1',copies=1,handler=async()=>({jsonrpc:'2.0',result:{content:[{type:'text',text:'ok'}]}}),deny=false;
   const tab={id:7,url:'https://chatgpt.com/c/chat-1'};
   const storage=object=>({get:async defaults=>({...defaults,...structuredClone(object)}),set:async value=>Object.assign(object,structuredClone(value)),remove:async key=>{delete object[key];}});
@@ -25,13 +25,13 @@ function fixture(initial=credential) {
     webSocket:url=>{const ws={url,readyState:0,sent:[],send(text){this.sent.push(text);},open(){this.readyState=1;this.onopen?.();},close(){this.readyState=3;this.onclose?.();}};sockets.push(ws);return ws;},
     setTimeout:(fn,ms)=>{const id=randomUUID();timers.set(id,{fn,ms});return id;},clearTimeout:id=>timers.delete(id),
     setInterval:(fn,ms)=>{const id=randomUUID();intervals.set(id,{fn,ms});return id;},clearInterval:id=>intervals.delete(id),
-    accepts:()=>true,invalidated:target=>invalidated.push(target),dispatch:async request=>{dispatches.push(request);return handler(request);}
+    accepts:()=>true,invalidated:target=>invalidated.push(target),timing:value=>timings.push(value),dispatch:async request=>{dispatches.push(request);return handler(request);}
   };
   const connection=createCloudConnection(host);
   const sender={id:EXT,frameId:0,tab};
   async function online(){await connection.start();sockets.at(-1).open();sockets.at(-1).onmessage({data:"direct-tools-ready"});await flush();return sockets.at(-1);}
   const receive=async(ws,value)=>{ws.onmessage({data:typeof value === "string" ? value : JSON.stringify(value)});await flush();await flush();await flush();};
-  return {connection,host,data,sessionData,sockets,timers,intervals,calls,dispatches,invalidated,sender,online,receive,
+  return {connection,host,data,sessionData,sockets,timers,intervals,calls,dispatches,invalidated,timings,sender,online,receive,
     navigate:()=>{documentId='new-document';},duplicate:()=>{copies=2;},advance:ms=>{time+=ms;},deny:()=>{deny=true;},handle:fn=>{handler=fn;}};
 }
 assert.equal(cloudConversation('https://chatgpt.com/g/g-id/c/chat-1'),'chat-1');
@@ -52,7 +52,16 @@ assert.equal(cloudConversation('https://evil.test/c/chat-1'),null);
  await f.connection.suspend();assert.equal(f.intervals.size,0);
 }
 const request=(name,args={},installationId=credential.installationId)=>({type:'request',requestId:randomUUID(),installationId,
- request:{jsonrpc:'2.0',method:'tools/call',params:{name,arguments:args}}});
+ request:{jsonrpc:'2.0',method:'tools/call',params:{name,arguments:args}},timing:{workerReceivedAtMs:Date.now()-30,roomReceivedAtMs:Date.now()-20,roomForwardedAtMs:Date.now()-10}});
+{
+ const f=fixture(),ws=await f.online();const call=request('site_list_tabs',{chatTabId:7});
+ await f.receive(ws,call);
+ assert.deepEqual(f.timings.slice(0,4).map(row=>row.stage),['worker.received','room.received','room.forwarded','extension.received']);
+ assert.equal(f.timings.at(-1).stage,'extension.returned');
+ await f.receive(ws,{type:'timing',requestId:call.requestId,tool:'site_list_tabs',chatTabId:7,roomRespondedAtMs:Date.now()});
+ assert.equal(f.timings.at(-1).stage,'room.responded');
+ assert.equal(f.timings.at(-1).requestId,call.requestId);
+}
 {
  const f=fixture(),ws=await f.online();f.duplicate();
  f.host.chrome.scripting.executeScript=async()=>{throw Error('Public research must not inspect ChatGPT');};

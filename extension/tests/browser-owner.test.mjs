@@ -30,7 +30,7 @@ assert.deepEqual(browserToolDefinitions().map(t=>t.name),['site_list_tabs','site
 const read=await f.run('site_read'),nodeId=read.roots[0],resourceId=read.nodes.find(n=>n.role==='image').resources[0].resourceId;
 const task=await f.run('site_get_images',{resourceId,addToChat:false});
 f.tabs.set(23,{id:23,url:'https://chatgpt.com/c/unrelated',groupId:100});await f.agent.onCreated();
-const calls={site_get_children:{nodeId},site_get_node:{nodeId},site_get_text:{nodeId},site_interact:{action:'scroll'},site_get_images:{resourceId},site_get_files:{resourceId},site_files_status:{taskId:task.taskId},site_files_cancel:{taskId:task.taskId}};
+const calls={site_get_children:{nodeId},site_get_node:{nodeId},site_get_text:{nodeId},site_interact:{steps:[{action:'scroll'}]},site_get_images:{resourceId},site_get_files:{resourceId},site_files_status:{taskId:task.taskId},site_files_cancel:{taskId:task.taskId}};
 for(const tool of browserToolDefinitions())await assert.rejects(f.run(tool.name,{chatTabId:23,...calls[tool.name]}),{code:'BROWSER_NOT_GROUP_OWNER'},tool.name);
 await assert.rejects(f.agent.connectGroup(23),{code:'BROWSER_NOT_GROUP_OWNER'});
 assert.deepEqual((await f.run('site_list_tabs')).group.tabs.map(t=>t.tabId),[21,22]);

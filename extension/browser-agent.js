@@ -193,7 +193,9 @@ export function createBrowserAgent(host) {
     target = { group, agentTabId: tab.id, observation: group.options.observation, state: "running", url: tab.url, title: tab.title || "",
       pageVersion: nextPageVersion(), revision: 1, childSessions: new Map(), attached: false, error: null, operation: null, lastPageCallEnd: null };
     target.trace = createBrowserDiagnostics({ enabled: group.options.detailedLogging, groupId: group.groupId, log, onError: details => host.diagnostic?.({ ...details, tool: target.operation?.tool, tabId: target.agentTabId, chatTabId: target.operation?.chatTabId }), now: host.monotonicNow || host.now });
-    target.page = createBrowserPage(target, { command, check, trace: target.trace, context: () => ({ chatTabId: target.operation?.chatTabId ?? target.agentTabId, group: groups.project(group) }) });
+    target.page = createBrowserPage(target, { command, check, trace: target.trace,
+      onStep: timing => host.onStep?.({ ...timing, groupId: group.groupId, tabId: target.agentTabId }),
+      context: () => ({ chatTabId: target.operation?.chatTabId ?? target.agentTabId, group: groups.project(group) }) });
     group.targets.set(tab.id, target); targets.set(tab.id, target); return target;
   }
   async function ensureTarget(target, onDocument = null) {
@@ -444,7 +446,8 @@ export function createBrowserAgent(host) {
     return response;
   }
   async function executeInGroup(name, input, group, member, cloudGuard) {
-    const caller = { group, chatTabId: input.chatTabId, chatPath: member.chatPath, tool: name, action: input.action, cloudGuard };
+    const caller = { group, chatTabId: input.chatTabId, chatPath: member.chatPath, tool: name,
+      action: name === "site_interact" ? input.steps.length === 1 ? input.steps[0].action : "sequence" : undefined, cloudGuard };
     if (["site_list_tabs", "site_session_status"].includes(name)) {
       return { chatTabId: input.chatTabId, group: groups.project(group, input.offset, input.limit) };
     }

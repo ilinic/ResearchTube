@@ -26,9 +26,14 @@ assert.match(byRole('image').nodeId,/^n_21_[0-9]+_[0-9]+$/);
 assert.deepEqual(byRole('heading').childIds,[byRole('StaticText').nodeId]);
 assert.equal((await f.run('site_get_text',{nodeId:byRole('heading').nodeId,limit:8})).text,'Detailed');
 assert.equal((await f.run('site_get_children',{nodeId:read.roots[0],maxNodes:2})).nodes.length,2);
-for(const [action,args] of [['hover',{}],['click',{}],['key',{key:'Ctrl+A'}],['scroll',{amount:100}]])await f.run('site_interact',{action,nodeId:byRole('button').nodeId,...args});
-await f.run('site_interact',{action:'type',nodeId:byRole('textbox').nodeId,text:'Query'});
-await f.run('site_interact',{action:'select',nodeId:byRole('combobox').nodeId,value:'a'});
+for(const [action,args] of [['hover',{}],['click',{}],['key',{key:'Ctrl+A'}],['scroll',{amount:100}]])await f.run('site_interact',{steps:[{action,nodeId:byRole('button').nodeId,...args}]});
+await f.run('site_interact',{steps:[{action:'type',nodeId:byRole('textbox').nodeId,text:'Query'}]});
+await f.run('site_interact',{steps:[{action:'select',nodeId:byRole('combobox').nodeId,value:'a'}]});
+const search=await f.run('site_interact',{steps:[{action:'type',nodeId:byRole('textbox').nodeId,text:'Xeon DDR4'},{action:'key',key:'Enter'}]});
+assert.equal(search.completedSteps,2);assert.equal(search.failedStep,null);
+for(const steps of [[],Array(21).fill({action:'scroll'}),[{action:'type',text:'missing node'}],[{action:'key',key:123}],[{action:'scroll',unknown:1}],[{action:'scroll',amount:0}]])
+ assert.throws(()=>validateBrowserInput('site_interact',{chatTabId:22,tabId:21,steps}),{code:'BROWSER_INVALID'});
+assert.throws(()=>validateBrowserInput('site_interact',{chatTabId:22,tabId:21,action:'scroll'}),{code:'BROWSER_INVALID'});
 const resourceId=byRole('image').resources[0].resourceId;
 const task=await f.run('site_get_images',{resourceId});assert.equal(task.status,'queued');assert.equal(task.tabId,21);assert.equal(task.chatTabId,22);
 await f.scheduled.shift()();const done=await f.run('site_files_status',{taskId:task.taskId});
@@ -117,7 +122,7 @@ ordered.host.command=async(id,method,...rest)=>{
  return native(id,method,...rest);
 };
 const slow=ordered.run('site_read').catch(error=>error);await entering;
-const waitingInput=ordered.run('site_interact',{action:'click',nodeId:initial.nodes.find(n=>n.role==='button').nodeId}).catch(error=>error);
+const waitingInput=ordered.run('site_interact',{steps:[{action:'click',nodeId:initial.nodes.find(n=>n.role==='button').nodeId}]}).catch(error=>error);
 assert.equal((await ordered.run('site_read',{tabId:31})).tabId,31,'another tab can finish while the first is waiting');
 ordered.tabs.get(21).groupId=999;await ordered.agent.onUpdated(21,{groupId:999});
 unblock();assert.ok((await slow).code);assert.ok((await waitingInput).code);

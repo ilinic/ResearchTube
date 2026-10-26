@@ -4,7 +4,7 @@ import { start, doRoom, roomPost, socketFor, message } from "./helpers.mjs";
 let mf; const sockets = [];
 beforeAll(async () => { ({ mf } = await start()); });
 afterAll(async () => { for (const socket of sockets) { try { socket.close(); } catch {} } await mf?.dispose(); });
-const request = (name = "youtube_get_transcript", args = {videoId:"aqz-KE-bpKQ"}) => ({request:{jsonrpc:"2.0",method:"tools/call",params:{name,arguments:args}}});
+const request = (name = "youtube_get_transcript", args = {videoId:"aqz-KE-bpKQ"}) => ({workerReceivedAtMs:Date.now()-5,request:{jsonrpc:"2.0",method:"tools/call",params:{name,arguments:args}}});
 async function setup(ready = true) {
   const stub = await doRoom(mf, randomUUID()), connection = await socketFor(stub); sockets.push(connection.socket);
   if (ready) {
@@ -17,8 +17,21 @@ test("productive dispatch needs only the account extension and returns its first
   const {stub,socket,installationId} = await setup();
   const incoming = message(socket), pending = roomPost(stub,"/dispatch",request()), command = await incoming;
   expect(command).toMatchObject({type:"request",installationId});expect(command).not.toHaveProperty("target");
+  expect(command.timing.workerReceivedAtMs).toBeGreaterThan(0);
+  expect(command.timing.roomForwardedAtMs).toBeGreaterThanOrEqual(command.timing.roomReceivedAtMs);
   socket.send(JSON.stringify({type:"response",requestId:command.requestId,result:{content:[{type:"text",text:"transcript"}]}}));
   expect(await (await pending).json()).toEqual({result:{content:[{type:"text",text:"transcript"}]}});
+});
+test("site requests receive correlated UTC relay stamps without page contents", async () => {
+  const {stub,socket} = await setup();
+  const incoming = message(socket), pending = roomPost(stub,"/dispatch",request("site_list_tabs",{chatTabId:42})), command = await incoming;
+  const stamp = message(socket);
+  socket.send(JSON.stringify({type:"response",requestId:command.requestId,result:{content:[{type:"text",text:"ok"}]}}));
+  const timing = await stamp;
+  expect(timing).toMatchObject({type:"timing",requestId:command.requestId,chatTabId:42,tool:"site_list_tabs"});
+  expect(timing.roomRespondedAtMs).toBeGreaterThanOrEqual(command.timing.roomForwardedAtMs);
+  expect(JSON.stringify(timing)).not.toContain("SECRET");
+  expect((await (await pending).json()).result.content[0].text).toBe("ok");
 });
 test("offline and old extensions fail immediately without a queued request", async () => {
   const empty = await doRoom(mf,randomUUID());

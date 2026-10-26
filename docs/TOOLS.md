@@ -219,9 +219,9 @@ Start **Study this site** from the popup to create a site copy and one leading C
 | `site_get_children` | Expand current children with depth and pagination. |
 | `site_get_node` | Inspect AX details, safe DOM geometry and resource references. |
 | `site_get_text` | Read deferred subtree text with offset/limit. |
-| `site_interact` | Click, type, key, select, scroll or hover on site pages. ChatGPT tabs cannot be targeted. |
+| `site_interact` | Run 1–20 ordered `steps` (click/type/key/select/scroll/hover) in one call; stop on failure/navigation, return `completedSteps` and `failedStep`, and observe once at the end. No legacy single-action input. ChatGPT tabs cannot be targeted. |
 | `site_diagnostics_start` | Start a bounded timing capture for the leading `chatTabId` and its site group. Resets that chat's earlier capture. |
-| `site_diagnostics_report` | Return a copyable Markdown timeline of Site tool calls, gaps between calls and slowest browser stages. Stops the capture by default. |
+| `site_diagnostics_report` | Return a copyable Markdown timeline of Site calls, per-step timings, gaps, browser stages and correlated Cloudflare/Extension UTC stamps. Stops the capture by default. |
 | `site_get_images` | Download observed images from the target tab and optionally attach/send an ordered batch to the initiating chat; labelled screenshot fallbacks. |
 | `site_get_files` | Download observed documents/audio/video from the target and optionally attach/send one batch to the initiating chat. |
 | `site_files_status` | Read file task progress, saved files and confirmed submission. |

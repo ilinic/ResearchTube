@@ -161,19 +161,39 @@ export function createCloudConnection(host) {
   async function receive(data, ws, credential) {
     if (typeof data !== "string" || new TextEncoder().encode(data).length > 1048576) throw fail("CLOUD_PROTOCOL_ERROR", "Invalid relay message.");
     const message = JSON.parse(data), requestGeneration = generation;
+    if (message.type === "timing") {
+      if (Object.keys(message).some(key => !["type", "requestId", "tool", "chatTabId", "roomRespondedAtMs"].includes(key)) ||
+          !UUID.test(message.requestId) || !/^site_[a-z_]+$/.test(message.tool) ||
+          !Number.isSafeInteger(message.chatTabId) || message.chatTabId < 0 || !Number.isSafeInteger(message.roomRespondedAtMs))
+        throw fail("CLOUD_PROTOCOL_ERROR", "Invalid relay timing message.");
+      try { host.timing?.({ chatTabId: message.chatTabId, requestId: message.requestId,
+        stage: "room.responded", event: "stamp", atMs: message.roomRespondedAtMs }); } catch {}
+      return;
+    }
     if (message.type === "disconnect" && message.code === "EXTENSION_REPLACED" && Object.keys(message).length === 2) {
       generation++; stopSocket();
       if (retryTimer !== null) host.clearTimeout(retryTimer); retryTimer = null;
       await local.set({ [KEY]: { ...credential, revoked: true, revokedCode: "EXTENSION_REPLACED" } });
       await publish("error", "EXTENSION_REPLACED"); return;
     }
-    if (message.type !== "request" || Object.keys(message).some(key => !["type", "requestId", "installationId", "request"].includes(key)) ||
+    if (message.type !== "request" || Object.keys(message).some(key => !["type", "requestId", "installationId", "request", "timing"].includes(key)) ||
         !UUID.test(message.requestId) || message.installationId !== credential.installationId ||
+        !message.timing || Object.keys(message.timing).some(key => !["workerReceivedAtMs", "roomReceivedAtMs", "roomForwardedAtMs"].includes(key)) ||
+        !["workerReceivedAtMs", "roomReceivedAtMs", "roomForwardedAtMs"].every(key => Number.isSafeInteger(message.timing[key])) ||
         !message.request || Object.keys(message.request).some(key => !["jsonrpc", "method", "params"].includes(key)) ||
         message.request.jsonrpc !== "2.0" || message.request.method !== "tools/call" ||
         !message.request.params || Object.keys(message.request.params).some(key => !["name", "arguments"].includes(key)) ||
         typeof message.request.params.name !== "string" || !message.request.params.arguments || typeof message.request.params.arguments !== "object" || Array.isArray(message.request.params.arguments))
       throw fail("CLOUD_PROTOCOL_ERROR", "Invalid relay request.");
+    const toolName = message.request.params.name, chatTabId = message.request.params.arguments.chatTabId;
+    const record = (stage, atMs) => {
+      if (!/^site_[a-z_]+$/.test(toolName) || !Number.isSafeInteger(chatTabId) || chatTabId < 0) return;
+      try { host.timing?.({ chatTabId, requestId: message.requestId, stage, event: "stamp", atMs }); } catch {}
+    };
+    record("worker.received", message.timing.workerReceivedAtMs);
+    record("room.received", message.timing.roomReceivedAtMs);
+    record("room.forwarded", message.timing.roomForwardedAtMs);
+    record("extension.received", Date.now());
     if (seen.has(message.requestId)) return;
     seen.add(message.requestId);
     if (seen.size > 4096 || pending.size >= 100) { ws.close(); return; }
@@ -211,6 +231,7 @@ export function createCloudConnection(host) {
     }
     finally { requests.delete(message.requestId); pending.delete(message.requestId); }
     if (socket !== ws || ws.readyState !== 1) return;
+    record("extension.returned", Date.now());
     const payload = { type: "response", requestId: message.requestId, ...response };
     const text = JSON.stringify(payload);
     ws.send(new TextEncoder().encode(text).length <= 1048576 ? text : JSON.stringify({ type: "response", requestId: message.requestId,

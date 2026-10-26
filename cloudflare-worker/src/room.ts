@@ -1,7 +1,9 @@
 import { DurableObject } from "cloudflare:workers";
 import { z } from "zod";
 import validateArguments from "./validators.js";
-import { SOCKET_TTL, MAX_BYTES, PublicError, errorResponse, json, readJson, type Env, type RpcRequest } from "./types";
+import { SOCKET_TTL, MAX_BYTES, PublicError, errorResponse, json, readJson, type Env } from "./types";
+
+type ToolCallRequest = { jsonrpc: "2.0"; method: "tools/call"; params: { name: string; arguments: Record<string, unknown> } };
 
 interface SocketIdentity { installationId: string; expiresAt: number; directTools?: boolean }
 interface Pending {
@@ -9,6 +11,8 @@ interface Pending {
   resolve: (value: Record<string, unknown>) => void;
   reject: (reason: PublicError) => void;
   timer: ReturnType<typeof setTimeout>;
+  chatTabId?: number;
+  tool: string;
 }
 // Exactly one authenticated extension per account. No conversation handshakes,
 // focus guesses, queued execution or automatic replay after an unknown outcome.
@@ -63,13 +67,14 @@ export class BrowserRoom extends DurableObject<Env> {
       }
       if (path === "/dispatch") {
         const body = z.object({ request: z.object({ jsonrpc: z.literal("2.0"), method: z.literal("tools/call"),
-          params: z.object({ name: z.string(), arguments: z.record(z.string(), z.unknown()) }).strict() }).strict() }).strict().parse(await readJson(request));
+          params: z.object({ name: z.string(), arguments: z.record(z.string(), z.unknown()) }).strict() }).strict(),
+          workerReceivedAtMs: z.number().int().nonnegative() }).strict().parse(await readJson(request));
         const name = body.request.params.name;
         if (!Object.hasOwn(validateArguments, name) || name === "system_connection_status" || !(validateArguments as Record<string, any>)[name](body.request.params.arguments))
           throw new PublicError("INVALID_ARGUMENT", "Arguments do not match an available tool.");
         const socket = await this.activeSocket();
         if (!socket) throw new PublicError("EXTENSION_OFFLINE", "Open Chrome with the connected ResearchTube extension.", 409);
-        return json(await this.dispatch(socket, body.request));
+        return json(await this.dispatch(socket, body.request, body.workerReceivedAtMs, Date.now()));
       }
       return new Response(null, { status: 404 });
     } catch (error) {
@@ -88,16 +93,20 @@ export class BrowserRoom extends DurableObject<Env> {
       throw new PublicError("EXTENSION_UPDATE_REQUIRED", "Update the ResearchTube extension to run tools directly.", 409);
     return sockets[0];
   }
-  private dispatch(socket: WebSocket, request: RpcRequest): Promise<Record<string, unknown>> {
+  private dispatch(socket: WebSocket, request: ToolCallRequest, workerReceivedAtMs: number, roomReceivedAtMs: number): Promise<Record<string, unknown>> {
     if (this.pending.size >= 100) throw new PublicError("BROWSER_BUSY", "Too many requests are running.", 429);
     const requestId = crypto.randomUUID();
+    const argumentChatTabId = request.params.arguments.chatTabId;
+    const chatTabId = typeof argumentChatTabId === "number" && Number.isSafeInteger(argumentChatTabId) && argumentChatTabId >= 0 ? argumentChatTabId : undefined;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(requestId);
         reject(new PublicError("BROWSER_OUTCOME_UNKNOWN", "The extension did not acknowledge the request. Inspect its state before repeating an action.", 504));
       }, 25_000);
-      this.pending.set(requestId, { socket, resolve, reject, timer });
-      try { socket.send(JSON.stringify({ type: "request", requestId, installationId: (socket.deserializeAttachment() as SocketIdentity).installationId, request })); }
+      this.pending.set(requestId, { socket, resolve, reject, timer, tool: request.params.name,
+        ...(chatTabId !== undefined ? { chatTabId } : {}) });
+      try { socket.send(JSON.stringify({ type: "request", requestId, installationId: (socket.deserializeAttachment() as SocketIdentity).installationId, request,
+        timing: { workerReceivedAtMs, roomReceivedAtMs, roomForwardedAtMs: Date.now() } })); }
       catch { clearTimeout(timer); this.pending.delete(requestId); reject(new PublicError("EXTENSION_OFFLINE", "The extension disconnected. The request was not retried.", 409)); }
     });
   }
@@ -116,6 +125,11 @@ export class BrowserRoom extends DurableObject<Env> {
       const pending = this.pending.get(msg.requestId);
       if (!pending || pending.socket !== socket) return;
       clearTimeout(pending.timer); this.pending.delete(msg.requestId);
+      // Only safe correlation/timestamps return to the extension recorder.
+      if (pending.tool.startsWith("site_") && pending.chatTabId !== undefined) {
+        try { socket.send(JSON.stringify({ type: "timing", requestId: msg.requestId, tool: pending.tool,
+          chatTabId: pending.chatTabId, roomRespondedAtMs: Date.now() })); } catch {}
+      }
       pending.resolve(msg.error ? { error: msg.error } : { result: msg.result });
     } catch { socket.close(1008, "Invalid response"); this.rejectSocket(socket, "BROWSER_PROTOCOL_ERROR", "Invalid extension response."); }
   }
