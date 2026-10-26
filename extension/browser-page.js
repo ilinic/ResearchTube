@@ -452,8 +452,8 @@ export function createBrowserPage(session, host) {
   }
   async function act({ steps }) {
     const pageVersion = session.pageVersion;
-    let completedSteps = 0, failedStep = null;
-    for (const [index, step] of steps.entries()) {
+    let completedSteps = 0, failedStep = null, navigationPossible = false;
+    for (const [stepIndex, step] of steps.entries()) {
       const started = performance.now();
       let code = null;
       try {
@@ -461,18 +461,28 @@ export function createBrowserPage(session, host) {
         // to nodes introduced by a preceding action require another MCP call.
         await host.check(session, true);
         if (session.pageVersion !== pageVersion) throw browserError("PAGE_CHANGED", "The page navigated during the sequence. Observe it before continuing.");
+        // Enter and links commonly start a document navigation asynchronously.
+        // Avoid reading the old AX tree while the new document is replacing it.
+        const mayNavigate = step.action === "key" && step.key.split("+").at(-1) === "Enter"
+          || step.action === "click" && index.get(step.nodeId)?.role === "link";
         await dispatchStep(step);
         completedSteps++;
+        if (mayNavigate) navigationPossible = true;
       } catch (error) {
         code = error?.code || "BROWSER_UNAVAILABLE";
-        failedStep = { index, code, message: error?.code ? error.message : "The step may have been dispatched; observe the page before continuing." };
+        failedStep = { index: stepIndex, code, message: error?.code ? error.message : "The step may have been dispatched; observe the page before continuing." };
       } finally {
         // Diagnostic capture is optional, bounded and deliberately excludes
         // text, node identifiers, addresses and keyboard values.
-        try { host.onStep?.({ index, action: step.action, elapsedMs: Math.round((performance.now() - started) * 10) / 10,
-          outcome: failedStep?.index === index ? "failed" : "ok", ...(code ? { code } : {}) }); } catch {}
+        try { host.onStep?.({ index: stepIndex, action: step.action, elapsedMs: Math.round((performance.now() - started) * 10) / 10,
+          outcome: failedStep?.index === stepIndex ? "failed" : "ok", ...(code ? { code } : {}) }); } catch {}
       }
       if (failedStep) break;
+    }
+    if (navigationPossible || session.pageVersion !== pageVersion) {
+      // No action is retried: the caller reads the destination with site_read.
+      // This is a deferred observation, not a failed input or failed AX read.
+      return { ...context(), completedSteps, failedStep, page: metadata(), observeAgain: true, observation: null, observationError: null };
     }
     // Return the useful local difference with this action, avoiding another
     // model/tool round trip merely to discover a new panel or image.

@@ -40,7 +40,7 @@ function browserToolDefinitions() {
     define("site_get_children", "Get site node children", "Expand an observed Accessibility Tree node into bounded children with hierarchy and pagination. Re-observe after PAGE_CHANGED or STALE_NODE.", { nodeId, depth, ...budget }, ["nodeId"], observation),
     define("site_get_node", "Inspect site node", "Inspect an observed node's accessibility data, safe attributes, bounds and resource references. Use site_get_text for long text, site_get_images for images and site_get_files for documents, audio or video.", { nodeId }, ["nodeId"], object({ ...context, page, node, dom: object({ tag: nullableString, attributes: { type: "array", items: object({ name: string, value: string }) }, bounds: { anyOf: [object({ x: { type: "number" }, y: { type: "number" }, width: { type: "number" }, height: { type: "number" } }), { type: "null" }] }, resources: { type: "array", items: resource } }) })),
     define("site_get_text", "Read site node text", "Read full text of an observed node/subtree with pagination. Protected/password values are excluded.", { nodeId, offset: budget.offset, limit: { type: "integer", minimum: 1, maximum: 5e4, default: 12e3 } }, ["nodeId"], object({ ...context, page, nodeId: string, text: string, totalCharacters: integer, nextOffset: { type: ["integer", "null"] } })),
-    define("site_interact", "Interact with site elements", "Run 1\u201320 ordered click, type, key, scroll, hover or select steps in one MCP call, without model round trips or intermediate AX refresh. All nodeIds must come from an existing observation; stop at the first failure or navigation. The result reports completedSteps and failedStep; never replay completed steps. The final observation contains changed nodes/resources; re-observe if observeAgain or observationError indicates uncertainty. Password typing is refused.", { steps: { type: "array", minItems: 1, maxItems: 20, items: actionStep } }, ["steps"], object({ ...context, completedSteps: { type: "integer", minimum: 0 }, failedStep: { anyOf: [object({ index: { type: "integer", minimum: 0 }, code: string, message: string }), { type: "null" }] }, page, observeAgain: { type: "boolean" }, observation: { anyOf: [observation, { type: "null" }] }, observationError: error }), write),
+    define("site_interact", "Interact with site elements", "Run 1\u201320 ordered click, type, key, scroll, hover or select steps in one MCP call, without model round trips or intermediate AX refresh. All nodeIds must come from an existing observation; stop at the first failure or navigation. The result reports completedSteps and failedStep; never replay completed steps. Ordinary actions return changed nodes/resources. Enter, link clicks or detected navigation defer AX refresh: observation is null and observeAgain is true; call site_read next. Password typing is refused.", { steps: { type: "array", minItems: 1, maxItems: 20, items: actionStep } }, ["steps"], object({ ...context, completedSteps: { type: "integer", minimum: 0 }, failedStep: { anyOf: [object({ index: { type: "integer", minimum: 0 }, code: string, message: string }), { type: "null" }] }, page, observeAgain: { type: "boolean" }, observation: { anyOf: [observation, { type: "null" }] }, observationError: error }), write),
     define("site_diagnostics_start", "Start browser timing capture", "Start a fresh bounded timing capture for this Study this site group. Use before performing a slow browser test, then call site_diagnostics_report to retrieve a pasteable Markdown timeline. Only durations, operation names and safe numeric metadata are captured; no site text, typed values or URLs.", { maxEvents: { type: "integer", minimum: 100, maximum: 800, default: 600 } }, [], object({ chatTabId: integer, groupId: integer, startedAt: string, recording: { type: "boolean" }, maxEvents: integer }), diagnostic, false),
     define("site_diagnostics_report", "Read browser timing report", "Return a copyable Markdown report of site tool durations, the time between tool calls (including the gap between typing and pressing Enter), and the slowest internal Chrome stages. stop=true stops the capture after reporting; false takes a live snapshot. Gaps include client/model/network time and are not exclusively model inference time.", { stop: { type: "boolean", default: true }, limit: { type: "integer", minimum: 1, maximum: 300, default: 120 } }, [], object({ chatTabId: integer, groupId: integer, recording: { type: "boolean" }, completedCalls: integer, interCallGaps: integer, droppedEvents: integer, reportMarkdown: string }), diagnostic, false),
     download("site_get_images", "Get site images", "Download selected images into study-this-site/ without overwriting. Image IDs only. addToChat=true (default) attaches them and sends a continuation to the initiating chat; false saves only. Returns an asynchronous task: poll site_files_status at pollIntervalMs; site_files_cancel stops before Send. Finish your response for delivery. Screenshots are labelled fallbacks.", "image"),
@@ -1618,31 +1618,36 @@ function createBrowserPage(session, host) {
   }
   async function act({ steps }) {
     const pageVersion = session.pageVersion;
-    let completedSteps = 0, failedStep = null;
-    for (const [index2, step] of steps.entries()) {
+    let completedSteps = 0, failedStep = null, navigationPossible = false;
+    for (const [stepIndex, step] of steps.entries()) {
       const started = performance.now();
       let code = null;
       try {
         await host.check(session, true);
         if (session.pageVersion !== pageVersion) throw browserError("PAGE_CHANGED", "The page navigated during the sequence. Observe it before continuing.");
+        const mayNavigate = step.action === "key" && step.key.split("+").at(-1) === "Enter" || step.action === "click" && index.get(step.nodeId)?.role === "link";
         await dispatchStep(step);
         completedSteps++;
+        if (mayNavigate) navigationPossible = true;
       } catch (error4) {
         code = error4?.code || "BROWSER_UNAVAILABLE";
-        failedStep = { index: index2, code, message: error4?.code ? error4.message : "The step may have been dispatched; observe the page before continuing." };
+        failedStep = { index: stepIndex, code, message: error4?.code ? error4.message : "The step may have been dispatched; observe the page before continuing." };
       } finally {
         try {
           host.onStep?.({
-            index: index2,
+            index: stepIndex,
             action: step.action,
             elapsedMs: Math.round((performance.now() - started) * 10) / 10,
-            outcome: failedStep?.index === index2 ? "failed" : "ok",
+            outcome: failedStep?.index === stepIndex ? "failed" : "ok",
             ...code ? { code } : {}
           });
         } catch {
         }
       }
       if (failedStep) break;
+    }
+    if (navigationPossible || session.pageVersion !== pageVersion) {
+      return { ...context2(), completedSteps, failedStep, page: metadata(), observeAgain: true, observation: null, observationError: null };
     }
     try {
       await refresh();

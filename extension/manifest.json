@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "minimum_chrome_version": "125",
   "name": "ResearchTube \u2014 YouTube Research for ChatGPT",
-  "version": "2.10.4",
+  "version": "2.10.5",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAq7x/G7M7VgWS25XfVIRPEJy3egENWEBIyrRc1wpV6PZfuz+VgXBtLfBgujFepqBsxXPtwc2qxG/q3w3zYKLrm+uiZje9EeDbnQiLJFnrXQB/iF1UxujbeF4sef4MNEMisrlBPTS03OX46BiCO829ltJqfTKP2zDU+MhcUAR4x3w4CNBcIR75Pc0vsDcZnWzKQeFnBh5kYuEEN+mBQBZ8A76CuSAELCCrg2ywvbzE4BnEh5s6vEzr6ru7zzb8/74o35yYO2u6QK1K+QYZ++ZK3tk9VDE5Kvo+ufTFj3P6gyIQcVg2Zvvx0ChLhx2t+o8k3rs/UBBk7PzTOpgNOrie2QIDAQAB",
   "description": "YouTube research and local media tools for ChatGPT.",
   "icons": {
