@@ -6,6 +6,7 @@ const source = await readFile(new URL("../background.js", import.meta.url), "utf
 const bundle = await readFile(new URL("../dist/background.js", import.meta.url), "utf8");
 const pageBundle = await readFile(new URL("../dist/task-chat-page.js", import.meta.url), "utf8");
 const extract = (text, name) => {
+  text = text.replace(/\r\n/g, "\n");
   const match = new RegExp("(?:async )?function " + name + "\\(").exec(text);
   assert.ok(match, name);
   return text.slice(match.index, text.indexOf("\n}\n", match.index) + 3);

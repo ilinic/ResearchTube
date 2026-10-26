@@ -13,7 +13,7 @@ async function begin() {
   const client = await response.json(); expect(response.status, JSON.stringify(client)).toBe(201);
   const session = await seedSession(db);
   const params = new URLSearchParams({ client_id: client.client_id, response_type: "code", redirect_uri: CALLBACK,
-    scope: "openid profile email offline_access researchtube:use", resource: BASE + "/mcp", state: "test-state",
+    scope: "openid profile email offline_access researchtube:use", resource: BASE, state: "test-state",
     code_challenge_method: "S256", code_challenge: createHash("sha256").update(verifier).digest("base64url") });
   const authorize = await mf.dispatchFetch(BASE + "/api/auth/oauth2/authorize?" + params, { headers: { Cookie: session.cookie, Accept: "text/html", "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Dest": "document" }, redirect: "manual" });
   // Miniflare's Node fetch transport sets sec-fetch-mode:cors; Better Auth
@@ -32,7 +32,7 @@ async function begin() {
 test("real D1-backed OAuth code + consent + PKCE token authorizes only browser-scoped calls", async () => {
   const { client, code } = await begin();
   const response = await mf.dispatchFetch(BASE + "/api/auth/oauth2/token", form({ grant_type: "authorization_code", client_id: client.client_id,
-    code, code_verifier: verifier, redirect_uri: CALLBACK, resource: BASE + "/mcp" }));
+    code, code_verifier: verifier, redirect_uri: CALLBACK, resource: BASE }));
   const tokens = await response.json(); expect(response.status, JSON.stringify(tokens)).toBe(200);
   expect(tokens.access_token).toBeTypeOf("string"); expect(tokens.refresh_token).toBeTypeOf("string");
   tokenResponse = { ...tokens, clientId: client.client_id };
@@ -40,18 +40,21 @@ test("real D1-backed OAuth code + consent + PKCE token authorizes only browser-s
   const value = await status.json(); expect(status.status, JSON.stringify(value)).toBe(200);
   expect(value.result.structuredContent).toMatchObject({ connected: false, ambiguous: false, bindings: [] });
   const noContext = await (await rpc(mf, "tools/call", { name: "system_connection_status", arguments: {} }, tokens.access_token)).json();
-  expect(noContext.result.structuredContent.error.code).toBe("BROWSER_CONTEXT_REQUIRED");
+  expect(noContext.result.structuredContent).toMatchObject({ accountConnected: true, contextAvailable: false, cloudToolsAvailable: false, setupUrl: BASE + "/setup" });
+  const waiting = await (await rpc(mf, "tools/call", { name: "system_connect_browser", arguments: {}, _meta: { "openai/session": "new-chat" } }, tokens.access_token)).json();
+  expect(waiting.result.structuredContent).toMatchObject({ status: "binding", setupUrl: BASE + "/setup" });
+  expect(waiting.result._meta["researchtube/cloudBinding"].nonce).toBeTypeOf("string");
 });
 test("refresh rotates credentials and a revoked refresh token cannot mint new access", async () => {
   expect(tokenResponse).toBeDefined();
   const refreshed = await mf.dispatchFetch(BASE + "/api/auth/oauth2/token", form({ grant_type: "refresh_token", client_id: tokenResponse.clientId,
-    refresh_token: tokenResponse.refresh_token, resource: BASE + "/mcp" }));
+    refresh_token: tokenResponse.refresh_token, resource: BASE }));
   const tokens = await refreshed.json(); expect(refreshed.status, JSON.stringify(tokens)).toBe(200);
   expect(tokens.refresh_token).not.toBe(tokenResponse.refresh_token);
   const revoke = await mf.dispatchFetch(BASE + "/api/auth/oauth2/revoke", form({ client_id: tokenResponse.clientId, token: tokens.refresh_token, token_type_hint: "refresh_token" }));
   expect(revoke.status, await revoke.clone().text()).toBe(200);
   const denied = await mf.dispatchFetch(BASE + "/api/auth/oauth2/token", form({ grant_type: "refresh_token", client_id: tokenResponse.clientId,
-    refresh_token: tokens.refresh_token, resource: BASE + "/mcp" }));
+    refresh_token: tokens.refresh_token, resource: BASE }));
   expect(denied.status).toBe(400);
   // Signed access tokens expire after five minutes; disconnecting a browser
   // binding or installation separately blocks routing immediately.
@@ -59,19 +62,19 @@ test("refresh rotates credentials and a revoked refresh token cannot mint new ac
 test("rejects an unregistered redirect and a wrong PKCE verifier", async () => {
   const { client, code } = await begin();
   const redirect = await mf.dispatchFetch(BASE + "/api/auth/oauth2/authorize?" + new URLSearchParams({ client_id: client.client_id,
-    response_type: "code", redirect_uri: "https://evil.test/callback", scope: "researchtube:use", resource: BASE + "/mcp" }), { redirect: "manual" });
+    response_type: "code", redirect_uri: "https://evil.test/callback", scope: "researchtube:use", resource: BASE }), { redirect: "manual" });
   expect(redirect.headers.get("Location") || "").not.toContain("evil.test");
   const refusal = await redirect.json();
   if (refusal.url) expect(new URL(refusal.url, BASE).origin).not.toBe("https://evil.test");
   else expect(refusal.error).toBeTruthy();
   const exchange = await mf.dispatchFetch(BASE + "/api/auth/oauth2/token", form({ grant_type: "authorization_code", client_id: client.client_id,
-    code, code_verifier: "wrong-pkce-verifier-of-more-than-forty-three-characters", redirect_uri: CALLBACK, resource: BASE + "/mcp" }));
+    code, code_verifier: "wrong-pkce-verifier-of-more-than-forty-three-characters", redirect_uri: CALLBACK, resource: BASE }));
   expect(exchange.status).toBe(400);
 });
 test("routes an OAuth-authenticated MCP call through its widget proof to exactly one extension socket", async () => {
   const { client, code, session } = await begin();
   const tokens = await (await mf.dispatchFetch(BASE + "/api/auth/oauth2/token", form({ grant_type: "authorization_code", client_id: client.client_id,
-    code, code_verifier: verifier, redirect_uri: CALLBACK, resource: BASE + "/mcp" }))).json();
+    code, code_verifier: verifier, redirect_uri: CALLBACK, resource: BASE }))).json();
   const installed = await (await mf.dispatchFetch(BASE + "/api/installations", post({ name: "Test profile", extensionOrigin: EXTENSION }, { Cookie: session.cookie, Origin: BASE }))).json();
   const headers = { Authorization: "Bearer " + installed.installationToken, Origin: EXTENSION };
   const ticket = await (await mf.dispatchFetch(BASE + "/api/relay-ticket", post({}, headers))).json();

@@ -2,6 +2,7 @@ import { z } from "zod";
 import { createAuth, browserUser, MCP_SCOPE } from "./auth";
 import { mcpResponse, roomRequest } from "./mcp";
 import { authScript, page } from "./pages";
+import { homePage, homeIcon, homeScript } from "./homepage";
 import { WORKER_VERSION } from "./version";
 import { bearer, digest, errorResponse, extensionOrigins, json, origin, PublicError, readBytes, readJson, room, secret, type Env } from "./types";
 export { BrowserRoom } from "./room";
@@ -32,22 +33,18 @@ async function route(request: Request, env: Env): Promise<Response> {
   const url = new URL(request.url), base = origin(env), path = url.pathname;
   if (request.method === "OPTIONS") return new Response(null, { status: 204 });
   if (path === "/health" && request.method === "GET") return json({ service: "ResearchTube", version: WORKER_VERSION, status: "ok" });
-  if (path === "/.well-known/oauth-protected-resource" || path === "/.well-known/oauth-protected-resource/mcp")
-    return json({ resource: `${base}/mcp`, authorization_servers: [`${base}/api/auth`], scopes_supported: [MCP_SCOPE], bearer_methods_supported: ["header"] });
+  if (path === "/.well-known/oauth-protected-resource")
+    return json({ resource: base, authorization_servers: [`${base}/api/auth`], scopes_supported: [MCP_SCOPE], bearer_methods_supported: ["header"] });
   // These pages must not start asynchronous auth/D1 work that outlives their
   // response. Only endpoints that use authentication initialize it below.
-  if (path === "/" || path === "/sign-in") return page("sign-in", env);
+  if (path === "/" && request.method === "GET" && !/application\/json|text\/event-stream/i.test(request.headers.get("Accept") || "")) return homePage(env);
+  if (path === "/home-ui.js" && request.method === "GET") return homeScript();
+  if (path === "/icons/researchtube-128.png" && request.method === "GET") return homeIcon();
+  if (path === "/sign-in") return page("sign-in", env);
+  if (path === "/setup") return page("setup", env);
   if (path === "/consent") return page("consent", env);
   if (path === "/auth-ui.js") return authScript();
   const auth = await createAuth(env);
-  if (path === "/connect-extension" && request.method === "GET") {
-    const extensionId = url.searchParams.get("extensionId"), nonce = url.searchParams.get("nonce");
-    if (!/^[a-p]{32}$/.test(extensionId || "") || !/^[a-f0-9-]{72}$/.test(nonce || ""))
-      throw new PublicError("INVALID_REQUEST", "Open connection setup from ResearchTube Settings.");
-    const session = await auth.api.getSession({ headers: request.headers });
-    if (!session) return Response.redirect(`${base}/sign-in?extensionId=${extensionId}&nonce=${nonce}`, 302);
-    return page("extension-connect", env);
-  }
   if (path === "/.well-known/oauth-authorization-server/api/auth" || path === "/.well-known/openid-configuration/api/auth") {
     const endpoint = path.includes("openid") ? "openid-configuration" : "oauth-authorization-server";
     return auth.handler(new Request(`${base}/api/auth/.well-known/${endpoint}`, request));
@@ -65,12 +62,20 @@ async function route(request: Request, env: Env): Promise<Response> {
     return auth.handler(request);
   }
   if (path === "/account") { await browserUser(request, auth); return page("account", env); }
-  if (path === "/mcp") return mcpResponse(request, env, auth);
+  if (path === "/") return mcpResponse(request, env, auth);
+  if (path === "/api/setup" && request.method === "GET") {
+    const session = await auth.api.getSession({ headers: request.headers });
+    return json({ signedIn: Boolean(session), ...(session ? { name: session.user.name, email: session.user.email } : {}) });
+  }
   if (path === "/api/installations" && request.method === "POST") {
     sameOrigin(request, env);
     const userId = await browserUser(request, auth);
-    const input = z.object({ name: z.string().trim().min(1).max(80), extensionOrigin: z.string() }).strict().parse(await readJson(request, 2048));
+    const input = z.object({ name: z.string().trim().min(1).max(80), extensionOrigin: z.string(), pairingNonce: z.string().length(72).optional() }).strict().parse(await readJson(request, 2048));
     if (!extensionOrigins(env).includes(input.extensionOrigin)) throw new PublicError("EXTENSION_NOT_ALLOWED", "This extension is not configured on the server.", 403);
+    // Automatic enrollment needs both proofs: this browser's authenticated
+    // cookie and the challenge issued to the same MCP account. A widget from
+    // another account cannot enroll this machine even if it knows a nonce.
+    if (input.pairingNonce) await roomRequest(env, userId, "/enrollment-check", { nonce: input.pairingNonce });
     const id = crypto.randomUUID(), token = secret();
     const result = await env.DB.prepare(`INSERT INTO rt_installation (id, user_id, name, extension_origin, token_hash, created_at)
       SELECT ?, ?, ?, ?, ?, ? WHERE (SELECT COUNT(*) FROM rt_installation WHERE user_id = ? AND revoked_at IS NULL) < 20`)
@@ -78,6 +83,11 @@ async function route(request: Request, env: Env): Promise<Response> {
     if (!result.meta.changes) throw new PublicError("INSTALLATION_LIMIT", "Disconnect an unused extension installation first.", 409);
     // This credential goes only to the local setup bridge, never MCP or a URL.
     return json({ installationId: id, installationToken: token }, 201);
+  }
+  if (path === "/api/installations" && request.method === "GET") {
+    const userId = await browserUser(request, auth);
+    const rows = await env.DB.prepare("SELECT id, name, created_at FROM rt_installation WHERE user_id = ? AND revoked_at IS NULL ORDER BY created_at DESC LIMIT 20").bind(userId).all<{ id: string; name: string; created_at: number }>();
+    return json({ installations: rows.results.map(row => ({ installationId: row.id, name: row.name, createdAt: row.created_at })) });
   }
   if (/^\/api\/installations\/[a-f0-9-]{36}$/.test(path) && request.method === "DELETE") {
     sameOrigin(request, env);
@@ -99,9 +109,13 @@ async function route(request: Request, env: Env): Promise<Response> {
     ]);
     return json({ ticket, expiresAt });
   }
-  if (path === "/api/installations/revoke-current" && request.method === "POST") {
+  if (path === "/api/installation/check" && request.method === "POST") {
     const device = await installation(request, env);
-    await env.DB.prepare("UPDATE rt_installation SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL").bind(Date.now(), device.id).run();
+    return json({ installationId: device.id });
+  }
+  if (path === "/api/installation/revoke" && request.method === "POST") {
+    const device = await installation(request, env);
+    await env.DB.prepare("UPDATE rt_installation SET revoked_at = ? WHERE id = ?").bind(Date.now(), device.id).run();
     await roomRequest(env, device.user_id, "/revoke", { installationId: device.id });
     return json({ revoked: true });
   }

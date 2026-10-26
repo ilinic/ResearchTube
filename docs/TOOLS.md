@@ -2,19 +2,22 @@
 
 This is a behavioral index, not a duplicate of the JSON Schemas. Exact schemas and defaults are authoritative in the owning Extension modules: `background.js`, `browser-tools.js`, `storyboards.js`, `timers.js` and `artifact-tools.js`. Custom tools come from their package manifests. See [Development](DEVELOPMENT.md) for ownership.
 
-## Server connection
+## Public connection setup
 
-These three tools are provided by the public Worker in server mode:
+The public MCP URL is **https://rtube.win**, with OAuth and no `/mcp` suffix.
+Connect it in ChatGPT before installing the Extension or optional Agent.
+These server-owned tools do not require a preexisting browser binding:
 
-| Tool | Purpose |
+| Tool | Behavior |
 | --- | --- |
-| `system_connect_browser` | Connect this saved Chrome chat through its widget. |
-| `system_connection_status` | Check the connection and obtain this chat's `browserBindingId`. |
-| `system_disconnect_browser` | Release this conversation's bindings without disconnecting other chats. |
+| `system_connection_status` | Confirms account connection, returns setup instructions before installation and reports extension/chat readiness. Missing client context is a supported setup state. |
+| `system_connect_browser` | Explains missing extension/client requirements or emits the exact-chat binding widget when an extension is online. |
+| `system_disconnect_browser` | Removes this conversation's browser routes without revoking other conversations or installations. |
 
-Other server tools require that binding ID. The built-in definitions otherwise
-match the Extension. Source `tabId` still selects a site; chat delivery is fixed
-to the authenticated chat. See [connection setup](HELP.md#3-set-up-the-openai-connection).
+Other public-server tools require `browserBindingId` from the connected chat's
+status. OAuth ownership and conversation correlation are checked independently
+of that ID. There are no cloud transcripts, free quotas or mobile execution.
+See [Public connection](features/PUBLIC_CONNECTION.md).
 
 ## Artifact tasks and paths
 

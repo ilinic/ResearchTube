@@ -14,8 +14,8 @@ export function authOptions(env: Env): BetterAuthOptions {
   const oauth: OAuthOptions<Scope[]> = {
     loginPage: "/sign-in", consentPage: "/consent",
     scopes: ["openid", "profile", "email", "offline_access", MCP_SCOPE],
-    resources: [{ identifier: `${base}/mcp`, allowedScopes: [MCP_SCOPE, "openid", "profile", "email", "offline_access"], accessTokenTtl: 300 }],
-    clientRegistrationDefaultResources: [`${base}/mcp`],
+    resources: [{ identifier: base, allowedScopes: [MCP_SCOPE, "openid", "profile", "email", "offline_access"], accessTokenTtl: 300 }],
+    clientRegistrationDefaultResources: [base],
     grantTypes: ["authorization_code", "refresh_token"],
     allowDynamicClientRegistration: true,
     allowUnauthenticatedClientRegistration: true,
@@ -58,7 +58,7 @@ export function authOptions(env: Env): BetterAuthOptions {
 export interface Auth {
   handler(request: Request): Promise<Response>;
   api: {
-    getSession(options: { headers: Headers }): Promise<{ user: { id: string } } | null>;
+    getSession(options: { headers: Headers }): Promise<{ user: { id: string; name?: string; email?: string } } | null>;
     verifyResearchTubeToken(options: { body: { token: string } }): Promise<ActiveAccessTokenPayload>;
   };
 }
@@ -99,7 +99,7 @@ export async function authenticateMcp(request: Request, env: Env, auth: Auth): P
   }
   const audiences = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
   const scopes = typeof claims.scope === "string" ? claims.scope.split(" ") : [];
-  if (claims.cnf || claims.iss !== `${origin(env)}/api/auth` || !audiences.includes(`${origin(env)}/mcp`) ||
+  if (claims.cnf || claims.iss !== `${origin(env)}/api/auth` || !audiences.includes(origin(env)) ||
       typeof claims.sub !== "string" || !claims.sub || typeof claims.exp !== "number" || claims.exp * 1000 <= Date.now())
     throw new PublicError("AUTHENTICATION_REQUIRED", "The access token is not valid for ResearchTube.", 401);
   if (!scopes.includes(MCP_SCOPE)) throw new PublicError("INSUFFICIENT_SCOPE", "Authorize access to ResearchTube tools.", 403);

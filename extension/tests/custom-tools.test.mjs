@@ -3,8 +3,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import vm from 'node:vm';
 import {webcrypto} from 'node:crypto';
+import {fileURLToPath} from 'node:url';
 
-const root = path.resolve(new URL('../..', import.meta.url).pathname);
+const root = fileURLToPath(new URL('../..', import.meta.url));
 const background = fs.readFileSync(path.join(root, 'extension', 'background.js'), 'utf8');
 const manifest = JSON.parse(fs.readFileSync(path.join(root, 'agent', 'custom-tools', 'custom-toolset', 'manifest.json'), 'utf8'));
 

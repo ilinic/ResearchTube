@@ -41,6 +41,8 @@ This directory is the canonical documentation set for ResearchTube. Source code 
 
 ## Feature specifications
 
+- [Public connection](features/PUBLIC_CONNECTION.md): ChatGPT-first OAuth, extension pairing, relay and exact chat authority.
+
 - [YouTube Storyboards](features/STORYBOARDS.md)
 - [Workspace media viewer](features/MEDIA_VIEWER.md)
 - [Text to Speech](features/TEXT_TO_SPEECH.md)

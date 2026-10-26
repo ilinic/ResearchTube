@@ -11,13 +11,15 @@ ResearchTube uses stable public error codes so an assisting chat can distinguish
 | `AGENT_INVALID_RESPONSE` | Agent response violated the Extension's allowlisted contract | Record versions and report a compatibility/implementation defect |
 | `AGENT_REQUEST_FAILED` | Loopback request failed after connection | Check Agent console and bounded diagnostics; do not expose paths |
 | `CONFIG_INVALID` | A value or structure in `agent-config.json` is invalid | Correct its type/range or Workspace path; retain the `value`/`comment` structure |
-| `API_KEY_MISSING` | Tunnel API key absent | Enter a dedicated restricted key in Settings |
-| `API_KEY_INVALID` | OpenAI rejected the key | Replace/check the key locally |
-| `TUNNEL_ID_MISSING` | Tunnel ID absent | Enter the `tunnel_...` identifier |
-| `TUNNEL_NOT_FOUND` | Tunnel is unavailable to that key/organisation | Verify ID and organisation |
-| `TUNNEL_PERMISSION_DENIED` | Restricted key lacks tunnel access | Grant required Tunnels Read + Use permissions |
-| `NETWORK_ERROR` | Control-plane network request failed | Check network, VPN/proxy and retry |
 | `TOOL_DISABLED` | Tool is disabled in ResearchTube Settings | Enable it and refresh the ChatGPT schema |
+| `EXTENSION_AUTHENTICATION_REQUIRED` | Installation credential is revoked or invalid | Ask ResearchTube to reconnect this saved ChatGPT conversation |
+| `ENROLLMENT_INVALID` | Setup page, initiating tab, nonce or deadline did not match | Reconnect this saved ChatGPT conversation |
+| `BROWSER_SIGN_IN_REQUIRED` | Automatic pairing found no ResearchTube website session in this Chrome profile | Sign in at the setup page, then reconnect this chat |
+| `BROWSER_ACCOUNT_MISMATCH` | Automatic pairing challenge belongs to another account or expired | Use the same ResearchTube account as in ChatGPT and reconnect; no automatic account switch |
+| `BROWSER_BINDING_CHANGED` | The original cloud browser binding ended | Reconnect the exact chat; existing files remain saved |
+| `BROWSER_CONTEXT_AMBIGUOUS` | Multiple conversation copies or conflicting bindings | Close duplicates, disconnect this chat's routes and reconnect |
+| `BROWSER_TARGET_MISMATCH` | Document or requested destination differs from the verified target | Reconnect the exact conversation; no fallback or automatic replay |
+| `BROWSER_OUTCOME_UNKNOWN` | A dispatched request timed out | Inspect its state before repeating an action |
 
 ## Workspace and files
 

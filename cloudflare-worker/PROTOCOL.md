@@ -1,9 +1,8 @@
 # Chrome relay protocol v1
 
-This is the integration contract implemented by the Chrome public-connection adapter.
-Keep the existing
-tunnel transport as an independent alternative and reuse `handleMcpRequest`;
-do not fork the tool implementations or expose the loopback Agent publicly.
+The Extension implements the public adapter in `cloud-connection.js` and
+`chatgpt-cloud-bridge.js`. The canonical MCP URL is the root origin; there is
+no `/mcp` alias. ChatGPT OAuth precedes local installation. Reuse `handleMcpRequest` for the tool implementations. Keep the Agent on loopback.
 
 ## Account and installation
 
@@ -11,7 +10,11 @@ An account may own several extension installations. A browser profile owns one
 installation; multiple Chrome windows in that profile share it. A tab ID is
 never a global address.
 
-The initiating extension opens the Worker's same-origin `/connect-extension` setup page with its ID and a random 72-character nonce. The background stores the exact tab and a ten-minute deadline before navigating that tab.
+First connect the public MCP URL in ChatGPT and complete OAuth. Setup/status
+tools work without a browser binding. Afterwards the initiating extension opens
+the Worker's `/setup?extensionId=...&nonce=...` page from Settings. Chrome
+external messaging verifies the initiating top-frame tab, exact URL, extension
+ID, nonce and deadline before accepting a single-use credential receipt.
 After Google/Microsoft sign-in, that page sends a cookie-authenticated
 `POST /api/installations` with:
 
@@ -23,14 +26,15 @@ After Google/Microsoft sign-in, that page sends a cookie-authenticated
 ```
 
 The page's `Origin` must equal `PUBLIC_ORIGIN`, and `extensionOrigin` must be in
-the server's explicit allowlist. A dedicated content script announces readiness
-without carrying credentials. The background verifies its Chrome sender ID,
-top frame, exact tab, URL and pending nonce. A fixed isolated-world script calls
-the API with same-origin cookies and returns the credential directly through
-Chrome's injection result. No generic page message or DOM exposes that result.
-The background stores it in local (not synced) Extension storage and consumes
-the pending enrollment. Signing in again replaces and revokes the old profile
-credential where reachable. An MCP token cannot enroll a device.
+the server's explicit allowlist. The setup bridge must authenticate its
+initiating extension and return the new `{installationId, installationToken}`
+only to that extension. Do not publish a generic window-message token receiver.
+Implement a nonce-bound handshake and verify message source and exact origins.
+The credential is private, stored in local Extension storage, never synced to
+other profiles or included in an LLM response, URL, logs or diagnostics.
+
+The Extension implements this enrollment bridge. The server API
+requires an actual browser login session; an MCP token cannot enroll a device.
 
 ## Connect the extension
 
@@ -40,8 +44,7 @@ credential where reachable. An MCP token cannot enroll a device.
 3. A ticket is consumed once. It cannot open a second socket. Obtaining tickets
    is limited to one per installation per five seconds. Use bounded reconnect
    backoff with jitter; never spin on a failed or revoked credential.
-4. Exchange `{"type":"ping"}` / `{"type":"pong"}` every 20 seconds to keep the Chrome service worker alive.
-5. A new connection replaces that installation's old socket. In-flight commands
+4. A new connection replaces that installation's old socket and invalidates its old browser bindings. In-flight commands
    fail with an unknown/disconnected outcome and are not retried. Reauthenticate
    the socket at least hourly, after current requests settle.
 
@@ -63,8 +66,8 @@ returns a compact widget with a nonce in private tool-result metadata:
 ```
 
 The widget announces `{source: "researchtube-cloud-binding", nonce}` to its
-parent. The dedicated `server-widget-bridge.js` listener runs alongside the existing
-local chat-target bridge without weakening its task/token validators.
+parent. Add a dedicated cloud listener alongside the existing local chat-target
+bridge, not by weakening that bridge's task/token validators.
 
 The Extension must verify:
 
@@ -196,18 +199,14 @@ invalidate that context and cancel or suppress pending chat delivery, while
 preserving already created Workspace files. Do not only remove the socket.
 Every asynchronous local task retains its original immutable destination.
 
-Profile-side `POST /api/installations/revoke-current` revokes only the authenticated
-installation using its own credential. Settings **Disconnect profile** calls
-this before clearing local credentials.
-
 Account-side `DELETE /api/installations/<installationId>` requires same-origin
 cookie authentication and revokes the installation and its routes. The cloud
 tool `system_disconnect_browser` removes this conversation's routes only.
 
 ## Before public rollout
 
-Enrollment, connection mode/settings and the dedicated widget listener are
-implemented. Exercise real Google and Microsoft callbacks and a personal
+Enrollment, connection Settings and the dedicated widget listener are implemented.
+Exercise real Google and Microsoft callbacks and a personal
 ChatGPT OAuth connection. Test several computers/profiles, duplicated copies
 of the same conversation, reused widget frames, worker suspension, navigation,
 profile restarts and delayed media delivery. Protocol tests cannot establish

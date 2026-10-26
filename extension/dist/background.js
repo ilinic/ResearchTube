@@ -1,288 +1,3 @@
-// server-connection.js
-var SERVER_ORIGIN = "https://rtube.win";
-var UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
-var NONCE = /^[a-f0-9-]{72}$/;
-var SOURCE_TABS = /* @__PURE__ */ new Set(["site_read", "site_get_children", "site_get_node", "site_get_text", "site_interact", "site_get_images", "site_get_files", "system_get_diagnostics"]);
-var failure = (code, message) => Object.assign(new Error(message), { code });
-var same = (a, b) => a?.tabId === b?.tabId && a?.documentId === b?.documentId && a?.conversationId === b?.conversationId;
-var terminal = (code) => ["SERVER_SIGN_IN_REQUIRED", "EXTENSION_AUTHENTICATION_REQUIRED", "EXTENSION_NOT_ALLOWED"].includes(code);
-function createServerConnection(host) {
-  let socket = null, generation = 0, connecting = null, retry = null, heartbeat = null, attempt = 0, lastPong = 0, openedAt = 0, rejectedCredential = null;
-  const bindings = /* @__PURE__ */ new Map(), handshakes = /* @__PURE__ */ new Map(), seen = /* @__PURE__ */ new Set(), active = /* @__PURE__ */ new Set();
-  const now = () => host.now?.() ?? Date.now();
-  const online = () => socket?.readyState === 1;
-  const status = (state, errorCode = null) => host.status({ state, errorCode });
-  async function api(path, body, credential = null) {
-    const config = credential || await host.config();
-    if (!config.serverInstallationToken) throw failure("SERVER_SIGN_IN_REQUIRED", "Sign in to connect this Chrome profile.");
-    const controller = new AbortController(), timer = host.setTimeout(() => controller.abort(), 15e3);
-    try {
-      const response = await host.fetch(SERVER_ORIGIN + path, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: "Bearer " + config.serverInstallationToken },
-        body: JSON.stringify(body),
-        signal: controller.signal,
-        redirect: "error",
-        credentials: "omit"
-      });
-      let value;
-      try {
-        value = await response.json();
-      } catch {
-        throw failure("SERVER_INVALID_RESPONSE", "The server returned an invalid response.");
-      }
-      if (!response.ok) {
-        const code = value?.error?.code;
-        throw failure(typeof code === "string" && /^[A-Z][A-Z0-9_]{0,63}$/.test(code) ? code : "SERVER_CONNECTION_FAILED", "The server could not complete this connection.");
-      }
-      return value;
-    } catch (error4) {
-      if (error4.code) throw error4;
-      throw failure("SERVER_NETWORK_ERROR", "The ResearchTube server could not be reached.");
-    } finally {
-      host.clearTimeout(timer);
-    }
-  }
-  async function invalidate(id2, release = true) {
-    const binding = bindings.get(id2);
-    if (!binding) return;
-    bindings.delete(id2);
-    await host.invalidate?.(binding);
-    if (release) void api("/api/browser/release", { bindingId: id2 }).catch(() => {
-    });
-  }
-  async function clearBindings(release = true) {
-    await Promise.all([...bindings.keys()].map((id2) => invalidate(id2, release)));
-    handshakes.clear();
-  }
-  async function stop() {
-    generation++;
-    if (retry !== null) host.clearTimeout(retry);
-    retry = null;
-    if (heartbeat !== null) host.clearInterval(heartbeat);
-    heartbeat = null;
-    const old = socket;
-    socket = null;
-    connecting = null;
-    old?.close();
-    await clearBindings();
-  }
-  async function verify(binding) {
-    const current = bindings.get(binding?.bindingId), config = await host.config();
-    if (config.connectionMode !== "server" || !online() || !current || current.expiresAt <= now() || !same(current, binding) || binding.localEpoch && binding.localEpoch !== current?.localEpoch)
-      throw failure("BROWSER_BINDING_CHANGED", "Connect this chat to ResearchTube again.");
-    const live = await host.identity(binding.tabId);
-    if (!same(live, binding)) {
-      await invalidate(binding.bindingId);
-      throw failure("BROWSER_TARGET_MISMATCH", "The connected tab or document changed.");
-    }
-    if (bindings.get(binding.bindingId) !== current || !online()) throw failure("BROWSER_BINDING_CHANGED", "The browser connection changed.");
-    return current;
-  }
-  function scheduleReconnect() {
-    if (retry !== null) return;
-    const delay2 = Math.min(6e4, 5e3 * 2 ** Math.min(attempt++, 4)) + Math.floor((host.random?.() ?? Math.random()) * 1e3);
-    retry = host.setTimeout(() => {
-      retry = null;
-      void connect().catch(() => {
-      });
-    }, delay2);
-  }
-  async function receive(data, current, config, revision) {
-    if (current !== socket || revision !== generation || typeof data !== "string" || new TextEncoder().encode(data).length > 1024 * 1024) return;
-    let message;
-    try {
-      message = JSON.parse(data);
-    } catch {
-      current.close(1008, "Invalid response");
-      return;
-    }
-    if (message.type === "pong") {
-      lastPong = now();
-      return;
-    }
-    if (message.type === "invalidate" && UUID.test(message.bindingId || "")) {
-      await invalidate(message.bindingId, false);
-      return;
-    }
-    if (message.type !== "request" || !UUID.test(message.requestId || "") || seen.has(message.requestId)) return;
-    seen.add(message.requestId);
-    if (seen.size > 1e3) seen.delete(seen.values().next().value);
-    const target = message.target;
-    const observed = { tabId: target?.tabId, documentId: target?.documentId, conversationId: target?.conversationId };
-    let response;
-    try {
-      if (active.size >= 50 || target?.installationId !== config.serverInstallationId || !UUID.test(target?.bindingId || "")) throw failure("BROWSER_TARGET_MISMATCH", "Invalid browser request.");
-      const binding = await verify(target);
-      const request = message.request;
-      if (request?.jsonrpc !== "2.0" || !["tools/list", "tools/call", "resources/list", "resources/read"].includes(request.method)) throw failure("SERVER_PROTOCOL_ERROR", "Invalid browser request.");
-      const args = { ...request.params?.arguments || {} }, name2 = request.params?.name;
-      if (Object.hasOwn(args, "chatTabId") && args.chatTabId !== binding.tabId || Object.hasOwn(args, "tabId") && !SOURCE_TABS.has(name2) && args.tabId !== binding.tabId)
-        throw failure("BROWSER_TARGET_MISMATCH", "The requested chat differs from the connected chat.");
-      const schema = host.tool(name2)?.inputSchema?.properties || {};
-      if (schema.chatTabId) args.chatTabId = binding.tabId;
-      if (schema.tabId && !SOURCE_TABS.has(name2)) args.tabId = binding.tabId;
-      active.add(message.requestId);
-      const result = await host.execute({ ...request, id: message.requestId, params: { ...request.params, ...request.method === "tools/call" ? { arguments: args } : {} } }, structuredClone(binding));
-      await verify(binding);
-      response = result?.error ? { error: { code: -32001, message: "ResearchTube could not complete this request." } } : { result: result?.result || {} };
-    } catch (error4) {
-      response = { error: { code: -32001, message: /^[A-Z][A-Z0-9_]{0,63}$/.test(error4.code || "") ? error4.code : "BROWSER_REQUEST_FAILED" } };
-    } finally {
-      active.delete(message.requestId);
-    }
-    if (socket !== current || revision !== generation || !online()) return;
-    const encoded = JSON.stringify({ type: "response", requestId: message.requestId, target: observed, ...response });
-    if (new TextEncoder().encode(encoded).length <= 1024 * 1024) current.send(encoded);
-    else current.send(JSON.stringify({ type: "response", requestId: message.requestId, target: observed, error: { code: -32001, message: "BROWSER_RESPONSE_TOO_LARGE" } }));
-  }
-  async function connect() {
-    const config = await host.config();
-    if (config.connectionMode !== "server") return { ok: false, errorCode: "SERVER_MODE_DISABLED" };
-    if (terminal(config.lastServerConnection?.errorCode)) return { ok: false, errorCode: "SERVER_SIGN_IN_REQUIRED" };
-    if (rejectedCredential === config.serverInstallationToken) return { ok: false, errorCode: "SERVER_SIGN_IN_REQUIRED" };
-    if (online()) return { ok: true };
-    if (connecting) return connecting;
-    const revision = generation;
-    const work = (async () => {
-      try {
-        await status("connecting");
-        const ticket = await api("/api/relay-ticket", {}, config);
-        if (!NONCE.test(ticket.ticket || "") || !Number.isFinite(ticket.expiresAt) || ticket.expiresAt <= now()) throw failure("SERVER_INVALID_RESPONSE", "The server returned an invalid ticket.");
-        if (revision !== generation || (await host.config()).connectionMode !== "server") return { ok: false, errorCode: "CONNECTION_CHANGED" };
-        const current = host.socket(SERVER_ORIGIN.replace("https:", "wss:") + "/relay?ticket=" + encodeURIComponent(ticket.ticket));
-        socket = current;
-        await new Promise((resolve, reject) => {
-          const timer = host.setTimeout(() => {
-            current.close();
-            reject(failure("SERVER_CONNECTION_TIMEOUT", "The server connection timed out."));
-          }, 15e3);
-          current.addEventListener("open", () => {
-            host.clearTimeout(timer);
-            resolve();
-          }, { once: true });
-          current.addEventListener("error", () => {
-            host.clearTimeout(timer);
-            reject(failure("SERVER_NETWORK_ERROR", "The server connection failed."));
-          }, { once: true });
-          current.addEventListener("close", () => {
-            host.clearTimeout(timer);
-            reject(failure("SERVER_DISCONNECTED", "The server disconnected."));
-          }, { once: true });
-        });
-        if (revision !== generation) {
-          current.close();
-          return { ok: false, errorCode: "CONNECTION_CHANGED" };
-        }
-        attempt = 0;
-        lastPong = now();
-        openedAt = now();
-        current.addEventListener("message", (event) => {
-          void receive(event.data, current, config, revision).catch(() => current.close(1008, "Invalid response"));
-        });
-        current.addEventListener("close", () => {
-          if (socket !== current || revision !== generation) return;
-          socket = null;
-          if (heartbeat !== null) host.clearInterval(heartbeat);
-          heartbeat = null;
-          void clearBindings().then(() => status("error", "SERVER_DISCONNECTED")).catch(() => {
-          });
-          scheduleReconnect();
-        });
-        heartbeat = host.setInterval(() => {
-          if (socket !== current) return;
-          if (now() - lastPong > 45e3 || now() - openedAt > 55 * 6e4) {
-            current.close(1e3, "Reconnect");
-            return;
-          }
-          current.send('{"type":"ping"}');
-        }, 2e4);
-        await status("ready");
-        return { ok: true };
-      } catch (error4) {
-        if (revision !== generation) return { ok: false, errorCode: "CONNECTION_CHANGED" };
-        const old = socket;
-        socket = null;
-        old?.close();
-        await status("error", error4.code || "SERVER_CONNECTION_FAILED");
-        if (terminal(error4.code)) rejectedCredential = config.serverInstallationToken;
-        else scheduleReconnect();
-        return { ok: false, errorCode: error4.code || "SERVER_CONNECTION_FAILED", message: error4.message };
-      }
-    })();
-    connecting = work;
-    try {
-      return await work;
-    } finally {
-      if (connecting === work) connecting = null;
-    }
-  }
-  async function bind(nonce, sender) {
-    if (!NONCE.test(nonce || "") || sender?.id !== host.extensionId || !Number.isSafeInteger(sender.tab?.id)) throw failure("BROWSER_BINDING_INVALID", "Invalid browser widget.");
-    const prior = handshakes.get(nonce);
-    if (prior) {
-      const value = await prior;
-      await verify(value);
-      if (value.tabId !== sender.tab.id) throw failure("BROWSER_CONTEXT_AMBIGUOUS", "This widget belongs to another tab.");
-      return { ok: true };
-    }
-    if (!online()) {
-      const result = await connect();
-      if (!result.ok) throw failure(result.errorCode, "Connect this Chrome profile in ResearchTube Settings.");
-    }
-    const revision = generation;
-    const work = (async () => {
-      const identity = await host.identity(sender.tab.id);
-      await host.claimGroup?.(identity.tabId);
-      const result = await api("/api/browser/bind", { nonce, target: identity });
-      if (!UUID.test(result.bindingId || "") || !Number.isFinite(result.expiresAt) || result.expiresAt <= now()) throw failure("SERVER_INVALID_RESPONSE", "The server returned an invalid binding.");
-      if (revision !== generation || !online()) throw failure("CONNECTION_CHANGED", "The server connection changed.");
-      const live = await host.identity(identity.tabId);
-      if (!same(identity, live)) throw failure("BROWSER_TARGET_MISMATCH", "The conversation changed while connecting.");
-      if (bindings.size >= 200) throw failure("BROWSER_BUSY", "Too many connected chats.");
-      const binding = { ...identity, bindingId: result.bindingId, expiresAt: result.expiresAt, localEpoch: bindings.get(result.bindingId)?.localEpoch || crypto.randomUUID() };
-      bindings.set(binding.bindingId, binding);
-      return binding;
-    })();
-    handshakes.set(nonce, work);
-    if (handshakes.size > 200) handshakes.delete(handshakes.keys().next().value);
-    try {
-      await work;
-      return { ok: true };
-    } catch (error4) {
-      handshakes.delete(nonce);
-      throw error4;
-    }
-  }
-  return {
-    connect,
-    stop,
-    bind,
-    verify,
-    api,
-    online,
-    async changed(tabId2) {
-      for (const binding of [...bindings.values()]) if (binding.tabId === tabId2) {
-        try {
-          await verify(binding);
-        } catch {
-          await invalidate(binding.bindingId);
-        }
-      }
-    },
-    async disconnect() {
-      const config = await host.config();
-      await stop();
-      try {
-        await api("/api/installations/revoke-current", {}, config);
-      } finally {
-        await host.clearCredential();
-        await status("not-configured", "SERVER_SIGN_IN_REQUIRED");
-      }
-    }
-  };
-}
-
 // browser-tools.js
 var string = { type: "string" };
 var integer = { type: "integer" };
@@ -405,6 +120,450 @@ function createBrowserOwner(host) {
       throw browserError("TAB_LEFT_GROUP", "The controller marker target changed during binding.");
   }
   return { read: read2, write: write2 };
+}
+
+// cloud-connection.js
+var CLOUD_ORIGIN = "https://rtube.win";
+var KEY = "researchtubeCloudCredential";
+var SESSION_KEY = "researchtubeCloudEnrollment";
+var UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
+var SECRET = /^[a-f0-9-]{72}$/;
+var SOURCE_TABS = /* @__PURE__ */ new Set(["site_read", "site_get_children", "site_get_node", "site_get_text", "site_interact", "site_get_images", "site_get_files", "system_get_diagnostics"]);
+var fail = (code, message) => Object.assign(new Error(message), { code });
+function cloudConversation(value) {
+  try {
+    const url = new URL(value);
+    if (url.origin !== "https://chatgpt.com") return null;
+    return /\/c\/([A-Za-z0-9_-]{1,128})\/?$/.exec(url.pathname)?.[1] || null;
+  } catch {
+    return null;
+  }
+}
+function cloudDocumentSnapshot() {
+  return { url: location.href };
+}
+function createCloudConnection(host) {
+  const base = host.origin || CLOUD_ORIGIN;
+  let socket = null, opening = null, retryTimer = null, heartbeat = null, generation = 0, attempts = 0, nextRetryAt = 0;
+  let openedAt = 0, lastPong = 0, state = "not-configured", errorCode = null;
+  const bindings = /* @__PURE__ */ new Map(), requests = /* @__PURE__ */ new Map(), pending = /* @__PURE__ */ new Set(), seen = /* @__PURE__ */ new Set();
+  const onlineWaiters = /* @__PURE__ */ new Set();
+  let automatic = null;
+  const now = () => host.now?.() ?? Date.now();
+  const local = Object.fromEntries(["get", "set", "remove"].map((name2) => [name2, (...args) => host.chrome.storage.local[name2](...args)]));
+  const session = Object.fromEntries(["get", "set", "remove"].map((name2) => [name2, (...args) => host.chrome.storage.session[name2](...args)]));
+  const config = async () => (await local.get({ [KEY]: null }))[KEY];
+  async function publish(next, code = null) {
+    state = next;
+    errorCode = code;
+    await local.set({ cloudConnectionStatus: { state, errorCode } });
+    await host.changed?.();
+  }
+  async function status() {
+    return { state, errorCode, configured: Boolean((await config())?.installationToken), serverUrl: base };
+  }
+  async function api(path, body, credential) {
+    const response = await host.fetch(base + path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer " + credential.installationToken },
+      body: JSON.stringify(body),
+      credentials: "omit",
+      redirect: "error",
+      signal: AbortSignal.timeout(15e3)
+    });
+    if (!response.ok) throw fail(response.status === 401 || response.status === 403 ? "EXTENSION_AUTHENTICATION_REQUIRED" : "CLOUD_UNAVAILABLE", "The ResearchTube server could not complete this connection request.");
+    const reader = response.body?.getReader();
+    if (!reader) throw fail("CLOUD_INVALID_RESPONSE", "The connection response is empty.");
+    let text3 = "", size = 0;
+    const decoder = new TextDecoder("utf-8", { fatal: true });
+    try {
+      for (; ; ) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        size += value.byteLength;
+        if (size > 4096) {
+          await reader.cancel();
+          throw fail("CLOUD_INVALID_RESPONSE", "The connection response is too large.");
+        }
+        text3 += decoder.decode(value, { stream: true });
+      }
+      text3 += decoder.decode();
+      return JSON.parse(text3);
+    } catch (error4) {
+      throw error4.code ? error4 : fail("CLOUD_INVALID_RESPONSE", "The connection response is invalid.");
+    } finally {
+      reader.releaseLock();
+    }
+  }
+  async function readTarget(tabId2) {
+    const tab = await host.chrome.tabs.get(tabId2);
+    const results = await host.chrome.scripting.executeScript({ target: { tabId: tabId2, frameIds: [0] }, func: cloudDocumentSnapshot });
+    const top = results?.find((result) => result.frameId === 0);
+    const conversationId = cloudConversation(top?.result?.url);
+    if (!conversationId || cloudConversation(tab.url) !== conversationId || typeof top.documentId !== "string" || !top.documentId)
+      throw fail("BROWSER_CONTEXT_REQUIRED", "Open a saved ChatGPT conversation in desktop Chrome.");
+    const copies = (await host.chrome.tabs.query({})).filter((other) => cloudConversation(other.url) === conversationId);
+    if (copies.length !== 1 || copies[0].id !== tabId2) throw fail("BROWSER_CONTEXT_AMBIGUOUS", "Close duplicate copies of this conversation before connecting.");
+    return { tabId: tabId2, documentId: top.documentId, conversationId };
+  }
+  function live(target) {
+    const bound = bindings.get(target?.bindingId);
+    if (!bound || bound.expiresAt <= now() || !socket || socket.readyState !== 1 || bound.tabId !== target.tabId || bound.documentId !== target.documentId || bound.conversationId !== target.conversationId)
+      throw fail("BROWSER_BINDING_CHANGED", "The original browser connection ended. Reconnect this chat; no alternate destination was selected.");
+  }
+  async function verifyTarget(target) {
+    live(target);
+    const current = await readTarget(target.tabId);
+    live(target);
+    if (current.documentId !== target.documentId || current.conversationId !== target.conversationId) {
+      invalidate(target.bindingId);
+      throw fail("BROWSER_TARGET_MISMATCH", "The original ChatGPT document changed. Reconnect this chat.");
+    }
+    await host.checkOwner?.(target.tabId);
+    live(target);
+    return current;
+  }
+  function invalidate(id2) {
+    const target = bindings.get(id2);
+    bindings.delete(id2);
+    if (target) void host.invalidated?.(target);
+  }
+  function invalidateAll() {
+    for (const id2 of [...bindings.keys()]) invalidate(id2);
+  }
+  function stopSocket() {
+    const old = socket;
+    socket = null;
+    if (heartbeat !== null) host.clearInterval(heartbeat);
+    heartbeat = null;
+    invalidateAll();
+    seen.clear();
+    for (const waiter of [...onlineWaiters]) waiter.reject(fail("EXTENSION_OFFLINE", "The extension connection ended."));
+    old?.close();
+  }
+  function retry() {
+    if (retryTimer !== null) return;
+    const delay2 = Math.min(6e4, 5e3 * 2 ** Math.min(attempts++, 4)) + Math.floor((host.random?.() ?? Math.random()) * 1e3);
+    nextRetryAt = now() + delay2;
+    retryTimer = host.setTimeout(() => {
+      retryTimer = null;
+      void start();
+    }, delay2);
+  }
+  async function start() {
+    if (opening || socket) return opening;
+    opening = (async () => {
+      const revision = generation;
+      if (now() < nextRetryAt) return;
+      const credential = await config();
+      if (revision !== generation) return;
+      if (!credential || credential.revoked) {
+        await publish(credential ? "error" : "not-configured", credential ? "EXTENSION_AUTHENTICATION_REQUIRED" : null);
+        return;
+      }
+      await publish("connecting");
+      try {
+        const ticket = await api("/api/relay-ticket", {}, credential);
+        if (revision !== generation) return;
+        if (!SECRET.test(ticket.ticket) || !Number.isFinite(ticket.expiresAt) || ticket.expiresAt <= now()) throw fail("CLOUD_INVALID_RESPONSE", "The relay ticket is invalid.");
+        const ws = host.webSocket(base.replace(/^https:/, "wss:") + "/relay?ticket=" + encodeURIComponent(ticket.ticket));
+        socket = ws;
+        const openingTimeout = host.setTimeout(() => {
+          if (socket === ws && ws.readyState !== 1) ws.close();
+        }, 15e3);
+        ws.onopen = () => {
+          host.clearTimeout(openingTimeout);
+          if (socket !== ws || revision !== generation) {
+            ws.close();
+            return;
+          }
+          openedAt = lastPong = now();
+          attempts = 0;
+          nextRetryAt = 0;
+          for (const waiter of [...onlineWaiters]) waiter.resolve();
+          void publish("ready");
+          heartbeat = host.setInterval(() => {
+            if (socket !== ws) return;
+            if (now() - lastPong > 6e4 || now() - openedAt > 55 * 6e4 && !pending.size) {
+              ws.close();
+              return;
+            }
+            try {
+              ws.send("ping");
+            } catch {
+              ws.close();
+            }
+          }, 2e4);
+        };
+        ws.onmessage = (event) => {
+          if (socket !== ws || revision !== generation) return;
+          if (event.data === "pong") {
+            lastPong = now();
+            return;
+          }
+          void receive(event.data, ws, credential).catch(() => ws.close());
+        };
+        ws.onerror = () => ws.close();
+        ws.onclose = () => {
+          host.clearTimeout(openingTimeout);
+          if (socket !== ws) return;
+          stopSocket();
+          void publish("offline", "CLOUD_DISCONNECTED");
+          retry();
+        };
+      } catch (error4) {
+        if (revision !== generation) return;
+        if (error4.code === "EXTENSION_AUTHENTICATION_REQUIRED") {
+          await local.set({ [KEY]: { ...credential, revoked: true } });
+          await publish("error", error4.code);
+        } else {
+          await publish("offline", "CLOUD_UNAVAILABLE");
+          retry();
+        }
+      }
+    })().finally(() => {
+      opening = null;
+    });
+    return opening;
+  }
+  async function receive(data, ws, credential) {
+    if (typeof data !== "string" || new TextEncoder().encode(data).length > 1048576) throw fail("CLOUD_PROTOCOL_ERROR", "Invalid relay message.");
+    const message = JSON.parse(data);
+    if (message.type === "invalidate" && UUID.test(message.bindingId) && Object.keys(message).length === 2) {
+      invalidate(message.bindingId);
+      return;
+    }
+    const target = message.target;
+    if (message.type !== "request" || !UUID.test(message.requestId) || !target || target.installationId !== credential.installationId || !UUID.test(target.bindingId) || typeof target.session !== "string" || target.session.length > 512 || !target.session || message.request?.jsonrpc !== "2.0" || message.request.method !== "tools/call" || !message.request.params || typeof message.request.params.name !== "string" || !message.request.params.arguments || typeof message.request.params.arguments !== "object" || Array.isArray(message.request.params.arguments))
+      throw fail("CLOUD_PROTOCOL_ERROR", "Invalid relay request.");
+    if (seen.has(message.requestId)) return;
+    seen.add(message.requestId);
+    if (seen.size > 4096) {
+      ws.close();
+      return;
+    }
+    if (pending.size >= 100) {
+      ws.close();
+      return;
+    }
+    pending.add(message.requestId);
+    const replyTarget = { tabId: target.tabId, documentId: target.documentId, conversationId: target.conversationId };
+    let response;
+    try {
+      await verifyTarget(target);
+      const args = message.request.params.arguments;
+      if (args.chatTabId !== void 0 && args.chatTabId !== target.tabId || args.tabId !== void 0 && !SOURCE_TABS.has(message.request.params.name) && args.tabId !== target.tabId)
+        throw fail("BROWSER_TARGET_MISMATCH", "The request points to a different chat.");
+      requests.set(message.requestId, structuredClone(target));
+      const result = await host.dispatch({
+        jsonrpc: "2.0",
+        method: "tools/call",
+        id: message.requestId,
+        params: { name: message.request.params.name, arguments: { ...args } }
+      });
+      await verifyTarget(target);
+      response = result?.error ? { error: { code: -32603, message: "The extension could not execute this request." } } : { result: result.result };
+    } catch {
+      response = { error: { code: -32e3, message: "The original browser context is unavailable or changed. Check ResearchTube connection status. The operation was not retried." } };
+    } finally {
+      requests.delete(message.requestId);
+      pending.delete(message.requestId);
+    }
+    if (socket !== ws || ws.readyState !== 1) return;
+    const text3 = JSON.stringify({ type: "response", requestId: message.requestId, target: replyTarget, ...response });
+    if (new TextEncoder().encode(text3).length > 1048576) {
+      ws.send(JSON.stringify({ type: "response", requestId: message.requestId, target: replyTarget, error: { code: -32e3, message: "The tool response exceeded the relay limit. Request a smaller result." } }));
+    } else ws.send(text3);
+  }
+  async function bind(message, sender) {
+    if (sender?.id !== host.chrome.runtime.id || !Number.isInteger(sender.tab?.id) || !cloudConversation(sender.tab.url) || !SECRET.test(message.nonce)) throw fail("BROWSER_CONTEXT_REQUIRED", "A verified ResearchTube widget in ChatGPT Chrome is required.");
+    const target = await readTarget(sender.tab.id);
+    await host.checkOwner?.(target.tabId, true);
+    let credential = await config();
+    if (!credential || credential.revoked) {
+      await autoEnroll(message.nonce);
+      credential = await config();
+    }
+    await waitOnline();
+    if (!credential || !socket || socket.readyState !== 1) throw fail("EXTENSION_OFFLINE", "The extension could not connect to ResearchTube.");
+    const revision = generation, ws = socket;
+    const prepared = await readTarget(sender.tab.id);
+    if (prepared.documentId !== target.documentId || prepared.conversationId !== target.conversationId) throw fail("BROWSER_TARGET_MISMATCH", "The chat changed during automatic connection.");
+    const receipt = await api("/api/browser/bind", { nonce: message.nonce, target }, credential);
+    const current = await readTarget(sender.tab.id);
+    if (revision !== generation || socket !== ws || current.documentId !== target.documentId || current.conversationId !== target.conversationId) {
+      if (UUID.test(receipt.bindingId)) await api("/api/browser/release", { bindingId: receipt.bindingId }, credential).catch(() => {
+      });
+      throw fail("BROWSER_TARGET_MISMATCH", "The chat changed during connection.");
+    }
+    if (!UUID.test(receipt.bindingId) || !Number.isFinite(receipt.expiresAt) || receipt.expiresAt <= now()) throw fail("CLOUD_INVALID_RESPONSE", "The browser binding is invalid.");
+    for (const [id2, previous] of bindings) if (previous.tabId === target.tabId && id2 !== receipt.bindingId) invalidate(id2);
+    bindings.set(receipt.bindingId, { ...target, ...receipt });
+    return { ok: true };
+  }
+  async function waitOnline() {
+    await start();
+    if (socket?.readyState === 1) return;
+    await new Promise((resolve, reject) => {
+      const finish = (callback) => (value) => {
+        host.clearTimeout(timer);
+        onlineWaiters.delete(waiter);
+        callback(value);
+      };
+      const waiter = { resolve: finish(resolve), reject: finish(reject) };
+      const timer = host.setTimeout(() => waiter.reject(fail("EXTENSION_OFFLINE", "The extension connection timed out.")), 15e3);
+      onlineWaiters.add(waiter);
+    });
+  }
+  async function finishAutomatic(error4 = null) {
+    const current = automatic;
+    if (!current) return;
+    automatic = null;
+    host.clearTimeout(current.timer);
+    const stored = (await session.get({ [SESSION_KEY]: null }))[SESSION_KEY];
+    if (stored?.nonce === current.nonce) await session.remove(SESSION_KEY);
+    if (Number.isInteger(current.tabId)) host.setTimeout(() => {
+      void host.chrome.tabs.remove(current.tabId).catch(() => {
+      });
+    }, 100);
+    if (error4) current.reject(error4);
+    else current.resolve();
+    if (error4) await publish("error", error4.code || "CLOUD_UNAVAILABLE");
+  }
+  async function autoEnroll(pairingNonce) {
+    if (automatic) return automatic.promise;
+    const nonce = host.uuid();
+    const transaction = { nonce, tabId: null };
+    transaction.promise = new Promise((resolve, reject) => {
+      transaction.resolve = resolve;
+      transaction.reject = reject;
+    });
+    void transaction.promise.catch(() => {
+    });
+    automatic = transaction;
+    transaction.timer = host.setTimeout(() => {
+      void finishAutomatic(fail("CLOUD_UNAVAILABLE", "Automatic pairing timed out. Check the connection and reconnect this chat."));
+    }, 25e3);
+    try {
+      await beginEnrollment({ automatic: true, pairingNonce, transaction });
+    } catch (error4) {
+      await finishAutomatic(error4);
+    }
+    return transaction.promise;
+  }
+  async function beginEnrollment(options = {}) {
+    if (!options.automatic) await finishAutomatic(fail("ENROLLMENT_INVALID", "Automatic pairing was replaced."));
+    const nonce = options.transaction?.nonce || host.uuid();
+    const url = base + "/setup?" + new URLSearchParams({ extensionId: host.chrome.runtime.id, nonce });
+    const tab = await host.chrome.tabs.create({ url: "about:blank", active: !options.automatic });
+    if (options.transaction) options.transaction.tabId = tab.id;
+    await session.set({ [SESSION_KEY]: {
+      nonce,
+      tabId: tab.id,
+      expiresAt: now() + (options.automatic ? 25e3 : 10 * 6e4),
+      ...options.automatic ? { automatic: true, pairingNonce: options.pairingNonce } : {}
+    } });
+    await host.chrome.tabs.update(tab.id, { url });
+    return { ok: true };
+  }
+  let enrollmentTail = Promise.resolve();
+  function external(message, sender) {
+    const work = enrollmentTail.catch(() => {
+    }).then(async () => {
+      const fields2 = message?.type === "researchtube_setup_ready" ? ["type", "nonce"] : message?.type === "researchtube_setup_failed" ? ["type", "nonce", "errorCode"] : ["type", "nonce", "installationId", "installationToken"];
+      if (!message || Object.keys(message).some((key) => !fields2.includes(key))) throw fail("ENROLLMENT_INVALID", "Invalid setup message.");
+      const pending2 = (await session.get({ [SESSION_KEY]: null }))[SESSION_KEY];
+      let url;
+      try {
+        url = new URL(sender?.url);
+      } catch {
+      }
+      if (!pending2 || pending2.expiresAt <= now() || pending2.nonce !== message.nonce || sender?.id || sender?.frameId !== 0 || sender.tab?.id !== pending2.tabId || url?.origin !== base || url.pathname !== "/setup" || url.searchParams.get("nonce") !== pending2.nonce || url.searchParams.get("extensionId") !== host.chrome.runtime.id)
+        throw fail("ENROLLMENT_INVALID", "Reconnect this chat in ChatGPT.");
+      if (message.type === "researchtube_setup_ready") return {
+        ok: true,
+        extensionOrigin: "chrome-extension://" + host.chrome.runtime.id,
+        ...pending2.automatic ? { automatic: true, pairingNonce: pending2.pairingNonce } : {}
+      };
+      if (message.type === "researchtube_setup_failed" && pending2.automatic) {
+        const code = ["BROWSER_SIGN_IN_REQUIRED", "BROWSER_ACCOUNT_MISMATCH"].includes(message.errorCode) ? message.errorCode : "CLOUD_UNAVAILABLE";
+        await finishAutomatic(fail(code, "Automatic extension pairing needs this browser's matching ResearchTube sign-in."));
+        return { ok: true };
+      }
+      if (message.type !== "researchtube_setup_complete" || !UUID.test(message.installationId) || !SECRET.test(message.installationToken))
+        throw fail("ENROLLMENT_INVALID", "The installation credential is invalid.");
+      const credential = { installationId: message.installationId, installationToken: message.installationToken };
+      const revision = generation;
+      const checked = await api("/api/installation/check", {}, credential);
+      if (checked.installationId !== credential.installationId) throw fail("ENROLLMENT_INVALID", "The installation does not match its credential.");
+      const current = (await session.get({ [SESSION_KEY]: null }))[SESSION_KEY];
+      if (revision !== generation || current?.nonce !== pending2.nonce || current.expiresAt <= now()) throw fail("ENROLLMENT_INVALID", "The pairing was cancelled or replaced.");
+      const previous = await config();
+      if (previous) await api("/api/installation/revoke", {}, previous).catch(() => {
+      });
+      if (revision !== generation) throw fail("ENROLLMENT_INVALID", "The pairing was cancelled.");
+      generation++;
+      stopSocket();
+      nextRetryAt = 0;
+      await local.set({ [KEY]: credential });
+      await session.remove(SESSION_KEY);
+      await opening?.catch(() => {
+      });
+      await start();
+      if (pending2.automatic) await finishAutomatic();
+      return { ok: true };
+    });
+    enrollmentTail = work.catch(() => {
+    });
+    return work;
+  }
+  async function disconnect() {
+    await finishAutomatic(fail("ENROLLMENT_INVALID", "The extension was disconnected."));
+    const credential = await config();
+    generation++;
+    stopSocket();
+    if (retryTimer !== null) host.clearTimeout(retryTimer);
+    retryTimer = null;
+    await local.remove(KEY);
+    await session.remove(SESSION_KEY);
+    await publish("not-configured");
+    if (credential) {
+      try {
+        await api("/api/installation/revoke", {}, credential);
+      } catch {
+        return { ok: true, remoteRevocationPending: true };
+      }
+    }
+    return { ok: true };
+  }
+  async function tabChanged(tabId2) {
+    const credential = await config();
+    for (const [id2, target] of [...bindings]) if (target.tabId === tabId2) {
+      invalidate(id2);
+      if (credential) void api("/api/browser/release", { bindingId: id2 }, credential).catch(() => {
+      });
+    }
+  }
+  async function suspend() {
+    generation++;
+    stopSocket();
+    if (retryTimer !== null) host.clearTimeout(retryTimer);
+    retryTimer = null;
+    nextRetryAt = 0;
+  }
+  return {
+    start,
+    status,
+    bind,
+    external,
+    beginEnrollment,
+    disconnect,
+    suspend,
+    tabChanged,
+    verifyTarget,
+    targetForRequest: (id2) => requests.get(id2) || null,
+    assertLive: live
+  };
 }
 
 // chat-composer.js
@@ -641,9 +800,9 @@ function normalizeTaskTabId(value) {
 }
 function createTaskCompletionDelivery(host) {
   let records = [], loaded = false, loading = null, ticking = false, writing = Promise.resolve();
-  const terminal3 = (task) => ["completed", "failed", "cancelled"].includes(task.status);
+  const terminal2 = (task) => ["completed", "failed", "cancelled"].includes(task.status);
   const save = () => {
-    const done = records.filter(terminal3);
+    const done = records.filter(terminal2);
     const remove = new Set(done.slice(0, Math.max(0, done.length - host.historyLimit())).map((task) => task.taskId));
     records = records.filter((task) => !remove.has(task.taskId));
     const snapshot = JSON.parse(JSON.stringify(records));
@@ -670,8 +829,7 @@ function createTaskCompletionDelivery(host) {
     task.chatCompletionHandled = true;
     await persist();
     try {
-      await host.verifyContext?.(task);
-      await host.send(task.tabId, { completionText: "ResearchTube task " + task.taskId + " completed.", beforeSend: () => host.verifyContext?.(task) });
+      await host.send(task.tabId, { completionText: "ResearchTube task " + task.taskId + " completed.", ...task.cloudTarget ? { cloudTarget: task.cloudTarget } : {} });
     } catch (error4) {
       host.log?.("Task completion notification stopped", { taskId: task.taskId, code: error4.code || "CHAT_UNAVAILABLE" });
     }
@@ -681,12 +839,12 @@ function createTaskCompletionDelivery(host) {
     if (tabId2 == null) return task;
     let record = records.find((item) => item.taskId === task.taskId);
     if (!record) {
-      record = { ...task, kind, tabId: tabId2, cloudTarget };
+      record = { ...task, kind, tabId: tabId2, ...cloudTarget ? { cloudTarget } : {} };
       records.push(record);
     } else Object.assign(record, task);
     await save();
     await completed(record, save);
-    if (!terminal3(record)) host.schedule(Math.max(250, record.pollIntervalMs || 1e3));
+    if (!terminal2(record)) host.schedule(Math.max(250, record.pollIntervalMs || 1e3));
     return { ...task, tabId: record.tabId };
   }
   async function observe(task) {
@@ -704,12 +862,12 @@ function createTaskCompletionDelivery(host) {
     ticking = true;
     try {
       for (const record of records) {
-        if (terminal3(record) || host.now() < (record.nextPollAt || 0)) continue;
+        if (terminal2(record) || host.now() < (record.nextPollAt || 0)) continue;
         record.nextPollAt = host.now() + Math.max(250, record.pollIntervalMs || 1e3);
         try {
           const task = await host.status(record.kind, record.taskId);
           if (task.taskId !== record.taskId) throw new Error("Another task returned");
-          if (terminal3(record)) continue;
+          if (terminal2(record)) continue;
           Object.assign(record, task);
           await save();
           await completed(record, save);
@@ -717,11 +875,11 @@ function createTaskCompletionDelivery(host) {
           host.log?.("Background task poll unavailable", { taskId: record.taskId, code: error4.code || "AGENT_UNAVAILABLE" });
         }
       }
-      const done = records.filter(terminal3);
+      const done = records.filter(terminal2);
       const remove = new Set(done.slice(0, Math.max(0, done.length - host.historyLimit())).map((task) => task.taskId));
       records = records.filter((task) => !remove.has(task.taskId));
       await save();
-      if (records.some((task) => !terminal3(task))) host.schedule(1e3);
+      if (records.some((task) => !terminal2(task))) host.schedule(1e3);
     } finally {
       ticking = false;
     }
@@ -1427,9 +1585,9 @@ function createBrowserPage(session, host) {
 // task-history.js
 function pruneCompletedTasks(tasks, maximum = 2e3) {
   if (!Number.isSafeInteger(maximum) || maximum < 1) maximum = 2e3;
-  const terminal3 = [...tasks.values()].filter((task) => ["completed", "failed", "cancelled"].includes(task.status));
-  terminal3.sort((a, b) => String(a.updatedAt || a.createdAt).localeCompare(String(b.updatedAt || b.createdAt)));
-  for (const task of terminal3.slice(0, Math.max(0, terminal3.length - maximum))) tasks.delete(task.taskId);
+  const terminal2 = [...tasks.values()].filter((task) => ["completed", "failed", "cancelled"].includes(task.status));
+  terminal2.sort((a, b) => String(a.updatedAt || a.createdAt).localeCompare(String(b.updatedAt || b.createdAt)));
+  for (const task of terminal2.slice(0, Math.max(0, terminal2.length - maximum))) tasks.delete(task.taskId);
 }
 
 // browser-diagnostics.js
@@ -1931,17 +2089,20 @@ function createBrowserAgent(host) {
     for (const task of tasks.values()) if (task.groupId === group2.groupId && (task.tabId === tabId2 || task.chatTabId === tabId2)) cancelTask(task);
   }
   function checkTask(task, session) {
+    task.caller.cloudGuard?.assertLive?.();
     if (task.cancelRequested || ["stopped", "failed"].includes(session.group.state) || session.error || targets.get(session.agentTabId) !== session)
       throw browserError("BROWSER_CANCELLED", "The task was cancelled or its selected participant stopped. Existing files and attachments were preserved.");
   }
   async function waitRunning(task, session) {
     checkTask(task, session);
+    await task.caller.cloudGuard?.();
     await groups.check(session.group, task.chatTabId, task.caller.chatPath);
     await check(session);
     if (session.group.state === "starting") throw browserError("BROWSER_SESSION_NOT_READY", "Wait for study initialization.");
     checkTask(task, session);
   }
   async function check(session, mutation = false) {
+    await session.operation?.cloudGuard?.();
     if (session.error) throw browserError(session.error.code, session.error.message);
     if (targets.get(session.agentTabId) !== session) throw browserError("TAB_LEFT_GROUP", "This page no longer belongs to the current group automation.");
     const tab = await groups.check(session.group, session.agentTabId);
@@ -2002,9 +2163,9 @@ function createBrowserAgent(host) {
       try {
         await host.attach(target.agentTabId);
       } catch (error4) {
-        const failure2 = browserAttachmentError(error4);
-        target.trace.event("target.attachFailed", { tabId: target.agentTabId, code: failure2.code });
-        throw failure2;
+        const failure = browserAttachmentError(error4);
+        target.trace.event("target.attachFailed", { tabId: target.agentTabId, code: failure.code });
+        throw failure;
       }
       target.attached = true;
       try {
@@ -2272,7 +2433,7 @@ function createBrowserAgent(host) {
         checkTask(task, session);
         const continuation = `Requested browser resource(s) ${task.resourceIds.join(", ")} attached. Continue the current Study Page task using chatTabId: ${task.chatTabId} and source tabId: ${task.tabId}.`;
         await host.attachFiles(files, {
-          target: { tabId: task.chatTabId, chatPath: task.caller.chatPath, ...task.caller.cloudTarget ? { cloudTarget: task.caller.cloudTarget } : {} },
+          target: { tabId: task.chatTabId, chatPath: task.caller.chatPath, ...task.caller.cloudGuard?.target ? { cloudTarget: task.caller.cloudGuard.target } : {} },
           continuation,
           trace: session.trace,
           taskId: task.taskId,
@@ -2311,10 +2472,11 @@ function createBrowserAgent(host) {
       pruneCompletedTasks(tasks, host.historyLimit?.() || 2e3);
     }
   }
-  async function execute(name2, argumentsValue, cloudTarget = null) {
+  async function execute(name2, argumentsValue, cloudGuard = null) {
+    await cloudGuard?.();
     const input = validateBrowserInput(name2, argumentsValue);
     const { group: group2, member: member2 } = await groups.forChat(input.chatTabId);
-    const result = await executeInGroup(name2, input, group2, member2, cloudTarget);
+    const result = await executeInGroup(name2, input, group2, member2, cloudGuard);
     await groups.check(group2, input.chatTabId, member2.chatPath, { allowStopped: true });
     const fullSnapshot = ["site_list_tabs", "site_session_status"].includes(name2) && result.group.revision === group2.revision;
     const changes2 = groups.reportChanges(group2, fullSnapshot);
@@ -2322,8 +2484,8 @@ function createBrowserAgent(host) {
     changes2.commit();
     return response;
   }
-  async function executeInGroup(name2, input, group2, member2, cloudTarget = null) {
-    const caller = { group: group2, cloudTarget, chatTabId: input.chatTabId, chatPath: member2.chatPath, tool: name2, action: input.action };
+  async function executeInGroup(name2, input, group2, member2, cloudGuard) {
+    const caller = { group: group2, chatTabId: input.chatTabId, chatPath: member2.chatPath, tool: name2, action: input.action, cloudGuard };
     if (["site_list_tabs", "site_session_status"].includes(name2)) {
       return { chatTabId: input.chatTabId, group: groups.project(group2, input.offset, input.limit) };
     }
@@ -2557,7 +2719,7 @@ function createChatContext(host) {
   const tasks = /* @__PURE__ */ new Map();
   const now = host.now || Date.now;
   const document2 = (task) => structuredClone(Object.fromEntries(["taskId", "status", "phase", "progressPercent", "pollIntervalMs", "chatTabId", "group", "error"].map((key) => [key, task[key]])));
-  function fail3(task, code, message) {
+  function fail4(task, code, message) {
     if (task.status === "cancelled") return;
     task.status = "failed";
     task.phase = "failed";
@@ -2569,7 +2731,7 @@ function createChatContext(host) {
     }
   }
   function expire(task) {
-    if (task.status === "working" && now() >= task.deadline) fail3(task, "BROWSER_CONTEXT_TIMEOUT", "The chat widget did not identify its tab within 30 seconds. Retry after the widget loads.");
+    if (task.status === "working" && now() >= task.deadline) fail4(task, "BROWSER_CONTEXT_TIMEOUT", "The chat widget did not identify its tab within 30 seconds. Retry after the widget loads.");
   }
   async function verify(target) {
     const tab = await host.getTab(target.tabId).catch(() => {
@@ -2623,7 +2785,7 @@ function createChatContext(host) {
         if (["stopped", "failed"].includes(context2.group.state)) throw browserError("BROWSER_SESSION_STOPPED", "Group automation stopped. Call without taskId to connect again.");
         task.group = context2.group;
       } catch (error4) {
-        fail3(task, error4.code || "BROWSER_UNAVAILABLE", error4.code ? error4.message : "The bound group could not be inspected.");
+        fail4(task, error4.code || "BROWSER_UNAVAILABLE", error4.code ? error4.message : "The bound group could not be inspected.");
       }
     }
     return document2(task);
@@ -2640,7 +2802,7 @@ function createChatContext(host) {
     const chatPath = host.conversationPath(sender.tab.url);
     if (!chatPath || /\/c\/local-chatgpt(?:%3A|:)/i.test(chatPath)) {
       const error4 = browserError("BROWSER_SESSION_NOT_READY", "Wait for ChatGPT to save this conversation, then connect again.");
-      if (task.status === "working") fail3(task, error4.code, error4.message);
+      if (task.status === "working") fail4(task, error4.code, error4.message);
       throw error4;
     }
     if (task.target && (task.target.tabId !== sender.tab.id || task.target.chatPath !== chatPath)) throw browserError("BROWSER_CHAT_CHANGED", "This binding belongs to another tab or conversation.");
@@ -2671,7 +2833,7 @@ function createChatContext(host) {
         task.progressPercent = 100;
         return { ok: true, context: document2(task) };
       } catch (error4) {
-        if (task.status === "working") fail3(task, error4.code || "BROWSER_UNAVAILABLE", error4.code ? error4.message : "Unable to connect this tab group.");
+        if (task.status === "working") fail4(task, error4.code || "BROWSER_UNAVAILABLE", error4.code ? error4.message : "Unable to connect this tab group.");
         throw error4;
       }
     })();
@@ -2809,33 +2971,33 @@ function timerDefinitions(readAnnotations, writeAnnotations) {
     }
   ];
 }
-function fail(message, code = "TIMER_INVALID") {
+function fail2(message, code = "TIMER_INVALID") {
   throw Object.assign(new Error(message), { code });
 }
 var plain = (value) => value && typeof value === "object" && !Array.isArray(value);
 function validateTimerInput(name2, value) {
-  if (!plain(value)) fail("Timer input must be an object.");
+  if (!plain(value)) fail2("Timer input must be an object.");
   if (name2 !== "timer_start") {
-    if (Object.keys(value).length !== 1 || typeof value.taskId !== "string" || !/^tsk_[A-Za-z0-9_-]{10}$/.test(value.taskId)) fail("Use the unchanged taskId returned by timer_start.");
+    if (Object.keys(value).length !== 1 || typeof value.taskId !== "string" || !/^tsk_[A-Za-z0-9_-]{10}$/.test(value.taskId)) fail2("Use the unchanged taskId returned by timer_start.");
     return { taskId: value.taskId };
   }
-  if (Object.keys(value).some((key) => !["duration", "unit", "until", "timeZone", "clockSource"].includes(key)) || Object.hasOwn(value, "duration") === Object.hasOwn(value, "until")) fail("Specify exactly one of duration or until and no unsupported fields.");
-  if (value.clockSource !== void 0 && !["system", "internet"].includes(value.clockSource)) fail("clockSource must be system or internet.");
+  if (Object.keys(value).some((key) => !["duration", "unit", "until", "timeZone", "clockSource"].includes(key)) || Object.hasOwn(value, "duration") === Object.hasOwn(value, "until")) fail2("Specify exactly one of duration or until and no unsupported fields.");
+  if (value.clockSource !== void 0 && !["system", "internet"].includes(value.clockSource)) fail2("clockSource must be system or internet.");
   if (value.timeZone !== void 0) {
     try {
       new Intl.DateTimeFormat("en", { timeZone: value.timeZone });
     } catch {
-      fail("timeZone must be an available IANA time zone.");
+      fail2("timeZone must be an available IANA time zone.");
     }
-    if (typeof value.timeZone !== "string" || !value.timeZone) fail("timeZone must be a nonempty IANA name.");
+    if (typeof value.timeZone !== "string" || !value.timeZone) fail2("timeZone must be a nonempty IANA name.");
   }
   if (Object.hasOwn(value, "duration")) {
-    if (typeof value.duration !== "number" || !Number.isFinite(value.duration) || value.duration < 0 || value.unit !== void 0 && !["seconds", "minutes", "hours"].includes(value.unit)) fail("duration must be nonnegative and finite; unit must be seconds, minutes or hours.");
-  } else if (Object.hasOwn(value, "unit") || typeof value.until !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})?$/.test(value.until)) fail("until must contain a complete ISO date/time including seconds; omit unit.");
+    if (typeof value.duration !== "number" || !Number.isFinite(value.duration) || value.duration < 0 || value.unit !== void 0 && !["seconds", "minutes", "hours"].includes(value.unit)) fail2("duration must be nonnegative and finite; unit must be seconds, minutes or hours.");
+  } else if (Object.hasOwn(value, "unit") || typeof value.until !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})?$/.test(value.until)) fail2("until must contain a complete ISO date/time including seconds; omit unit.");
   return { ...value };
 }
 function project(schema, value) {
-  const bad = () => fail("The Local Agent returned invalid timer metadata.", "AGENT_INVALID_RESPONSE");
+  const bad = () => fail2("The Local Agent returned invalid timer metadata.", "AGENT_INVALID_RESPONSE");
   if (schema.anyOf) {
     for (const child of schema.anyOf) {
       try {
@@ -2868,9 +3030,9 @@ function project(schema, value) {
 function normalizeTimerResult(name2, value) {
   const result = project(name2 === "timer_cancel" ? object3({ task: timerTaskSchema, cancelled: { type: "boolean" } }) : timerTaskSchema, value);
   const task = name2 === "timer_cancel" ? result.task : result;
-  if (task.status === "working" && !["preparing", "waiting"].includes(task.phase) || task.status !== "working" && task.phase !== task.status || task.status === "completed" && (task.progressPercent !== 100 || task.remainingSeconds !== 0) || task.status !== "failed" && task.error !== null || task.warningCount < task.warnings.length || task.clockSource === "system" && task.clockSync !== null) fail("The Local Agent returned inconsistent timer metadata.", "AGENT_INVALID_RESPONSE");
+  if (task.status === "working" && !["preparing", "waiting"].includes(task.phase) || task.status !== "working" && task.phase !== task.status || task.status === "completed" && (task.progressPercent !== 100 || task.remainingSeconds !== 0) || task.status !== "failed" && task.error !== null || task.warningCount < task.warnings.length || task.clockSource === "system" && task.clockSync !== null) fail2("The Local Agent returned inconsistent timer metadata.", "AGENT_INVALID_RESPONSE");
   for (const key of ["createdAtUtc", "startedAtUtc", "currentUtc", "targetUtc", "completedAtUtc"]) {
-    if (task[key] !== null && (!/Z$/.test(task[key]) || !Number.isFinite(Date.parse(task[key])))) fail("The Local Agent returned invalid UTC timer metadata.", "AGENT_INVALID_RESPONSE");
+    if (task[key] !== null && (!/Z$/.test(task[key]) || !Number.isFinite(Date.parse(task[key])))) fail2("The Local Agent returned invalid UTC timer metadata.", "AGENT_INVALID_RESPONSE");
   }
   return result;
 }
@@ -2926,7 +3088,7 @@ var ARTIFACT_CANCEL_TOOLS = Object.freeze({
   media_clip_cancel_task: "media_clip",
   system_speech_cancel: "system_speech_speak"
 });
-var terminal2 = (status) => ["completed", "failed", "cancelled"].includes(status);
+var terminal = (status) => ["completed", "failed", "cancelled"].includes(status);
 var object4 = (properties, required = Object.keys(properties)) => ({ type: "object", additionalProperties: false, properties, required });
 var errorSchema = object4({ code: { type: "string" }, message: { type: "string" } });
 var nullable = (schema) => ({ anyOf: [schema, { type: "null" }] });
@@ -3010,12 +3172,12 @@ function createArtifactTaskManager(host) {
     await persist();
     host.report(document2(task));
   }
-  async function finish(task, status, failure2 = null) {
+  async function finish(task, status, failure = null) {
     task.status = status;
     task.phase = status;
-    task.error = failure2;
+    task.error = failure;
     delete task.input;
-    task.statusMessage = failure2?.message ?? (status === "completed" && task.addToChat ? "All requested stages completed." : artifactOperationMessage(task.tool, status));
+    task.statusMessage = failure?.message ?? (status === "completed" && task.addToChat ? "All requested stages completed." : artifactOperationMessage(task.tool, status));
     if (status === "completed") task.progressPercent = 100;
     await host.unschedule(task.taskId);
     if (status !== "completed" && task.chatTaskId) {
@@ -3035,7 +3197,7 @@ function createArtifactTaskManager(host) {
       tasks = new Map((await host.load()).filter((t) => t && ARTIFACT_TOOLS.includes(t.tool) && /^tsk_[A-Za-z0-9_-]{10}$/.test(t.taskId)).map((t) => [t.taskId, t]));
       loaded = true;
       for (const task of tasks.values()) {
-        if (terminal2(task.status)) continue;
+        if (terminal(task.status)) continue;
         if (task.creation.status !== "completed" && !task.creation.taskId) {
           await finish(task, "failed", publicError(error4("MEDIA_ARTIFACT_INTERRUPTED", "The Extension restarted during file creation. Check the Workspace before retrying; creation is not replayed.")));
         } else await host.schedule(task.taskId, 1);
@@ -3067,7 +3229,7 @@ function createArtifactTaskManager(host) {
   async function advance(id2) {
     await ensure();
     const task = tasks.get(id2);
-    if (!task || terminal2(task.status) || running.has(id2)) return;
+    if (!task || terminal(task.status) || running.has(id2)) return;
     running.add(id2);
     try {
       const producer = host.producers[task.tool];
@@ -3091,7 +3253,7 @@ function createArtifactTaskManager(host) {
         }
         delete task.input;
         await acceptCreation(task, data);
-        if (task.cancelRequested && producer.cancel && !terminal2(task.creation.status)) {
+        if (task.cancelRequested && producer.cancel && !terminal(task.creation.status)) {
           await producer.cancel(task.creation.taskId);
           task.nativeCancelSent = true;
         }
@@ -3101,14 +3263,14 @@ function createArtifactTaskManager(host) {
         if (data.status === "rejected") throw data.error;
         if (data.taskId !== task.creation.taskId) throw error4("AGENT_INVALID_RESPONSE", "The Agent returned another native creation task. No files were selected for delivery.");
         await acceptCreation(task, data);
-        if (task.cancelRequested && !task.nativeCancelSent && !terminal2(task.creation.status)) {
+        if (task.cancelRequested && !task.nativeCancelSent && !terminal(task.creation.status)) {
           await producer.cancel(task.creation.taskId);
           task.nativeCancelSent = true;
         }
       }
       if (task.addToChat && !task.chatReleased) task.chat = await host.chatStatus(task.chatTaskId);
       task.tabId ??= task.chat?.tabId ?? null;
-      if (!terminal2(task.creation.status)) {
+      if (!terminal(task.creation.status)) {
         task.phase = task.cancelRequested ? "cancelling" : task.creation.phase;
         task.statusMessage = task.cancelRequested ? artifactOperationMessage(task.tool, "cancelling") : task.creation.data?.statusMessage || artifactOperationMessage(task.tool);
         task.nextCreationPoll = host.now() + Math.max(1e3, task.creation.data?.pollIntervalMs ?? 1e3);
@@ -3140,19 +3302,19 @@ function createArtifactTaskManager(host) {
       task.phase = task.chat.phase === "queued" ? "chatPreparing" : task.chat.phase;
       task.statusMessage = task.chat.message;
       task.progressPercent = Math.max(task.progressPercent, 70 + task.chat.progressPercent * 0.29);
-      if (terminal2(task.chat.status)) {
+      if (terminal(task.chat.status)) {
         await finish(task, task.chat.status, task.chat.error ? publicError(error4("MEDIA_ARTIFACT_CHAT_FAILED", task.chat.error)) : null);
         return;
       }
       await save(task);
       await host.schedule(id2, 1e3);
-    } catch (failure2) {
+    } catch (failure) {
       if (task.creation.status !== "completed") {
         task.creation.status = "failed";
         task.creation.phase = "failed";
-        task.creation.error = publicError(failure2);
+        task.creation.error = publicError(failure);
       }
-      await finish(task, task.cancelRequested ? "cancelled" : "failed", task.cancelRequested ? null : publicError(failure2));
+      await finish(task, task.cancelRequested ? "cancelled" : "failed", task.cancelRequested ? null : publicError(failure));
     } finally {
       running.delete(id2);
     }
@@ -3216,7 +3378,7 @@ function createArtifactTaskManager(host) {
     async cancel(id2, tools = null) {
       await ensure();
       const task = get(id2, tools);
-      if (terminal2(task.status)) return { task: document2(task), cancelled: false };
+      if (terminal(task.status)) return { task: document2(task), cancelled: false };
       if (task.chatTaskId) {
         const result = await host.cancelChat(task.chatTaskId);
         task.chat = result.task ?? await host.chatStatus(task.chatTaskId);
@@ -3229,7 +3391,7 @@ function createArtifactTaskManager(host) {
       task.phase = "cancelling";
       task.statusMessage = artifactOperationMessage(task.tool, "cancelling");
       await save(task);
-      if (!terminal2(task.creation.status) && task.creation.taskId && !task.nativeCancelSent) {
+      if (!terminal(task.creation.status) && task.creation.taskId && !task.nativeCancelSent) {
         await host.producers[task.tool].cancel(task.creation.taskId);
         task.nativeCancelSent = true;
         await save(task);
@@ -3349,28 +3511,28 @@ function createMediaStreamHandler({ extensionUrl, getClient, resolveMedia, fetch
       return false;
     }
   };
-  const failure2 = (status, message) => new Response(message, {
+  const failure = (status, message) => new Response(message, {
     status,
     headers: { "Content-Type": "text/plain", "Cache-Control": "no-store" }
   });
   async function respond(event, url) {
     try {
       const request = event.request;
-      if (!["GET", "HEAD"].includes(request.method)) return failure2(405, "Only media reads are supported.");
+      if (!["GET", "HEAD"].includes(request.method)) return failure(405, "Only media reads are supported.");
       const client = event.clientId ? await getClient(event.clientId) : null;
-      if (!isViewer(client?.url || (!event.clientId ? request.referrer : ""))) return failure2(403, "The media request is not from a ResearchTube viewer.");
+      if (!isViewer(client?.url || (!event.clientId ? request.referrer : ""))) return failure(403, "The media request is not from a ResearchTube viewer.");
       if ([...url.searchParams.keys()].some((key) => !["path", "reload"].includes(key)) || url.searchParams.getAll("path").length !== 1 || (url.searchParams.get("reload") || "").length > 80) {
-        return failure2(400, "Invalid media request.");
+        return failure(400, "Invalid media request.");
       }
       const path = url.searchParams.get("path");
-      if (!path || path.length > 4096 || request.signal.aborted) return failure2(400, "Invalid or stopped media request.");
+      if (!path || path.length > 4096 || request.signal.aborted) return failure(400, "Invalid or stopped media request.");
       const media = await resolveMedia(path);
-      if (!["video", "audio"].includes(media?.metadata?.mediaKind)) return failure2(415, "This stream route supports video and audio.");
-      if (request.signal.aborted) return failure2(400, "Media request stopped.");
+      if (!["video", "audio"].includes(media?.metadata?.mediaKind)) return failure(415, "This stream route supports video and audio.");
+      if (request.signal.aborted) return failure(400, "Media request stopped.");
       const headers = new Headers();
       const range = request.headers.get("Range");
       if (range !== null) {
-        if (!/^bytes=(?:\d+-\d*|-\d+)$/.test(range)) return failure2(400, "Only one byte range is supported.");
+        if (!/^bytes=(?:\d+-\d*|-\d+)$/.test(range)) return failure(400, "Only one byte range is supported.");
         headers.set("Range", range);
       }
       const upstream = await fetchMedia(media.localAgentImageUrl, {
@@ -3384,7 +3546,7 @@ function createMediaStreamHandler({ extensionUrl, getClient, resolveMedia, fetch
       if (![200, 206, 416].includes(upstream.status)) {
         await upstream.body?.cancel();
         log("Agent response unavailable", { status: upstream.status });
-        return failure2(upstream.status === 404 ? 404 : 502, "The Local Agent could not stream this media.");
+        return failure(upstream.status === 404 ? 404 : 502, "The Local Agent could not stream this media.");
       }
       const outputHeaders = new Headers({ "Content-Type": media.metadata.mimeType, "Cache-Control": "no-store" });
       for (const name2 of ["Content-Length", "Content-Range", "Accept-Ranges"]) {
@@ -3399,7 +3561,7 @@ function createMediaStreamHandler({ extensionUrl, getClient, resolveMedia, fetch
       );
     } catch {
       log("media stream failed");
-      return failure2(502, "The Local Agent media stream is unavailable.");
+      return failure(502, "The Local Agent media stream is unavailable.");
     }
   }
   return (event) => {
@@ -3533,7 +3695,7 @@ function storyboardDefinitions(readAnnotations, writeAnnotations) {
     make(STORYBOARD_TOOL_NAMES[3], "Cancel storyboard download", "Cancel storyboard transfers; keep completely published sheets. Repeated cancellation returns terminal status.", object5({ taskId: taskId4 }), { type: "object", oneOf: [cancelSchema, rejected] }, true)
   ];
 }
-function fail2(code = "STORYBOARD_INVALID") {
+function fail3(code = "STORYBOARD_INVALID") {
   throw Object.assign(new Error(messages[code] || "The Agent returned invalid storyboard metadata."), { code });
 }
 var plain2 = (value) => value && typeof value === "object" && !Array.isArray(value);
@@ -3542,23 +3704,23 @@ var finite = (value) => typeof value === "number" && Number.isFinite(value);
 function validateStoryboardInput(name2, args) {
   const keys = name2.endsWith("get_info") ? ["videoId"] : name2.endsWith("download") ? ["videoId", "variantId", "selection"] : ["taskId"];
   const allowed = name2.endsWith("download") ? [...keys, "frameTimestampPosition"] : keys;
-  if (!plain2(args) || Object.keys(args).some((k) => !allowed.includes(k)) || keys.some((k) => !Object.hasOwn(args, k))) fail2();
+  if (!plain2(args) || Object.keys(args).some((k) => !allowed.includes(k)) || keys.some((k) => !Object.hasOwn(args, k))) fail3();
   if (keys.includes("taskId")) {
-    if (!matches(taskId4, args.taskId)) fail2();
+    if (!matches(taskId4, args.taskId)) fail3();
     return { taskId: args.taskId };
   }
-  if (!matches(videoId, args.videoId)) fail2();
+  if (!matches(videoId, args.videoId)) fail3();
   if (name2.endsWith("get_info")) return { videoId: args.videoId };
-  if (!matches(variantId, args.variantId) || !plain2(args.selection) || args.frameTimestampPosition !== void 0 && !timestampPositions.includes(args.frameTimestampPosition)) fail2();
+  if (!matches(variantId, args.variantId) || !plain2(args.selection) || args.frameTimestampPosition !== void 0 && !timestampPositions.includes(args.frameTimestampPosition)) fail3();
   const s = args.selection;
   const position = args.frameTimestampPosition === void 0 ? "bottomRight" : args.frameTimestampPosition;
   if (s.mode === "all" && Object.keys(s).length === 1) return { ...args, frameTimestampPosition: position, selection: { mode: "all" } };
   if (s.mode === "range" && Object.keys(s).length === 3 && finite(s.startSeconds) && finite(s.endSeconds) && 0 <= s.startSeconds && s.startSeconds <= s.endSeconds) return { ...args, frameTimestampPosition: position, selection: { mode: "range", startSeconds: s.startSeconds, endSeconds: s.endSeconds } };
   if (s.mode === "sheets" && Object.keys(s).length === 2 && Array.isArray(s.sheetIndexes) && s.sheetIndexes.length && s.sheetIndexes.every((i) => Number.isInteger(i) && i >= 0)) return { ...args, frameTimestampPosition: position, selection: { mode: "sheets", sheetIndexes: [...new Set(s.sheetIndexes)] } };
-  fail2();
+  fail3();
 }
 function normalizeStoryboardResult(name2, data) {
-  const bad = () => fail2("AGENT_INVALID_RESPONSE");
+  const bad = () => fail3("AGENT_INVALID_RESPONSE");
   if (!plain2(data)) bad();
   if (data.status === "rejected") {
     if (!messages[data.error?.code]) bad();
@@ -3615,28 +3777,15 @@ function normalizeStoryboardResult(name2, data) {
 }
 
 // background.js
-var CONTROL_PLANE_BASE_URL = "https://api.openai.com";
 var RESEARCHTUBE_HELP_GUIDE_URL = "https://github.com/ilinic/ResearchTube/blob/main/docs/HELP.md";
 var RESEARCHTUBE_HELP_PROMPT = `Read ${RESEARCHTUBE_HELP_GUIDE_URL} and use it to answer my ResearchTube setup, usage and troubleshooting questions in my language. Ask what I need help with.`;
 var EXTERNAL_URLS = Object.freeze({
-  tunnels: "https://platform.openai.com/settings/organization/tunnels",
-  apiKeys: "https://platform.openai.com/settings/organization/api-keys",
   chatgpt: "https://chatgpt.com/plugins",
   chatgptNewChat: "https://chatgpt.com/",
   chatgptSettings: "https://chatgpt.com/#settings",
   support: "https://ko-fi.com/ilinic"
 });
 var DEFAULTS = {
-  connectionMode: "tunnel",
-  serverInstallationId: "",
-  serverInstallationToken: "",
-  lastServerConnection: null,
-  serverEnrollment: null,
-  tunnelId: "",
-  runtimeApiKey: "",
-  onboardingCompleted: false,
-  lastConnectionTest: null,
-  lastTunnelConnection: null,
   agentPort: 17843,
   youtubeSearchCooldownUntil: 0,
   youtubeSearchCooldownLevel: 0
@@ -3775,7 +3924,6 @@ var GOOGLE_TRANSLATE_PLAYBACK_TIMEOUT_MS = 10 * 6e4;
 var AGENT_HEALTH_TIMEOUT_MS = 5e3;
 var AGENT_TASK_TIMEOUT_MS = 1e4;
 var AGENT_CAPTURE_FRAME_TIMEOUT_MS = 9e4;
-var POLL_RETRY_DELAY_MS = 250;
 var SEARCH_MIN_START_INTERVAL_MS = 500;
 var SEARCH_CACHE_TTL_MS = 5 * 6e4;
 var SEARCH_COOLDOWN_STEPS_MS = [2e3, 5e3, 1e4, 2e4, 4e4, 6e4];
@@ -3802,14 +3950,6 @@ var cameraRecordingBadgeKind = null;
 var cameraRecordingBadgeTaskId = null;
 var cameraRecordingBadgeVisible = false;
 var cameraRecordingBadgeTimer = null;
-var polling = false;
-var connectionRevision = 0;
-var connectionUpdateTail = Promise.resolve();
-var currentPollRevision = -1;
-var tunnelPollController = null;
-var currentPollPromise = null;
-var pollLoopScheduled = false;
-var pollLoopTimer = null;
 var lastSearchStartedAt = 0;
 var searchQueue = Promise.resolve();
 var searchQueueDepth = 0;
@@ -4918,7 +5058,7 @@ function toolDefinitions() {
     {
       name: "online_share_start",
       title: "Start an online share",
-      description: "Expose one Workspace file or a folder's selected fileTypes through a temporary public HTTPS tunnel. Replaces any prior share. verifyExternal tests an image via wsrv.nl; a folder requires probeWorkspacePath. externallyReachable is true only after that test succeeds.",
+      description: "Expose one Workspace file or a folder's selected fileTypes through a temporary public HTTPS link. Replaces any prior share. verifyExternal tests an image via wsrv.nl; a folder requires probeWorkspacePath. externallyReachable is true only after that test succeeds.",
       annotations: { ...localWorkspaceWriteAnnotations, openWorldHint: true },
       inputSchema: { type: "object", additionalProperties: false, properties: { folder: { type: "string", description: "Existing logical directory. Mutually exclusive with file; empty string means the workspace root." }, file: { type: "string", minLength: 1, description: "Existing logical file. Mutually exclusive with folder." }, fileTypes: { type: "array", minItems: 1, maxItems: 7, uniqueItems: true, items: workspaceShareFileTypeSchema, description: "Required only for a folder share; all cannot be combined with another category." }, verifyExternal: { type: "boolean", default: false, description: "Use wsrv.nl to verify external image reachability." }, probePath: { type: "string", minLength: 1, description: "Required only for a verified folder share: an allowed image inside folder." } }, oneOf: [{ required: ["folder", "fileTypes"], not: { required: ["file"] } }, { required: ["file"], not: { anyOf: [{ required: ["folder"] }, { required: ["fileTypes"] }, { required: ["probePath"] }] } }] },
       outputSchema: workspaceShareStatusSchema
@@ -4934,7 +5074,7 @@ function toolDefinitions() {
     {
       name: "online_share_stop",
       title: "Stop the online share",
-      description: "Close the public sharing server and tunnel. Workspace files remain.",
+      description: "Stop the temporary public share. Workspace files remain.",
       annotations: { ...localWorkspaceWriteAnnotations, openWorldHint: true },
       inputSchema: { type: "object", additionalProperties: false, properties: {} },
       outputSchema: workspaceShareStopSchema
@@ -6217,7 +6357,7 @@ async function cdpInsertBrowserContinuation(tabId2, currentChatTarget, fileNames
   if (confirmed !== true) throw localAgentError("BROWSER_CHAT_CHANGED", "The continuation could not be added to the Composer; files remain attached.");
   await assertCurrentChatComposer(currentChatTarget, { fileNames, guardToken: composerGuardToken, retryPolicy, checkCancelled });
 }
-async function cdpAttachFilesNow(filePathValues, { onPhase = null, currentChatTarget = null, deferSend = false, checkCancelled = null, onSendCommit = null, continuationText = null, beforeSend = null, trace = null } = {}) {
+async function cdpAttachFilesNow(filePathValues, { onPhase = null, currentChatTarget = null, deferSend = false, checkCancelled = null, onSendCommit = null, continuationText = null, beforeSend = null, beforeUpload = null, trace = null } = {}) {
   checkCancelled?.();
   if (!Array.isArray(filePathValues) || !filePathValues.length) {
     throw cdpError("A file batch must contain at least one eligible file.");
@@ -6270,6 +6410,8 @@ async function cdpAttachFilesNow(filePathValues, { onPhase = null, currentChatTa
       if (installed !== true) throw localAgentError("MEDIA_TO_CHAT_INVALID", "The Composer could not be monitored; no files were sent.");
       await assertCurrentChatComposer(currentChatTarget);
     }
+    checkCancelled?.();
+    await beforeUpload?.();
     checkCancelled?.();
     await cdpCommand(tab.id, "DOM.setFileInputFiles", { files: filePaths, backendNodeId: chooser.backendNodeId });
     cdpLog("DOM.setFileInputFiles completed", { tabId: tab.id, backendNodeId: chooser.backendNodeId, fileCount: filePaths.length });
@@ -6365,8 +6507,7 @@ function chatConversationPath(value) {
   return null;
 }
 async function requireCurrentChatTarget(target) {
-  if (target?.cloudTarget) await serverConnection.verify(target.cloudTarget);
-  else if (!target?.newChat && (await getConfig()).connectionMode === "server") throw localAgentError("BROWSER_BINDING_CHANGED", "Connect this chat again before sending files.");
+  if (target?.cloudTarget) await cloudConnection.verifyTarget(target.cloudTarget);
   if (!Number.isInteger(target?.tabId) || !target.chatPath) {
     throw localAgentError("MEDIA_TO_CHAT_TARGET_NOT_FOUND", "The originating ChatGPT tab could not be identified; no Composer changes were made.");
   }
@@ -6648,16 +6789,23 @@ async function drainLibraryStoreQueue() {
       if (!task || task.status !== "queued") continue;
       await updateLibraryStoreTask(task, "resolvingFiles", "Resolving the workspace file batch.");
       try {
+        if (task.cloudTarget) await cloudConnection.verifyTarget(task.cloudTarget);
         const { localPaths, submittedFiles, skippedFiles } = await resolveLibraryStoreFiles(task.files);
         task.skippedFiles = skippedFiles;
         if (!localPaths.length) {
           await updateLibraryStoreTask(task, "failed", `All ${skippedFiles.length} files exceed the configured per-file size limit; no files were submitted.`, { status: "failed", error: "All requested files exceed the configured per-file size limit." });
           continue;
         }
-        await withChatFileAutomation(() => cdpAttachFilesNow(localPaths, { onPhase: async (phase) => {
-          const messages2 = { attaching: "Attaching the file batch to the background ChatGPT Composer.", composerAccepted: "The ChatGPT Composer accepted the file batch.", submitting: "Sending the attached file batch to ChatGPT without Composer text." };
-          await updateLibraryStoreTask(task, phase, messages2[phase] || "Processing the attached file batch.");
-        } }));
+        const guard = task.cloudTarget ? () => cloudConnection.verifyTarget(task.cloudTarget) : null;
+        await withChatFileAutomation(() => cdpAttachFilesNow(localPaths, {
+          beforeUpload: guard,
+          beforeSend: guard,
+          checkCancelled: task.cloudTarget ? () => cloudConnection.assertLive(task.cloudTarget) : null,
+          onPhase: async (phase) => {
+            const messages2 = { attaching: "Attaching the file batch to the background ChatGPT Composer.", composerAccepted: "The ChatGPT Composer accepted the file batch.", submitting: "Sending the attached file batch to ChatGPT without Composer text." };
+            await updateLibraryStoreTask(task, phase, messages2[phase] || "Processing the attached file batch.");
+          }
+        }));
         task.submittedFiles = submittedFiles;
         task.libraryAvailability = "not_verified";
         await updateLibraryStoreTask(task, "submitted", `ResearchTube submitted ${submittedFiles.length} file(s) to ChatGPT; ${skippedFiles.length} over-limit file(s) skipped. Library completion cannot be verified.`, {
@@ -6809,6 +6957,7 @@ function normalizeMediaToChatSendDelay(value = 0) {
   return value;
 }
 function assertMediaToChatNotCancelled(task) {
+  if (task.target?.cloudTarget) cloudConnection.assertLive(task.target.cloudTarget);
   if (task.status === "cancelled") throw localAgentError("MEDIA_TO_CHAT_INVALID", "The files-to-chat task was cancelled. Composer contents were left unchanged.");
 }
 function commitMediaToChatSend(task) {
@@ -6958,8 +7107,6 @@ async function drainMediaToChatQueue() {
   }
 }
 async function mediaToChatStart(argumentsValue = {}, { awaitingArtifacts = false, cloudTarget = null } = {}) {
-  if (cloudTarget) await serverConnection.verify(cloudTarget);
-  const cloudChatPath = cloudTarget ? chatConversationPath((await chrome.tabs.get(cloudTarget.tabId)).url) : null;
   if (!argumentsValue || typeof argumentsValue !== "object" || Array.isArray(argumentsValue) || Object.keys(argumentsValue).some((name2) => !["files", "sendDelaySeconds", "tabId"].includes(name2))) {
     throw localAgentError("MEDIA_TO_CHAT_INVALID", "media_view accepts only files, sendDelaySeconds and optional tabId.");
   }
@@ -6978,10 +7125,9 @@ async function mediaToChatStart(argumentsValue = {}, { awaitingArtifacts = false
   const task = {
     taskId: taskId5,
     tabId: tabId2,
-    cloudTarget,
     suppressCompletionNotification: awaitingArtifacts,
     awaitingArtifacts,
-    target: cloudTarget ? { tabId: cloudTarget.tabId, chatPath: cloudChatPath, cloudTarget } : null,
+    target: null,
     bindingToken: crypto.randomUUID(),
     bindingDeadline: Date.now() + MEDIA_TO_CHAT_BIND_TIMEOUT_MS,
     sendDelaySeconds,
@@ -6999,9 +7145,16 @@ async function mediaToChatStart(argumentsValue = {}, { awaitingArtifacts = false
     message: "Waiting for the originating chat widget to identify its exact Chrome tab. Finish the current assistant response so Send can become available.",
     error: null
   };
+  if (cloudTarget) {
+    await cloudConnection.verifyTarget(cloudTarget);
+    if (tabId2 != null && tabId2 !== cloudTarget.tabId) throw localAgentError("BROWSER_TARGET_MISMATCH", "The destination differs from this chat.");
+    task.tabId = cloudTarget.tabId;
+    task.target = { tabId: cloudTarget.tabId, chatPath: chatConversationPath((await chrome.tabs.get(cloudTarget.tabId)).url), cloudTarget };
+    task.cloudTarget = cloudTarget;
+    task.bindingToken = null;
+  }
   mediaToChatTasks.set(task.taskId, task);
   mediaToChatQueue.push(task.taskId);
-  if (cloudTarget) task.bindingToken = null;
   await persistMediaToChatTasks();
   if (cloudTarget) void drainMediaToChatQueue();
   else await chrome.alarms.create(`media-chat-bind:${task.taskId}`, { when: task.bindingDeadline });
@@ -7201,7 +7354,14 @@ async function updateComposerWatchdog(tabId2, action, preserve = false) {
     args: [action, preserve]
   });
 }
-async function sendComposerWhenReady(tabId2, { completionText = null, revision = null, chatPath = null, beforeSend = null, onSendCommit = null } = {}) {
+async function sendComposerWhenReady(tabId2, { completionText = null, revision = null, chatPath = null, beforeSend = null, onSendCommit = null, cloudTarget = null } = {}) {
+  if (cloudTarget) {
+    const previous = beforeSend;
+    beforeSend = async () => {
+      await cloudConnection.verifyTarget(cloudTarget);
+      await previous?.();
+    };
+  }
   return withChatFileAutomation(async () => {
     let attached = false, committed = false, inserted = false;
     try {
@@ -7314,7 +7474,6 @@ var taskCompletionDelivery = createTaskCompletionDelivery({
   save: (records) => chrome.storage.local.set({ researchtubeBackgroundTaskRecordsV1: records }),
   schedule: scheduleBackgroundTaskPoll,
   send: sendComposerWhenReady,
-  verifyContext: verifyTaskCloudContext,
   log: consoleAction,
   status: async (kind, taskId5) => kind === "timer" ? normalizeTimerResult("timer_status", await agentJsonRequest("/tasks/timer/" + encodeURIComponent(taskId5))) : customToolStatus(taskId5)
 });
@@ -7387,7 +7546,8 @@ async function startArtifactTask(tool, argumentsValue, cloudTarget = null) {
   return artifactTaskManager.start(tool, args, { addToChat, sendDelaySeconds, tabId: tabId2, cloudTarget });
 }
 async function executeArtifactStart(id2, tool, args) {
-  const response = await executeToolCall(id2, tool, args, () => startArtifactTask(tool, args, cloudContextForRequest(id2)));
+  const cloudTarget = typeof cloudConnection === "undefined" ? null : cloudConnection.targetForRequest(id2);
+  const response = await executeToolCall(id2, tool, args, () => startArtifactTask(tool, args, cloudTarget));
   const task = response.result?.structuredContent;
   if (task?.taskId) {
     const metadata = await artifactTaskManager.metadata(task.taskId);
@@ -7399,7 +7559,7 @@ async function executeArtifactStart(id2, tool, args) {
   return response;
 }
 chrome.runtime.onInstalled.addListener(({ reason }) => {
-  void bootstrapTunnel();
+  void bootstrapConnection();
   void ensureLibraryStoreLoaded().then(drainLibraryStoreQueue);
   void ensureMediaToChatLoaded().then(drainMediaToChatQueue);
   void artifactTaskManager.ensure();
@@ -7411,21 +7571,27 @@ chrome.runtime.onInstalled.addListener(({ reason }) => {
 chrome.runtime.onStartup.addListener(() => {
   void browserAgent.recoverGroups().catch(() => {
   });
-  void bootstrapTunnel();
+  void bootstrapConnection();
   void ensureLibraryStoreLoaded().then(drainLibraryStoreQueue);
   void ensureMediaToChatLoaded().then(drainMediaToChatQueue);
   void artifactTaskManager.ensure();
   void taskCompletionDelivery.tick();
 });
 chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === "public-relay") void cloudConnection.start();
   if (alarm.name === "background-task-completions") void taskCompletionDelivery.tick();
   if (alarm.name.startsWith("artifact-task:")) void artifactTaskManager.advance(alarm.name.slice("artifact-task:".length));
-  if (alarm.name === "tunnel-poll") void startPolling();
   if (alarm.name.startsWith("media-chat-bind:")) void expireMediaToChatBinding(alarm.name.slice("media-chat-bind:".length));
   if (alarm.name.startsWith("media-chat-send:")) void resumeDelayedMediaToChatTask(alarm.name.slice("media-chat-send:".length));
 });
-async function bootstrapTunnel() {
+async function bootstrapConnection() {
   await chrome.storage.local.remove([
+    "connectionMode",
+    "tunnelId",
+    "runtimeApiKey",
+    "lastConnectionTest",
+    "lastTunnelConnection",
+    "onboardingCompleted",
     "controlPlaneBaseUrl",
     "onboardingStep",
     "enabled",
@@ -7434,9 +7600,10 @@ async function bootstrapTunnel() {
     "transcriptClientType",
     "commentsProfileDefaultVersion"
   ]);
-  await chrome.alarms.create("tunnel-poll", { periodInMinutes: 0.5 });
+  await chrome.alarms.clear("tunnel-poll");
+  await chrome.alarms.create("public-relay", { periodInMinutes: 0.5 });
   await refreshActionBadge();
-  return startPolling();
+  return cloudConnection.start();
 }
 async function configuredStartupPrompts() {
   try {
@@ -7662,6 +7829,46 @@ var chatContext = createChatContext({
   },
   error: (value) => recordSystemDiagnostic({ ...value, source: "tool", tool: "system_get_chat_context", stage: "chat.binding" })
 });
+var cloudConnection = createCloudConnection({
+  chrome,
+  fetch: (url, options) => fetch(url, options),
+  webSocket: (url) => new WebSocket(url),
+  uuid: () => crypto.randomUUID(),
+  setTimeout: (...args) => globalThis.setTimeout(...args),
+  clearTimeout: (id2) => globalThis.clearTimeout(id2),
+  setInterval: (...args) => globalThis.setInterval(...args),
+  clearInterval: (id2) => globalThis.clearInterval(id2),
+  dispatch: (request) => handleMcpRequest(request),
+  changed: () => refreshActionBadge(),
+  checkOwner: async (tabId2, reconnect = false) => {
+    const tab = await chrome.tabs.get(tabId2);
+    if (tab.groupId < 0) return;
+    const owner = await browserOwner.read(tabId2);
+    if (!owner && (await chrome.tabs.query({ groupId: tab.groupId })).filter((candidate) => chatConversationPath(candidate.url)).length !== 1)
+      throw localAgentError("BROWSER_CONTEXT_AMBIGUOUS", "This group needs one unambiguous leading ChatGPT tab before connection.");
+    if (owner && owner.ownerTabId === tabId2 && reconnect && ["stopped", "failed"].includes(owner.state)) {
+      await browserAgent.connectGroup(tabId2);
+      return;
+    }
+    if (owner && (owner.ownerTabId !== tabId2 || ["stopped", "failed"].includes(owner.state)))
+      throw localAgentError("BROWSER_CONTEXT_REQUIRED", "Reconnect the leading chat of this tab group before using browser tools.");
+  },
+  invalidated: async (target) => {
+    await updateComposerWatchdog(target.tabId, "suppress").catch(() => {
+    });
+    await ensureMediaToChatLoaded();
+    for (const task of mediaToChatTasks.values()) if (task.target?.cloudTarget?.bindingId === target.bindingId && ["queued", "working"].includes(task.status) && !task.sendStarted)
+      await failMediaToChatTarget(task, "BROWSER_BINDING_CHANGED", "The original cloud browser binding ended. Created files were preserved; chat delivery was stopped.");
+  }
+});
+void chrome.storage?.local?.setAccessLevel?.({ accessLevel: "TRUSTED_CONTEXTS" });
+chrome.runtime.onMessageExternal?.addListener((message, sender, sendResponse) => {
+  cloudConnection.external(message, sender).then(sendResponse).catch((error4) => sendResponse({
+    ok: false,
+    errorCode: /^[A-Z][A-Z0-9_]{0,63}$/.test(error4?.code || "") ? error4.code : "CLOUD_UNAVAILABLE"
+  }));
+  return true;
+});
 chrome.debugger?.onEvent?.addListener((source, method, params) => {
   void browserAgent.onEvent(source, method, params).catch((error4) => consoleAction(`[ResearchTube Browser] ${error4.code || "BROWSER_UNAVAILABLE"}`));
 });
@@ -7671,8 +7878,7 @@ chrome.debugger?.onDetach?.addListener((source, reason) => {
   });
 });
 chrome.tabs?.onRemoved?.addListener((tabId2) => {
-  void serverConnection.changed(tabId2).catch(() => {
-  });
+  void cloudConnection.tabChanged(tabId2);
   void browserAgent.onRemoved(tabId2).catch(() => {
   }).finally(() => {
     browserAutomationBadges.delete(tabId2);
@@ -7680,8 +7886,7 @@ chrome.tabs?.onRemoved?.addListener((tabId2) => {
   });
 });
 chrome.tabs?.onUpdated?.addListener((tabId2, change) => {
-  if (change.url || change.status) void serverConnection.changed(tabId2).catch(() => {
-  });
+  if (change.status === "loading" || Object.hasOwn(change, "url")) void cloudConnection.tabChanged(tabId2);
   void browserAgent.onUpdated(tabId2, change).catch(() => {
   });
 });
@@ -7694,6 +7899,21 @@ chrome.tabs?.onReplaced?.addListener(() => {
   });
 });
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === "google-profile-status") {
+    if (sender?.id !== chrome.runtime.id || sender.url !== chrome.runtime.getURL("popup.html")) {
+      sendResponse({ state: "unknown" });
+      return false;
+    }
+    getGoogleProfileStatus().then(sendResponse);
+    return true;
+  }
+  if (message?.type === "researchtube_cloud_bind") {
+    cloudConnection.bind(message, sender).then(sendResponse).catch((error4) => sendResponse({
+      ok: false,
+      errorCode: /^[A-Z][A-Z0-9_]{0,63}$/.test(error4?.code || "") ? error4.code : "CLOUD_UNAVAILABLE"
+    }));
+    return true;
+  }
   if (message?.type === "researchtube_composer_watchdog") {
     if (sender?.id !== chrome.runtime.id || sender.frameId !== 0 || !Number.isInteger(sender.tab?.id)) {
       sendResponse({ sent: false });
@@ -7712,45 +7932,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     });
     return true;
   }
-  if (["server-sign-in", "server-disconnect"].includes(message?.type)) {
-    if (sender?.id !== chrome.runtime.id || sender.tab || sender.url !== chrome.runtime.getURL("settings.html")) {
-      sendResponse({ ok: false, errorCode: "INVALID_SENDER" });
-      return false;
-    }
-    (message.type === "server-sign-in" ? beginServerSignIn() : updateConnection(() => serverConnection.disconnect()).then(() => ({ ok: true }))).then(sendResponse).catch(() => sendResponse({ ok: false, errorCode: "SERVER_CONNECTION_FAILED" }));
-    return true;
-  }
-  if (message?.type === "researchtube_server_enroll") {
-    enrollServerProfile(message, sender).then(sendResponse).catch((error4) => sendResponse({ ok: false, errorCode: error4.code || "SERVER_ENROLLMENT_FAILED" }));
-    return true;
-  }
-  if (message?.type === "researchtube_server_bind") {
-    serverConnection.bind(message.nonce, sender).then(sendResponse).catch((error4) => sendResponse({ ok: false, errorCode: error4.code || "BROWSER_BINDING_INVALID" }));
-    return true;
-  }
-  if (message?.type === "poll-now") {
-    startPolling();
-    pollOnce().then((result) => sendResponse(result));
-    return true;
-  }
   if (message?.type === "status") {
     getPublicConnectionState({ includeAgent: message.includeAgent !== false }).then(sendResponse);
     return true;
   }
   if (message?.type === "agent-status") {
     getAgentStatus().then(sendResponse);
-    return true;
-  }
-  if (message?.type === "save-connection") {
-    saveConnection(message.payload).then(sendResponse).catch((error4) => sendResponse({ ok: false, error: safeErrorMessage(error4) }));
-    return true;
-  }
-  if (message?.type === "clear-api-key") {
-    saveConnection({ apiKey: "" }).then(sendResponse).catch((error4) => sendResponse({ ok: false, error: safeErrorMessage(error4) }));
-    return true;
-  }
-  if (message?.type === "test-connection") {
-    testConnection().then(sendResponse).catch((error4) => sendResponse(connectionFailure("UNKNOWN_ERROR", "Connection test failed.", error4)));
     return true;
   }
   if (message?.type === "save-agent-port") {
@@ -7842,111 +8029,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   return false;
 });
-var cloudRequestTargets = /* @__PURE__ */ new Map();
-var serverEnrollmentRunning = false;
-function cloudContextForRequest(id2) {
-  return cloudRequestTargets.get(id2) || null;
-}
-function readServerChatDocument() {
-  const path = location.pathname;
-  const match = /\/c\/([A-Za-z0-9_-]+)\/?$/.exec(path);
-  if (location.origin !== "https://chatgpt.com" || !match || match[1].startsWith("local-chatgpt")) return null;
-  return { conversationId: match[1] };
-}
-async function serverChatIdentity(tabId2) {
-  const tab = await chrome.tabs.get(tabId2);
-  if (!chatConversationPath(tab.url)) throw localAgentError("BROWSER_SESSION_NOT_READY", "Wait for ChatGPT to save this conversation.");
-  const results = await chrome.scripting.executeScript({ target: { tabId: tabId2, frameIds: [0] }, world: "ISOLATED", func: readServerChatDocument });
-  const top = results.find((item) => item.frameId === 0), conversationId = top?.result?.conversationId;
-  if (!top?.documentId || !conversationId || chatConversationPath(tab.url)?.split("/c/").pop() !== conversationId)
-    throw localAgentError("BROWSER_TARGET_MISMATCH", "The ChatGPT document changed.");
-  const copies = (await chrome.tabs.query({ url: "https://chatgpt.com/*" })).filter((item) => chatConversationPath(item.url)?.split("/c/").pop() === conversationId);
-  if (copies.length !== 1 || copies[0].id !== tabId2) throw localAgentError("BROWSER_CONTEXT_AMBIGUOUS", "Close duplicate tabs of this conversation, then reconnect.");
-  return { tabId: tabId2, documentId: top.documentId, conversationId };
-}
-var serverConnection = createServerConnection({
-  extensionId: chrome.runtime.id,
-  config: getConfig,
-  now: Date.now,
-  fetch: (...args) => fetch(...args),
-  socket: (url) => new WebSocket(url),
-  setTimeout: (...args) => setTimeout(...args),
-  clearTimeout: (id2) => clearTimeout(id2),
-  setInterval: (...args) => setInterval(...args),
-  clearInterval: (id2) => clearInterval(id2),
-  identity: serverChatIdentity,
-  claimGroup: async (tabId2) => {
-    if ((await chrome.tabs.get(tabId2)).groupId >= 0) await browserAgent.connectGroup(tabId2);
-  },
-  tool: (name2) => toolDefinitions().find((tool) => tool.name === name2),
-  execute: async (request, target) => {
-    cloudRequestTargets.set(request.id, target);
-    try {
-      return await handleMcpRequest(request);
-    } finally {
-      cloudRequestTargets.delete(request.id);
-    }
-  },
-  status: async (value) => {
-    await chrome.storage.local.set({ lastServerConnection: value });
-    await refreshActionBadge();
-  },
-  clearCredential: () => chrome.storage.local.set({ serverInstallationId: "", serverInstallationToken: "", serverEnrollment: null }),
-  invalidate: async (binding) => {
-    await updateComposerWatchdog(binding.tabId, "suppress").catch(() => {
-    });
-    for (const task of mediaToChatTasks.values()) if (task.target?.cloudTarget?.bindingId === binding.bindingId && ["queued", "working"].includes(task.status)) await mediaToChatCancel(task.taskId).catch(() => {
-    });
-    await browserAgent.onRemoved(binding.tabId).catch(() => {
-    });
-  }
-});
-async function verifyTaskCloudContext(task) {
-  const cloudTarget = task.cloudTarget || task.caller?.cloudTarget;
-  if (cloudTarget) await serverConnection.verify(cloudTarget);
-  else if ((await getConfig()).connectionMode === "server") throw localAgentError("BROWSER_BINDING_CHANGED", "This task has no current server chat binding.");
-}
-async function beginServerSignIn() {
-  const config = await getConfig();
-  if (config.connectionMode !== "server") return { ok: false, errorCode: "SERVER_MODE_DISABLED", message: "Select ResearchTube server first." };
-  const nonce = crypto.randomUUID() + crypto.randomUUID();
-  const tab = await chrome.tabs.create({ url: "about:blank", active: true });
-  await chrome.storage.local.set({ serverEnrollment: { nonce, tabId: tab.id, expiresAt: Date.now() + 10 * 6e4 } });
-  await chrome.tabs.update(tab.id, { url: SERVER_ORIGIN + "/connect-extension?extensionId=" + chrome.runtime.id + "&nonce=" + nonce });
-  return { ok: true, message: "Finish sign-in in the opened tab." };
-}
-async function enrollServerProfile(message, sender) {
-  const config = await getConfig(), pending = config.serverEnrollment;
-  if (!pending || config.connectionMode !== "server" || sender?.id !== chrome.runtime.id || sender.frameId !== 0 || typeof sender.documentId !== "string" || sender.tab?.id !== pending?.tabId || pending.expiresAt <= Date.now() || message.nonce !== pending.nonce)
-    throw localAgentError("SERVER_ENROLLMENT_EXPIRED", "Start connection setup again from ResearchTube Settings.");
-  const url = new URL(sender.url);
-  if (url.origin !== SERVER_ORIGIN || url.pathname !== "/connect-extension" || url.searchParams.get("nonce") !== pending.nonce || url.searchParams.get("extensionId") !== chrome.runtime.id)
-    throw localAgentError("SERVER_ENROLLMENT_INVALID", "Invalid server setup page.");
-  if (serverEnrollmentRunning) throw localAgentError("SERVER_ENROLLMENT_BUSY", "Connection setup is already running.");
-  serverEnrollmentRunning = true;
+async function getGoogleProfileStatus() {
+  if (!chrome.identity?.getProfileUserInfo) return { state: "unknown" };
   try {
-    const injection = (await chrome.scripting.executeScript({ target: { tabId: sender.tab.id, documentIds: [sender.documentId] }, world: "ISOLATED", func: async (extensionId) => {
-      const r = await fetch("/api/installations", { method: "POST", signal: AbortSignal.timeout(15e3), credentials: "same-origin", redirect: "error", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: "Chrome profile", extensionOrigin: "chrome-extension://" + extensionId }) });
-      const data = await r.json();
-      return r.ok ? { ok: true, installationId: data.installationId, installationToken: data.installationToken } : { ok: false, errorCode: data?.error?.code };
-    }, args: [chrome.runtime.id] }))[0];
-    const result = injection?.result;
-    if (injection?.documentId !== sender.documentId) throw localAgentError("SERVER_ENROLLMENT_INVALID", "The setup document changed.");
-    if (!result?.ok) throw localAgentError(/^[A-Z][A-Z0-9_]{0,63}$/.test(result?.errorCode || "") ? result.errorCode : "SERVER_ENROLLMENT_FAILED", "This Chrome profile could not be connected.");
-    if (!/^[a-f0-9-]{36}$/.test(result.installationId || "") || !/^[a-f0-9-]{72}$/.test(result.installationToken || "")) throw localAgentError("SERVER_INVALID_RESPONSE", "Invalid server credential.");
-    const latest = await getConfig();
-    if (latest.connectionMode !== "server" || latest.serverEnrollment?.nonce !== pending.nonce) throw localAgentError("CONNECTION_CHANGED", "Connection settings changed.");
-    await serverConnection.stop();
-    if (config.serverInstallationToken) await serverConnection.api("/api/installations/revoke-current", {}, config).catch(() => {
-    });
-    await updateConnection(async () => {
-      const current = await getConfig();
-      if (current.connectionMode !== "server" || current.serverEnrollment?.nonce !== pending.nonce) throw localAgentError("CONNECTION_CHANGED", "Connection setup was cancelled.");
-      await chrome.storage.local.set({ serverInstallationId: result.installationId, serverInstallationToken: result.installationToken, serverEnrollment: null, lastServerConnection: null });
-    });
-    return serverConnection.connect();
-  } finally {
-    serverEnrollmentRunning = false;
+    const profile = await chrome.identity.getProfileUserInfo({ accountStatus: "ANY" });
+    return { state: profile?.id ? "signed-in" : "signed-out" };
+  } catch {
+    return { state: "unknown" };
   }
 }
 async function getConfig() {
@@ -7957,23 +8046,15 @@ async function getPublicConnectionState({ includeAgent = true } = {}) {
   const agentPort = normalizeAgentPort(config.agentPort);
   const agent = includeAgent ? await getAgentStatus(agentPort) : null;
   const remainingMs = Math.max(0, Number(config.youtubeSearchCooldownUntil || 0) - Date.now());
+  const cloud = await cloudConnection.status();
   return {
-    connectionMode: config.connectionMode,
-    serverOrigin: SERVER_ORIGIN,
-    serverExtensionId: chrome.runtime.id,
-    serverSignedIn: Boolean(config.serverInstallationToken),
-    configured: config.connectionMode === "server" ? Boolean(config.serverInstallationToken) : Boolean(config.tunnelId && config.runtimeApiKey),
-    tunnelId: config.tunnelId,
-    apiKeyPresent: Boolean(config.runtimeApiKey),
-    polling,
-    lastStatus: config.lastStatus || "",
-    lastConnectionTest: config.lastConnectionTest || null,
-    connection: activeConnectionState(config),
+    cloud,
+    configured: cloud.configured,
+    connection: { state: cloud.state, errorCode: cloud.errorCode },
     agentPort,
     agent,
     extensionVersion: EXTENSION_VERSION,
     requiredAgentInterfaceVersion: REQUIRED_AGENT_INTERFACE_VERSION,
-    onboardingCompleted: Boolean(config.onboardingCompleted),
     youtubeSearch: {
       rateLimited: remainingMs > 0,
       retryAfterSeconds: Math.ceil(remainingMs / 1e3),
@@ -8798,7 +8879,7 @@ function normalizeAgentTask(value) {
 }
 function publicDownloadTask(task) {
   const result = task.result && typeof task.result === "object" ? task.result : null;
-  const failure2 = task.error && typeof task.error === "object" ? task.error : null;
+  const failure = task.error && typeof task.error === "object" ? task.error : null;
   return {
     taskId: task.taskId,
     status: task.status,
@@ -8809,10 +8890,10 @@ function publicDownloadTask(task) {
     pollIntervalMs: Number.isInteger(task.pollIntervalMs) && task.pollIntervalMs > 0 ? task.pollIntervalMs : 1e3,
     progressPercent: typeof task.progressPercent === "number" && task.progressPercent >= 0 && task.progressPercent <= 100 ? task.progressPercent : null,
     result,
-    error: failure2 ? {
-      code: typeof failure2.code === "string" ? failure2.code : "DOWNLOAD_FAILED",
-      message: typeof failure2.message === "string" ? failure2.message : "The download task failed.",
-      detail: typeof failure2.detail === "string" ? failure2.detail : null
+    error: failure ? {
+      code: typeof failure.code === "string" ? failure.code : "DOWNLOAD_FAILED",
+      message: typeof failure.message === "string" ? failure.message : "The download task failed.",
+      detail: typeof failure.detail === "string" ? failure.detail : null
     } : null
   };
 }
@@ -9933,189 +10014,6 @@ async function copyCaptureFramePath(path) {
   await copyCaptureFrameToClipboard({ kind: "path", text: logicalPath });
   return { path: logicalPath, action: "copiedPath" };
 }
-function updateConnection(callback) {
-  const result = connectionUpdateTail.then(callback);
-  connectionUpdateTail = result.catch(() => {
-  });
-  return result;
-}
-function saveConnection(payload = {}) {
-  return updateConnection(async () => {
-    const config = await getConfig();
-    const changes2 = {};
-    if (Object.hasOwn(payload, "connectionMode")) {
-      if (!["tunnel", "server"].includes(payload.connectionMode)) throw localAgentError("INVALID_ARGUMENT", "Select tunnel or server.");
-      changes2.connectionMode = payload.connectionMode;
-    }
-    if (Object.hasOwn(payload, "tunnelId")) changes2.tunnelId = String(payload.tunnelId ?? "").trim();
-    if (Object.hasOwn(payload, "apiKey")) changes2.runtimeApiKey = String(payload.apiKey ?? "").trim();
-    const changed = Object.entries(changes2).some(([name2, value]) => config[name2] !== value);
-    if (changed) {
-      connectionRevision++;
-      await serverConnection.stop();
-      tunnelPollController?.abort();
-      if (pollLoopTimer !== null) clearTimeout(pollLoopTimer);
-      pollLoopTimer = null;
-      pollLoopScheduled = false;
-      Object.assign(changes2, { lastConnectionTest: null, lastTunnelConnection: null, lastServerConnection: null, lastStatus: "", onboardingCompleted: false });
-    }
-    if (Object.hasOwn(payload, "onboardingCompleted")) changes2.onboardingCompleted = payload.onboardingCompleted === true;
-    await chrome.storage.local.set(changes2);
-    await refreshActionBadge();
-    const saved = await getConfig();
-    if (saved.connectionMode === "server") void serverConnection.connect();
-    else if (saved.tunnelId && saved.runtimeApiKey) void startPolling();
-    return { ok: true, apiKeyPresent: Boolean(saved.runtimeApiKey) };
-  });
-}
-function activeConnectionState(config) {
-  if (config.connectionMode !== "server") return tunnelConnectionState(config);
-  if (!config.serverInstallationToken) return { state: "not-configured", errorCode: "SERVER_SIGN_IN_REQUIRED" };
-  return config.lastServerConnection || { state: "unchecked", errorCode: null };
-}
-function tunnelConnectionState(config) {
-  if (!config.tunnelId || !config.runtimeApiKey) return {
-    state: "not-configured",
-    errorCode: !config.tunnelId && !config.runtimeApiKey ? "NOT_CONFIGURED" : !config.tunnelId ? "TUNNEL_ID_MISSING" : "API_KEY_MISSING"
-  };
-  const latest = config.lastTunnelConnection || config.lastConnectionTest;
-  if (!latest) return { state: "unchecked", errorCode: null };
-  return { state: latest.success ? "ready" : "error", errorCode: latest.errorCode || null };
-}
-function recordTunnelConnection(revision, result, lastStatus, manual = false) {
-  return updateConnection(async () => {
-    if (revision !== connectionRevision) return false;
-    const outcome = { success: result.ok, timestamp: (/* @__PURE__ */ new Date()).toISOString(), stage: result.ok ? "tunnel" : result.errorCode, errorCode: result.errorCode || null, message: result.message || null };
-    const changes2 = { lastTunnelConnection: outcome };
-    if (lastStatus !== void 0) changes2.lastStatus = lastStatus;
-    if (manual) {
-      changes2.lastConnectionTest = outcome;
-      if (result.ok) changes2.onboardingCompleted = true;
-    }
-    await chrome.storage.local.set(changes2);
-    await refreshActionBadge();
-    return true;
-  });
-}
-function startPolling() {
-  void getConfig().then((config) => {
-    if (config.connectionMode === "server") void serverConnection.connect();
-  });
-  schedulePollLoop(0);
-  return currentPollPromise ?? Promise.resolve({ ok: true, scheduled: true });
-}
-function schedulePollLoop(delayMs) {
-  if (pollLoopScheduled) return;
-  pollLoopScheduled = true;
-  pollLoopTimer = setTimeout(async () => {
-    pollLoopScheduled = false;
-    pollLoopTimer = null;
-    const result = await pollOnce();
-    const config = await getConfig();
-    if (config.connectionMode !== "server" && config.tunnelId && config.runtimeApiKey) {
-      schedulePollLoop(POLL_RETRY_DELAY_MS);
-    } else {
-      await refreshActionBadge();
-    }
-    return result;
-  }, delayMs);
-}
-async function pollOnce() {
-  await connectionUpdateTail;
-  if (currentPollPromise) {
-    if (currentPollRevision === connectionRevision) return currentPollPromise;
-    const old = currentPollPromise;
-    await old.catch(() => {
-    });
-    if (currentPollPromise === old) currentPollPromise = null;
-    return pollOnce();
-  }
-  const revision = connectionRevision;
-  const promise = pollOnceInternal(revision);
-  currentPollPromise = promise;
-  currentPollRevision = revision;
-  try {
-    return await promise;
-  } finally {
-    if (currentPollPromise === promise) currentPollPromise = null;
-  }
-}
-async function pollOnceInternal(revision = connectionRevision) {
-  const config = await getConfig();
-  if (revision !== connectionRevision) return { ok: false, reason: "connection-changed" };
-  if (config.connectionMode === "server") return { ok: false, reason: "server-mode" };
-  if (!config.tunnelId || !config.runtimeApiKey) {
-    return { ok: false, reason: "not-configured" };
-  }
-  polling = true;
-  const controller = new AbortController();
-  tunnelPollController = controller;
-  try {
-    const url = `${CONTROL_PLANE_BASE_URL}/v1/tunnels/${encodeURIComponent(config.tunnelId)}/poll?limit=1&timeout_ms=15000`;
-    const response = await fetch(url, {
-      signal: controller.signal,
-      headers: {
-        "Authorization": `Bearer ${config.runtimeApiKey}`,
-        "Accept": "application/json",
-        "X-Tunnel-Client-Name": "researchtube-extension",
-        "X-Tunnel-Client-Version": EXTENSION_VERSION,
-        "X-Tunnel-Client-Wire-Protocol-Version": "2026-08-25",
-        "X-Tunnel-MCP-Server-Info": JSON.stringify({ version: 1, channels: [{ name: "main" }] })
-      }
-    });
-    if (revision !== connectionRevision) return { ok: false, reason: "connection-changed" };
-    if (response.status === 204) {
-      await recordTunnelConnection(revision, { ok: true }, "poll: 204 (no command)");
-      return { ok: true, empty: true };
-    }
-    if (!response.ok) throw createTunnelHttpError(response.status);
-    const envelope = await response.json();
-    if (revision !== connectionRevision) return { ok: false, reason: "connection-changed" };
-    const commands = Array.isArray(envelope?.commands) ? envelope.commands : [];
-    if (!commands.length) {
-      await recordTunnelConnection(revision, { ok: true }, "poll: 200 (no command)");
-      return { ok: true, empty: true };
-    }
-    for (const command of commands) {
-      if (revision !== connectionRevision) return { ok: false, reason: "connection-changed" };
-      if (command.command_type !== "jsonrpc") continue;
-      const result = await handleMcpRequest(command.jsonrpc);
-      if (revision !== connectionRevision) return { ok: false, reason: "connection-changed" };
-      await postResponse(config, command, result);
-    }
-    await recordTunnelConnection(revision, { ok: true }, `handled ${commands.length} command(s)`);
-    return { ok: true, handled: commands.length };
-  } catch (error4) {
-    if (revision !== connectionRevision) return { ok: false, reason: "connection-changed" };
-    consoleAction("ResearchTube:", error4);
-    await recordTunnelConnection(revision, connectionFailureFromPoll({ error: String(error4) }), `error: ${safeErrorMessage(error4)}`);
-    return { ok: false, error: String(error4) };
-  } finally {
-    polling = false;
-    if (tunnelPollController === controller) tunnelPollController = null;
-  }
-}
-async function postResponse(config, command, result) {
-  const url = `${CONTROL_PLANE_BASE_URL}/v1/tunnels/${encodeURIComponent(config.tunnelId)}/response`;
-  const payload = {
-    request_id: command.request_id,
-    channel: command.channel || "main",
-    resp_headers: { "Content-Type": ["application/json"] },
-    resp_code: 200,
-    resp_type: result === null ? "notify_ack" : "jsonrpc_response"
-  };
-  if (result !== null) payload.resp_json = result;
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${config.runtimeApiKey}`,
-      "Content-Type": "application/json",
-      "X-Tunnel-Shard-Token": command.shard_token
-    },
-    body: JSON.stringify(payload)
-  });
-  if (!response.ok) throw createTunnelHttpError(response.status, "response");
-}
 async function paintBrowserAutomationBadge(tabId2) {
   const session = browserAutomationBadges.get(tabId2);
   let appearance = actionBadgeAppearance;
@@ -10214,51 +10112,14 @@ function updateCameraRecordingBadge(task) {
 async function refreshActionBadge() {
   if (cameraRecordingBadgeKind) return paintCameraRecordingBadge();
   const config = await getConfig();
-  const connection = activeConnectionState(config);
-  if (connection.state === "error") return setActionBadge("connection-error");
+  const cloud = await cloudConnection.status();
+  const connection = cloud;
+  if (connection.errorCode) return setActionBadge("connection-error");
   if (connection.state !== "ready") return setActionBadge("setup");
   if (Number(config.youtubeSearchCooldownUntil || 0) > Date.now()) {
     return setActionBadge("youtube-rate-limited");
   }
   return setActionBadge("ready");
-}
-async function testConnection() {
-  await connectionUpdateTail;
-  const revision = connectionRevision;
-  await setActionBadge("working");
-  const config = await getConfig();
-  if (config.connectionMode === "server") {
-    const result2 = await serverConnection.connect();
-    return { ...result2, mode: "server", message: result2.ok ? "ResearchTube server connected." : "Sign in or reconnect this Chrome profile." };
-  }
-  let result;
-  if (!config.tunnelId) {
-    result = connectionFailure("TUNNEL_ID_MISSING", "Enter your Tunnel ID.");
-  } else if (!config.runtimeApiKey) {
-    result = connectionFailure("API_KEY_MISSING", "Enter your OpenAI API key.");
-  } else {
-    const pollResult = await pollOnce();
-    result = pollResult.ok ? { ok: true, stages: { apiKey: true, tunnel: true }, message: "Connection successful." } : connectionFailureFromPoll(pollResult);
-  }
-  if (!await recordTunnelConnection(revision, result, void 0, true)) return connectionFailure("CONNECTION_CHANGED", "Connection settings changed during the test. Test the saved settings again.");
-  return result;
-}
-function createTunnelHttpError(status, operation = "poll") {
-  const error4 = new Error(`${operation} HTTP ${status}`);
-  error4.httpStatus = status;
-  return error4;
-}
-function connectionFailureFromPoll(result) {
-  const error4 = String(result?.error || "");
-  if (/HTTP 401/i.test(error4)) return connectionFailure("API_KEY_INVALID", "The OpenAI API key was rejected.");
-  if (/HTTP 403/i.test(error4)) return connectionFailure("TUNNEL_PERMISSION_DENIED", "The API key is valid, but it cannot access this tunnel.");
-  if (/HTTP 404/i.test(error4)) return connectionFailure("TUNNEL_NOT_FOUND", "The tunnel could not be found.");
-  if (/Failed to fetch|NetworkError|network/i.test(error4)) return connectionFailure("NETWORK_ERROR", "ResearchTube could not reach OpenAI.");
-  if (result?.reason === "not-configured") return connectionFailure("NOT_CONFIGURED", "Enter your Tunnel ID and OpenAI API key.");
-  return connectionFailure("OPENAI_ERROR", "Connection test failed.", error4);
-}
-function connectionFailure(errorCode, message, detail = null) {
-  return { ok: false, errorCode, message, detail: detail ? safeErrorMessage(detail) : null };
 }
 function safeErrorMessage(error4) {
   return String(error4?.message || error4 || "Unknown error").replace(/sk-[A-Za-z0-9_-]+/g, "[redacted]");
@@ -10374,17 +10235,7 @@ async function handleMcpRequest(request) {
         recordSystemDiagnostic({ source: "tool", tool: name2, stage: "validation", code: error4.code, message: error4.message });
         return toolError(request.id, error4);
       }
-      const response = await executeToolCall(request.id, name2, input, async () => {
-        if (name2 !== "system_get_chat_context") return systemDiagnostics.get(input);
-        const task = await chatContext.call(input), cloud = cloudContextForRequest(request.id);
-        if (cloud && !input.taskId) {
-          await serverConnection.verify(cloud);
-          const metadata2 = chatContext.metadata(task.taskId);
-          await chatContext.bind(metadata2, { id: chrome.runtime.id, tab: await chrome.tabs.get(cloud.tabId) });
-          return chatContext.call({ taskId: task.taskId });
-        }
-        return task;
-      });
+      const response = await executeToolCall(request.id, name2, input, () => name2 === "system_get_chat_context" ? chatContext.call(input) : systemDiagnostics.get(input));
       const metadata = name2 === "system_get_chat_context" ? chatContext.metadata(response.result?.structuredContent?.taskId) : null;
       if (name2 === "system_get_chat_context" && response.result?.structuredContent?.taskId) response.result._meta = { "researchtube/chatContext": response.result.structuredContent, ...metadata ? { "researchtube/chatTarget": metadata } : {} };
       return response;
@@ -10399,7 +10250,11 @@ async function handleMcpRequest(request) {
       return toolError(request.id, error4);
     }
     if (ARTIFACT_TOOLS.includes(name2)) return executeArtifactStart(request.id, name2, args);
-    if (BROWSER_TOOL_NAMES.includes(name2)) return executeToolCall(request.id, name2, args, () => browserAgent.execute(name2, args, cloudContextForRequest(request.id)));
+    if (BROWSER_TOOL_NAMES.includes(name2)) {
+      const target = cloudConnection.targetForRequest(request.id);
+      const guard = target ? Object.assign(() => cloudConnection.verifyTarget(target), { target, assertLive: () => cloudConnection.assertLive(target) }) : null;
+      return executeToolCall(request.id, name2, args, () => browserAgent.execute(name2, args, guard));
+    }
     const taskId5 = args.taskId;
     if (name2 === "media_task_status" || Object.hasOwn(ARTIFACT_STATUS_TOOLS, name2)) {
       return executeToolCall(request.id, name2, { taskId: taskId5 }, async () => {
@@ -10489,7 +10344,7 @@ async function handleMcpRequest(request) {
   }
   if (request?.method === "tools/call" && request.params?.name === "library_store_start") {
     const files = request.params.arguments?.files;
-    return executeToolCall(request.id, "library_store_start", { files, tabId: request.params.arguments?.tabId }, () => libraryStoreStart(files, request.params.arguments?.tabId, cloudContextForRequest(request.id)));
+    return executeToolCall(request.id, "library_store_start", { files, tabId: request.params.arguments?.tabId }, () => libraryStoreStart(files, request.params.arguments?.tabId, cloudConnection.targetForRequest(request.id)));
   }
   if (request?.method === "tools/call" && request.params?.name === "library_store_status") {
     const taskId5 = String(request.params.arguments?.taskId ?? "").trim();
@@ -10621,7 +10476,7 @@ async function handleMcpRequest(request) {
   }
   if (request?.method === "tools/call" && request.params?.name === "media_view") {
     const args = request.params.arguments ?? {};
-    const response = await executeToolCall(request.id, "media_view", args, () => mediaToChatStart(args, { cloudTarget: cloudContextForRequest(request.id) }));
+    const response = await executeToolCall(request.id, "media_view", args, () => mediaToChatStart(args, { cloudTarget: cloudConnection.targetForRequest(request.id) }));
     const metadata = mediaToChatWidgetMetadata(response.result?.structuredContent?.task?.taskId);
     if (metadata) response.result._meta = { "researchtube/chatTarget": metadata };
     return response;
@@ -10769,15 +10624,17 @@ async function executeCaptureFrameWidgetActionToolCall(id2, tool, path, action) 
   }
 }
 async function executeToolCall(id2, tool, input, work, operation = null) {
+  const cloudTarget = typeof cloudConnection === "undefined" ? null : cloudConnection.targetForRequest(id2);
   const startedAt = Date.now();
   const reportsLongOperationStatus = tool === "library_store_status" || tool === "media_view_status" || tool === "media_task_status" || tool === "site_files_status" || Object.hasOwn(ARTIFACT_STATUS_TOOLS, tool);
   void recordCommandDiagnostic("started", { tool, input: summarizeCommandInput(tool, input) });
   await setActionBadge("working");
   try {
+    if (cloudTarget) await cloudConnection.verifyTarget(cloudTarget);
     let value = await work();
     const task = value?.task?.taskId ? value.task : value;
     if (task?.taskId) {
-      let contextual = await registerBackgroundChatTask(tool, task, input.tabId, cloudContextForRequest(id2));
+      let contextual = await registerBackgroundChatTask(tool, task, input.tabId, cloudTarget);
       if (["timer_status", "timer_cancel", "custom_tool_status", "custom_tool_cancel"].includes(tool)) contextual = await taskCompletionDelivery.observe(contextual);
       value = value?.task?.taskId ? { ...value, task: contextual } : contextual;
     }
@@ -10925,7 +10782,7 @@ async function getDiagnosticsExport() {
   const text3 = [
     "ResearchTube Diagnostics",
     `Exported: ${(/* @__PURE__ */ new Date()).toISOString()}`,
-    "Contains concise local tool timing, safe request summaries, errors, search queue state, and YouTube HTTP status. It never includes OpenAI API keys, Tunnel IDs, YouTube cookies, request headers, response bodies, transcript text, or comment text.",
+    "Contains concise local tool timing, safe request summaries, errors, search queue state, and YouTube HTTP status. It never includes credentials, YouTube cookies, request headers, response bodies, transcript text, or comment text.",
     "",
     "Tool events:",
     ...commandEntries.map((entry) => JSON.stringify(entry)),

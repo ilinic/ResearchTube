@@ -31,6 +31,17 @@ test("one-time widget proof cannot be replayed or bound offline", async () => {
   const other = await (await roomPost(stub, "/challenge", { session: "chat" })).json();
   expect((await roomPost(stub, "/bind", { ...body, nonce: other.nonce, installationId: randomUUID() })).status).toBe(409);
 });
+test("heartbeat preserves socket authentication and reconnect invalidates old document proofs", async () => {
+  const { stub, socket, installationId } = await setup();
+  const binding = await bind(stub, installationId);
+  const pong = new Promise(resolve => socket.addEventListener("message", event => resolve(event.data), { once: true }));
+  socket.send("ping"); expect(await pong).toBe("pong");
+  const replacement = await socketFor(stub, installationId); sockets.push(replacement.socket);
+  const status = await (await roomPost(stub, "/status", { session: "chat-1" })).json();
+  expect(status).toMatchObject({ extensionConnected: true, connected: false, bindings: [] });
+  const replay = await roomPost(stub, "/dispatch", { bindingId: binding.bindingId, session: "chat-1", request: { jsonrpc: "2.0", method: "tools/list" } });
+  expect(replay.status).toBe(409);
+});
 test("same conversation observed in a second installation blocks both instead of switching", async () => {
   const { stub, socket, installationId } = await setup();
   const first = await bind(stub, installationId);

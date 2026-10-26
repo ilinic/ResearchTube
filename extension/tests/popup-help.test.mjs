@@ -12,7 +12,7 @@ assert.ok(prompt.length < 300);
 assert.match(prompt, /in my language/);
 assert.match(prompt, /setup, usage and troubleshooting/);
 assert.doesNotMatch(prompt, /@ResearchTube|sessionId|tabId/);
-for (const topic of ["Developer Mode", "Plus", "Tunnels Read + Use", "--silent-debugger-extension-api", "Shortcut → Target", "system_agent_status", "site_get_images", "Custom Tools"]) assert.ok(guide.includes(topic), topic);
+for (const topic of ["Developer mode", "OAuth", "https://rtube.win", "--silent-debugger-extension-api", "Shortcut → Target", "system_agent_status", "site_get_images", "Custom Tools"]) assert.ok(guide.includes(topic), topic);
 
 for (const [name, script] of [["source", source], ["bundle", bundle]]) {
   const start = script.indexOf("async function openResearchTubeHelp()");

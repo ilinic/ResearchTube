@@ -5,6 +5,7 @@ import { authenticateMcp, MCP_SCOPE, type Auth } from "./auth";
 import { errorResponse, json, origin, PublicError, readJson, room, type Env } from "./types";
 import { bindingWidget } from "./pages";
 import { WORKER_VERSION } from "./version";
+import { setupResult } from "./onboarding";
 
 import { tools, WIDGET_URI, catalog } from "./catalog";
 
@@ -20,10 +21,10 @@ export async function roomRequest(env: Env, userId: string, path: string, body: 
   if (!response.ok) throw new PublicError(value.error?.code || "BROWSER_UNAVAILABLE", value.error?.message || "The browser is unavailable.", response.status);
   return value;
 }
-function sessionOf(meta: unknown): string {
+function sessionOf(meta: unknown): string | null {
   const value = (meta as Record<string, unknown> | undefined)?.["openai/session"];
   if (typeof value !== "string" || !value || value.length > 512)
-    throw new PublicError("BROWSER_CONTEXT_REQUIRED", "Use ResearchTube from a ChatGPT conversation in Google Chrome with its extension. This client did not provide conversation context.", 409);
+    return null;
   return value;
 }
 function toolResult(value: unknown, meta?: Record<string, unknown>) {
@@ -42,14 +43,14 @@ export async function mcpResponse(request: Request, env: Env, auth: Auth): Promi
     catch (error) {
       if (!(error instanceof PublicError)) return errorResponse(error);
       const insufficient = error.code === "INSUFFICIENT_SCOPE";
-      const challenge = `Bearer resource_metadata="${origin(env)}/.well-known/oauth-protected-resource/mcp", scope="${MCP_SCOPE}"${insufficient ? ', error="insufficient_scope"' : ''}`;
+      const challenge = `Bearer resource_metadata="${origin(env)}/.well-known/oauth-protected-resource", scope="${MCP_SCOPE}", error="${insufficient ? "insufficient_scope" : "invalid_token"}", error_description="Connect your ResearchTube account"`;
       return json({ jsonrpc: "2.0", id: body.id ?? null, error: { code: -32001, message: error.message } }, error.status,
         { "WWW-Authenticate": challenge });
     }
   }
   const server = new Server({ name: "researchtube", version: WORKER_VERSION }, {
     capabilities: { tools: {}, resources: {} },
-    instructions: "ResearchTube requires ChatGPT in Chrome with its extension. First call system_connect_browser; its widget binds this exact tab automatically. Poll system_connection_status, then use its browserBindingId with other tools. Never reuse a binding from another conversation or select an active browser. Codex is unsupported. If Chrome is disconnected, ask the user to open it. Existing Extension tool contracts and task status/cancel semantics apply."
+    instructions: "Start by adding this public MCP server in ChatGPT and completing OAuth. First call system_connection_status: setup works before Extension or Agent installation. If this chat is not connected, call system_connect_browser in a saved ChatGPT conversation in desktop Chrome. Its widget automatically pairs the installed extension using this browser's existing ResearchTube sign-in and binds the exact tab. Do not ask the user to link a Chrome profile or sign in again unless the widget reports missing sign-in or different accounts. If the extension is missing, show setupUrl for installation and call system_connect_browser afterwards. Poll system_connection_status at pollIntervalMs, then use its browserBindingId. Never select another browser or reuse a different conversation's binding. Mobile execution and cloud transcripts are unavailable; there are no free cloud quotas. Local file/media tools require the optional Agent. Existing Extension contracts and task status/cancel semantics apply."
   });
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: tools as any }));
   server.setRequestHandler(ListResourcesRequestSchema, async () => ({ resources: [
@@ -72,13 +73,21 @@ export async function mcpResponse(request: Request, env: Env, auth: Auth): Promi
       if (!validator(args)) throw new PublicError("INVALID_ARGUMENT", "Arguments do not match this tool's schema.");
       if (!userId) throw new PublicError("AUTHENTICATION_REQUIRED", "Connect your ResearchTube account.", 401);
       const session = sessionOf(params._meta);
+      if (params.name === "system_connection_status") {
+        const status = await roomRequest(env, userId, "/status", { session: session || "" });
+        return toolResult(setupResult(env, Boolean(session), status));
+      }
       if (params.name === "system_connect_browser") {
+        const status = await roomRequest(env, userId, "/status", { session: session || "" });
+        const setup = setupResult(env, Boolean(session), status);
+        if (!session) return toolResult({ status: "unsupported_client",
+          setupUrl: setup.setupUrl, pollIntervalMs: setup.pollIntervalMs, message: setup.message });
         const challenge = await roomRequest(env, userId, "/challenge", { session });
-        return toolResult({ status: "binding", pollIntervalMs: 1000, expiresAt: challenge.expiresAt,
-          message: "Waiting for the ResearchTube extension in this Chrome tab. Check system_connection_status." },
+        return toolResult({ status: "binding", setupUrl: setup.setupUrl, pollIntervalMs: 1000, expiresAt: challenge.expiresAt,
+          message: "The installed extension connects automatically using this browser's existing ResearchTube sign-in. Keep this saved ChatGPT conversation open in desktop Chrome, then check system_connection_status. If the extension is missing, install it and call this tool again." },
         { "researchtube/cloudBinding": { nonce: challenge.nonce } });
       }
-      if (params.name === "system_connection_status") return toolResult(await roomRequest(env, userId, "/status", { session }));
+      if (!session) throw new PublicError("BROWSER_CONTEXT_REQUIRED", "Browser execution requires this saved ChatGPT conversation in desktop Chrome. Call system_connection_status for setup.", 409);
       if (params.name === "system_disconnect_browser") return toolResult(await roomRequest(env, userId, "/disconnect", { session }));
       const { browserBindingId: bindingId, ...arguments_ } = args;
       const response = await roomRequest(env, userId, "/dispatch", { bindingId, session,

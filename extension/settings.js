@@ -1,15 +1,5 @@
 const $ = (id) => document.getElementById(id);
-const messages = {
-  API_KEY_INVALID: "The OpenAI API key was rejected. Check the key and try again.",
-  TUNNEL_PERMISSION_DENIED: "The API key is valid, but it cannot access this tunnel. Use a Restricted key with Tunnels: Read + Use.",
-  TUNNEL_NOT_FOUND: "The tunnel could not be found. Check the Tunnel ID and try again.",
-  NETWORK_ERROR: "ResearchTube could not reach OpenAI. Check your internet connection and try again.",
-  API_KEY_MISSING: "Enter your OpenAI API key.",
-  TUNNEL_ID_MISSING: "Enter your Tunnel ID."
-};
 async function call(message) { return chrome.runtime.sendMessage(message); }
-function escapeHtml(value) { const element = document.createElement("span"); element.textContent = value; return element.innerHTML; }
-function renderResult(result) { if (result.mode === "server") { const box=$("test-result"); box.hidden=false; box.className=result.ok?"ok":"error"; box.textContent=result.message || (result.ok?"ResearchTube server connected.":"Sign in and reconnect this Chrome profile."); return; } const box = $("test-result"); box.hidden = false; box.className = result.ok ? "ok" : "error"; if (result.ok) box.innerHTML = "<strong>Connection successful.</strong><br>✓ API key accepted<br>✓ Tunnel found<br>✓ ResearchTube can access the tunnel"; else { const message = messages[result.errorCode] || result.message || "Connection test failed."; box.innerHTML = `<strong>${escapeHtml(message)}</strong>${result.detail ? `<details><summary>Technical details</summary>${escapeHtml(result.detail)}</details>` : ""}`; } }
 function componentLabel(name) { return name === "ytDlp" ? "yt-dlp" : name === "youtubePoTokenProvider" ? "YouTube PO-token provider" : name; }
 function componentDetail(component) {
   const version = component.version ? ` — ${component.version}` : "";
@@ -80,82 +70,14 @@ function renderMcpTools(result) {
   }
 }
 async function loadMcpToolSettings() { renderMcpTools(await call({ type: "get-mcp-tool-settings" })); }
-async function saveAndTest() {
-  const button = $("test-connection");
-  button.disabled = true; button.textContent = "Saving…";
-  try {
-    const saved = await call({ type: "save-connection", payload: { connectionMode: $("connection-mode").value, tunnelId: $("tunnel-id").value, apiKey: $("api-key").value } });
-    if (!saved?.ok) { renderResult({ ...saved, message: saved?.error || "Could not save connection settings." }); return; }
-    button.textContent = "Testing…";
-    renderResult(await call({ type: "test-connection" }));
-  } catch {
-    renderResult({ ok: false, message: "Could not save or test connection settings. Try again." });
-  } finally {
-    button.disabled = false; button.textContent = "Save and test connection";
-  }
-}
-function renderServerConnection(state) {
-  const server=state.connectionMode==="server";
-  $("connection-mode").value=state.connectionMode || "tunnel";
-  $("server-connection").hidden=!server;
-  $("tunnel-connection").hidden=server;
-  $("tunnel-save-help").hidden=server;
-  $("server-extension-id").value=state.serverExtensionId || chrome.runtime.id;
-  $("server-disconnect").hidden=!state.serverSignedIn;
-  $("server-sign-in").textContent=state.serverSignedIn?"Sign in again":"Sign in and connect";
-  const value=state.connection || {};
-  $("server-status").textContent=!state.serverSignedIn?"Not connected. Sign in to connect this Chrome profile.":value.state==="ready"?"Connected to rtube.win.":value.state==="connecting"?"Connecting…":"Disconnected. Reconnect this Chrome profile.";
-}
-$("connection-mode").addEventListener("change",async()=>{
-  const mode=$("connection-mode").value;
-  await call({type:"save-connection",payload:{connectionMode:mode}});
-  $("test-result").hidden=true;
-  renderServerConnection(await call({type:"status",includeAgent:false}));
-});
-$("server-sign-in").addEventListener("click",async()=>{
-  const saved=await call({type:"save-connection",payload:{connectionMode:"server"}});
-  if(!saved?.ok)return;
-  const result=await call({type:"server-sign-in"});
-  $("server-status").textContent=result?.ok?"Finish sign-in in the opened tab.":"Could not open sign-in. Try again.";
-});
-$("server-disconnect").addEventListener("click",async()=>{
-  await call({type:"server-disconnect"});renderServerConnection(await call({type:"status",includeAgent:false}));
-});
-$("copy-server-extension-id").addEventListener("click",()=>navigator.clipboard.writeText($("server-extension-id").value));
-chrome.storage.onChanged.addListener((changes,area)=>{
-  if(area==="local" && ["lastServerConnection","serverInstallationId","connectionMode"].some(key=>Object.hasOwn(changes,key)))
-    void call({type:"status",includeAgent:false}).then(renderServerConnection);
-});
-$("open-chrome-extensions").addEventListener("click", (event) => {
-  event.preventDefault();
-  void chrome.tabs.create({ url: "chrome://extensions/", active: true }).catch((error) => console.info("[ResearchTube] Could not open Chrome Extensions", error));
-});
-$("test-connection").addEventListener("click", saveAndTest);
 $("test-agent").addEventListener("click", testAgentConnection);
 document.querySelectorAll("[data-open]").forEach((link) => link.addEventListener("click", (event) => { event.preventDefault(); call({ type: "open-external", target: link.dataset.open }); }));
-$("copy-tunnel").addEventListener("click", async () => { await navigator.clipboard.writeText($("tunnel-id").value.trim()); $("copy-tunnel").textContent = "Copied"; setTimeout(() => { $("copy-tunnel").textContent = "Copy Tunnel ID"; }, 1400); });
-$("copy-app-name").addEventListener("click", async () => { await navigator.clipboard.writeText("ResearchTube"); $("copy-app-name").textContent = "Copied"; setTimeout(() => { $("copy-app-name").textContent = "Copy name"; }, 1400); });
 $("copy-silent-automation-flag").addEventListener("click", async () => { await navigator.clipboard.writeText($("silent-automation-flag").textContent.trim()); $("copy-silent-automation-flag").textContent = "Copied"; setTimeout(() => { $("copy-silent-automation-flag").textContent = "Copy"; }, 1400); });
-$("copy-prompt").addEventListener("click", async () => { await navigator.clipboard.writeText($("example-prompt").textContent.trim()); $("copy-prompt").textContent = "Copied"; setTimeout(() => { $("copy-prompt").textContent = "Copy example prompt"; }, 1400); });
 $("copy-diagnostics").addEventListener("click", async () => { const button = $("copy-diagnostics"); const result = await call({ type: "get-diagnostics" }); if (!result?.ok) { $("diagnostics-summary").textContent = "Could not export diagnostics."; return; } await navigator.clipboard.writeText(result.text); button.textContent = "Copied"; setTimeout(() => { button.textContent = "Copy diagnostics log"; }, 1400); });
 $("clear-diagnostics").addEventListener("click", async () => { const result = await call({ type: "clear-diagnostics" }); if (result?.ok) { $("diagnostics-summary").textContent = "No diagnostic events captured yet."; } else { $("diagnostics-summary").textContent = "Could not clear diagnostics."; } });
 async function init() {
-  // Only this local Extension settings page reads the stored secret. Public
-  // status/MCP responses still contain only apiKeyPresent, never the key.
-  const [state, local] = await Promise.all([call({ type: "status", includeAgent: false }), chrome.storage.local.get({ runtimeApiKey: "" })]);
-  renderServerConnection(state);
-  $("tunnel-id").value = state.tunnelId || "";
-  $("api-key").value = local.runtimeApiKey || "";
+  const state = await call({ type: "status", includeAgent: false });
   $("agent-port").value = state.agentPort || 17843;
   await refreshDiagnostics(); await loadMcpToolSettings();
 }
-function openSetupGuideFromHash() {
-  if (window.location.hash !== "#setup-guide") return;
-  const guide = $("setup-guide");
-  guide.open = true;
-  // Expand first, then scroll to the new element height.
-  requestAnimationFrame(() => requestAnimationFrame(() => guide.scrollIntoView({ block: "start", behavior: "instant" })));
-}
-window.addEventListener("hashchange", openSetupGuideFromHash);
-openSetupGuideFromHash();
 init();

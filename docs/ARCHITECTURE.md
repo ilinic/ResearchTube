@@ -8,32 +8,30 @@ ResearchTube connects ChatGPT to public YouTube research and local media operati
 
 ```mermaid
 flowchart TD
-    C[ChatGPT] <--> T[OpenAI Secure MCP Tunnel]
-    T <--> E[Chrome Extension service worker]
+    C[ChatGPT] <--> T[Public ResearchTube MCP and OAuth]
+    T <--> E[Chrome Extension outbound WebSocket]
     E <--> Y[YouTube page bridge]
     E <--> A[Local Agent on 127.0.0.1]
     E <--> V[Extension-owned media viewer]
     A <--> W[Workspace and local executables]
 ```
 
-The tunnel is outbound-only from the Extension. The Agent binds only to loopback. Browser page bridges are used only when a normal page origin or browser interaction is required.
+Setup starts in ChatGPT with OAuth before Extension or Agent installation. The canonical MCP URL is the root origin, without a `/mcp` suffix. There are no cloud transcripts, free quotas or mobile execution. The Extension connects outbound; the Agent remains loopback-only. See [Public connection](features/PUBLIC_CONNECTION.md).
 
 ## Components
 
-The Chrome Extension offers mutually exclusive **ResearchTube server** and
-**My OpenAI tunnel** transports. Both call the same `handleMcpRequest`; tool
-implementations remain local. The public path is ChatGPT → Cloudflare MCP/OAuth
-Worker → authenticated WebSocket → Extension → optional loopback Agent. Its
-source is [`cloudflare-worker/`](../cloudflare-worker/README.md), and
-[`PROTOCOL.md`](../cloudflare-worker/PROTOCOL.md) defines exact installation,
-tab, top-document and conversation binding. The selected transport and private
-per-profile credential live in local Extension storage; credentials never enter
-MCP output. Switching transports preserves settings and invalidates live routes.
-The original tunnel topology above remains supported independently.
+The public entry point lives in [`cloudflare-worker/`](../cloudflare-worker/README.md).
+D1 owns accounts and installation credential hashes; Durable Objects route
+requests by authenticated user and verified installation/tab/document bindings.
+`extension/cloud-connection.js` owns enrollment and the relay adapter;
+`extension/chatgpt-cloud-bridge.js` owns its separate widget handshake. The
+[Chrome protocol](../cloudflare-worker/PROTOCOL.md) applies to dispatch and
+asynchronous delivery. Real Chrome/ChatGPT verification remains a rollout
+requirement independently of automated test success.
 
 | Component | Main sources | Responsibility |
 | --- | --- | --- |
-| MCP service worker | `extension/background.js` | Tunnel polling, MCP schemas, validation, task orchestration, Settings state and browser automation |
+| MCP service worker | `extension/background.js` | Public relay, MCP schemas, validation, task orchestration, Settings state and browser automation |
 | YouTube isolated bridge | `extension/youtube-content.js` | Typed boundary between Extension messages and the YouTube page world |
 | YouTube MAIN bridge | `extension/youtube-page-bridge.src.js` | Anonymous requests in a normal `youtube.com` origin for public research data |
 | Storyboard Extension module | `extension/storyboards.js` | Storyboard schemas, validation and public result projection |
@@ -48,17 +46,14 @@ The original tunnel topology above remains supported independently.
 
 Generated files are `extension/dist/background.js` and `extension/youtube-page-bridge.js`. Their source files must be changed first.
 
-## MCP request lifecycle
+## Public request lifecycle
 
-1. The Extension reads the Tunnel ID and restricted API key from `chrome.storage.local`.
-2. It long-polls the OpenAI tunnel control plane for one queued JSON-RPC request.
-3. `handleMcpRequest` validates the method and selected public tool.
-4. Tool input is normalized before browser or Agent work begins.
-5. Browser and Agent responses are explicitly projected into the public schema.
-6. The Extension posts the JSON-RPC response to the tunnel.
-7. One successor poll is scheduled; alarms recover polling after service-worker suspension.
+1. ChatGPT calls the public MCP endpoint using OAuth.
+2. The server routes the request to the authenticated Extension and exact chat binding.
+3. `handleMcpRequest` validates the tool input and executes browser or loopback Agent work.
+4. The Extension normalizes the response before returning it through the relay.
 
-The Extension exposes both JSON text content and structured content. Expected user/input/state failures use stable structured results where defined. Unexpected failures use MCP tool errors.
+The Extension exposes JSON text and structured content. Expected state and input failures use stable codes. Unexpected failures remain MCP tool errors.
 
 ## Browser research path
 
@@ -179,9 +174,9 @@ For file-only output, the tab is muted during playback. ResearchTube waits for p
 
 ## Security and privacy
 
-- The Tunnel key is sent only to the OpenAI control plane.
+- Installation credentials stay in trusted Extension storage; only hashes are stored on the server.
 - YouTube requests omit credentials and do not use account actions.
-- Diagnostics exclude credentials, Tunnel IDs, cookies, request headers, signed URLs, transcript bodies and unbounded child-process output.
+- Diagnostics exclude credentials, cookies, request headers, signed URLs, transcript bodies and unbounded child-process output.
 - Agent HTTP access is loopback-only.
 - Public shares are explicit, temporary cloudflared operations and never expose the Agent API.
 - File creation is non-overwriting by default.

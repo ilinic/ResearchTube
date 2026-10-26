@@ -1,20 +1,24 @@
 # ResearchTube Cloudflare Worker
 
-Development server for a public ResearchTube MCP connection. TypeScript runs on
+Public ResearchTube MCP/OAuth server at the root origin **https://rtube.win**. TypeScript runs on
 Cloudflare Workers, Better Auth handles Google/Microsoft sign-in and OAuth 2.1,
 D1 stores accounts and installation credentials, and SQLite-backed Durable
 Objects route requests to authenticated extension WebSockets.
 
-**This is the public backend; Store approval is a separate step.**
-The Chrome Extension offers **ResearchTube server** and **My OpenAI tunnel**
-connection methods. Its public path includes sign-in/enrollment, the dedicated
-cloud widget listener and authenticated WebSocket relay. See [PROTOCOL.md](PROTOCOL.md)
-and test real Chrome/ChatGPT before public rollout. The Worker never launches
-a browser, reads its cookies or runs FFmpeg/yt-dlp.
+Setup starts in ChatGPT: add the root URL, choose OAuth, sign in and install
+the personal plugin. Catalog publication is not required. Connection status
+returns `/setup` instructions before local installation. Install and pair the
+Chrome Extension afterwards; start the optional Agent for local operations.
+There are no cloud transcripts, free quotas or mobile execution.
+
+The Extension implements public connection Settings, nonce-bound enrollment,
+the dedicated widget listener and outbound relay adapter.  Deployment and real provider/Chrome/ChatGPT
+verification are separate rollout steps; tests do not confirm a deployed or
+Store-approved plugin. The Worker never launches a browser or runs FFmpeg/yt-dlp.
 
 ## Implemented
 
-- Stateless Streamable HTTP MCP at `/mcp`, using the official MCP SDK.
+- Stateless Streamable HTTP MCP at `/`, using the official MCP SDK. Browser GET requests at the root show setup instructions; MCP POST requests execute the protocol. No `/mcp` alias is provided.
 - The built-in Extension catalog and existing UI resources are exported from the
   shipped Extension bundle, with three cloud connection tools added. Each
   proxied tool requires `browserBindingId`; original arguments/results and local
@@ -25,7 +29,7 @@ a browser, reads its cookies or runs FFmpeg/yt-dlp.
   five-minute access tokens, rotating refresh tokens and a refresh revocation
   endpoint. No passwords or email delivery service are configured.
 - OAuth issuer: `PUBLIC_ORIGIN/api/auth`; protected resource:
-  `PUBLIC_ORIGIN/mcp`. For the personal ChatGPT connection, select OAuth with
+  `PUBLIC_ORIGIN`. For the personal ChatGPT connection, select OAuth with
   dynamic client registration (DCR). CIMD is not configured in this version.
 - Separate random credentials per extension installation; only SHA-256 hashes
   are stored. A one-use, 15-second ticket opens its WebSocket. The long-lived
@@ -103,10 +107,10 @@ Put the returned database ID into **`env.production.d1_databases[0].database_id`
 replacing the zero placeholder. If the database already exists, use its ID
 instead of creating another. Leave the top-level local binding unchanged.
 Bindings and variables are explicitly repeated because named environments do
-not inherit them. `EXTENSION_ORIGINS` starts empty: add only the exact approved
-Chrome extension origins before enabling enrollment, for example
-`["chrome-extension://<32-letter-extension-id>"]`. An unpacked extension's ID
-may differ from its published ID.
+not inherit them. `EXTENSION_ORIGINS` explicitly allowlists the unpacked identity
+fixed by the packaged public manifest key:
+`chrome-extension://jnnhjpkdhmghpbgfcalbhmkagdeelgnp`. No wildcard origin is
+allowed. A future Web Store release must use its actual approved identity.
 
 Generate a fresh random `BETTER_AUTH_SECRET` of at least 32 characters and
 upload it using Wrangler's hidden input. Configure at least one login provider;
@@ -150,9 +154,9 @@ configurations, without publishing. After deployment, check
 `https://rtube.win/health`, `https://rtube.win/` and the OAuth metadata. Health
 only confirms an HTTP response, not provider or browser readiness.
 
-The ChatGPT MCP address is **`https://rtube.win/mcp`**. Use a personal custom MCP
+The ChatGPT MCP address is **`https://rtube.win`**. Use a personal custom MCP
 connection with OAuth/DCR for testing before Store submission. Actual browser
-calls require a signed-in Extension profile and a fresh chat-widget binding. Test provider
+calls require a paired Extension and a fresh exact-chat widget binding. Test provider
 redirects with real accounts; automated tests seed local sessions and do not
 complete external social login.
 
@@ -177,25 +181,6 @@ missing redirect restores the button and displays a bounded error. Diagnostics
 show only HTTP status and a safe error code, never provider response bodies,
 secrets or authorization URLs. After deployment, test the real provider redirect
 and callback in Chrome; `/health` alone does not exercise authentication.
-
-## Allow the Chrome Extension
-
-Open Extension Settings and select **ResearchTube server**. Under **Server setup
-details**, copy its Extension ID. In `env.production.vars.EXTENSION_ORIGINS`,
-allow its exact origin, for example:
-
-```json
-"EXTENSION_ORIGINS": "[\"chrome-extension://<actual-32-letter-id>\"]"
-```
-
-Deploy this change before clicking **Sign in and connect**. Do not add wildcard
-origins. Unpacked IDs depend on their installation; a published extension has a
-fixed approved ID. Updating the Extension code does not configure the Worker's
-allowlist automatically. Chrome needs the new `https://rtube.win/*` host access;
-reload the Extension and refresh existing ChatGPT tabs to install its bridges.
-After profile connection, connect `https://rtube.win/mcp` with OAuth in ChatGPT,
-call `system_connect_browser`, then `system_connection_status`. Switching back
-to the tunnel retains its ID/key and stops the server socket.
 
 ## Accounts and revocation
 
@@ -223,9 +208,8 @@ old route instead of electing a browser. A copied conversation's old widget
 cannot reuse a consumed nonce.
 
 The server alone cannot detect another computer displaying a historical copy
-of the same conversation. The Extension rejects duplicate
-controllers in its profile and requires fresh binding after disconnect, restart
-or document changes. Do not claim
+of the same conversation. The Extension integration must reject duplicate
+controllers and require fresh binding on resumed/moved chats. Do not claim
 transparent multi-device support or enable public rollout based solely on
 the protocol simulator. Test identical conversation copies on different
 computers/profiles, not just different conversations.
@@ -236,6 +220,12 @@ computers/profiles, not just different conversations.
 npm run check
 npm test
 ```
+
+The optional `npm run test:chrome` exercises the actual unpacked Extension in an
+isolated Chromium profile against local workerd, with seeded test login and
+simulated ChatGPT/widget pages. It verifies native external messaging, sender
+tab/document identity, dispatch, navigation invalidation and revocation. See
+[Development](../docs/DEVELOPMENT.md) for its browser/runtime requirements.
 
 Tests build and run the actual Worker in Cloudflare's local workerd/Miniflare
 runtime, use real local D1 migrations, exercise OAuth code/consent/PKCE and

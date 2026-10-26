@@ -4,11 +4,12 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-10-24",
   "compatibility_flags": ["nodejs_compat"],
+  "rules": [{ "type": "Data", "globs": ["**/*.png"], "fallthrough": true }],
   "workers_dev": true,
   "observability": { "enabled": false },
   "vars": {
     "PUBLIC_ORIGIN": "http://localhost:8787",
-    "EXTENSION_ORIGINS": "[]",
+    "EXTENSION_ORIGINS": "[\"chrome-extension://jnnhjpkdhmghpbgfcalbhmkagdeelgnp\"]",
     "ALLOW_LOCAL_DEVELOPMENT": "true"
   },
   "d1_databases": [{
@@ -28,7 +29,7 @@
       "routes": [{ "pattern": "rtube.win", "custom_domain": true }],
       "vars": {
         "PUBLIC_ORIGIN": "https://rtube.win",
-        "EXTENSION_ORIGINS": "[]",
+        "EXTENSION_ORIGINS": "[\"chrome-extension://jnnhjpkdhmghpbgfcalbhmkagdeelgnp\"]",
         "ALLOW_LOCAL_DEVELOPMENT": "false"
       },
       "d1_databases": [{

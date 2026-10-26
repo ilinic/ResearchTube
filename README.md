@@ -4,6 +4,16 @@
 
 **Turn YouTube into Answers. And Much More.**
 
+## Getting Started
+
+In **ChatGPT Plugins**, add **https://rtube.win** as a **custom MCP server**, choose **OAuth** and sign in with Google. Then follow ResearchTube's setup instructions.
+
+The [ResearchTube website](https://rtube.win) has the installation link and all the details to copy into ChatGPT.
+
+Need help? Open **Help** in the ResearchTube extension or read the [installation guide](docs/INSTALLATION.md).
+
+---
+
 **Give ChatGPT the power to explore websites, investigate videos and discussions, and work with media on your computer — just by asking.**
 
 **Free & Open Source · Local-first · Windows · macOS · Linux**
@@ -11,6 +21,7 @@
 ### [⬇ Download ResearchTube](https://github.com/ilinic/ResearchTube/releases)
 
 [See What It Can Do](#what-can-researchtube-do) · [Getting Started](#getting-started)
+
 
 
 ---
@@ -103,17 +114,6 @@ Study this page and its images. Summarize the important information, explain wha
 
 On Windows, the Local Agent runs quietly in the system tray. Click its ResearchTube icon to view the live log; close the window to keep it running, or choose **Exit** from the tray menu to stop. Files use `agent/workspace` by default; change `workspacePath.value` in `agent/agent-config.json` to choose another location.
 
-## Getting Started
-
-1. **Download ResearchTube.** Open [GitHub Releases](https://github.com/ilinic/ResearchTube/releases) and choose the ZIP for your operating system under **Assets** (Windows x64, Linux x64, macOS Apple silicon, or macOS Intel). **Do not download a "Source code" archive** — it does not contain the ready-to-use package.
-2. **Extract the ZIP** to a permanent folder on your computer. Keep the extracted folder in place; Chrome loads the extension from it.
-3. **Install the Chrome extension.** Open `chrome://extensions`, enable **Developer mode**, click **Load unpacked**, and select the `extension` folder inside ResearchTube. Make sure it's enabled, then pin ResearchTube to your Chrome toolbar.
-4. **Finish setup inside ResearchTube.** Click the ResearchTube toolbar icon, open **Settings**, and expand **How to Set Up ResearchTube**. Follow the built-in illustrated guide to connect ChatGPT, start the Local Agent when needed, and configure optional features.
-
-**Requirements:** Google Chrome and a compatible paid ChatGPT subscription with private MCP access (tested with ChatGPT Plus), plus access to OpenAI Secure MCP Tunnels. ResearchTube itself is free; a ChatGPT subscription is separate. Feature availability can depend on your platform and account.
-
-Need extra help? See the [full installation guide](docs/INSTALLATION.md) or open **Help** in the ResearchTube extension.
-
 ## MCP Tools
 
 **See everything ResearchTube can do.** Browse the tools by group, with plain-language descriptions of each capability.
@@ -122,7 +122,7 @@ Need extra help? See the [full installation guide](docs/INSTALLATION.md) or open
 
 ## Free, Open Source, and Local-first
 
-ResearchTube has **no ResearchTube subscription or hosted processing fee**. The extension and its companion Agent run on your computer. Local video and audio processing stays local unless you choose to share results with ChatGPT or another service. The OpenAI Secure MCP Tunnel connects your extension to ChatGPT without requiring you to run a public server.
+ResearchTube has **no ResearchTube subscription or hosted processing fee**. The extension and its companion Agent run on your computer. Local video and audio processing stays local unless you choose to share results with ChatGPT or another service. The public server authenticates and relays tool requests. Cloud transcripts and mobile execution are not provided.
 
 ResearchTube is not currently distributed through the Chrome Web Store; download the packaged release from GitHub using the link above.
 

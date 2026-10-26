@@ -1,26 +1,21 @@
 const $ = (id) => document.getElementById(id);
 async function call(message) { return chrome.runtime.sendMessage(message); }
-function shortTunnel(id) { return id && id.length > 14 ? `${id.slice(0, 9)}…${id.slice(-4)}` : id || "Not configured"; }
 function version(value) { return value ? `v${String(value).replace(/^v/i, "")}` : "v—"; }
 let connectionReadRevision = 0;
 function renderConnectionStatus(state) {
-  const errorLabels = {
-    NOT_CONFIGURED: "Not Configured", API_KEY_MISSING: "API key missing", TUNNEL_ID_MISSING: "Tunnel ID missing",
-    API_KEY_INVALID: "API key rejected", TUNNEL_PERMISSION_DENIED: "Access denied", TUNNEL_NOT_FOUND: "Tunnel not found", NETWORK_ERROR: "Network error", SERVER_SIGN_IN_REQUIRED: "Sign in required", SERVER_DISCONNECTED: "Disconnected", SERVER_NETWORK_ERROR: "Network error"
-  };
-  const connection = state.connection || (state.configured ? { state: "unchecked" } : { state: "not-configured", errorCode: "NOT_CONFIGURED" });
-  const server = state.connectionMode === "server";
-  $("connection-label").textContent = server ? "ResearchTube Server" : "OpenAI Tunnel";
-  const element = $("tunnel-status");
-  const notConfigured = !state.configured || connection.state === "not-configured";
-  $("tunnel-status-value").textContent = notConfigured ? "Not Configured" : connection.state === "ready" ? (server ? "rtube.win" : shortTunnel(state.tunnelId)) : connection.state === "connecting" ? "Connecting…" : connection.state === "unchecked" ? "Not tested" : errorLabels[connection.errorCode] || "Connection failed";
-  $("tunnel-help").hidden = connection.state === "ready";
-  element.className = connection.state === "ready" ? "good" : connection.state === "unchecked" || connection.errorCode === "NOT_CONFIGURED" ? "warn" : "bad";
+  const cloud = state.cloud;
+  $("server-status-value").textContent = cloud?.state === "ready" ? "Connected" : cloud?.errorCode ? "Sign-in or connection error" : cloud?.state === "connecting" ? "Connecting…" : !cloud?.configured ? "Waiting for chat" : "Offline";
+  $("server-status").className = cloud?.state === "ready" ? "good" : cloud?.errorCode ? "bad" : "warn";
 }
 async function loadConnectionStatus() {
   const revision = ++connectionReadRevision;
   const state = await call({ type: "status", includeAgent: false });
   if (revision === connectionReadRevision) renderConnectionStatus(state);
+}
+async function loadGoogleProfileStatus() {
+  let result; try { result = await call({ type: "google-profile-status" }); } catch { /* unsupported browser */ }
+  $("google-status").textContent = result?.state === "signed-in" ? "Signed in" : result?.state === "signed-out" ? "Not signed in" : "Unknown";
+  $("google-status").className = result?.state === "signed-in" ? "good" : result?.state === "signed-out" ? "bad" : "warn";
 }
 function agentSummary(agent, port) {
   if (!agent?.available) return { text: `Unavailable · ${port}`, className: "bad" };
@@ -66,6 +61,7 @@ async function loadAgentStatus(port) {
 }
 let activeYouTubeVideoTab = null;
 async function load() {
+  void loadGoogleProfileStatus();
   $("extension-status").textContent = version(chrome.runtime.getManifest().version);
   $("extension-status").className = "good";
   $("agent-status").textContent = "Checking…";
@@ -110,17 +106,17 @@ $("describe-video").addEventListener("click", async () => {
   window.close();
 });
 $("settings").addEventListener("click", () => chrome.runtime.openOptionsPage());
-$("tunnel-help").addEventListener("click", () => chrome.tabs.create({ url: chrome.runtime.getURL("settings.html") + "#setup-guide" }));
 $("help").addEventListener("click", () => {
   // The worker owns startup after this popup closes, including with no Agent
-  // or tunnel configured: help must be available during initial installation.
+  // connection configured: help must be available during initial installation.
   void call({ type: "open-help" }).catch(error => console.info("[ResearchTube] Help request failed", error));
   window.close();
 });
 $("support").addEventListener("click", () => call({ type: "open-external", target: "support" }));
 chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === "local" && ["tunnelId", "runtimeApiKey", "lastConnectionTest", "lastTunnelConnection", "connectionMode", "serverInstallationId", "lastServerConnection"].some(name => Object.hasOwn(changes, name))) {
+  if (area === "local" && ["cloudConnectionStatus", "researchtubeCloudCredential"].some(name => Object.hasOwn(changes, name))) {
     void loadConnectionStatus().catch(() => {});
   }
 });
 load();
+chrome.identity?.onSignInChanged?.addListener(() => { void loadGoogleProfileStatus(); });

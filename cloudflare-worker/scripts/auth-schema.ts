@@ -28,6 +28,6 @@ for (const [table, definition] of Object.entries(schema).sort((a, b) => a[1].ord
 }
 const destination = new URL("../migrations/0001_auth.sql", import.meta.url);
 if (process.argv.includes("--check")) {
-  if (await readFile(destination, "utf8") !== sql) throw Error("Auth schema changed: add and review a new migration");
+  if ((await readFile(destination, "utf8")).replace(/\r\n/g, "\n") !== sql) throw Error("Auth schema changed: add and review a new migration");
 } else await writeFile(destination, sql);
 console.log(`Generated ${Object.keys(schema).length} auth tables`);

@@ -15,7 +15,7 @@ assert.match(html, /Study this site/);
 assert.match(script, /type: "study-site", tabId: tab.id/);
 assert.match(html, /<nav><button id="settings"[^>]*>Settings<\/button><button id="help" class="link">Help<\/button><button id="support"[^>]*><span class="support-heart" aria-hidden="true">♥<\/span> Support<\/button><\/nav>/, "Help must appear between Settings and Support on the same row with the same link style");
 assert.match(html, /<dt>Extension<\/dt><dd id="extension-status">/);
-assert.match(html, /<dt id="connection-label">OpenAI Tunnel<\/dt>/);
+assert.match(html, /<dt id="connection-label">ResearchTube server<\/dt>/);
 assert.match(html, /<dt>YouTube<\/dt>/);
 assert.match(html, /<dt>Local Agent<\/dt>/);
 assert.match(html, /<dt>Interface<\/dt>/);
@@ -73,9 +73,10 @@ const popupContext = {
       sendMessage: (message) => {
         messages.push(message);
         if (message.type === "status") return Promise.resolve({
-          configured: true, connection: { state: "ready", errorCode: null }, tunnelId: "tunnel_test", extensionVersion: "2.2.52",
+          configured: true, cloud: { state: "ready", errorCode: null, configured: true }, extensionVersion: "2.2.52",
           requiredAgentInterfaceVersion: 73, agentPort: 17844, youtubeSearch: {},
         });
+        if (message.type === "google-profile-status") return Promise.resolve({ state: "signed-in" });
         assert.equal(message.type, "agent-status");
         agentCalls += 1;
         if (agentCalls === 1) return new Promise((resolve) => { resolveAgent = resolve; });
@@ -88,10 +89,10 @@ vm.runInNewContext(script, popupContext);
 assert.equal(element("extension-status").textContent, "v9.8.7", "version renders before worker status resolves");
 await new Promise((resolve) => setImmediate(resolve));
 assert.equal(element("extension-status").textContent, "v9.8.7", "popup uses installed manifest even when worker returns an older version");
-assert.equal(element("tunnel-status-value").textContent, "tunnel_test");
+assert.equal(element("server-status-value").textContent, "Connected");
 assert.equal(element("interface-version").textContent, "v73");
 assert.equal(element("agent-status").textContent, "Checking…");
-assert.equal(messages[0].includeAgent, false);
+assert.equal(messages.find(message => message.type === "status").includeAgent, false);
 resolveAgent({ available: true, agentVersion: "2.2.52", chromeAutomation: { state: "checking" } });
 await new Promise((resolve) => setImmediate(resolve));
 assert.equal(element("agent-status").textContent, "Ready · v2.2.52");

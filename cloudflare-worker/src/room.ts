@@ -32,6 +32,11 @@ export class BrowserRoom extends DurableObject<Env> {
         if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") return new Response(null, { status: 426 });
         const installationId = request.headers.get("X-Installation-Id")!;
         const pair = new WebSocketPair();
+        // A restarted adapter has no live document proofs. Never restore old
+        // routes solely from its installation credential.
+        for (const [key, binding] of await this.ctx.storage.list<StoredBinding>({ prefix: "binding:", limit: 201 })) {
+          if (binding.installationId === installationId) { this.invalidate(binding); await this.ctx.storage.delete(key); }
+        }
         for (const old of this.ctx.getWebSockets(installationId)) {
           this.rejectSocket(old, "BROWSER_DISCONNECTED", "The browser connection was replaced. The operation was not retried.");
           old.close(1000, "Replaced");
@@ -50,6 +55,12 @@ export class BrowserRoom extends DurableObject<Env> {
         await this.ctx.storage.put(`challenge:${nonce}`, value);
         await this.ctx.storage.setAlarm(Date.now() + CHALLENGE_TTL);
         return json({ nonce, expiresAt: value.expiresAt });
+      }
+      if (path === "/enrollment-check") {
+        const { nonce } = z.object({ nonce: z.string().length(72) }).strict().parse(await readJson(request, 256));
+        const challenge = await this.ctx.storage.get<Challenge>(`challenge:${nonce}`);
+        if (!challenge || challenge.expiresAt <= Date.now()) throw new PublicError("BROWSER_ACCOUNT_MISMATCH", "This chat challenge does not belong to the ResearchTube account signed in to this browser, or it expired.", 409);
+        return json({ valid: true });
       }
       if (path === "/bind") {
         const body = z.object({ installationId: z.string().uuid(), nonce: z.string().length(72), target: targetSchema }).strict().parse(await readJson(request));
@@ -98,7 +109,9 @@ export class BrowserRoom extends DurableObject<Env> {
         const { session } = z.object({ session: z.string().max(512) }).strict().parse(await readJson(request));
         const bindings = await this.ctx.storage.list<StoredBinding>({ prefix: "binding:", limit: 201 });
         const active = [...bindings.values()].filter(b => b.session === session && b.expiresAt > Date.now());
-        return json({ connected: active.some(b => !b.ambiguous && this.online(b.installationId)),
+        const installations = [...new Set(this.ctx.getWebSockets().map(ws => ws.deserializeAttachment() as SocketIdentity)
+          .filter(identity => identity?.expiresAt > Date.now()).map(identity => identity.installationId))].length;
+        return json({ extensionConnected: installations > 0, connected: active.some(b => !b.ambiguous && this.online(b.installationId)),
           ambiguous: active.some(b => b.ambiguous), bindings: active.filter(b => !b.ambiguous).map(b => ({ bindingId: b.bindingId, expiresAt: b.expiresAt })) });
       }
       if (path === "/disconnect") {
@@ -187,6 +200,7 @@ export class BrowserRoom extends DurableObject<Env> {
     // Heartbeats keep Chrome's MV3 worker alive without replaying tool calls.
     if (data === '{"type":"ping"}') { socket.send('{"type":"pong"}'); return; }
     if (typeof data !== "string" || new TextEncoder().encode(data).length > MAX_BYTES) { socket.close(1009, "Invalid payload"); this.rejectSocket(socket, "BROWSER_PROTOCOL_ERROR", "The browser returned an invalid response."); return; }
+    if (data === "ping") { socket.send("pong"); return; }
     try {
       const msg = z.object({ type: z.literal("response"), requestId: z.string().uuid(), target: targetSchema,
         result: z.record(z.string(), z.unknown()).optional(), error: z.object({ code: z.number().int(), message: z.string().max(500) }).strict().optional()

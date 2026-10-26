@@ -2,8 +2,9 @@
   "manifest_version": 3,
   "minimum_chrome_version": "125",
   "name": "ResearchTube \u2014 YouTube Research for ChatGPT",
-  "version": "2.10.0",
-  "description": "Public YouTube research tools for ChatGPT through a local MCP connection.",
+  "version": "2.10.1",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAq7x/G7M7VgWS25XfVIRPEJy3egENWEBIyrRc1wpV6PZfuz+VgXBtLfBgujFepqBsxXPtwc2qxG/q3w3zYKLrm+uiZje9EeDbnQiLJFnrXQB/iF1UxujbeF4sef4MNEMisrlBPTS03OX46BiCO829ltJqfTKP2zDU+MhcUAR4x3w4CNBcIR75Pc0vsDcZnWzKQeFnBh5kYuEEN+mBQBZ8A76CuSAELCCrg2ywvbzE4BnEh5s6vEzr6ru7zzb8/74o35yYO2u6QK1K+QYZ++ZK3tk9VDE5Kvo+ufTFj3P6gyIQcVg2Zvvx0ChLhx2t+o8k3rs/UBBk7PzTOpgNOrie2QIDAQAB",
+  "description": "YouTube research and local media tools for ChatGPT.",
   "icons": {
     "16": "icons/researchtube-16.png",
     "32": "icons/researchtube-32.png",
@@ -11,6 +12,8 @@
     "128": "icons/researchtube-128.png"
   },
   "permissions": [
+    "identity",
+    "identity.email",
     "storage",
     "alarms",
     "tabs",
@@ -21,18 +24,22 @@
     "tabGroups"
   ],
   "host_permissions": [
-    "https://api.openai.com/*",
+    "https://rtube.win/*",
     "https://www.youtube.com/*",
     "https://translate.google.com/*",
     "https://chatgpt.com/*",
     "https://web-sandbox.oaiusercontent.com/*",
     "https://*.web-sandbox.oaiusercontent.com/*",
-    "http://127.0.0.1/*",
-    "https://rtube.win/*"
+    "http://127.0.0.1/*"
   ],
   "background": {
     "service_worker": "dist/background.js",
     "type": "module"
+  },
+  "externally_connectable": {
+    "matches": [
+      "https://rtube.win/*"
+    ]
   },
   "options_page": "settings.html",
   "action": {
@@ -45,6 +52,20 @@
     }
   },
   "content_scripts": [
+    {
+      "matches": [
+        "https://chatgpt.com/*",
+        "https://web-sandbox.oaiusercontent.com/*",
+        "https://*.web-sandbox.oaiusercontent.com/*"
+      ],
+      "js": [
+        "chatgpt-cloud-bridge.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": true,
+      "match_about_blank": true,
+      "match_origin_as_fallback": true
+    },
     {
       "matches": [
         "https://www.youtube.com/*"
@@ -102,29 +123,6 @@
       "all_frames": true,
       "match_about_blank": true,
       "match_origin_as_fallback": true
-    },
-    {
-      "matches": [
-        "https://chatgpt.com/*",
-        "https://web-sandbox.oaiusercontent.com/*",
-        "https://*.web-sandbox.oaiusercontent.com/*"
-      ],
-      "js": [
-        "server-widget-bridge.js"
-      ],
-      "run_at": "document_start",
-      "all_frames": true,
-      "match_about_blank": true,
-      "match_origin_as_fallback": true
-    },
-    {
-      "matches": [
-        "https://rtube.win/connect-extension*"
-      ],
-      "js": [
-        "server-enrollment-bridge.js"
-      ],
-      "run_at": "document_idle"
     }
   ],
   "web_accessible_resources": [

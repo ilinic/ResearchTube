@@ -3,12 +3,12 @@ import { afterEach, expect, test, vi } from 'vitest';
 import { authScript } from '../src/pages.ts';
 
 afterEach(() => vi.useRealTimers());
-async function ui(fetch, search = '') {
+async function ui(fetch, search = '', page = 'sign-in') {
   const button = { disabled: false, dataset: { provider: 'google' } };
   const status = { textContent: '' }, requests = [], destinations = [];
   const elements = { status };
   const context = vm.createContext({
-    document: { getElementById: id => elements[id] || null, querySelectorAll: () => [button] },
+    document: { body: { dataset: { page } }, getElementById: id => elements[id] || null, querySelectorAll: () => [button] },
     location: { origin: 'https://rt.test', search, assign: url => destinations.push(url) },
     fetch: (path, options) => { requests.push({ path, ...options, body: JSON.parse(options.body) }); return fetch(path, options); },
     URL, URLSearchParams, AbortController, Error, TypeError, setTimeout, clearTimeout
@@ -25,10 +25,10 @@ test('Google click obtains a JSON redirect before navigating, preserving OAuth c
   expect(view.destinations).toEqual(['https://accounts.google.com/o/oauth2/v2/auth?state=test']);
 });
 test('extension sign-in resumes only the fixed enrollment route with its nonce', async () => {
-  const query = '?extensionId=' + 'a'.repeat(32) + '&nonce=' + 'b'.repeat(72);
-  const view = await ui(async () => Response.json({ url: 'https://accounts.google.com/o/oauth2/v2/auth' }), query);
+  const query = '?extensionId=' + 'a'.repeat(32) + '&nonce=aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+  const view = await ui(async () => Response.json({ url: 'https://accounts.google.com/o/oauth2/v2/auth' }), query, 'setup');
   await view.button.onclick();
-  expect(view.requests[0].body.callbackURL).toBe('https://rt.test/connect-extension' + query);
+  expect(view.requests[0].body.callbackURL).toBe('https://rt.test/setup' + query);
 });
 test.each([
   [() => Response.json({}), 'did not return'],

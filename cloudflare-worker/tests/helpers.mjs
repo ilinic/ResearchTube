@@ -1,12 +1,13 @@
 import { Miniflare, convertV4MiniflareOptions } from "miniflare";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import { createHmac, randomUUID } from "node:crypto";
 export const BASE = "https://rt.test";
 export const EXTENSION = "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 export const AUTH_SECRET = "test-only-random-auth-secret-12345678901234567890";
 export async function start(bindings = {}) {
+  const images = (await readdir("dist")).filter(name => name.endsWith(".png"));
   const mf = new Miniflare(convertV4MiniflareOptions({
-    modules: true, scriptPath: "dist/index.js", compatibilityDate: "2026-10-24", compatibilityFlags: ["nodejs_compat"],
+    modules: [{ type: "ESModule", path: "dist/index.js" }, ...images.map(name => ({ type: "Data", path: "dist/" + name }))], compatibilityDate: "2026-10-24", compatibilityFlags: ["nodejs_compat"],
     bindings: { PUBLIC_ORIGIN: BASE, EXTENSION_ORIGINS: JSON.stringify([EXTENSION]), BETTER_AUTH_SECRET: AUTH_SECRET, ...bindings },
     d1Databases: ["DB"], durableObjects: { BROWSER_ROOMS: { className: "BrowserRoom", useSQLite: true } },
     cf: false, logRequests: false
@@ -48,7 +49,7 @@ export async function bind(stub, installationId, session = "chat-1", page = targ
 }
 export const message = socket => new Promise(resolve => socket.addEventListener("message", e => resolve(JSON.parse(e.data)), { once: true }));
 export async function rpc(mf, method, params, token) {
-  return mf.dispatchFetch(BASE + "/mcp", post({ jsonrpc: "2.0", id: 1, method, ...(params ? { params } : {}) }, {
+  return mf.dispatchFetch(BASE, post({ jsonrpc: "2.0", id: 1, method, ...(params ? { params } : {}) }, {
     Accept: "application/json, text/event-stream", ...(token ? { Authorization: "Bearer " + token } : {})
   }));
 }

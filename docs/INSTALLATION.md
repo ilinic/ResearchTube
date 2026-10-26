@@ -1,13 +1,13 @@
 # Installing ResearchTube
 
-This guide installs the Chrome Extension, Local Agent and private ChatGPT MCP connection. Keep the extracted release directory: Chrome loads the Extension from it, and the Agent reads configuration beside its script or executable.
+Start by connecting the public MCP server in ChatGPT, then install the Chrome Extension and optional Local Agent. Keep the extracted release directory: Chrome loads the Extension from it, and the Agent reads configuration beside its script or executable.
 
 ## Requirements
 
 - Windows 10/11, macOS or Linux with Chrome/Chromium. The broad architecture is cross-platform, but some tools have platform limits.
 - Python 3.10 or later on Linux/macOS, or when launching the Agent from source on Windows. The release's Windows EXE includes Python and needs no separate interpreter.
 - Node.js is required only for development, not for a prebuilt release.
-- An OpenAI Platform organisation with Secure MCP Tunnel access.
+- Custom MCP access in ChatGPT, subject to your account and workspace permissions.
 - ChatGPT Plus or a higher supported plan with access to private MCP connections. This installation path assumes those controls are available; account/workspace policy also applies.
 
 The platform archive includes all runtime tools:
@@ -15,6 +15,16 @@ The platform archive includes all runtime tools:
 - FFmpeg and ffprobe: media probe, frames, maps, clips, screen and camera operations.
 - yt-dlp and Deno plus the ready YouTube PO-token provider: local YouTube formats, downloads and metadata fallback.
 - cloudflared: explicit temporary online sharing only.
+
+## Connect in ChatGPT first
+
+1. Open **ChatGPT Plugins → + → Add custom MCP server**.
+2. Enter **https://rtube.win**, choose **OAuth**, sign in through Google (or the configured Microsoft provider), authorize ResearchTube and install the personal plugin.
+3. Ask ResearchTube to check its connection. Account setup works before Extension or Agent installation; follow the returned setup link.
+4. Download/extract the release and load its Extension as described below.
+5. Return to a saved ChatGPT conversation in desktop Chrome and ask ResearchTube to connect this chat. The extension pairs automatically using the browser's existing ResearchTube sign-in, then reconnects automatically. Each chat still needs its own verified binding.
+
+Follow the setup instructions at [rtube.win](https://rtube.win). For connection recovery, see [troubleshooting](TROUBLESHOOTING.md#public-server-connection).
 
 ## 1. Extract the complete release
 
@@ -30,7 +40,7 @@ Extract ResearchTube into a permanent directory. Do not load the Extension from 
 4. Select the release's `extension/` directory, not the repository root.
 5. Pin ResearchTube to the toolbar if desired.
 
-Open ResearchTube **Settings** from the toolbar popup or Chrome's extension details page. In **How to Set Up ResearchTube**, Step 1 lists the download, extraction and Chrome setup sequence using the platform ZIP from **GitHub Releases → Assets**, not a **Source code** archive. Select “`ResearchTube/extension`” with **Load unpacked**, check it is loaded and enabled, keep the extracted folder in place and pin the Extension.
+Open the Extension popup to check the ResearchTube server and Local Agent status.
 
 ## 3. Start the Local Agent
 
@@ -52,7 +62,7 @@ Both launch modes read the same external `agent/agent-config.json`, `tools/` and
 
 The Agent starts listening and prints its version/interface and Workspace summary before its background diagnostics finish. Component results appear in the console as each one-time startup check completes; health initially reports `checking` for unfinished checks. Repeated status requests read the saved startup snapshot. Restart the Agent after changing tools or Chrome launch flags to refresh it. Physical paths appear only in the local log. Windows tray logs are retained with rotation in `agent/logs/agent.log`.
 
-In Extension Settings, select **Test connection** under **How to Set Up ResearchTube → Step 5 — Start the Local Agent**. A successful result should show compatible Extension/Agent interface versions and component statuses.
+In Extension Settings, select **Test connection** under **Local Agent (optional)**. A successful result should show compatible Extension/Agent interface versions and component statuses.
 
 ### Choose the Workspace directory
 
@@ -82,39 +92,16 @@ Restart the Agent after adding or replacing a component, then test the Agent aga
 
 Current yt-dlp YouTube operations also require the bundled/local BgUtils PO-token provider to report `ready`. Its tokens are generated locally per video and are not stored in configuration or exposed through MCP.
 
-## 5. Create the Secure MCP Tunnel connection
-
-Use the official OpenAI Platform tunnel page opened by ResearchTube Settings.
-
-1. Create or choose a Secure MCP Tunnel.
-2. Copy its identifier beginning with `tunnel_`.
-3. Create a separate restricted OpenAI API key.
-4. Grant only the tunnel permissions ResearchTube Settings requests, normally **Tunnels: Read + Use**.
-5. Paste the Tunnel ID and key into ResearchTube Settings.
-6. Select **Save and test connection**.
-
-The button saves both fields before testing, including empty values. The saved key is displayed masked in its password field. To remove the connection, clear both fields and save; a missing-settings test result is expected and the popup shows **Not configured**. A failed test never restores the previous values. See [User help](HELP.md#3-set-up-the-openai-connection) for testing the initial setup state.
-
-Do not use an organisation-owner, administrator or unrestricted key. The key is stored in local Chrome extension storage and is sent only to OpenAI's tunnel control plane.
-
-## 6. Add ResearchTube to ChatGPT
-
-Before continuing, keep the Local Agent running and the ResearchTube Extension enabled. Open the popup and check **Local Agent: Ready**; this confirms the Extension–Agent connection. Keep ResearchTube connected while ChatGPT discovers its tools.
-
-1. Open [ChatGPT Plugins](https://chatgpt.com/plugins), select **+ → Add custom MCP server** (older labels: Create app/connector).
-2. Choose **Tunnel** under Connection and select/paste the same Tunnel ID.
-3. Name it **ResearchTube** and upload `icons/researchtube-64.png` from the extracted ResearchTube folder as the plugin icon. Where server authentication is requested, choose **No authentication**; the restricted runtime key belongs only in Extension Settings. Review and create/install the connection.
-4. Open a new conversation and select or mention ResearchTube.
-
-If **Add custom MCP server** is missing, check your plan and workspace permissions; some interfaces still require enabling **Developer Mode** in ChatGPT Settings. ChatGPT's interface labels can change. The essential operation is adding the private MCP connection backed by the configured Tunnel ID. See [User help](HELP.md#6-create-the-researchtube-connection-in-chatgpt) for missing controls/workspace association and links to current official OpenAI instructions. ResearchTube itself implements the tunnel connection; no separate OpenAI `tunnel-client` or cloudflared installation is needed for this route.
-
 ## Optional Chrome launch flag
 
-`--silent-debugger-extension-api` hides Chrome's debugger banner; it is not required for the tunnel or Agent connection. See [where to put the Chrome flag](HELP.md#where-to-put-the-chrome-flag) for Windows shortcut Target instructions, full Chrome restart and Agent status refresh.
+`--silent-debugger-extension-api` hides Chrome's debugger banner during browser automation. See [where to put the Chrome flag](HELP.md#where-to-put-the-chrome-flag) for Windows shortcut Target instructions, full Chrome restart and Agent status refresh.
 
-## 7. Verify the installation
+## 5. Verify the installation
 
-Make sure the Local Agent is running, then check the tunnel connection, Local Agent readiness and interface compatibility in the ResearchTube popup. **Settings → How to Set Up ResearchTube → Step 8** contains **Copy example prompt** and a link to a new ChatGPT chat. Copy the example first, open a new ChatGPT chat with the link below it, then paste and send the prompt. It already includes `@ResearchTube`. The optional **Silent file automation** flag and Copy button are in Step 6 of the same guide, after the Agent port and Test connection controls in Step 5. Verify the popup statuses before adding the MCP plugin in Step 7.
+For the public connection, verify **ResearchTube server: Connected** in the popup,
+call `system_connection_status` and bind this chat with `system_connect_browser`.
+Start the optional Agent for local operations and check its readiness/interface
+compatibility.
 
 To check Agent components, ask:
 

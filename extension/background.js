@@ -1,5 +1,5 @@
-import { createServerConnection, SERVER_ORIGIN } from "./server-connection.js";
 import { createBrowserOwner } from "./browser-owner.js";
+import { createCloudConnection } from "./cloud-connection.js";
 import { taskTabSchema, normalizeTaskTabId, createTaskCompletionDelivery, installComposerWatchdog } from "./task-chat.js";
 import { waitForComposerMedia } from "./composer-media-retry.js";
 import { createTabAutomationQueue, createDebuggerLeases } from "./tab-automation.js";
@@ -17,28 +17,15 @@ import { pruneCompletedTasks } from "./task-history.js";
 import { createMediaStreamHandler } from "./media-stream.js";
 import { resolveChatComposer, chatComposerPageExpression, inspectChatComposer, clickChatComposerAttachmentRemoval, resetChatComposerFileInputs, installChatComposerGuard, readChatComposerGuard, disposeChatComposerGuard, authorizeChatComposerText } from "./chat-composer.js";
 import { STORYBOARD_TOOL_NAMES, storyboardDefinitions, validateStoryboardInput, normalizeStoryboardResult } from "./storyboards.js";
-const CONTROL_PLANE_BASE_URL = "https://api.openai.com";
 const RESEARCHTUBE_HELP_GUIDE_URL = "https://github.com/ilinic/ResearchTube/blob/main/docs/HELP.md";
 const RESEARCHTUBE_HELP_PROMPT = `Read ${RESEARCHTUBE_HELP_GUIDE_URL} and use it to answer my ResearchTube setup, usage and troubleshooting questions in my language. Ask what I need help with.`;
 const EXTERNAL_URLS = Object.freeze({
-  tunnels: "https://platform.openai.com/settings/organization/tunnels",
-  apiKeys: "https://platform.openai.com/settings/organization/api-keys",
   chatgpt: "https://chatgpt.com/plugins",
   chatgptNewChat: "https://chatgpt.com/",
   chatgptSettings: "https://chatgpt.com/#settings",
   support: "https://ko-fi.com/ilinic"
 });
 const DEFAULTS = {
-  connectionMode: "tunnel",
-  serverInstallationId: "",
-  serverInstallationToken: "",
-  lastServerConnection: null,
-  serverEnrollment: null,
-  tunnelId: "",
-  runtimeApiKey: "",
-  onboardingCompleted: false,
-  lastConnectionTest: null,
-  lastTunnelConnection: null,
   agentPort: 17843,
   youtubeSearchCooldownUntil: 0,
   youtubeSearchCooldownLevel: 0
@@ -126,7 +113,6 @@ const GOOGLE_TRANSLATE_PLAYBACK_TIMEOUT_MS = 10 * 60_000;
 const AGENT_HEALTH_TIMEOUT_MS = 5_000;
 const AGENT_TASK_TIMEOUT_MS = 10_000;
 const AGENT_CAPTURE_FRAME_TIMEOUT_MS = 90_000;
-const POLL_RETRY_DELAY_MS = 250;
 const SEARCH_MIN_START_INTERVAL_MS = 500;
 const SEARCH_CACHE_TTL_MS = 5 * 60_000;
 const SEARCH_COOLDOWN_STEPS_MS = [2_000, 5_000, 10_000, 20_000, 40_000, 60_000];
@@ -158,14 +144,6 @@ let cameraRecordingBadgeTaskId = null;
 let cameraRecordingBadgeVisible = false;
 let cameraRecordingBadgeTimer = null;
 
-let polling = false;
-let connectionRevision = 0;
-let connectionUpdateTail = Promise.resolve();
-let currentPollRevision = -1;
-let tunnelPollController = null;
-let currentPollPromise = null;
-let pollLoopScheduled = false;
-let pollLoopTimer = null;
 let lastSearchStartedAt = 0;
 let searchQueue = Promise.resolve();
 let searchQueueDepth = 0;
@@ -1121,7 +1099,7 @@ function toolDefinitions() {
     {
       name: "online_share_start",
       title: "Start an online share",
-      description: "Expose one Workspace file or a folder's selected fileTypes through a temporary public HTTPS tunnel. Replaces any prior share. verifyExternal tests an image via wsrv.nl; a folder requires probeWorkspacePath. externallyReachable is true only after that test succeeds.",
+      description: "Expose one Workspace file or a folder's selected fileTypes through a temporary public HTTPS link. Replaces any prior share. verifyExternal tests an image via wsrv.nl; a folder requires probeWorkspacePath. externallyReachable is true only after that test succeeds.",
       annotations: { ...localWorkspaceWriteAnnotations, openWorldHint: true },
       inputSchema: { type: "object", additionalProperties: false, properties: { folder: { type: "string", description: "Existing logical directory. Mutually exclusive with file; empty string means the workspace root." }, file: { type: "string", minLength: 1, description: "Existing logical file. Mutually exclusive with folder." }, fileTypes: { type: "array", minItems: 1, maxItems: 7, uniqueItems: true, items: workspaceShareFileTypeSchema, description: "Required only for a folder share; all cannot be combined with another category." }, verifyExternal: { type: "boolean", default: false, description: "Use wsrv.nl to verify external image reachability." }, probePath: { type: "string", minLength: 1, description: "Required only for a verified folder share: an allowed image inside folder." } }, oneOf: [{ required: ["folder", "fileTypes"], not: { required: ["file"] } }, { required: ["file"], not: { anyOf: [{ required: ["folder"] }, { required: ["fileTypes"] }, { required: ["probePath"] }] } }] },
       outputSchema: workspaceShareStatusSchema
@@ -1137,7 +1115,7 @@ function toolDefinitions() {
     {
       name: "online_share_stop",
       title: "Stop the online share",
-      description: "Close the public sharing server and tunnel. Workspace files remain.",
+      description: "Stop the temporary public share. Workspace files remain.",
       annotations: { ...localWorkspaceWriteAnnotations, openWorldHint: true },
       inputSchema: { type: "object", additionalProperties: false, properties: {} },
       outputSchema: workspaceShareStopSchema
@@ -2449,7 +2427,7 @@ async function cdpInsertBrowserContinuation(tabId, currentChatTarget, fileNames,
   await assertCurrentChatComposer(currentChatTarget, { fileNames, guardToken: composerGuardToken, retryPolicy, checkCancelled });
 }
 
-async function cdpAttachFilesNow(filePathValues, { onPhase = null, currentChatTarget = null, deferSend = false, checkCancelled = null, onSendCommit = null, continuationText = null, beforeSend = null, trace = null } = {}) {
+async function cdpAttachFilesNow(filePathValues, { onPhase = null, currentChatTarget = null, deferSend = false, checkCancelled = null, onSendCommit = null, continuationText = null, beforeSend = null, beforeUpload = null, trace = null } = {}) {
   checkCancelled?.();
   if (!Array.isArray(filePathValues) || !filePathValues.length) {
     throw cdpError("A file batch must contain at least one eligible file.");
@@ -2500,6 +2478,8 @@ async function cdpAttachFilesNow(filePathValues, { onPhase = null, currentChatTa
       if (installed !== true) throw localAgentError("MEDIA_TO_CHAT_INVALID", "The Composer could not be monitored; no files were sent.");
       await assertCurrentChatComposer(currentChatTarget);
     }
+    checkCancelled?.();
+    await beforeUpload?.();
     checkCancelled?.();
     await cdpCommand(tab.id, "DOM.setFileInputFiles", { files: filePaths, backendNodeId: chooser.backendNodeId });
     cdpLog("DOM.setFileInputFiles completed", { tabId: tab.id, backendNodeId: chooser.backendNodeId, fileCount: filePaths.length });
@@ -2582,8 +2562,7 @@ function chatConversationPath(value) {
 }
 
 async function requireCurrentChatTarget(target) {
-  if (target?.cloudTarget) await serverConnection.verify(target.cloudTarget);
-  else if (!target?.newChat && (await getConfig()).connectionMode === "server") throw localAgentError("BROWSER_BINDING_CHANGED", "Connect this chat again before sending files.");
+  if (target?.cloudTarget) await cloudConnection.verifyTarget(target.cloudTarget);
   if (!Number.isInteger(target?.tabId) || !target.chatPath) {
     throw localAgentError("MEDIA_TO_CHAT_TARGET_NOT_FOUND", "The originating ChatGPT tab could not be identified; no Composer changes were made.");
   }
@@ -2847,13 +2826,17 @@ async function drainLibraryStoreQueue() {
       if (!task || task.status !== "queued") continue;
       await updateLibraryStoreTask(task, "resolvingFiles", "Resolving the workspace file batch.");
       try {
+        if (task.cloudTarget) await cloudConnection.verifyTarget(task.cloudTarget);
         const { localPaths, submittedFiles, skippedFiles } = await resolveLibraryStoreFiles(task.files);
         task.skippedFiles = skippedFiles;
         if (!localPaths.length) {
           await updateLibraryStoreTask(task, "failed", `All ${skippedFiles.length} files exceed the configured per-file size limit; no files were submitted.`, { status: "failed", error: "All requested files exceed the configured per-file size limit." });
           continue;
         }
-        await withChatFileAutomation(() => cdpAttachFilesNow(localPaths, { onPhase: async (phase) => {
+        const guard = task.cloudTarget ? () => cloudConnection.verifyTarget(task.cloudTarget) : null;
+        await withChatFileAutomation(() => cdpAttachFilesNow(localPaths, { beforeUpload: guard, beforeSend: guard,
+          checkCancelled: task.cloudTarget ? () => cloudConnection.assertLive(task.cloudTarget) : null,
+          onPhase: async (phase) => {
           const messages = { attaching: "Attaching the file batch to the background ChatGPT Composer.", composerAccepted: "The ChatGPT Composer accepted the file batch.", submitting: "Sending the attached file batch to ChatGPT without Composer text." };
           await updateLibraryStoreTask(task, phase, messages[phase] || "Processing the attached file batch.");
         } }));
@@ -2996,6 +2979,7 @@ function normalizeMediaToChatSendDelay(value = 0) {
 }
 
 function assertMediaToChatNotCancelled(task) {
+  if (task.target?.cloudTarget) cloudConnection.assertLive(task.target.cloudTarget);
   if (task.status === "cancelled") throw localAgentError("MEDIA_TO_CHAT_INVALID", "The files-to-chat task was cancelled. Composer contents were left unchanged.");
 }
 
@@ -3149,8 +3133,6 @@ async function drainMediaToChatQueue() {
 }
 
 async function mediaToChatStart(argumentsValue = {}, { awaitingArtifacts = false, cloudTarget = null } = {}) {
-  if (cloudTarget) await serverConnection.verify(cloudTarget);
-  const cloudChatPath = cloudTarget ? chatConversationPath((await chrome.tabs.get(cloudTarget.tabId)).url) : null;
   if (!argumentsValue || typeof argumentsValue !== "object" || Array.isArray(argumentsValue) || Object.keys(argumentsValue).some((name) => !["files", "sendDelaySeconds", "tabId"].includes(name))) {
     throw localAgentError("MEDIA_TO_CHAT_INVALID", "media_view accepts only files, sendDelaySeconds and optional tabId.");
   }
@@ -3164,21 +3146,27 @@ async function mediaToChatStart(argumentsValue = {}, { awaitingArtifacts = false
   let taskId;
   do { taskId = createAsyncTaskId(); } while (mediaToChatTasks.has(taskId));
   const task = {
-    taskId, tabId, cloudTarget, suppressCompletionNotification: awaitingArtifacts, awaitingArtifacts, target: cloudTarget ? {tabId:cloudTarget.tabId,chatPath:cloudChatPath,cloudTarget} : null, bindingToken: crypto.randomUUID(), bindingDeadline: Date.now() + MEDIA_TO_CHAT_BIND_TIMEOUT_MS,
+    taskId, tabId, suppressCompletionNotification: awaitingArtifacts, awaitingArtifacts, target: null, bindingToken: crypto.randomUUID(), bindingDeadline: Date.now() + MEDIA_TO_CHAT_BIND_TIMEOUT_MS,
     sendDelaySeconds, sendNotBefore: null, sendStarted: false,
     status: "queued", phase: "queued", progressPercent: 0,
     files, submittedFiles: [], skippedFiles: [], createdAt, updatedAt: createdAt, submittedAt: null,
     message: "Waiting for the originating chat widget to identify its exact Chrome tab. Finish the current assistant response so Send can become available.", error: null
   };
+  if (cloudTarget) {
+    await cloudConnection.verifyTarget(cloudTarget);
+    if (tabId != null && tabId !== cloudTarget.tabId) throw localAgentError("BROWSER_TARGET_MISMATCH", "The destination differs from this chat.");
+    task.tabId = cloudTarget.tabId;
+    task.target = { tabId: cloudTarget.tabId, chatPath: chatConversationPath((await chrome.tabs.get(cloudTarget.tabId)).url), cloudTarget };
+    task.cloudTarget = cloudTarget; task.bindingToken = null;
+  }
   mediaToChatTasks.set(task.taskId, task); mediaToChatQueue.push(task.taskId);
-  if (cloudTarget) task.bindingToken = null;
   await persistMediaToChatTasks();
   if (cloudTarget) void drainMediaToChatQueue();
   else await chrome.alarms.create(`media-chat-bind:${task.taskId}`, { when: task.bindingDeadline });
   return { task: mediaToChatTaskDocument(task) };
 }
 
-// The MCP tunnel does not carry a Chrome tab ID. Only the result widget in
+// MCP requests do not carry a trusted Chrome tab ID. Only the result widget in
 // the invoking conversation can bind this task through a Chrome-authenticated
 // content-script sender. Never derive a destination from focus or activation.
 function mediaToChatWidgetMetadata(taskId) {
@@ -3385,7 +3373,11 @@ async function updateComposerWatchdog(tabId, action, preserve = false) {
       else state?.suppress();
     }, args: [action, preserve] });
 }
-async function sendComposerWhenReady(tabId, { completionText = null, revision = null, chatPath = null, beforeSend = null, onSendCommit = null } = {}) {
+async function sendComposerWhenReady(tabId, { completionText = null, revision = null, chatPath = null, beforeSend = null, onSendCommit = null, cloudTarget = null } = {}) {
+  if (cloudTarget) {
+    const previous = beforeSend;
+    beforeSend = async () => { await cloudConnection.verifyTarget(cloudTarget); await previous?.(); };
+  }
   return withChatFileAutomation(async () => {
     let attached = false, committed = false, inserted = false;
     try {
@@ -3482,7 +3474,7 @@ const taskCompletionDelivery = createTaskCompletionDelivery({
   now: () => Date.now(), historyLimit: () => completedTaskHistoryLimit,
   load: async () => (await chrome.storage.local.get({ researchtubeBackgroundTaskRecordsV1: [] })).researchtubeBackgroundTaskRecordsV1,
   save: records => chrome.storage.local.set({ researchtubeBackgroundTaskRecordsV1: records }),
-  schedule: scheduleBackgroundTaskPoll, send: sendComposerWhenReady, verifyContext: verifyTaskCloudContext, log: consoleAction,
+  schedule: scheduleBackgroundTaskPoll, send: sendComposerWhenReady, log: consoleAction,
   status: async (kind, taskId) => kind === "timer"
     ? normalizeTimerResult("timer_status", await agentJsonRequest("/tasks/timer/" + encodeURIComponent(taskId)))
     : customToolStatus(taskId)
@@ -3549,7 +3541,8 @@ async function startArtifactTask(tool, argumentsValue, cloudTarget = null) {
 }
 
 async function executeArtifactStart(id, tool, args) {
-  const response = await executeToolCall(id, tool, args, () => startArtifactTask(tool, args, cloudContextForRequest(id)));
+  const cloudTarget = typeof cloudConnection === "undefined" ? null : cloudConnection.targetForRequest(id);
+  const response = await executeToolCall(id, tool, args, () => startArtifactTask(tool, args, cloudTarget));
   const task = response.result?.structuredContent;
   if (task?.taskId) {
     const metadata = await artifactTaskManager.metadata(task.taskId);
@@ -3561,9 +3554,8 @@ async function executeArtifactStart(id, tool, args) {
 
 chrome.runtime.onInstalled.addListener(({ reason }) => {
   // Do not overwrite chrome.storage.local here. Reloading or updating an
-  // unpacked extension fires onInstalled and previously erased the tunnel
-  // settings, which made development unnecessarily repetitive.
-  void bootstrapTunnel();
+  // unpacked extension fires onInstalled; preserve user preferences.
+  void bootstrapConnection();
   void ensureLibraryStoreLoaded().then(drainLibraryStoreQueue);
   void ensureMediaToChatLoaded().then(drainMediaToChatQueue);
   void artifactTaskManager.ensure();
@@ -3575,7 +3567,7 @@ chrome.runtime.onInstalled.addListener(({ reason }) => {
 
 chrome.runtime.onStartup.addListener(() => {
   void browserAgent.recoverGroups().catch(() => {});
-  void bootstrapTunnel();
+  void bootstrapConnection();
   void ensureLibraryStoreLoaded().then(drainLibraryStoreQueue);
   void ensureMediaToChatLoaded().then(drainMediaToChatQueue);
   void artifactTaskManager.ensure();
@@ -3583,18 +3575,20 @@ chrome.runtime.onStartup.addListener(() => {
 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === "public-relay") void cloudConnection.start();
   if (alarm.name === "background-task-completions") void taskCompletionDelivery.tick();
   if (alarm.name.startsWith("artifact-task:")) void artifactTaskManager.advance(alarm.name.slice("artifact-task:".length));
-  if (alarm.name === "tunnel-poll") void startPolling();
   if (alarm.name.startsWith("media-chat-bind:")) void expireMediaToChatBinding(alarm.name.slice("media-chat-bind:".length));
   if (alarm.name.startsWith("media-chat-send:")) void resumeDelayedMediaToChatTask(alarm.name.slice("media-chat-send:".length));
 });
 
-async function bootstrapTunnel() {
+async function bootstrapConnection() {
   // These were experimental controls in older builds. The transport is now
   // permanently anonymous WEB page-context, so retaining stale values would
   // be misleading and serves no purpose.
   await chrome.storage.local.remove([
+    "connectionMode", "tunnelId", "runtimeApiKey", "lastConnectionTest",
+    "lastTunnelConnection", "onboardingCompleted",
     "controlPlaneBaseUrl",
     "onboardingStep",
     "enabled",
@@ -3603,9 +3597,10 @@ async function bootstrapTunnel() {
     "transcriptClientType",
     "commentsProfileDefaultVersion"
   ]);
-  await chrome.alarms.create("tunnel-poll", { periodInMinutes: 0.5 });
+  await chrome.alarms.clear("tunnel-poll");
+  await chrome.alarms.create("public-relay", { periodInMinutes: 0.5 });
   await refreshActionBadge();
-  return startPolling();
+  return cloudConnection.start();
 }
 
 async function configuredStartupPrompts() {
@@ -3819,15 +3814,51 @@ const chatContext = createChatContext({
   scheduleExpiry: (work, ms) => { const timer = setTimeout(work, ms); timer?.unref?.(); },
   error: value => recordSystemDiagnostic({ ...value, source: "tool", tool: "system_get_chat_context", stage: "chat.binding" })
 });
+const cloudConnection = createCloudConnection({
+  chrome, fetch: (url, options) => fetch(url, options), webSocket: url => new WebSocket(url), uuid: () => crypto.randomUUID(),
+  setTimeout: (...args) => globalThis.setTimeout(...args), clearTimeout: id => globalThis.clearTimeout(id),
+  setInterval: (...args) => globalThis.setInterval(...args), clearInterval: id => globalThis.clearInterval(id),
+  dispatch: request => handleMcpRequest(request), changed: () => refreshActionBadge(),
+  checkOwner: async (tabId, reconnect = false) => {
+    const tab = await chrome.tabs.get(tabId);
+    if (tab.groupId < 0) return;
+    const owner = await browserOwner.read(tabId);
+    if (!owner && (await chrome.tabs.query({ groupId: tab.groupId })).filter(candidate => chatConversationPath(candidate.url)).length !== 1)
+      throw localAgentError("BROWSER_CONTEXT_AMBIGUOUS", "This group needs one unambiguous leading ChatGPT tab before connection.");
+    if (owner && owner.ownerTabId === tabId && reconnect && ["stopped", "failed"].includes(owner.state)) { await browserAgent.connectGroup(tabId); return; }
+    if (owner && (owner.ownerTabId !== tabId || ["stopped", "failed"].includes(owner.state)))
+      throw localAgentError("BROWSER_CONTEXT_REQUIRED", "Reconnect the leading chat of this tab group before using browser tools.");
+  },
+  invalidated: async target => {
+    await updateComposerWatchdog(target.tabId, "suppress").catch(() => {});
+    await ensureMediaToChatLoaded();
+    for (const task of mediaToChatTasks.values()) if (task.target?.cloudTarget?.bindingId === target.bindingId && ["queued", "working"].includes(task.status) && !task.sendStarted)
+      await failMediaToChatTarget(task, "BROWSER_BINDING_CHANGED", "The original cloud browser binding ended. Created files were preserved; chat delivery was stopped.");
+  }
+});
+void chrome.storage?.local?.setAccessLevel?.({ accessLevel: "TRUSTED_CONTEXTS" });
+chrome.runtime.onMessageExternal?.addListener((message, sender, sendResponse) => {
+  cloudConnection.external(message, sender).then(sendResponse).catch(error => sendResponse({ ok: false,
+    errorCode: /^[A-Z][A-Z0-9_]{0,63}$/.test(error?.code || "") ? error.code : "CLOUD_UNAVAILABLE" }));
+  return true;
+});
 // Alarm revives a suspended worker; only live exact conversations reconnect.
 chrome.debugger?.onEvent?.addListener((source, method, params) => { void browserAgent.onEvent(source, method, params).catch(error => consoleAction(`[ResearchTube Browser] ${error.code || "BROWSER_UNAVAILABLE"}`)); });
 chrome.debugger?.onDetach?.addListener((source, reason) => { debuggerLeases.lost(source.tabId); void browserAgent.onDetached(source, reason).catch(() => {}); });
-chrome.tabs?.onRemoved?.addListener(tabId => { void serverConnection.changed(tabId).catch(() => {}); void browserAgent.onRemoved(tabId).catch(() => {}).finally(() => { browserAutomationBadges.delete(tabId); browserAutomationToolbarTabs.delete(tabId); }); });
-chrome.tabs?.onUpdated?.addListener((tabId, change) => { if (change.url || change.status) void serverConnection.changed(tabId).catch(() => {}); void browserAgent.onUpdated(tabId, change).catch(() => {}); });
+chrome.tabs?.onRemoved?.addListener(tabId => { void cloudConnection.tabChanged(tabId); void browserAgent.onRemoved(tabId).catch(() => {}).finally(() => { browserAutomationBadges.delete(tabId); browserAutomationToolbarTabs.delete(tabId); }); });
+chrome.tabs?.onUpdated?.addListener((tabId, change) => { if (change.status === "loading" || Object.hasOwn(change, "url")) void cloudConnection.tabChanged(tabId); void browserAgent.onUpdated(tabId, change).catch(() => {}); });
 chrome.tabs?.onCreated?.addListener(() => { void browserAgent.onCreated().catch(() => {}); });
 chrome.tabs?.onReplaced?.addListener(() => { void browserAgent.onReplaced().catch(() => {}); });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === "google-profile-status") {
+    if (sender?.id !== chrome.runtime.id || sender.url !== chrome.runtime.getURL("popup.html")) { sendResponse({ state: "unknown" }); return false; }
+    getGoogleProfileStatus().then(sendResponse); return true;
+  }
+  if (message?.type === "researchtube_cloud_bind") {
+    cloudConnection.bind(message, sender).then(sendResponse).catch(error => sendResponse({ ok: false,
+      errorCode: /^[A-Z][A-Z0-9_]{0,63}$/.test(error?.code || "") ? error.code : "CLOUD_UNAVAILABLE" })); return true;
+  }
   if (message?.type === "researchtube_composer_watchdog") {
     if (sender?.id !== chrome.runtime.id || sender.frameId !== 0 || !Number.isInteger(sender.tab?.id)) { sendResponse({ sent: false }); return; }
     sendComposerWhenReady(sender.tab.id, { revision: message.revision }).then(sendResponse).catch(() => sendResponse({ sent: false }));
@@ -3843,39 +3874,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     });
     return true;
   }
-  if (["server-sign-in", "server-disconnect"].includes(message?.type)) {
-    if(sender?.id!==chrome.runtime.id || sender.tab || sender.url!==chrome.runtime.getURL("settings.html")){sendResponse({ok:false,errorCode:"INVALID_SENDER"});return false;}
-    (message.type==="server-sign-in"?beginServerSignIn():updateConnection(()=>serverConnection.disconnect()).then(()=>({ok:true}))).then(sendResponse).catch(()=>sendResponse({ok:false,errorCode:"SERVER_CONNECTION_FAILED"}));return true;
-  }
-  if(message?.type==="researchtube_server_enroll"){
-    enrollServerProfile(message,sender).then(sendResponse).catch(error=>sendResponse({ok:false,errorCode:error.code||"SERVER_ENROLLMENT_FAILED"}));return true;
-  }
-  if(message?.type==="researchtube_server_bind"){
-    serverConnection.bind(message.nonce,sender).then(sendResponse).catch(error=>sendResponse({ok:false,errorCode:error.code||"BROWSER_BINDING_INVALID"}));return true;
-  }
-  if (message?.type === "poll-now") {
-    startPolling();
-    pollOnce().then((result) => sendResponse(result));
-    return true;
-  }
   if (message?.type === "status") {
     getPublicConnectionState({ includeAgent: message.includeAgent !== false }).then(sendResponse);
     return true;
   }
   if (message?.type === "agent-status") {
     getAgentStatus().then(sendResponse);
-    return true;
-  }
-  if (message?.type === "save-connection") {
-    saveConnection(message.payload).then(sendResponse).catch((error) => sendResponse({ ok: false, error: safeErrorMessage(error) }));
-    return true;
-  }
-  if (message?.type === "clear-api-key") {
-    saveConnection({ apiKey: "" }).then(sendResponse).catch((error) => sendResponse({ ok: false, error: safeErrorMessage(error) }));
-    return true;
-  }
-  if (message?.type === "test-connection") {
-    testConnection().then(sendResponse).catch((error) => sendResponse(connectionFailure("UNKNOWN_ERROR", "Connection test failed.", error)));
     return true;
   }
   if (message?.type === "save-agent-port") {
@@ -3967,88 +3971,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return false;
 });
 
-// Server credentials and enrollment capabilities are private local state.
-const cloudRequestTargets = new Map();
-let serverEnrollmentRunning = false;
-function cloudContextForRequest(id) { return cloudRequestTargets.get(id) || null; }
-function readServerChatDocument() {
-  const path=location.pathname;
-  const match=/\/c\/([A-Za-z0-9_-]+)\/?$/.exec(path);
-  if(location.origin!=="https://chatgpt.com" || !match || match[1].startsWith("local-chatgpt"))return null;
-  return {conversationId:match[1]};
-}
-async function serverChatIdentity(tabId) {
-  const tab=await chrome.tabs.get(tabId);
-  if(!chatConversationPath(tab.url))throw localAgentError("BROWSER_SESSION_NOT_READY","Wait for ChatGPT to save this conversation.");
-  const results=await chrome.scripting.executeScript({target:{tabId,frameIds:[0]},world:"ISOLATED",func:readServerChatDocument});
-  const top=results.find(item=>item.frameId===0), conversationId=top?.result?.conversationId;
-  if(!top?.documentId || !conversationId || chatConversationPath(tab.url)?.split("/c/").pop()!==conversationId)
-    throw localAgentError("BROWSER_TARGET_MISMATCH","The ChatGPT document changed.");
-  const copies=(await chrome.tabs.query({url:"https://chatgpt.com/*"})).filter(item=>chatConversationPath(item.url)?.split("/c/").pop()===conversationId);
-  if(copies.length!==1 || copies[0].id!==tabId)throw localAgentError("BROWSER_CONTEXT_AMBIGUOUS","Close duplicate tabs of this conversation, then reconnect.");
-  return {tabId,documentId:top.documentId,conversationId};
-}
-const serverConnection = createServerConnection({
-  extensionId:chrome.runtime.id,config:getConfig,now:Date.now,fetch:(...args)=>fetch(...args),socket:url=>new WebSocket(url),
-  setTimeout:(...args)=>setTimeout(...args),clearTimeout:id=>clearTimeout(id),setInterval:(...args)=>setInterval(...args),clearInterval:id=>clearInterval(id),
-  identity:serverChatIdentity,
-  claimGroup:async tabId=>{if((await chrome.tabs.get(tabId)).groupId>=0)await browserAgent.connectGroup(tabId);},
-  tool:name=>toolDefinitions().find(tool=>tool.name===name),
-  execute:async(request,target)=>{
-    cloudRequestTargets.set(request.id,target);
-    try{return await handleMcpRequest(request);}finally{cloudRequestTargets.delete(request.id);}
-  },
-  status:async value=>{await chrome.storage.local.set({lastServerConnection:value});await refreshActionBadge();},
-  clearCredential:()=>chrome.storage.local.set({serverInstallationId:"",serverInstallationToken:"",serverEnrollment:null}),
-  invalidate:async binding=>{
-    await updateComposerWatchdog(binding.tabId, "suppress").catch(()=>{});
-    for(const task of mediaToChatTasks.values())if(task.target?.cloudTarget?.bindingId===binding.bindingId && ["queued","working"].includes(task.status))await mediaToChatCancel(task.taskId).catch(()=>{});
-    await browserAgent.onRemoved(binding.tabId).catch(()=>{});
-  }
-});
-async function verifyTaskCloudContext(task) {
-  const cloudTarget=task.cloudTarget || task.caller?.cloudTarget;
-  if(cloudTarget)await serverConnection.verify(cloudTarget);
-  else if((await getConfig()).connectionMode==="server")throw localAgentError("BROWSER_BINDING_CHANGED","This task has no current server chat binding.");
-}
-async function beginServerSignIn() {
-  const config=await getConfig();
-  if(config.connectionMode!=="server")return {ok:false,errorCode:"SERVER_MODE_DISABLED",message:"Select ResearchTube server first."};
-  const nonce=crypto.randomUUID()+crypto.randomUUID();
-  const tab=await chrome.tabs.create({url:"about:blank",active:true});
-  await chrome.storage.local.set({serverEnrollment:{nonce,tabId:tab.id,expiresAt:Date.now()+10*60_000}});
-  await chrome.tabs.update(tab.id,{url:SERVER_ORIGIN+"/connect-extension?extensionId="+chrome.runtime.id+"&nonce="+nonce});
-  return {ok:true,message:"Finish sign-in in the opened tab."};
-}
-async function enrollServerProfile(message,sender) {
-  const config=await getConfig(), pending=config.serverEnrollment;
-  if(!pending || config.connectionMode!=="server" || sender?.id!==chrome.runtime.id || sender.frameId!==0 || typeof sender.documentId!=="string" || sender.tab?.id!==pending?.tabId || pending.expiresAt<=Date.now() || message.nonce!==pending.nonce)
-    throw localAgentError("SERVER_ENROLLMENT_EXPIRED","Start connection setup again from ResearchTube Settings.");
-  const url=new URL(sender.url);
-  if(url.origin!==SERVER_ORIGIN || url.pathname!=="/connect-extension" || url.searchParams.get("nonce")!==pending.nonce || url.searchParams.get("extensionId")!==chrome.runtime.id)
-    throw localAgentError("SERVER_ENROLLMENT_INVALID","Invalid server setup page.");
-  if(serverEnrollmentRunning)throw localAgentError("SERVER_ENROLLMENT_BUSY","Connection setup is already running.");
-  serverEnrollmentRunning=true;
+async function getGoogleProfileStatus() {
+  if (!chrome.identity?.getProfileUserInfo) return { state: "unknown" };
   try {
-  const injection=(await chrome.scripting.executeScript({target:{tabId:sender.tab.id,documentIds:[sender.documentId]},world:"ISOLATED",func:async extensionId=>{
-    const r=await fetch("/api/installations",{method:"POST",signal:AbortSignal.timeout(15000),credentials:"same-origin",redirect:"error",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:"Chrome profile",extensionOrigin:"chrome-extension://"+extensionId})});
-    const data=await r.json();return r.ok?{ok:true,installationId:data.installationId,installationToken:data.installationToken}:{ok:false,errorCode:data?.error?.code};
-  },args:[chrome.runtime.id]}))[0];
-  const result=injection?.result;
-  if(injection?.documentId!==sender.documentId)throw localAgentError("SERVER_ENROLLMENT_INVALID","The setup document changed.");
-  if(!result?.ok)throw localAgentError(/^[A-Z][A-Z0-9_]{0,63}$/.test(result?.errorCode || "")?result.errorCode:"SERVER_ENROLLMENT_FAILED","This Chrome profile could not be connected.");
-  if(!/^[a-f0-9-]{36}$/.test(result.installationId || "") || !/^[a-f0-9-]{72}$/.test(result.installationToken || ""))throw localAgentError("SERVER_INVALID_RESPONSE","Invalid server credential.");
-  const latest=await getConfig();
-  if(latest.connectionMode!=="server" || latest.serverEnrollment?.nonce!==pending.nonce)throw localAgentError("CONNECTION_CHANGED","Connection settings changed.");
-  await serverConnection.stop();
-  if(config.serverInstallationToken)await serverConnection.api("/api/installations/revoke-current",{},config).catch(()=>{});
-  await updateConnection(async()=>{
-    const current=await getConfig();
-    if(current.connectionMode!=="server" || current.serverEnrollment?.nonce!==pending.nonce)throw localAgentError("CONNECTION_CHANGED","Connection setup was cancelled.");
-    await chrome.storage.local.set({serverInstallationId:result.installationId,serverInstallationToken:result.installationToken,serverEnrollment:null,lastServerConnection:null});
-  });
-  return serverConnection.connect();
-  } finally { serverEnrollmentRunning=false; }
+    const profile = await chrome.identity.getProfileUserInfo({ accountStatus: "ANY" });
+    // Primary Chrome identity only. Never expose its email or Gaia ID to the
+    // page, MCP, diagnostics or server; this is not ResearchTube authentication.
+    return { state: profile?.id ? "signed-in" : "signed-out" };
+  } catch { return { state: "unknown" }; }
 }
 
 async function getConfig() {
@@ -4060,23 +3990,15 @@ async function getPublicConnectionState({ includeAgent = true } = {}) {
   const agentPort = normalizeAgentPort(config.agentPort);
   const agent = includeAgent ? await getAgentStatus(agentPort) : null;
   const remainingMs = Math.max(0, Number(config.youtubeSearchCooldownUntil || 0) - Date.now());
+  const cloud = await cloudConnection.status();
   return {
-    connectionMode: config.connectionMode,
-    serverOrigin: SERVER_ORIGIN,
-    serverExtensionId: chrome.runtime.id,
-    serverSignedIn: Boolean(config.serverInstallationToken),
-    configured: config.connectionMode === "server" ? Boolean(config.serverInstallationToken) : Boolean(config.tunnelId && config.runtimeApiKey),
-    tunnelId: config.tunnelId,
-    apiKeyPresent: Boolean(config.runtimeApiKey),
-    polling,
-    lastStatus: config.lastStatus || "",
-    lastConnectionTest: config.lastConnectionTest || null,
-    connection: activeConnectionState(config),
+    cloud,
+    configured: cloud.configured,
+    connection: { state: cloud.state, errorCode: cloud.errorCode },
     agentPort,
     agent,
     extensionVersion: EXTENSION_VERSION,
     requiredAgentInterfaceVersion: REQUIRED_AGENT_INTERFACE_VERSION,
-    onboardingCompleted: Boolean(config.onboardingCompleted),
     youtubeSearch: {
       rateLimited: remainingMs > 0,
       retryAfterSeconds: Math.ceil(remainingMs / 1_000),
@@ -6161,197 +6083,6 @@ async function copyCaptureFramePath(path) {
   return { path: logicalPath, action: "copiedPath" };
 }
 
-function updateConnection(callback) {
-  const result = connectionUpdateTail.then(callback);
-  connectionUpdateTail = result.catch(() => {});
-  return result;
-}
-
-function saveConnection(payload = {}) {
-  return updateConnection(async () => {
-    const config = await getConfig();
-    const changes = {};
-    if (Object.hasOwn(payload, "connectionMode")) {
-      if (!["tunnel", "server"].includes(payload.connectionMode)) throw localAgentError("INVALID_ARGUMENT", "Select tunnel or server.");
-      changes.connectionMode = payload.connectionMode;
-    }
-    // Explicit empty fields clear credentials. Omitted fields preserve them for
-    // internal metadata-only updates; Settings always supplies both fields.
-    if (Object.hasOwn(payload, "tunnelId")) changes.tunnelId = String(payload.tunnelId ?? "").trim();
-    if (Object.hasOwn(payload, "apiKey")) changes.runtimeApiKey = String(payload.apiKey ?? "").trim();
-    const changed = Object.entries(changes).some(([name, value]) => config[name] !== value);
-    if (changed) {
-      connectionRevision++;
-      await serverConnection.stop();
-      tunnelPollController?.abort();
-      if (pollLoopTimer !== null) clearTimeout(pollLoopTimer);
-      pollLoopTimer = null; pollLoopScheduled = false;
-      Object.assign(changes, { lastConnectionTest: null, lastTunnelConnection: null, lastServerConnection: null, lastStatus: "", onboardingCompleted: false });
-    }
-    if (Object.hasOwn(payload, "onboardingCompleted")) changes.onboardingCompleted = payload.onboardingCompleted === true;
-    await chrome.storage.local.set(changes);
-    await refreshActionBadge();
-    const saved = await getConfig();
-    if (saved.connectionMode === "server") void serverConnection.connect();
-    else if (saved.tunnelId && saved.runtimeApiKey) void startPolling();
-    return { ok: true, apiKeyPresent: Boolean(saved.runtimeApiKey) };
-  });
-}
-
-function activeConnectionState(config) {
-  if(config.connectionMode!=="server")return tunnelConnectionState(config);
-  if(!config.serverInstallationToken)return {state:"not-configured",errorCode:"SERVER_SIGN_IN_REQUIRED"};
-  return config.lastServerConnection || {state:"unchecked",errorCode:null};
-}
-
-function tunnelConnectionState(config) {
-  if (!config.tunnelId || !config.runtimeApiKey) return {
-    state: "not-configured",
-    errorCode: !config.tunnelId && !config.runtimeApiKey ? "NOT_CONFIGURED" : !config.tunnelId ? "TUNNEL_ID_MISSING" : "API_KEY_MISSING"
-  };
-  const latest = config.lastTunnelConnection || config.lastConnectionTest;
-  if (!latest) return { state: "unchecked", errorCode: null };
-  return { state: latest.success ? "ready" : "error", errorCode: latest.errorCode || null };
-}
-
-function recordTunnelConnection(revision, result, lastStatus, manual = false) {
-  return updateConnection(async () => {
-    if (revision !== connectionRevision) return false;
-    const outcome = { success: result.ok, timestamp: new Date().toISOString(), stage: result.ok ? "tunnel" : result.errorCode, errorCode: result.errorCode || null, message: result.message || null };
-    const changes = { lastTunnelConnection: outcome };
-    if (lastStatus !== undefined) changes.lastStatus = lastStatus;
-    if (manual) { changes.lastConnectionTest = outcome; if (result.ok) changes.onboardingCompleted = true; }
-    await chrome.storage.local.set(changes);
-    await refreshActionBadge();
-    return true;
-  });
-}
-
-function startPolling() {
-  void getConfig().then(config => { if (config.connectionMode === "server") void serverConnection.connect(); });
-  // All callers share one scheduled loop. The former implementation allowed
-  // concurrent callers to attach their own successor timer after the same
-  // poll, which could multiply timers even though the poll itself was shared.
-  schedulePollLoop(0);
-  return currentPollPromise ?? Promise.resolve({ ok: true, scheduled: true });
-}
-
-function schedulePollLoop(delayMs) {
-  if (pollLoopScheduled) return;
-  pollLoopScheduled = true;
-  pollLoopTimer = setTimeout(async () => {
-    pollLoopScheduled = false;
-    pollLoopTimer = null;
-    const result = await pollOnce();
-    const config = await getConfig();
-    if (config.connectionMode !== "server" && config.tunnelId && config.runtimeApiKey) {
-      schedulePollLoop(POLL_RETRY_DELAY_MS);
-    } else {
-      await refreshActionBadge();
-    }
-    return result;
-  }, delayMs);
-}
-
-async function pollOnce() {
-  await connectionUpdateTail;
-  if (currentPollPromise) {
-    if (currentPollRevision === connectionRevision) return currentPollPromise;
-    const old = currentPollPromise;
-    await old.catch(() => {});
-    if (currentPollPromise === old) currentPollPromise = null;
-    return pollOnce();
-  }
-  const revision = connectionRevision;
-  const promise = pollOnceInternal(revision);
-  currentPollPromise = promise; currentPollRevision = revision;
-  try {
-    return await promise;
-  } finally {
-    if (currentPollPromise === promise) currentPollPromise = null;
-  }
-}
-
-async function pollOnceInternal(revision = connectionRevision) {
-  const config = await getConfig();
-  if (revision !== connectionRevision) return { ok: false, reason: "connection-changed" };
-  if (config.connectionMode === "server") return { ok: false, reason: "server-mode" };
-  if (!config.tunnelId || !config.runtimeApiKey) {
-    return { ok: false, reason: "not-configured" };
-  }
-
-  polling = true;
-  const controller = new AbortController();
-  tunnelPollController = controller;
-  try {
-    const url = `${CONTROL_PLANE_BASE_URL}/v1/tunnels/${encodeURIComponent(config.tunnelId)}/poll?limit=1&timeout_ms=15000`;
-    const response = await fetch(url, {
-      signal: controller.signal,
-      headers: {
-        "Authorization": `Bearer ${config.runtimeApiKey}`,
-        "Accept": "application/json",
-        "X-Tunnel-Client-Name": "researchtube-extension",
-        "X-Tunnel-Client-Version": EXTENSION_VERSION,
-        "X-Tunnel-Client-Wire-Protocol-Version": "2026-08-25",
-        "X-Tunnel-MCP-Server-Info": JSON.stringify({ version: 1, channels: [{ name: "main" }] })
-      }
-    });
-    if (revision !== connectionRevision) return { ok: false, reason: "connection-changed" };
-    if (response.status === 204) {
-      await recordTunnelConnection(revision, { ok: true }, "poll: 204 (no command)");
-      return { ok: true, empty: true };
-    }
-    if (!response.ok) throw createTunnelHttpError(response.status);
-
-    const envelope = await response.json();
-    if (revision !== connectionRevision) return { ok: false, reason: "connection-changed" };
-    const commands = Array.isArray(envelope?.commands) ? envelope.commands : [];
-    if (!commands.length) {
-      await recordTunnelConnection(revision, { ok: true }, "poll: 200 (no command)");
-      return { ok: true, empty: true };
-    }
-    for (const command of commands) {
-      if (revision !== connectionRevision) return { ok: false, reason: "connection-changed" };
-      if (command.command_type !== "jsonrpc") continue;
-      const result = await handleMcpRequest(command.jsonrpc);
-      if (revision !== connectionRevision) return { ok: false, reason: "connection-changed" };
-      await postResponse(config, command, result);
-    }
-    await recordTunnelConnection(revision, { ok: true }, `handled ${commands.length} command(s)`);
-    return { ok: true, handled: commands.length };
-  } catch (error) {
-    if (revision !== connectionRevision) return { ok: false, reason: "connection-changed" };
-    consoleAction("ResearchTube:", error);
-    await recordTunnelConnection(revision, connectionFailureFromPoll({ error: String(error) }), `error: ${safeErrorMessage(error)}`);
-    return { ok: false, error: String(error) };
-  } finally {
-    polling = false;
-    if (tunnelPollController === controller) tunnelPollController = null;
-  }
-}
-
-async function postResponse(config, command, result) {
-  const url = `${CONTROL_PLANE_BASE_URL}/v1/tunnels/${encodeURIComponent(config.tunnelId)}/response`;
-  const payload = {
-    request_id: command.request_id,
-    channel: command.channel || "main",
-    resp_headers: { "Content-Type": ["application/json"] },
-    resp_code: 200,
-    resp_type: result === null ? "notify_ack" : "jsonrpc_response"
-  };
-  if (result !== null) payload.resp_json = result;
-  const response = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${config.runtimeApiKey}`,
-        "Content-Type": "application/json",
-        "X-Tunnel-Shard-Token": command.shard_token
-      },
-      body: JSON.stringify(payload)
-    });
-  if (!response.ok) throw createTunnelHttpError(response.status, "response");
-}
-
 async function paintBrowserAutomationBadge(tabId) {
   const session = browserAutomationBadges.get(tabId);
   let appearance = actionBadgeAppearance;
@@ -6460,57 +6191,14 @@ function updateCameraRecordingBadge(task) {
 async function refreshActionBadge() {
   if (cameraRecordingBadgeKind) return paintCameraRecordingBadge();
   const config = await getConfig();
-  const connection = activeConnectionState(config);
-  if (connection.state === "error") return setActionBadge("connection-error");
+  const cloud = await cloudConnection.status();
+  const connection = cloud;
+  if (connection.errorCode) return setActionBadge("connection-error");
   if (connection.state !== "ready") return setActionBadge("setup");
   if (Number(config.youtubeSearchCooldownUntil || 0) > Date.now()) {
     return setActionBadge("youtube-rate-limited");
   }
   return setActionBadge("ready");
-}
-
-async function testConnection() {
-  await connectionUpdateTail;
-  const revision = connectionRevision;
-  await setActionBadge("working");
-  const config = await getConfig();
-  if (config.connectionMode === "server") {
-    const result = await serverConnection.connect();
-    return { ...result, mode: "server", message: result.ok ? "ResearchTube server connected." : "Sign in or reconnect this Chrome profile." };
-  }
-  let result;
-  if (!config.tunnelId) {
-    result = connectionFailure("TUNNEL_ID_MISSING", "Enter your Tunnel ID.");
-  } else if (!config.runtimeApiKey) {
-    result = connectionFailure("API_KEY_MISSING", "Enter your OpenAI API key.");
-  } else {
-    const pollResult = await pollOnce();
-    result = pollResult.ok
-      ? { ok: true, stages: { apiKey: true, tunnel: true }, message: "Connection successful." }
-      : connectionFailureFromPoll(pollResult);
-  }
-  if (!await recordTunnelConnection(revision, result, undefined, true)) return connectionFailure("CONNECTION_CHANGED", "Connection settings changed during the test. Test the saved settings again.");
-  return result;
-}
-
-function createTunnelHttpError(status, operation = "poll") {
-  const error = new Error(`${operation} HTTP ${status}`);
-  error.httpStatus = status;
-  return error;
-}
-
-function connectionFailureFromPoll(result) {
-  const error = String(result?.error || "");
-  if (/HTTP 401/i.test(error)) return connectionFailure("API_KEY_INVALID", "The OpenAI API key was rejected.");
-  if (/HTTP 403/i.test(error)) return connectionFailure("TUNNEL_PERMISSION_DENIED", "The API key is valid, but it cannot access this tunnel.");
-  if (/HTTP 404/i.test(error)) return connectionFailure("TUNNEL_NOT_FOUND", "The tunnel could not be found.");
-  if (/Failed to fetch|NetworkError|network/i.test(error)) return connectionFailure("NETWORK_ERROR", "ResearchTube could not reach OpenAI.");
-  if (result?.reason === "not-configured") return connectionFailure("NOT_CONFIGURED", "Enter your Tunnel ID and OpenAI API key.");
-  return connectionFailure("OPENAI_ERROR", "Connection test failed.", error);
-}
-
-function connectionFailure(errorCode, message, detail = null) {
-  return { ok: false, errorCode, message, detail: detail ? safeErrorMessage(detail) : null };
 }
 
 function safeErrorMessage(error) {
@@ -6627,17 +6315,7 @@ async function handleMcpRequest(request) {
       let input;
       try { input = validateSystemInput(name, request.params.arguments ?? {}); }
       catch (error) { recordSystemDiagnostic({ source: "tool", tool: name, stage: "validation", code: error.code, message: error.message }); return toolError(request.id, error); }
-      const response = await executeToolCall(request.id, name, input, async () => {
-        if (name !== "system_get_chat_context") return systemDiagnostics.get(input);
-        const task = await chatContext.call(input), cloud = cloudContextForRequest(request.id);
-        if (cloud && !input.taskId) {
-          await serverConnection.verify(cloud);
-          const metadata = chatContext.metadata(task.taskId);
-          await chatContext.bind(metadata, {id:chrome.runtime.id,tab:await chrome.tabs.get(cloud.tabId)});
-          return chatContext.call({taskId:task.taskId});
-        }
-        return task;
-      });
+      const response = await executeToolCall(request.id, name, input, () => name === "system_get_chat_context" ? chatContext.call(input) : systemDiagnostics.get(input));
       const metadata = name === "system_get_chat_context" ? chatContext.metadata(response.result?.structuredContent?.taskId) : null;
       if (name === "system_get_chat_context" && response.result?.structuredContent?.taskId) response.result._meta = { "researchtube/chatContext": response.result.structuredContent, ...(metadata ? { "researchtube/chatTarget": metadata } : {}) };
       return response;
@@ -6649,7 +6327,11 @@ async function handleMcpRequest(request) {
     try { args = publicWorkspaceArguments(name, request.params.arguments ?? {}, toolDefinitions()); }
     catch (error) { return toolError(request.id, error); }
     if (ARTIFACT_TOOLS.includes(name)) return executeArtifactStart(request.id, name, args);
-    if (BROWSER_TOOL_NAMES.includes(name)) return executeToolCall(request.id, name, args, () => browserAgent.execute(name, args, cloudContextForRequest(request.id)));
+    if (BROWSER_TOOL_NAMES.includes(name)) {
+      const target = cloudConnection.targetForRequest(request.id);
+      const guard = target ? Object.assign(() => cloudConnection.verifyTarget(target), { target, assertLive: () => cloudConnection.assertLive(target) }) : null;
+      return executeToolCall(request.id, name, args, () => browserAgent.execute(name, args, guard));
+    }
     const taskId = args.taskId;
     if (name === "media_task_status" || Object.hasOwn(ARTIFACT_STATUS_TOOLS, name)) {
       return executeToolCall(request.id, name, { taskId }, async () => {
@@ -6740,7 +6422,7 @@ async function handleMcpRequest(request) {
   }
   if (request?.method === "tools/call" && request.params?.name === "library_store_start") {
     const files = request.params.arguments?.files;
-    return executeToolCall(request.id, "library_store_start", { files, tabId: request.params.arguments?.tabId }, () => libraryStoreStart(files, request.params.arguments?.tabId, cloudContextForRequest(request.id)));
+    return executeToolCall(request.id, "library_store_start", { files, tabId: request.params.arguments?.tabId }, () => libraryStoreStart(files, request.params.arguments?.tabId, cloudConnection.targetForRequest(request.id)));
   }
   if (request?.method === "tools/call" && request.params?.name === "library_store_status") {
     const taskId = String(request.params.arguments?.taskId ?? "").trim();
@@ -6872,7 +6554,7 @@ async function handleMcpRequest(request) {
   }
   if (request?.method === "tools/call" && request.params?.name === "media_view") {
     const args = request.params.arguments ?? {};
-    const response = await executeToolCall(request.id, "media_view", args, () => mediaToChatStart(args, {cloudTarget:cloudContextForRequest(request.id)}));
+    const response = await executeToolCall(request.id, "media_view", args, () => mediaToChatStart(args, { cloudTarget: cloudConnection.targetForRequest(request.id) }));
     const metadata = mediaToChatWidgetMetadata(response.result?.structuredContent?.task?.taskId);
     if (metadata) response.result._meta = { "researchtube/chatTarget": metadata };
     return response;
@@ -7045,6 +6727,7 @@ async function executeCaptureFrameWidgetActionToolCall(id, tool, path, action) {
 }
 
 async function executeToolCall(id, tool, input, work, operation = null) {
+  const cloudTarget = typeof cloudConnection === "undefined" ? null : cloudConnection.targetForRequest(id);
   const startedAt = Date.now();
   // youtube_download_get_task already reaches /tasks/... and the Agent logs
   // its native percentage there. Library status is Extension-local, so it
@@ -7053,10 +6736,11 @@ async function executeToolCall(id, tool, input, work, operation = null) {
   void recordCommandDiagnostic("started", { tool, input: summarizeCommandInput(tool, input) });
   await setActionBadge("working");
   try {
+    if (cloudTarget) await cloudConnection.verifyTarget(cloudTarget);
     let value = await work();
     const task = value?.task?.taskId ? value.task : value;
     if (task?.taskId) {
-      let contextual = await registerBackgroundChatTask(tool, task, input.tabId, cloudContextForRequest(id));
+      let contextual = await registerBackgroundChatTask(tool, task, input.tabId, cloudTarget);
       if (["timer_status", "timer_cancel", "custom_tool_status", "custom_tool_cancel"].includes(tool)) contextual = await taskCompletionDelivery.observe(contextual);
       value = value?.task?.taskId ? { ...value, task: contextual } : contextual;
     }
@@ -7220,7 +6904,7 @@ async function getDiagnosticsExport() {
   const text = [
     "ResearchTube Diagnostics",
     `Exported: ${new Date().toISOString()}`,
-    "Contains concise local tool timing, safe request summaries, errors, search queue state, and YouTube HTTP status. It never includes OpenAI API keys, Tunnel IDs, YouTube cookies, request headers, response bodies, transcript text, or comment text.",
+    "Contains concise local tool timing, safe request summaries, errors, search queue state, and YouTube HTTP status. It never includes credentials, YouTube cookies, request headers, response bodies, transcript text, or comment text.",
     "",
     "Tool events:",
     ...commandEntries.map((entry) => JSON.stringify(entry)),

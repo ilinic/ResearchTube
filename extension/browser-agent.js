@@ -151,17 +151,20 @@ export function createBrowserAgent(host) {
     for (const task of tasks.values()) if (task.groupId === group.groupId && (task.tabId === tabId || task.chatTabId === tabId)) cancelTask(task);
   }
   function checkTask(task, session) {
+    task.caller.cloudGuard?.assertLive?.();
     if (task.cancelRequested || ["stopped", "failed"].includes(session.group.state) || session.error || targets.get(session.agentTabId) !== session)
       throw browserError("BROWSER_CANCELLED", "The task was cancelled or its selected participant stopped. Existing files and attachments were preserved.");
   }
   async function waitRunning(task, session) {
     checkTask(task, session);
+    await task.caller.cloudGuard?.();
     await groups.check(session.group, task.chatTabId, task.caller.chatPath);
     await check(session);
     if (session.group.state === "starting") throw browserError("BROWSER_SESSION_NOT_READY", "Wait for study initialization.");
     checkTask(task, session);
   }
   async function check(session, mutation = false) {
+    await session.operation?.cloudGuard?.();
     if (session.error) throw browserError(session.error.code, session.error.message);
     if (targets.get(session.agentTabId) !== session) throw browserError("TAB_LEFT_GROUP", "This page no longer belongs to the current group automation.");
     const tab = await groups.check(session.group, session.agentTabId);
@@ -405,7 +408,7 @@ export function createBrowserAgent(host) {
         checkTask(task, session);
         const continuation = `Requested browser resource(s) ${task.resourceIds.join(", ")} attached. Continue the current Study Page task using chatTabId: ${task.chatTabId} and source tabId: ${task.tabId}.`;
         await host.attachFiles(files, {
-          target: { tabId: task.chatTabId, chatPath: task.caller.chatPath, ...(task.caller.cloudTarget ? {cloudTarget:task.caller.cloudTarget} : {}) }, continuation,
+          target: { tabId: task.chatTabId, chatPath: task.caller.chatPath, ...(task.caller.cloudGuard?.target ? { cloudTarget: task.caller.cloudGuard.target } : {}) }, continuation,
           trace: session.trace, taskId: task.taskId,
           checkCancelled: () => checkTask(task, session),
           beforeSend: async () => {
@@ -428,10 +431,11 @@ export function createBrowserAgent(host) {
       pruneCompletedTasks(tasks, host.historyLimit?.() || 2000);
     }
   }
-  async function execute(name, argumentsValue, cloudTarget = null) {
+  async function execute(name, argumentsValue, cloudGuard = null) {
+    await cloudGuard?.();
     const input = validateBrowserInput(name, argumentsValue);
     const { group, member } = await groups.forChat(input.chatTabId);
-    const result = await executeInGroup(name, input, group, member, cloudTarget);
+    const result = await executeInGroup(name, input, group, member, cloudGuard);
     await groups.check(group, input.chatTabId, member.chatPath, { allowStopped: true });
     const fullSnapshot = ["site_list_tabs", "site_session_status"].includes(name) && result.group.revision === group.revision;
     const changes = groups.reportChanges(group, fullSnapshot);
@@ -439,8 +443,8 @@ export function createBrowserAgent(host) {
     changes.commit();
     return response;
   }
-  async function executeInGroup(name, input, group, member, cloudTarget = null) {
-    const caller = { group, cloudTarget, chatTabId: input.chatTabId, chatPath: member.chatPath, tool: name, action: input.action };
+  async function executeInGroup(name, input, group, member, cloudGuard) {
+    const caller = { group, chatTabId: input.chatTabId, chatPath: member.chatPath, tool: name, action: input.action, cloudGuard };
     if (["site_list_tabs", "site_session_status"].includes(name)) {
       return { chatTabId: input.chatTabId, group: groups.project(group, input.offset, input.limit) };
     }

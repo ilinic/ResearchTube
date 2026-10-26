@@ -6,7 +6,35 @@ Start with popup **Help** or [User help](HELP.md) for a single setup/use entry g
 
 You are helping a ResearchTube user diagnose a local installation. Follow this document in order. Do not guess, do not ask for secrets, and do not recommend reinstalling everything before collecting the bounded status relevant to the symptom. Distinguish actions you can perform through ResearchTube tools from actions the user must perform in Chrome, Settings or the local Agent console.
 
-Never ask the user to paste an OpenAI API key, Tunnel ID, cookie, PO Token, complete Chrome profile, signed media URL or unredacted process command line.
+Never ask the user to paste a credential, cookie, PO Token, complete Chrome profile, signed media URL or unredacted process command line.
+
+## Public server connection
+
+First add **https://rtube.win** in ChatGPT as a custom MCP server with **OAuth**,
+complete account linking and install the personal plugin. The address has no
+`/mcp` suffix. Call `system_connection_status` even before installing locally.
+Account/workspace permissions govern whether custom MCP connections are available.
+
+If the account is connected but no extension is online, load the desktop Chrome
+extension and call `system_connect_browser` in this saved chat. Pairing uses an
+inactive, short-lived ResearchTube setup page and the browser's existing web
+session; no profile-confirmation click is needed. If the widget reports missing
+sign-in or different accounts, sign in at `/setup` in this Chrome profile and
+retry from the saved ChatGPT conversation.
+
+If the extension is online but this chat is unbound, open the saved conversation
+in desktop Chrome and call `system_connect_browser`. Close duplicate copies of
+that conversation. A worker/socket restart requires a fresh widget handshake.
+If conflicting bindings are reported, use `system_disconnect_browser`, then
+reconnect from one tab. Never select a different browser as a fallback.
+
+For a revoked installation, call `system_connect_browser` again from the saved
+ChatGPT conversation. For a network failure, the extension reconnects automatically
+with backoff. Use the account setup page to revoke an installation's access.
+
+Mobile execution and server-side transcripts are not available. Setup/status
+can explain this without installing an extension on a phone. Agent availability
+is separate: it is optional for browser-only research.
 
 ## First classification
 
@@ -20,34 +48,19 @@ Ask which of these best describes the failure:
 6. TTS, clipboard, screen or camera behavior fails.
 7. The Extension Settings connection test fails.
 
-If tools are callable, begin with `system_agent_status`. Report the Extension version, Agent availability, Agent version, both interface versions, Workspace status and relevant component statuses. Do not request physical paths through MCP.
-
-## Server connection
-
-Check the selected Connection method first. A green `/health` confirms HTTP
-availability, not Chrome enrollment. In server mode, use Settings **Sign in and
-connect**, and wait for **Connected to rtube.win**. For an unpacked extension,
-check its ID under Server setup details against the Worker's explicit allowlist.
-After upgrading, reload the Extension and refresh ChatGPT pages. Reconnect a
-saved chat using `system_connect_browser`, then `system_connection_status`.
-Do not reuse an old binding from another chat or browser. Close duplicate tabs
-of the same conversation. A browser disconnect/restart or document change
-invalidates old deliveries; Workspace files remain. Do not automatically retry
-an action whose execution was not acknowledged. See the Worker README for
-server deployment; installing the Extension alone does not deploy its backend.
+For the public connection, begin with `system_connection_status`. Once the browser is connected, use `system_agent_status` for Agent readiness. Report only public versions, availability and relevant component statuses; never request physical paths through MCP.
 
 ## ResearchTube is missing from ChatGPT
 
 Check in this order:
 
-1. The unpacked Chrome extension is enabled and has no error in `chrome://extensions`.
-2. ResearchTube Settings reports a successful tunnel connection.
-3. **Add custom MCP server** is available in ChatGPT Plugins for the account/workspace. If missing, check plan/workspace permissions and whether your interface still requires Developer Mode in ChatGPT Settings.
-4. The ChatGPT ResearchTube connection uses the same Tunnel ID configured in the Extension.
-5. Use the ResearchTube app management **Refresh** action after an Extension update.
-6. Start a new conversation and explicitly select or mention `@ResearchTube`.
+1. **Add custom MCP server** is available for this ChatGPT account/workspace. If missing, check permissions and any required Developer Mode setting.
+2. For public setup, add **https://rtube.win** with **OAuth**, finish sign-in/consent and install the personal plugin. This succeeds before Extension or Agent installation.
+3. Select or mention `@ResearchTube` and call `system_connection_status` for setup instructions.
+4. Then load and pair the Extension, verify its server connection and bind the saved ChatGPT conversation in Chrome.
+5. Refresh the ChatGPT connection after tool/schema updates.
 
-If the Extension popup reports a tunnel error, use the tunnel section below. Do not troubleshoot FFmpeg or the Agent until the MCP connection itself is present.
+If the Extension popup reports a connection error, use the public server section above. Do not troubleshoot FFmpeg or the Agent until the MCP connection itself is present.
 
 ## Tools are missing or an old schema is visible
 
@@ -86,26 +99,9 @@ Check `workspacePath.value` in `agent/agent-config.json` and whether the user ca
 
 Extract the complete release ZIP before starting the EXE. Keep it beside `agent-config.json`, `tools/` and `custom-tools/`; do not copy the EXE alone. Python mode on Windows needs `agent/requirements-windows.txt` for the tray, Chrome diagnostics and speech; those dependencies are already inside the EXE. The selected platform archive includes its matching media and sharing executables; do not mix tool binaries from another platform.
 
-## Tunnel connection failures
-
-| Result | Meaning | User action |
-| --- | --- | --- |
-| `API_KEY_MISSING` | No key was supplied | Enter a dedicated restricted key in Settings |
-| `API_KEY_INVALID` | OpenAI rejected the key | Create/check the key; never paste it into chat |
-| `TUNNEL_ID_MISSING` | No tunnel ID was supplied | Enter the `tunnel_...` identifier |
-| `TUNNEL_NOT_FOUND` | The key cannot find that tunnel or the ID is wrong | Verify the tunnel and organisation |
-| `TUNNEL_PERMISSION_DENIED` | The key lacks required tunnel access | Grant only the required Tunnels Read + Use permissions |
-| `NETWORK_ERROR` | The Extension could not reach OpenAI | Check connectivity, proxy/VPN and retry |
-
-The API key belongs only in ResearchTube Settings. Diagnostic exports intentionally omit it and the Tunnel ID.
-
-**Save and test connection** saves the current Tunnel ID and key before testing; a failed test leaves those saved values in place. The masked key field contains the saved key, so clearing it and saving removes the key. Clear both fields and save to reproduce an unconfigured installation for Help testing. The missing-settings result is expected; no tunnel request is made with incomplete settings. Agent configuration, Workspace files and tool preferences remain available.
-
-The popup reads the same saved connection state as the toolbar badge and updates while open. It shows missing settings, **Not tested**, the latest connection error, or a green tunnel ID after a successful request. A successful background poll recovers a previous error. When credentials change, the old poll is aborted and its delayed result cannot restore the previous status. If values still appear stale, reload the updated unpacked Extension in `chrome://extensions`, then reopen Settings and the popup.
-
 ## Optional Chrome debugging-banner flag
 
-See [Chrome shortcut instructions](HELP.md#where-to-put-the-chrome-flag). Append `--silent-debugger-extension-api` after the executable path's closing quote in Windows shortcut **Properties → Shortcut → Target**. Fully exit Chrome, relaunch from that shortcut and restart the Agent to refresh the saved diagnostic. Disabled/Mixed does not by itself indicate a tunnel failure. This is not a `chrome://flags` setting.
+See [Chrome shortcut instructions](HELP.md#where-to-put-the-chrome-flag). Append `--silent-debugger-extension-api` after the executable path's closing quote in Windows shortcut **Properties → Shortcut → Target**. Fully exit Chrome, relaunch from that shortcut and restart the Agent to refresh the saved diagnostic. Disabled/Mixed does not by itself indicate a server connection failure. This is not a `chrome://flags` setting.
 
 ## Local component failures
 
@@ -230,7 +226,7 @@ Collect only:
 - relevant ResearchTube-prefixed browser console lines;
 - operating-system family and Chrome version.
 
-Do not collect API keys, Tunnel IDs, cookies, signed URLs, physical user paths or complete unredacted browser logs.
+Do not collect credentials, cookies, signed URLs, physical user paths or complete unredacted browser logs.
 
 Use [Error reference](ERRORS.md) for code-specific guidance.
 
@@ -296,7 +292,7 @@ Grouping is required: Study this site creates a copied site and one leading Chat
 
 If ChatGPT still calls former `browser_*` tools after an upgrade, reload the Extension, then use ResearchTube → Manage → Refresh in ChatGPT. The catalog now exposes `site_read`, `site_interact`, `site_get_images`, `site_get_files` and the related `site_*` tools. Existing availability preferences are migrated. Start a new study chat to receive a prompt with chatTabId, or discover the refreshed tools in an existing conversation.
 
-Enable `browserStudyDetailedLogging.value` in `agent-config.json` (currently shipped as `true`) and start a new study session. In the Extension service-worker console collect `[ResearchTube Browser] timing` records through the slow operation. All service-worker action lines start with a visible ISO UTC timestamp; timing records and ordinary details are serialized text and survive DevTools Save as without expansion. An older export containing only `timing Object` lacks all measurements and cannot be used to calculate durations; repeat the short study after updating the Extension. AX refresh, DOM enrichment, resource extraction/save, automation queue and enabled-Send waits are measured separately; `tool.gap` is outside page-tool execution and includes client/model/tunnel/user waiting. Set the value to `false` and start a new session to disable these extra records. Existing compact console diagnostics remain. See [Browser Agent timing diagnostics](features/BROWSER_AGENT.md#optional-timing-diagnostics) for fields and interpretation.
+Enable `browserStudyDetailedLogging.value` in `agent-config.json` (currently shipped as `true`) and start a new study session. In the Extension service-worker console collect `[ResearchTube Browser] timing` records through the slow operation. All service-worker action lines start with a visible ISO UTC timestamp; timing records and ordinary details are serialized text and survive DevTools Save as without expansion. An older export containing only `timing Object` lacks all measurements and cannot be used to calculate durations; repeat the short study after updating the Extension. AX refresh, DOM enrichment, resource extraction/save, automation queue and enabled-Send waits are measured separately; `tool.gap` is outside page-tool execution and includes client/model/relay/user waiting. Set the value to `false` and start a new session to disable these extra records. Existing compact console diagnostics remain. See [Browser Agent timing diagnostics](features/BROWSER_AGENT.md#optional-timing-diagnostics) for fields and interpretation.
 
 ## Background Composer upload or Send confirmation times out
 

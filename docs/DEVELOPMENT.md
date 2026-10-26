@@ -15,10 +15,22 @@ The independent TypeScript Cloudflare server lives in
 and has its own lockfile, D1 migrations, build and local workerd integration
 tests. Run `npm ci`, `npm run check` and `npm test` in that directory. Its
 generated catalog and validators come from the built Extension and are not
-committed. The Extension server transport lives in `server-connection.js`, with dedicated
-widget and enrollment content scripts. Follow the protocol document; no
-device/focus-based fallback may replace exact chat binding. CI checks this package without
+committed. `extension/cloud-connection.js` implements enrollment and the outbound
+adapter; `chatgpt-cloud-bridge.js` owns the separate widget handshake. Setup
+starts in ChatGPT with root-origin MCP/OAuth before local installation. Follow
+[Public connection](features/PUBLIC_CONNECTION.md) and the protocol document;
+no device/focus-based fallback may replace exact chat binding. CI checks this package without
 deploying or requiring Cloudflare/provider credentials.
+
+`npm run test:chrome` in `cloudflare-worker/` runs the real unpacked Extension
+in an isolated Windows Chromium profile against local workerd. It needs an
+available Playwright module (optionally set `RESEARCHTUBE_PLAYWRIGHT_MODULE` to
+its directory) and defaults to installed Microsoft Edge. Override
+`RESEARCHTUBE_BROWSER_CHANNEL` for another browser supporting unpacked-extension
+launch flags. Browser page/widget origins and provider session are simulated;
+extension messaging, sender identity, document IDs, dispatch and WebSockets are
+real. The test routes extension transport to loopback and blocks production
+DNS. It does not replace real Google/ChatGPT rollout verification.
 
 Install Extension dependencies with:
 
@@ -267,40 +279,9 @@ Browser resource batches resolve all IDs before creating a task, enforce the exi
 
 See [Task chat context and automatic Send](features/TASK_CHAT.md). Startup prompts provide ChatGPT tabId once. Asynchronous launches accept it optionally; public workflow completion notifies only idle ChatGPT. The independent Composer watchdog shares the existing Send controller and configurable stability timeout. Task IDs remain unchanged.
 
-## Server connection mode
+## Public connection state
 
-Settings persists `connectionMode` as `tunnel` (legacy default) or `server`.
-Only the selected transport may run. Keep tunnel credentials and installation
-credentials separate, local and out of public status/diagnostics. `server-connection.js`
-owns one-time relay tickets, WebSockets, a 20-second heartbeat, bounded reconnect
-backoff, request deduplication and immutable document bindings. Ticket auth
-failures stop automatic retries until credentials change. Never replay a
-possibly executed MCP request after a disconnect or timeout.
-
-Enrollment opens an exact extension-created `/connect-extension` tab with a
-one-use local nonce/deadline. The background checks Chrome sender ID, top frame,
-tab, URL and nonce, then uses a fixed isolated-world `executeScript` function to
-call the cookie-authenticated API. Its private result returns directly to the
-background; no page message or DOM contains an installation credential. The
-server's explicit extension-origin allowlist remains required.
-
-Cloud requests reuse `handleMcpRequest` with their unique request ID. Private
-context follows artifact, media delivery, Browser Agent and completion records,
-without becoming a public argument or response. Document identity comes from
-the top-frame injection result, never widget document IDs or active-tab guesses.
-Each Composer check/Send revalidates this immutable context. Restart, disconnect,
-server invalidation and duplicate conversations fail closed while preserving
-Workspace outputs. Run the server transport/bridge tests and Worker integration
-suite, then verify real Chrome/ChatGPT separately; simulators do not prove
-physical multi-device identity for copied historical conversations.
-
-## Saved tunnel connection state
-
-Settings sends both current field values to `save-connection` before `test-connection`. Explicit empty values clear stored credentials; omitted fields preserve them for internal metadata updates. The password input loads the saved key directly from local Extension storage. Keep the key out of public status, MCP results and logs. Failed validation/transport must not undo saved values or require nonempty credentials to save.
-
-Credential changes invalidate prior test/poll results, reset onboarding completion, abort the old long poll and stop its scheduled retry. Serialize configuration/outcome writes and guard outcomes and command dispatch by the connection revision so a delayed old request cannot restore state or process commands under replaced credentials. Successful manual tests mark onboarding complete without a second configuration save.
-
-`tunnelConnectionState` derives readiness from current credentials and the latest durable tunnel outcome; mere credential presence means unchecked, not ready. Use it for popup and badge state; retain capture activity badge precedence. Background recovery can supersede a failed manual test. Popup storage notifications reread public state without contacting the Agent, and newer reads supersede stale responses. Run `extension/tests/connection-state.test.mjs` for explicit clears, source/shipped-worker outcomes, aborted/stale polls, credential replacement and Settings/popup behavior. Also verify the actual Chrome UI after reloading the Extension.
+`cloud-connection.js` owns the public server connection. Popup and toolbar readiness derive from its durable status. Startup clears obsolete connection settings and alarms while preserving Agent configuration, Workspace and tool preferences. Status responses never include installation credentials. Run the connection-state and cloud-connection tests and verify Chrome behavior after reloading the Extension.
 
 ## Popup Help and user documentation
 
