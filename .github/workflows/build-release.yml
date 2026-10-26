@@ -80,7 +80,7 @@ jobs:
           name: ResearchTube-${{ matrix.platform }}-release
           path: dist/${{ steps.package.outputs.archive }}
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 1
   publish:
     needs: build
     if: github.ref == 'refs/heads/main'
