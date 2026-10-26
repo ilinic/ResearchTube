@@ -79,14 +79,14 @@ for(const name of BROWSER_TOOL_NAMES) {
  assert.equal(w.context.toolSettingsMetadata(name).group,'browser');
 }
 const browserCalls=[];
-w.context.browserAgent.execute=async(name,args)=>{browserCalls.push({name,args});return {mockBrowserResult:true};};
+w.context.browserAgent.execute=async(name,args)=>{browserCalls.push({name,args});return {mockBrowserResult:true,group:{groupId:73}};};
 const browserRouted=await w.call('site_session_status',{chatTabId:22});
 assert.equal(browserRouted.result.structuredContent.mockBrowserResult,true);assert.equal(browserCalls[0].name,'site_session_status');
 assert.equal((await w.call('site_session_status',{chatTabId:22,tabId:81})).result.isError,false,'extra browser arguments are rejected before routing');
 assert.equal(browserCalls.length,1);
 
 // The complete renamed public catalog dispatches through the shipped worker.
-assert.equal(BROWSER_TOOL_NAMES.length,12);
+assert.equal(BROWSER_TOOL_NAMES.length,14);
 assert.ok(definitions.every(tool=>!tool.name.startsWith('browser_')));
 for(const name of BROWSER_TOOL_NAMES) {
  const properties=definitions.find(tool=>tool.name===name).inputSchema.properties;
@@ -98,8 +98,14 @@ for(const name of BROWSER_TOOL_NAMES) {
  if(properties.action) args.action='click';
  if(properties.resourceId) args.resourceId='r_21_1_1';
  const response=await w.call(name,args);
- assert.equal(response.result.structuredContent.mockBrowserResult,true,name+' MCP route');
- assert.equal(browserCalls.at(-1).name,name);
+ if(name==='site_diagnostics_start') {
+  assert.equal(response.result.structuredContent.recording,true);
+ } else if(name==='site_diagnostics_report') {
+  assert.match(response.result.structuredContent.reportMarkdown,/ResearchTube browser timing report/);
+ } else {
+  assert.equal(response.result.structuredContent.mockBrowserResult,true,name+' MCP route');
+  assert.equal(browserCalls.at(-1).name,name);
+ }
 }
 
 // Migrate both enabled and disabled choices once; explicit new-name choices win.

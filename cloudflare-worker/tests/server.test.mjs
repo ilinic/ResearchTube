@@ -46,7 +46,13 @@ test("serves bounded public status and OAuth discovery without a browser", async
 });
 test("MCP discovery uses canonical Extension tools; execution challenges missing credentials", async () => {
   const response = await rpc(mf, "tools/list"); expect(response.status).toBe(200);
-  const listing = await response.json(); expect(listing.result.tools).toHaveLength(82);
+  const listing = await response.json(); expect(listing.result.tools).toHaveLength(84);
+  for (const name of ["site_diagnostics_start", "site_diagnostics_report"]) {
+    const diagnostic = listing.result.tools.find(tool => tool.name === name);
+    expect(diagnostic).toBeDefined();
+    expect(diagnostic.inputSchema.required).toContain("chatTabId");
+    expect(diagnostic.inputSchema.additionalProperties).toBe(false);
+  }
   const search = listing.result.tools.find(t => t.name === "youtube_search");
   expect(search.inputSchema.required || []).not.toContain("browserBindingId");
   expect(search.inputSchema.properties).not.toHaveProperty("browserBindingId");

@@ -102,6 +102,8 @@ You can customize both popup startup prompts in `agent/agent-config.json`: edit 
 
 If Study this site reports **BROWSER_DEBUGGER_RESTRICTED**, Chrome refused access because the page embeds another extension’s frame. Temporarily disable the extension injecting that frame for the site, reload and retry. ResearchTube skips inaccessible child frames when the main page connection is available. See [Troubleshooting](TROUBLESHOOTING.md#study-this-site--browser-agent).
 
+If Site actions feel slow, ask the leading chat to call `site_diagnostics_start`, repeat the normal workflow, and call `site_diagnostics_report`. The resulting Markdown log can be pasted directly into a bug report or another chat. It distinguishes time spent inside each browser tool from gaps between calls (for example, between typing a search term and pressing Enter). See [Copyable performance trace](features/BROWSER_AGENT.md#copyable-performance-trace).
+
 ## Common problems: start here
 
 | Symptom | First checks / action |

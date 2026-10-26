@@ -22,6 +22,7 @@ var resourceTask = object({ taskId: string, chatTabId: integer, tabId: integer, 
 var groupChanges = object({ revision: integer, added: { type: "array", items: object({ tabId: integer, role: { const: "site" }, title: string }) }, removedTabIds: { type: "array", items: integer }, resyncRequired: { type: "boolean" } }, ["revision"]);
 var read = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true };
 var write = { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true };
+var diagnostic = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false };
 var depth = { type: "integer", minimum: 0, maximum: 20, description: "Default 20 for full content, 3 for outline, 1 for children." };
 var budget = { maxNodes: { type: "integer", minimum: 1, maximum: 1e3, description: "Optional lower node limit; the group's configured browserStudyMaxNodes remains the ceiling (default 200)." }, maxChars: { type: "integer", minimum: 100, maximum: 1e5, description: "Optional lower serialized node payload budget; browserStudyMaxChars remains the ceiling (default 48000). Includes IDs and structure, with small metadata/change-summary overhead." }, offset: { type: "integer", minimum: 0, default: 0 } };
 function browserToolDefinitions() {
@@ -38,6 +39,8 @@ function browserToolDefinitions() {
     define("site_get_node", "Inspect site node", "Inspect an observed node's accessibility data, safe attributes, bounds and resource references. Use site_get_text for long text, site_get_images for images and site_get_files for documents, audio or video.", { nodeId }, ["nodeId"], object({ ...context, page, node, dom: object({ tag: nullableString, attributes: { type: "array", items: object({ name: string, value: string }) }, bounds: { anyOf: [object({ x: { type: "number" }, y: { type: "number" }, width: { type: "number" }, height: { type: "number" } }), { type: "null" }] }, resources: { type: "array", items: resource } }) })),
     define("site_get_text", "Read site node text", "Read full text of an observed node/subtree with pagination. Protected/password values are excluded.", { nodeId, offset: budget.offset, limit: { type: "integer", minimum: 1, maximum: 5e4, default: 12e3 } }, ["nodeId"], object({ ...context, page, nodeId: string, text: string, totalCharacters: integer, nextOffset: { type: ["integer", "null"] } })),
     define("site_interact", "Interact with site element", "Click, replace text, key, scroll, hover or select in the exact tabId in your group (site pages only; ChatGPT tabs are excluded). Returns changed nodes/resources; use that difference directly. Re-observe when observeAgain is true or later content is expected. observationError means input was dispatched: do not repeat it merely for that error. Stale targets and password typing are refused.", { action: { enum: ["click", "type", "key", "scroll", "hover", "select"] }, nodeId, text: { type: "string", maxLength: 1e5 }, key: { type: "string", maxLength: 60 }, direction: { enum: ["up", "down", "left", "right"], default: "down" }, amount: { type: "number", minimum: 1, maximum: 1e4, default: 600 }, value: string }, ["action"], object({ ...context, action: string, page, observeAgain: { type: "boolean" }, observation: { anyOf: [observation, { type: "null" }] }, observationError: error }), write),
+    define("site_diagnostics_start", "Start browser timing capture", "Start a fresh bounded timing capture for this Study this site group. Use before performing a slow browser test, then call site_diagnostics_report to retrieve a pasteable Markdown timeline. Only durations, operation names and safe numeric metadata are captured; no site text, typed values or URLs.", { maxEvents: { type: "integer", minimum: 100, maximum: 800, default: 600 } }, [], object({ chatTabId: integer, groupId: integer, startedAt: string, recording: { type: "boolean" }, maxEvents: integer }), diagnostic, false),
+    define("site_diagnostics_report", "Read browser timing report", "Return a copyable Markdown report of site tool durations, the time between tool calls (including the gap between typing and pressing Enter), and the slowest internal Chrome stages. stop=true stops the capture after reporting; false takes a live snapshot. Gaps include client/model/network time and are not exclusively model inference time.", { stop: { type: "boolean", default: true }, limit: { type: "integer", minimum: 1, maximum: 300, default: 120 } }, [], object({ chatTabId: integer, groupId: integer, recording: { type: "boolean" }, completedCalls: integer, interCallGaps: integer, droppedEvents: integer, reportMarkdown: string }), diagnostic, false),
     download("site_get_images", "Get site images", "Download selected images into study-this-site/ without overwriting. Image IDs only. addToChat=true (default) attaches them and sends a continuation to the initiating chat; false saves only. Returns an asynchronous task: poll site_files_status at pollIntervalMs; site_files_cancel stops before Send. Finish your response for delivery. Screenshots are labelled fallbacks.", "image"),
     download("site_get_files", "Get site documents, audio and video", "Download selected documents, audio or video into study-this-site/ without overwriting. For images use site_get_images. addToChat=true (default) attaches files and sends a continuation to the initiating chat; false saves only. Returns an asynchronous task: poll site_files_status at pollIntervalMs; site_files_cancel stops before Send. Finish your response for delivery.", "document, audio or video"),
     define("site_files_status", "Site task status", "Read site file task progress and confirmed outputs. Poll at pollIntervalMs. Only the leading chat in the original group can inspect its tasks.", { taskId }, ["taskId"], resourceTask, read, false),
@@ -630,7 +633,7 @@ function inspectChatComposer() {
     }
     return null;
   };
-  const label = (button) => {
+  const label2 = (button) => {
     const attributes = ["aria-label", "title", "data-testid", "data-tooltip", "data-tooltip-content"];
     const described = (button.getAttribute("aria-describedby") || "").split(/\s+/).map((id2) => document.getElementById(id2)?.textContent || "").join(" ");
     return [...attributes.map((name2) => button.getAttribute(name2) || ""), button.innerText || "", described].join(" ").trim();
@@ -663,7 +666,7 @@ function inspectChatComposer() {
     const diagonal = ([x1, y1, x2, y2]) => Math.abs(x2 - x1) > 2 && Math.abs(Math.abs(x2 - x1) - Math.abs(y2 - y1)) < 1;
     return diagonal(a) && diagonal(b) && (a[2] - a[0]) * (a[3] - a[1]) * (b[2] - b[0]) * (b[3] - b[1]) < 0 && Math.abs(a[0] + a[2] - b[0] - b[2]) < 1 && Math.abs(a[1] + a[3] - b[1] - b[3]) < 1;
   };
-  const controls = [...root.querySelectorAll('button, [role="button"]')].map((button) => ({ button, card: attachmentCard(button), label: label(button) }));
+  const controls = [...root.querySelectorAll('button, [role="button"]')].map((button) => ({ button, card: attachmentCard(button), label: label2(button) }));
   const removals = controls.filter(({ button, card, label: text4 }) => {
     if (button === card || button.matches?.(".composer-attachment-surface") || button.getAttribute("aria-haspopup") === "dialog") return false;
     const remove = /(?:\b(?:remove|delete)\b|удалить)/i.test(text4);
@@ -915,16 +918,16 @@ async function waitForComposerMedia(probe, policy, { stage, beforeCheck = async 
   for (; ; ) {
     await beforeCheck();
     const state = await probe();
-    const diagnostic = state?.diagnostic && typeof state.diagnostic === "object" ? state.diagnostic : {};
+    const diagnostic2 = state?.diagnostic && typeof state.diagnostic === "object" ? state.diagnostic : {};
     if (state?.ready) {
-      log("Composer media condition confirmed", { stage, retries, ...diagnostic, elapsedMs: Math.round(now() - started) });
+      log("Composer media condition confirmed", { stage, retries, ...diagnostic2, elapsedMs: Math.round(now() - started) });
       return state;
     }
     if (state?.busy) {
       if (now() - started >= busyTimeoutMs) break;
     } else if (retries >= policy.retryCount) break;
     else retries++;
-    log("Composer media condition pending", { stage, retries, maximumRetries: policy.retryCount, intervalSeconds: policy.retryIntervalSeconds, busy: Boolean(state?.busy), ...diagnostic, elapsedMs: Math.round(now() - started) });
+    log("Composer media condition pending", { stage, retries, maximumRetries: policy.retryCount, intervalSeconds: policy.retryIntervalSeconds, busy: Boolean(state?.busy), ...diagnostic2, elapsedMs: Math.round(now() - started) });
     await sleep2(policy.retryIntervalSeconds * 1e3);
   }
   const error4 = new Error(`ChatGPT did not confirm ${stage} within the configured retry budget (${policy.retryCount} retries, ${policy.retryIntervalSeconds}s interval), or its response wait expired. Existing files and Composer contents were preserved.`);
@@ -2024,7 +2027,7 @@ function createBrowserAgent(host) {
   const queue = host.queue || localQueue.run;
   const clock = host.now || (() => Date.now());
   const timestamp = () => new Date(clock()).toISOString();
-  const log = (label, value = {}) => host.log?.(label, value);
+  const log = (label2, value = {}) => host.log?.(label2, value);
   let pageEpoch = null;
   const nextPageVersion = () => {
     if (pageEpoch === null) {
@@ -2692,6 +2695,213 @@ function createBrowserAgent(host) {
     localStatus,
     ownsTab: (id2) => [...groups.values()].some((group2) => !["stopped", "failed"].includes(group2.state) && group2.members.has(id2))
   };
+}
+
+// browser-timing-sessions.js
+var STORAGE_KEY = "browserTimingSessions";
+var SAFE_TIMING_FIELDS = /* @__PURE__ */ new Set([
+  "stage",
+  "event",
+  "spanId",
+  "method",
+  "outcome",
+  "code",
+  "elapsedMs",
+  "sinceLaunchMs",
+  "gapMs",
+  "count",
+  "frameCount",
+  "rawNodes",
+  "indexedNodes",
+  "returnedNodes",
+  "totalNodes",
+  "characters",
+  "bytes",
+  "extraction",
+  "mode",
+  "enabled",
+  "addedNodes",
+  "updatedNodes",
+  "removedNodes",
+  "addedResources",
+  "removedResources",
+  "point",
+  "tabId",
+  "tabStatus",
+  "active",
+  "visibilityState",
+  "hidden",
+  "hasFocus",
+  "readyState",
+  "tabState",
+  "cdpState",
+  "taskId"
+]);
+var safeCode = (value) => typeof value === "string" && /^[A-Z][A-Z0-9_]{0,79}$/.test(value) ? value : null;
+var rounded = (value) => Math.round(Math.max(0, value) * 10) / 10;
+var safeInteger = (value) => Number.isSafeInteger(value) && value >= 0;
+var label = (event) => `${event.tool}${event.action ? `:${event.action}` : ""}`;
+function createBrowserTimingSessions({
+  storage = null,
+  now = () => Date.now(),
+  maxSessions = 4
+} = {}) {
+  const sessions = /* @__PURE__ */ new Map();
+  let loaded = false;
+  let writeTail = Promise.resolve();
+  async function load() {
+    if (loaded) return;
+    const saved = await storage?.get?.(STORAGE_KEY);
+    for (const entry of saved?.[STORAGE_KEY] || []) {
+      if (!safeInteger(entry.chatTabId) || !safeInteger(entry.groupId) || !Array.isArray(entry.events)) continue;
+      const events = entry.events.filter((event) => event && ["tool", "gap", "timing"].includes(event.kind)).slice(-800);
+      sessions.set(entry.chatTabId, { ...entry, events, pending: /* @__PURE__ */ new Map() });
+    }
+    loaded = true;
+  }
+  function flush() {
+    if (!storage) return Promise.resolve();
+    const snapshot = [...sessions.values()].map(({ pending, ...entry }) => entry);
+    writeTail = writeTail.catch(() => {
+    }).then(() => storage.set({ [STORAGE_KEY]: snapshot })).catch(() => {
+    });
+    return writeTail;
+  }
+  function append(session, event) {
+    session.events.push(event);
+    if (session.events.length > session.maxEvents) {
+      session.droppedEvents += session.events.length - session.maxEvents;
+      session.events.splice(0, session.events.length - session.maxEvents);
+    }
+  }
+  async function start({ chatTabId: chatTabId2, groupId, maxEvents = 600 }) {
+    await load();
+    if (!safeInteger(chatTabId2) || !safeInteger(groupId) || !Number.isSafeInteger(maxEvents) || maxEvents < 100 || maxEvents > 800) throw Error("Invalid timing capture arguments.");
+    sessions.delete(chatTabId2);
+    while (sessions.size >= maxSessions) sessions.delete(sessions.keys().next().value);
+    const startedAtMs = now();
+    sessions.set(chatTabId2, {
+      chatTabId: chatTabId2,
+      groupId,
+      startedAtMs,
+      startedAt: new Date(startedAtMs).toISOString(),
+      maxEvents,
+      droppedEvents: 0,
+      events: [],
+      lastTool: null,
+      recording: true,
+      pending: /* @__PURE__ */ new Map()
+    });
+    await flush();
+    return { chatTabId: chatTabId2, groupId, startedAt: new Date(startedAtMs).toISOString(), recording: true, maxEvents };
+  }
+  async function beginTool({ chatTabId: chatTabId2, tabId: tabId2, tool, action }) {
+    await load();
+    const session = sessions.get(chatTabId2);
+    if (!session?.recording || !/^site_(?!diagnostics_)[a-z_]+$/.test(tool)) return null;
+    const atMs = now();
+    if (session.lastTool && atMs >= session.lastTool.endMs) {
+      append(session, {
+        kind: "gap",
+        atMs,
+        elapsedMs: rounded(atMs - session.lastTool.endMs),
+        after: session.lastTool.label,
+        before: label({ tool, action })
+      });
+    }
+    const call = {
+      kind: "tool",
+      atMs,
+      tool,
+      ...safeInteger(tabId2) ? { tabId: tabId2 } : {},
+      ...typeof action === "string" && /^[a-z]+$/.test(action) ? { action } : {},
+      outcome: "working",
+      elapsedMs: null
+    };
+    append(session, call);
+    session.pending.set(call, atMs);
+    return { session, call };
+  }
+  async function endTool(handle, { outcome = "ok", code = null } = {}) {
+    if (!handle) return;
+    const { session, call } = handle;
+    const started = session.pending.get(call);
+    if (started === void 0) return;
+    session.pending.delete(call);
+    const endMs = now();
+    call.elapsedMs = rounded(endMs - started);
+    call.outcome = outcome === "failed" ? "failed" : "ok";
+    if (call.outcome === "failed") call.code = safeCode(code) || "UNEXPECTED";
+    session.lastTool = { label: label(call), endMs };
+    await flush();
+  }
+  function timing(record) {
+    if (!record || !safeInteger(record.groupId)) return;
+    for (const session of sessions.values()) {
+      if (!session.recording || session.groupId !== record.groupId) continue;
+      const event = { kind: "timing", atMs: now() };
+      for (const [key, value] of Object.entries(record)) {
+        if (!SAFE_TIMING_FIELDS.has(key)) continue;
+        if (typeof value === "boolean" || typeof value === "number" && Number.isFinite(value) || typeof value === "string" && value.length <= 100 && !/[\/?\\=]/.test(value)) event[key] = value;
+      }
+      append(session, event);
+    }
+  }
+  async function report({ chatTabId: chatTabId2, stop = true, limit = 120 }) {
+    await load();
+    const session = sessions.get(chatTabId2);
+    if (!session) throw Object.assign(Error("No browser timing capture for this chat. Start one first."), { code: "BROWSER_DIAGNOSTICS_NOT_FOUND" });
+    const endedAtMs = now();
+    if (stop) session.recording = false;
+    const completed = session.events.filter((event) => event.kind === "tool" && event.elapsedMs !== null);
+    const gaps = session.events.filter((event) => event.kind === "gap");
+    const timings = session.events.filter((event) => event.kind === "timing" && event.event === "end" && typeof event.elapsedMs === "number");
+    const lines = [
+      "# ResearchTube browser timing report",
+      `Started: ${session.startedAt}; Reported: ${new Date(endedAtMs).toISOString()}`,
+      `Group: ${session.groupId}; Leading chat: ${session.chatTabId}; Recording: ${session.recording ? "active" : "stopped"}`,
+      `Completed calls: ${completed.length}; Inter-call gaps: ${gaps.length}; Dropped events: ${session.droppedEvents}`,
+      "",
+      "## Slowest calls and gaps"
+    ];
+    const slow = [
+      ...completed.map((event) => ({ ms: event.elapsedMs, what: `Tool ${label(event)}`, code: event.code })),
+      ...gaps.map((event) => ({ ms: event.elapsedMs, what: `Between ${event.after} \u2192 ${event.before}` }))
+    ].sort((a, b) => b.ms - a.ms).slice(0, 12);
+    lines.push(...slow.length ? slow.map((event) => `- ${event.ms} ms \u2014 ${event.what}${event.code ? ` (${event.code})` : ""}`) : ["- No completed calls yet."]);
+    lines.push("", "## Tool timeline (oldest to newest)");
+    const timeline = session.events.filter((event) => event.kind !== "timing").slice(-limit);
+    for (const event of timeline) {
+      const time = new Date(event.atMs).toISOString().slice(11, 23);
+      if (event.kind === "gap") lines.push(`- ${time} \xB7 GAP ${event.elapsedMs} ms \xB7 ${event.after} \u2192 ${event.before}`);
+      else lines.push(`- ${time} \xB7 ${label(event)} \xB7 ${event.elapsedMs ?? "pending"} ms \xB7 ${event.outcome}${event.code ? ` (${event.code})` : ""}`);
+    }
+    lines.push("", "## Slowest internal browser stages");
+    const stages = timings.sort((a, b) => b.elapsedMs - a.elapsedMs).slice(0, 15);
+    lines.push(...stages.length ? stages.map((event) => `- ${event.elapsedMs} ms \xB7 ${event.stage}${event.tabId !== void 0 ? ` \xB7 tab ${event.tabId}` : ""}`) : ["- No detailed browser stages captured (check browserStudyDetailedLogging)."]);
+    lines.push("", "## Browser event log (oldest to newest)");
+    const browserEvents = session.events.filter((event) => event.kind === "timing" && (["end", "cdp"].includes(event.event) || event.stage === "cdp.slow")).slice(-limit);
+    for (const event of browserEvents) {
+      const time = new Date(event.atMs).toISOString().slice(11, 23);
+      lines.push(`- ${time} \xB7 ${event.stage} \xB7 ${event.event || "slow"}${event.method ? ` \xB7 ${event.method}` : ""}${typeof event.elapsedMs === "number" ? ` \xB7 ${event.elapsedMs} ms` : ""}${event.count ? ` \xB7 \xD7${event.count}` : ""}${event.code ? ` \xB7 ${event.code}` : ""}`);
+    }
+    if (!browserEvents.length) lines.push("- No detailed browser events captured.");
+    lines.push("", "Note: GAP is time between one MCP tool's completion in the extension and the next call's arrival. It includes ChatGPT/client/network delay; it is not exclusively model thinking time.");
+    if (session.events.filter((event) => event.kind !== "timing").length > limit) lines.push(`Timeline limited to the latest ${limit} entries.`);
+    if (session.events.filter((event) => event.kind === "timing").length > limit) lines.push(`Browser events limited to the latest ${limit} entries.`);
+    const result = {
+      chatTabId: chatTabId2,
+      groupId: session.groupId,
+      recording: session.recording,
+      completedCalls: completed.length,
+      interCallGaps: gaps.length,
+      droppedEvents: session.droppedEvents,
+      reportMarkdown: lines.join("\n")
+    };
+    if (stop) await flush();
+    return result;
+  }
+  return { start, beginTool, endTool, timing, report };
 }
 
 // system-tools.js
@@ -3816,6 +4026,12 @@ var systemDiagnostics = createSystemDiagnostics({
     return Array.isArray(stored.systemDiagnostics) ? stored.systemDiagnostics : (stored.commandDiagnostics || []).filter((item) => item.event === "failed").map((item) => ({ timestamp: item.timestamp, source: "tool", tool: item.tool, stage: "tools.call", code: item.error_code, message: item.error, elapsedMs: item.elapsed_ms }));
   },
   write: (entries) => chrome.storage.local.set({ systemDiagnostics: entries })
+});
+var browserTimingSessions = createBrowserTimingSessions({
+  storage: chrome.storage?.session ? {
+    get: (key) => chrome.storage.session.get(key),
+    set: (value) => chrome.storage.session.set(value)
+  } : null
 });
 function recordSystemDiagnostic(entry) {
   void systemDiagnostics.append(entry).catch(() => {
@@ -7548,12 +7764,13 @@ async function configuredBrowserStudyOptions() {
     return { detailedLogging: true, observation: browserObservationOptions() };
   }
 }
-function browserDiagnosticLog(label, value) {
-  if (value.status === "failed" || label === "startup failed") recordSystemDiagnostic({ source: "browser", stage: value.phase || "startup", code: value.error?.code || value.code, message: value.error?.message || "Browser automation startup failed.", ...value });
-  if (label === "timing") {
+function browserDiagnosticLog(label2, value) {
+  if (value.status === "failed" || label2 === "startup failed") recordSystemDiagnostic({ source: "browser", stage: value.phase || "startup", code: value.error?.code || value.code, message: value.error?.message || "Browser automation startup failed.", ...value });
+  if (label2 === "timing") {
+    browserTimingSessions.timing(value);
     const record = { ...value, extensionVersion: EXTENSION_VERSION, atUtc: (/* @__PURE__ */ new Date()).toISOString() };
     consoleAction(`[ResearchTube Browser] timing ${JSON.stringify(record)}`);
-  } else consoleAction(`[ResearchTube Browser] ${label}`, value);
+  } else consoleAction(`[ResearchTube Browser] ${label2}`, value);
   if (value.taskId && Number.isFinite(value.progressPercent)) void reportMcpToolToAgent("site_files_status", { taskId: value.taskId, status: value.status || "working", progressPercent: value.progressPercent });
 }
 async function logBrowserTabState(trace, tabId2, point) {
@@ -7688,7 +7905,7 @@ var browserAgent = createBrowserAgent({
         return await waitForBrowserConversation({
           getTab: (id2) => chrome.tabs.get(id2),
           conversationPath: chatConversationPath,
-          log: (label, value) => consoleAction(`[ResearchTube Browser] ${label}`, value)
+          log: (label2, value) => consoleAction(`[ResearchTube Browser] ${label2}`, value)
         }, tabId2, checkStarting);
       } finally {
         if (attached) await evaluate(`(${disposeChatComposerGuard.toString()})(${JSON.stringify(guardToken)})`).catch(() => {
@@ -8428,10 +8645,10 @@ function googleTranslatePlaybackPage(action, expectedText) {
   }
   const current = monitor.resolve();
   const rect = current?.getBoundingClientRect();
-  const label = current?.getAttribute("aria-label");
+  const label2 = current?.getAttribute("aria-label");
   return {
     started: monitor.started,
-    finished: monitor.started && label === "Listen to source text",
+    finished: monitor.started && label2 === "Listen to source text",
     available: Boolean(current),
     enabled: Boolean(current && !current.disabled && current.getAttribute("aria-disabled") !== "true"),
     replacements: monitor.replacements,
@@ -8466,9 +8683,9 @@ async function googleTranslatePressListen(tabId2, signal, expectedText) {
       return;
     }
     if (state?.error) throw new Error("Google Translate source playback monitor is unavailable.");
-    const diagnostic = `${state?.available === true}/${state?.enabled === true}/${state?.replacements}`;
-    if (diagnostic !== lastDiagnostic) {
-      lastDiagnostic = diagnostic;
+    const diagnostic2 = `${state?.available === true}/${state?.enabled === true}/${state?.replacements}`;
+    if (diagnostic2 !== lastDiagnostic) {
+      lastDiagnostic = diagnostic2;
       cdpLog("Waiting for Google Translate source Stop listening", {
         tabId: tabId2,
         elapsedMs: Date.now() - start,
@@ -10157,6 +10374,23 @@ async function handleMcpRequest(request) {
     if (BROWSER_TOOL_NAMES.includes(name2)) {
       const target = cloudConnection.targetForRequest(request.id);
       const guard = target ? Object.assign(() => cloudConnection.verifyTarget(target), { target, assertLive: () => cloudConnection.assertLive(target) }) : null;
+      if (name2 === "site_diagnostics_start" || name2 === "site_diagnostics_report") {
+        let input;
+        try {
+          input = validateBrowserInput(name2, args);
+        } catch (error4) {
+          return toolError(request.id, error4);
+        }
+        return executeToolCall(request.id, name2, input, async () => {
+          const owner = await browserAgent.execute("site_list_tabs", { chatTabId: input.chatTabId }, guard);
+          if (name2 === "site_diagnostics_start") return browserTimingSessions.start({
+            chatTabId: input.chatTabId,
+            groupId: owner.group.groupId,
+            maxEvents: input.maxEvents ?? 600
+          });
+          return browserTimingSessions.report({ chatTabId: input.chatTabId, stop: input.stop ?? true, limit: input.limit ?? 120 });
+        });
+      }
       return executeToolCall(request.id, name2, args, () => browserAgent.execute(name2, args, guard));
     }
     const taskId5 = args.taskId;
@@ -10530,6 +10764,12 @@ async function executeCaptureFrameWidgetActionToolCall(id2, tool, path, action) 
 async function executeToolCall(id2, tool, input, work, operation = null) {
   const cloudTarget = typeof cloudConnection === "undefined" ? null : cloudConnection.targetForRequest(id2);
   const startedAt = Date.now();
+  const timingHandle = /^site_(?!diagnostics_)/.test(tool) ? await browserTimingSessions.beginTool({
+    chatTabId: input?.chatTabId,
+    tabId: input?.tabId,
+    tool,
+    action: input?.action
+  }).catch(() => null) : null;
   const reportsLongOperationStatus = tool === "library_store_status" || tool === "media_view_status" || tool === "media_task_status" || tool === "site_files_status" || Object.hasOwn(ARTIFACT_STATUS_TOOLS, tool);
   void recordCommandDiagnostic("started", { tool, input: summarizeCommandInput(tool, input) });
   await setActionBadge("working");
@@ -10560,6 +10800,8 @@ async function executeToolCall(id2, tool, input, work, operation = null) {
       elapsed_ms: Date.now() - startedAt,
       output: summarizeCommandOutput(value)
     });
+    await browserTimingSessions.endTool(timingHandle).catch(() => {
+    });
     return jsonToolResult(id2, value);
   } catch (error4) {
     if (reportsLongOperationStatus) await reportMcpToolToAgent(tool, null, true);
@@ -10571,6 +10813,8 @@ async function executeToolCall(id2, tool, input, work, operation = null) {
       error_code: contextualError?.code || null,
       error: searchDiagnosticMessage(contextualError),
       context: { tabId: input.tabId, chatTabId: input.chatTabId, taskId: input.taskId }
+    });
+    await browserTimingSessions.endTool(timingHandle, { outcome: "failed", code: contextualError?.code }).catch(() => {
     });
     return toolError(id2, contextualError);
   }
@@ -11030,9 +11274,9 @@ async function youtubeGetChannelPlaylists(args) {
 async function youtubeGetPlaylistVideos(args) {
   return runYouTubePageTool("playlist-videos", null, args);
 }
-function requireCatalogueIdentifier(value, label) {
+function requireCatalogueIdentifier(value, label2) {
   const identifier = String(value ?? "").trim();
-  if (identifier.length < 2 || identifier.length > 2e3) throw new Error(`${label} is required`);
+  if (identifier.length < 2 || identifier.length > 2e3) throw new Error(`${label2} is required`);
   return identifier;
 }
 function optionalContinuation(value) {

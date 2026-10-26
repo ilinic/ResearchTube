@@ -26,7 +26,7 @@ const f=fixture();await f.agent.start(10);
 assert.equal(f.tabs.size,3);assert.equal(f.ownerMarkers.get(22).ownerTabId,22);
 assert.equal(f.events.filter(e=>e[0]==='createChat').length,1);
 assert.equal(f.events.filter(e=>e[0]==='prompt').length,1);
-assert.deepEqual(browserToolDefinitions().map(t=>t.name),['site_list_tabs','site_read','site_get_children','site_get_node','site_get_text','site_interact','site_get_images','site_get_files','site_files_status','site_files_cancel','site_session_status','site_session_stop']);
+assert.deepEqual(browserToolDefinitions().map(t=>t.name),['site_list_tabs','site_read','site_get_children','site_get_node','site_get_text','site_interact','site_diagnostics_start','site_diagnostics_report','site_get_images','site_get_files','site_files_status','site_files_cancel','site_session_status','site_session_stop']);
 const read=await f.run('site_read'),nodeId=read.roots[0],resourceId=read.nodes.find(n=>n.role==='image').resources[0].resourceId;
 const task=await f.run('site_get_images',{resourceId,addToChat:false});
 f.tabs.set(23,{id:23,url:'https://chatgpt.com/c/unrelated',groupId:100});await f.agent.onCreated();

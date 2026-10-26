@@ -82,6 +82,16 @@ AUTO appears on group participants and ERR on a failed page/startup. The popup h
 
 `browserStudyDetailedLogging` controls optional bounded timing diagnostics for new groups. `[ResearchTube Browser]` console entries use UTC timestamps, group/tab/task IDs and allowlisted timings/counts, not page content or signed URLs. Unexpected debugger loss fails the affected page only; move that page out of the group and back to reconnect. Other participants remain available.
 
+### Copyable performance trace
+
+Use `site_diagnostics_start` with the leading `chatTabId` before a test on the group (for example, searching for a product on AliExpress). Perform ordinary `site_read` and `site_interact` operations, then call `site_diagnostics_report` with the same chatTabId. The report returns a single `reportMarkdown` string ready to paste into a bug report or another chat. Its default `stop: true` ends capture; `stop: false` lets a test inspect progress and continue. A second start resets the previous capture.
+
+The report ranks slow tool calls and gaps between consecutive Site calls, then shows the latest timeline and slow internal browser stages. In particular, the time between `site_interact` with `action: "type"` and the next `action: "key"` shows whether Enter was delayed before ResearchTube received the next call. These gaps include ChatGPT decision time, client scheduling, network and relay delays; they cannot be attributed exclusively to model reasoning. Tool durations are measured in the Extension. Optional per-stage timings depend on `browserStudyDetailedLogging` at group creation.
+
+Capture is explicitly enabled, bounded to the most recent 100–800 events (600 by default), and kept in Chrome's Extension session storage across service-worker restarts. Up to four leading chats may be captured at once. Only tool names, safe action types, group/tab identifiers, stage names, numeric measurements and error codes are retained. Typed text, website content, page URLs, prompts, headers, cookies and private CDP payloads are excluded. Reports never request a page rescan or modify the target tab. Console timing output remains available independently of these capture tools.
+
+Example instruction in the leading chat: *"Start ResearchTube browser diagnostics; search AliExpress for Xeon E5-2699 v4 using the ordinary Site tools, then print the full timing report. Do not repeat a browser action merely to measure it."*
+
 ## Composer delivery retries
 
 Existing guarded file/startup delivery uses `composerMediaRetryCount` (15) and `composerMediaRetryIntervalSeconds` (2): one immediate check plus bounded repeats. ChatGPT generation has a separate wait. Attachment confirmation uses visible attachment count. Files are supplied once; guarded Send attempts end on acknowledged submission. Text edits and extra attachments do not stop file delivery. Missing required cards, cancellation or conversation changes prevent Send and preserve the Composer. Startup prompt guards still detect edits after the reset.

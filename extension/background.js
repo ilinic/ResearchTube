@@ -4,8 +4,9 @@ import { taskTabSchema, normalizeTaskTabId, createTaskCompletionDelivery, instal
 import { waitForComposerMedia } from "./composer-media-retry.js";
 import { createTabAutomationQueue, createDebuggerLeases } from "./tab-automation.js";
 import { createBrowserAgent, waitForBrowserDocument, waitForBrowserConversation } from "./browser-agent.js";
-import { browserToolDefinitions, BROWSER_TOOL_NAMES, LEGACY_SITE_TOOL_NAMES } from "./browser-tools.js";
+import { browserToolDefinitions, BROWSER_TOOL_NAMES, LEGACY_SITE_TOOL_NAMES, validateBrowserInput } from "./browser-tools.js";
 import { browserObservationOptions } from "./browser-observation-options.js";
+import { createBrowserTimingSessions } from "./browser-timing-sessions.js";
 import { normalizeStartupPrompts, renderStartupPrompt } from "./startup-prompts.js";
 import { systemToolDefinitions, validateSystemInput } from "./system-tools.js";
 import { createChatContext } from "./chat-context.js";
@@ -80,6 +81,12 @@ const systemDiagnostics = createSystemDiagnostics({
     return Array.isArray(stored.systemDiagnostics) ? stored.systemDiagnostics : (stored.commandDiagnostics || []).filter(item => item.event === "failed").map(item => ({ timestamp: item.timestamp, source: "tool", tool: item.tool, stage: "tools.call", code: item.error_code, message: item.error, elapsedMs: item.elapsed_ms }));
   },
   write: entries => chrome.storage.local.set({ systemDiagnostics: entries })
+});
+const browserTimingSessions = createBrowserTimingSessions({
+  storage: chrome.storage?.session ? {
+    get: key => chrome.storage.session.get(key),
+    set: value => chrome.storage.session.set(value)
+  } : null
 });
 function recordSystemDiagnostic(entry) { void systemDiagnostics.append(entry).catch(() => {}); }
 // Chrome dispatches this for requests made by our Extension-owned viewer.
@@ -3630,6 +3637,7 @@ async function configuredBrowserStudyOptions() {
 function browserDiagnosticLog(label, value) {
   if (value.status === "failed" || label === "startup failed") recordSystemDiagnostic({ source: "browser", stage: value.phase || "startup", code: value.error?.code || value.code, message: value.error?.message || "Browser automation startup failed.", ...value });
   if (label === "timing") {
+    browserTimingSessions.timing(value);
     const record = { ...value, extensionVersion: EXTENSION_VERSION, atUtc: new Date().toISOString() };
     consoleAction(`[ResearchTube Browser] timing ${JSON.stringify(record)}`);
   } else consoleAction(`[ResearchTube Browser] ${label}`, value);
@@ -6319,6 +6327,18 @@ async function handleMcpRequest(request) {
     if (BROWSER_TOOL_NAMES.includes(name)) {
       const target = cloudConnection.targetForRequest(request.id);
       const guard = target ? Object.assign(() => cloudConnection.verifyTarget(target), { target, assertLive: () => cloudConnection.assertLive(target) }) : null;
+      if (name === "site_diagnostics_start" || name === "site_diagnostics_report") {
+        let input;
+        try { input = validateBrowserInput(name, args); }
+        catch (error) { return toolError(request.id, error); }
+        return executeToolCall(request.id, name, input, async () => {
+          const owner = await browserAgent.execute("site_list_tabs", { chatTabId: input.chatTabId }, guard);
+          if (name === "site_diagnostics_start") return browserTimingSessions.start({
+            chatTabId: input.chatTabId, groupId: owner.group.groupId, maxEvents: input.maxEvents ?? 600
+          });
+          return browserTimingSessions.report({ chatTabId: input.chatTabId, stop: input.stop ?? true, limit: input.limit ?? 120 });
+        });
+      }
       return executeToolCall(request.id, name, args, () => browserAgent.execute(name, args, guard));
     }
     const taskId = args.taskId;
@@ -6718,6 +6738,9 @@ async function executeCaptureFrameWidgetActionToolCall(id, tool, path, action) {
 async function executeToolCall(id, tool, input, work, operation = null) {
   const cloudTarget = typeof cloudConnection === "undefined" ? null : cloudConnection.targetForRequest(id);
   const startedAt = Date.now();
+  const timingHandle = /^site_(?!diagnostics_)/.test(tool) ? await browserTimingSessions.beginTool({
+    chatTabId: input?.chatTabId, tabId: input?.tabId, tool, action: input?.action
+  }).catch(() => null) : null;
   // youtube_download_get_task already reaches /tasks/... and the Agent logs
   // its native percentage there. Library status is Extension-local, so it
   // needs this small status-only report to remain visible in the Agent log.
@@ -6742,6 +6765,7 @@ async function executeToolCall(id, tool, input, work, operation = null) {
       elapsed_ms: Date.now() - startedAt,
       output: summarizeCommandOutput(value)
     });
+    await browserTimingSessions.endTool(timingHandle).catch(() => {});
     return jsonToolResult(id, value);
   } catch (error) {
     if (reportsLongOperationStatus) await reportMcpToolToAgent(tool, null, true);
@@ -6756,6 +6780,7 @@ async function executeToolCall(id, tool, input, work, operation = null) {
       error: searchDiagnosticMessage(contextualError),
       context: { tabId: input.tabId, chatTabId: input.chatTabId, taskId: input.taskId }
     });
+    await browserTimingSessions.endTool(timingHandle, { outcome: "failed", code: contextualError?.code }).catch(() => {});
     return toolError(id, contextualError);
   }
 }
