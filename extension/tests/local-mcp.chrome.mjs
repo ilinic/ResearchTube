@@ -69,6 +69,10 @@ try {
         authorization:/^SAPISIDHASH \d+_[a-f0-9]{40}$/.test(headers.authorization||''),account:headers['x-goog-authuser']});
       if(url.pathname==='/results')return route.fulfill({contentType:'text/html',body:'<script>var ytInitialData = '+JSON.stringify({contents:[video('searchfirst'),{continuationItemRenderer:{continuationEndpoint:{continuationCommand:{token:'test-continuation'}}}}]})+';</script>'});
       if(url.pathname==='/youtubei/v1/search')return route.fulfill({json:{contents:[video('searchsecond')]}});
+      if(url.pathname==='/youtubei/v1/player'){
+        assert.equal(route.request().postDataJSON().context.client.clientName,'ANDROID');
+        return route.fulfill({json:{captions:{playerCaptionsTracklistRenderer:{captionTracks:[{languageCode:'en',name:{simpleText:'English'},baseUrl:'https://www.youtube.com/api/timedtext?signature=PRIVATE_SIGNED_VALUE'}]}}}});
+      }
       if(url.pathname==='/watch'){
         const player={videoDetails:{videoId:'abcdefghijk',title:'Session metadata',author:'Test',lengthSeconds:'2',viewCount:'3'},
           captions:{playerCaptionsTracklistRenderer:{captionTracks:[{languageCode:'en',name:{simpleText:'English'},baseUrl:'https://www.youtube.com/api/timedtext?signature=PRIVATE_SIGNED_VALUE'}]}},
@@ -125,12 +129,18 @@ try {
   assert.equal(metadata.title,'Session metadata',JSON.stringify(metadata));
   assert.doesNotMatch(JSON.stringify(metadata),/PRIVATE_SIGNED_VALUE|test-session-cookie|SAPISIDHASH/);
   await youtube.evaluate(()=>{window.testRealProvider=true;});
+  const transcriptStart=nativeRequests.length;
   const realTranscript=await call('youtube_get_transcript',{videoId:'abcdefghijk',limit:10});
   assert.equal(realTranscript.segments?.[0]?.text,'Session caption',JSON.stringify(realTranscript));
-  for(const path of ['/results','/watch','/api/timedtext'])assert.ok(nativeRequests.some(item=>item.path===path&&item.cookie),'native session cookie required for '+path);
+  for(const path of ['/results','/watch'])assert.ok(nativeRequests.slice(0,transcriptStart).some(item=>item.path===path&&item.cookie),'native session cookie required for '+path);
+  for(const path of ['/watch','/youtubei/v1/player','/api/timedtext']){
+    const request=nativeRequests.slice(transcriptStart).find(item=>item.path===path);
+    assert.ok(request,'restored transcript request required for '+path);
+    assert.equal(request.cookie,false);assert.equal(request.authorization,false);
+  }
   assert.equal((await settings.evaluate(()=>chrome.tabs.query({active:true,currentWindow:true})))[0].id,before[0].id);
   assert.deepEqual(errors,[]);
-  console.log('Real local MCP: official SDK, Agent/Extension pairing, inactive tab, login, export/read/cancel, native cookies, signed search continuation, metadata and captions passed');
+  console.log('Real local MCP: session search/metadata, inactive tab, export/read/cancel and restored anonymous ANDROID transcripts passed');
 } finally {
   await client?.close();await browser?.close();
   if(agent&&agent.exitCode===null){await new Promise(resolve=>{agent.once('exit',resolve);agent.kill();});}

@@ -2,6 +2,10 @@
 
 ## Local Codex YouTube MCP
 
+If transcripts stopped after the session-transport update, update/reload the
+Extension and reload the YouTube context tab once. Transcripts use the restored
+anonymous ANDROID player/timedtext path; other research keeps browser cookies.
+
 Use `http://127.0.0.1:17843/mcp`, including `/mcp`, with the actual Agent port.
 Use `127.0.0.1` rather than `localhost`; Host validation is deliberate. A missing
 catalog usually means the Agent is stopped or outdated. A discoverable catalog

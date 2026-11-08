@@ -61,6 +61,11 @@ Public search, metadata, transcript, channel, playlist and comment operations us
 
 The isolated bridge checks the page origin and message source. The MAIN-world bridge receives only allowlisted actions and arguments. Sensitive page state, request headers, raw response bodies and private diagnostics are not returned through MCP.
 
+Transcripts retain the established anonymous transport: watch HTML, minimal
+ANDROID player request and timedtext, with credentials omitted throughout.
+This path bypasses session authorization decoration; other research keeps its
+browser-session transport.
+
 Search requests are serialized, briefly cached and placed into a bounded backoff after verification, HTTP 403 or HTTP 429 responses. ResearchTube reports a retry delay rather than attempting to bypass YouTube verification.
 
 ## Local Agent boundary

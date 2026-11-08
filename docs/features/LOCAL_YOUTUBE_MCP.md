@@ -30,6 +30,11 @@ the advertised read operations are supported; this does not add subscriptions,
 posting, likes or other account mutations.
 No cookies or credentials are exported to Codex.
 
+Transcript retrieval retains its established exception: anonymous watch HTML,
+the minimal ANDROID player request, then the selected timedtext URL, all with
+credentials omitted. The local tool still checks browser sign-in. Search,
+comments and catalogues continue using the browser session.
+
 `youtube_bridge_status` diagnoses the local connection without opening YouTube.
 Its `authentication: browser-session` describes the research request mode,
 not a live check of whether the browser is currently signed in. It is not a

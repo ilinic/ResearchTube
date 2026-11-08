@@ -22,6 +22,42 @@ await assert.rejects(()=>sessionRequestOptions('/youtubei/v1/next',{}, {...env,c
 
 // Exercise pagination through roots, multiple reply pages and next root page.
 const source=await readFile(new URL('../youtube-page-bridge.src.js',import.meta.url),'utf8');
+// Transcript regression: always use the original anonymous ANDROID player,
+// even when watch HTML already contains WEB caption tracks.
+const transcriptRequests=[];
+let unsafeTrack=false;
+const transcriptContext=vm.createContext({URL,location:{href:'https://www.youtube.com/',origin:'https://www.youtube.com'},
+  observedFetch:()=>{throw Error('Transcript must not enter session transport');},captureResponse(){},
+  originalFetch:async(input,init)=>{
+    transcriptRequests.push({input,init});
+    assert.equal(init.credentials,'omit');
+    assert.equal(init.headers?.Authorization,undefined);
+    if(input.startsWith('/watch'))return {ok:true,text:async()=>'<script>var config={"INNERTUBE_API_KEY":"fixture-key"}; var ytInitialPlayerResponse = {"captions":{"playerCaptionsTracklistRenderer":{"captionTracks":[{"baseUrl":"WEB_SHOULD_NOT_BE_USED"}]}}};</script>'};
+    if(input.startsWith('/youtubei/v1/player')){
+      const body=JSON.parse(init.body);
+      assert.equal(body.context.client.clientName,'ANDROID');assert.equal(body.context.client.clientVersion,'20.10.38');
+      assert.equal(body.videoId,'abcdefghijk');
+      return {ok:true,json:async()=>({captions:{playerCaptionsTracklistRenderer:{captionTracks:[
+        {languageCode:'en',name:{simpleText:'English'},baseUrl:'https://www.youtube.com/api/timedtext?track=0'},
+        {languageCode:'ru',name:{simpleText:'Russian'},baseUrl:unsafeTrack?'https://evil.test/captions':'https://www.youtube.com/api/timedtext?track=1'}
+      ]}}})};
+    }
+    assert.equal(input,'https://www.youtube.com/api/timedtext?track=1');
+    return {ok:true,text:async()=>'<timedtext><body><p t="1250" d="2500">Restored &amp; tested</p><p t="3750" d="1000">Next</p></body></timedtext>'};
+  }});
+const allowedStart=source.indexOf('  function isAllowedTimedTextUrl(');
+vm.runInContext(source.slice(allowedStart,source.indexOf('  // The library is bundled',allowedStart))+
+  source.slice(source.indexOf('  function textOf('),source.indexOf('  // Search deliberately uses fetch')),transcriptContext);
+const restored=await transcriptContext.getTranscriptFromPlayer({videoId:'abcdefghijk',limit:1,trackIndex:1});
+assert.equal(restored.selectedTrack.languageCode,'ru');assert.equal(restored.returned,1);
+assert.equal(restored.segments[0].start,1.25);assert.equal(restored.segments[0].duration,2.5);assert.equal(restored.segments[0].text,'Restored & tested');
+assert.equal(transcriptRequests.length,3);
+await assert.rejects(()=>transcriptContext.getTranscriptFromPlayer({videoId:'abcdefghijk',trackIndex:2}),/unavailable/);
+unsafeTrack=true;
+const beforeUnsafe=transcriptRequests.length;
+await assert.rejects(()=>transcriptContext.getTranscriptFromPlayer({videoId:'abcdefghijk',trackIndex:1}),/valid YouTube timedtext URL/);
+assert.equal(transcriptRequests.length,beforeUnsafe+2,'reject foreign caption URL before fetching it');
+console.log('Transcript regression: anonymous watch, ANDROID player, timedtext, track selection, timestamps, limits and origin validation passed');
 const comment=id=>({comment:{comment_id:id}});
 const parent=Object.assign(comment('root1'),{has_replies:true,has_continuation:true,replies:[comment('reply1')],async getReplies(){return this;},async getContinuation(){return {replies:[comment('reply2')],has_continuation:false};}});
 const page={contents:[parent],has_continuation:true,async getContinuation(){return {contents:[comment('root2')],has_continuation:false};}};

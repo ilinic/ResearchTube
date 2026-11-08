@@ -31,6 +31,9 @@ YouTube tab. Requests use the current page session and can reflect the signed-in
 account; cookies and authorization stay inside the browser. Files persist
 after Agent restart, while task IDs do not.
 
+Transcript requests are the exception: the established anonymous ANDROID
+player/timedtext path omits credentials. Local sign-in checks still apply.
+
 ## Artifact tasks and paths
 
 Every artifact producer accepts `addToChat` (false by default) and `sendDelaySeconds` (zero by default). Captures, cropping and clipboard reads are asynchronous as well. One task covers creation plus optional upload/Send in the originating chat. Use `media_task_status` and `media_task_cancel`; specialized status/cancel commands return the same complete workflow. `files[].workspacePath` selects created outputs uniformly; native results and counters are in `creation.data`, upload and delay information in `chat`. See [Artifact tasks](features/ARTIFACT_TASKS.md) for limits, cancellation and restart behavior.

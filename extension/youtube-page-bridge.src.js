@@ -236,6 +236,26 @@ import { sessionRequestOptions } from "./youtube-session.js";
     return response.text();
   }
 
+  // Preserve the working anonymous ANDROID transcript transport. Session
+  // decoration is intentionally excluded for watch, player and timedtext here.
+  async function transcriptFetch(input, init = {}) {
+    const url = new URL(input, location.href);
+    if (url.origin !== location.origin) throw new Error("Transcript requests must stay on YouTube");
+    const response = await originalFetch(input, { ...init, credentials: "omit" });
+    captureResponse(url.href, response, String(init.method || "GET").toUpperCase());
+    return response;
+  }
+
+  async function getAnonymousWatchHtml(videoId) {
+    const response = await transcriptFetch(`/watch?v=${encodeURIComponent(videoId)}`, {
+      credentials: "omit",
+      cache: "no-store",
+      headers: { Accept: "text/html" }
+    });
+    if (!response.ok) throw new Error(`YouTube anonymous watch page failed: HTTP ${response.status}`);
+    return response.text();
+  }
+
   function parseCaptionResponse(rawData) {
     const text = rawData.trim();
     if (text.startsWith("{")) {
@@ -290,28 +310,26 @@ import { sessionRequestOptions } from "./youtube-session.js";
     return segments;
   }
 
-  // Prefer the signed-in watch player's tracks, retaining the current account.
-  // The WEB player fallback also uses the document's cookies and authorization.
+  // This intentionally mirrors the working page-console probe: obtain the
+  // live key from /watch, make a minimal ANDROID /player request, then read
+  // the requested caption baseUrl. No youtubei.js transcript endpoint is used.
   async function getTranscriptFromPlayer({ videoId, limit, trackIndex = 0 }) {
-    const pageHtml = await getSessionWatchHtml(videoId);
+    const pageHtml = await getAnonymousWatchHtml(videoId);
     const apiKey = pageHtml.match(/"INNERTUBE_API_KEY":"([^"]+)"/)?.[1];
-    if (!apiKey) throw new Error("INNERTUBE_API_KEY was not found in the YouTube watch page");
+    if (!apiKey) throw new Error("INNERTUBE_API_KEY was not found in the anonymous YouTube watch page");
 
-    let player = extractSearchJson(pageHtml, ["var ytInitialPlayerResponse =", "ytInitialPlayerResponse ="]);
-    if (!playerTracks(player).length) {
-      const playerResponse = await observedFetch(`/youtubei/v1/player?key=${encodeURIComponent(apiKey)}`, {
-        method: "POST",
-        credentials: "include",
-        cache: "no-store",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          context: { client: { clientName: "WEB", clientVersion: window.ytcfg?.get?.("INNERTUBE_CLIENT_VERSION") || "2.20260101.00.00" } },
-          videoId
-        })
-      });
-      if (!playerResponse.ok) throw new Error(`YouTube WEB /player failed: HTTP ${playerResponse.status}`);
-      player = await playerResponse.json();
-    }
+    const playerResponse = await transcriptFetch(`/youtubei/v1/player?key=${encodeURIComponent(apiKey)}`, {
+      method: "POST",
+      credentials: "omit",
+      cache: "no-store",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        context: { client: { clientName: "ANDROID", clientVersion: "20.10.38" } },
+        videoId
+      })
+    });
+    if (!playerResponse.ok) throw new Error(`YouTube ANDROID /player failed: HTTP ${playerResponse.status}`);
+    const player = await playerResponse.json();
     const tracks = playerTracks(player);
     if (!tracks.length) {
       throw new Error(`No public caption track is available (${playerStatus(player)})`);
@@ -326,8 +344,8 @@ import { sessionRequestOptions } from "./youtube-session.js";
     if (!track?.baseUrl || !isAllowedTimedTextUrl(track.baseUrl)) {
       throw new Error(`Caption track ${selectedTrackIndex} did not contain a valid YouTube timedtext URL`);
     }
-    const captionResponse = await observedFetch(track.baseUrl, {
-      credentials: "include",
+    const captionResponse = await transcriptFetch(track.baseUrl, {
+      credentials: "omit",
       cache: "no-store",
     });
     if (!captionResponse.ok) throw new Error(`YouTube timedtext request failed: HTTP ${captionResponse.status}`);
