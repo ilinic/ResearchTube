@@ -11681,8 +11681,11 @@ async function waitForYouTubeTab(tabId2, timeoutMs = 45e3) {
   });
 }
 async function sendYouTubePageTool(tabId2, message) {
+  const version = chrome.runtime.getManifest().version;
+  const isCurrent = (response) => response?.ok && response.data?.version === version && response.data?.pageVersion === version;
   try {
-    return await chrome.tabs.sendMessage(tabId2, message);
+    const bridge = await chrome.tabs.sendMessage(tabId2, { type: "youtube-ui-tool", action: "bridge-version" });
+    if (isCurrent(bridge)) return await chrome.tabs.sendMessage(tabId2, message);
   } catch (error5) {
     if (!/Receiving end does not exist|Could not establish connection/i.test(String(error5?.message || error5))) {
       if (isRecoverablePageContextError(error5)) {
@@ -11704,6 +11707,8 @@ async function sendYouTubePageTool(tabId2, message) {
       world: "ISOLATED",
       injectImmediately: true
     });
+    const bridge = await chrome.tabs.sendMessage(tabId2, { type: "youtube-ui-tool", action: "bridge-version" });
+    if (!isCurrent(bridge)) throw createPageContextError("The YouTube page bridge did not confirm the current Extension version");
     return await chrome.tabs.sendMessage(tabId2, message);
   } catch (error5) {
     if (isRecoverablePageContextError(error5)) {

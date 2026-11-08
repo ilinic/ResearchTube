@@ -61,6 +61,12 @@ Public search, metadata, transcript, channel, playlist and comment operations re
 
 The isolated bridge checks the page origin and message source. The MAIN-world bridge receives only allowlisted actions and arguments. Sensitive page state, request headers, raw response bodies and private diagnostics are not returned through MCP.
 
+Before a page tool runs, the worker verifies both bridge layers against the
+installed Extension version. Missing or stale layers are reinjected and checked
+without reloading the tab. The bundled MAIN bridge and isolated content script
+use versioned message namespaces, so surviving listeners from an older Extension
+cannot answer current requests or retain the previous research transport.
+
 Transcripts retain the established anonymous transport: watch HTML, minimal
 ANDROID player request and timedtext, with credentials omitted throughout.
 All other research also omits credentials; no session authorization decoration

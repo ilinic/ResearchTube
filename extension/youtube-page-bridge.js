@@ -3267,9 +3267,9 @@ format:`, anonymisedFormat);
     if (magic !== MAGIC_HEADER) {
       throw new Error("Invalid binary format: magic header mismatch");
     }
-    const version2 = view.getUint32(4, true);
-    if (version2 !== VERSION) {
-      throw new Error(`Unsupported binary format version: ${version2}`);
+    const version3 = view.getUint32(4, true);
+    if (version3 !== VERSION) {
+      throw new Error(`Unsupported binary format version: ${version3}`);
     }
     const length = view.getUint32(8, true);
     if (12 + length > buffer.byteLength) {
@@ -38484,18 +38484,21 @@ ${getNsigProcessorFn(eval_args.n, eval_args.sp, eval_args.sig)}`;
     CustomEvent: globalThis.CustomEvent
   });
 
+  // manifest.json
+  var version2 = "2.11.3";
+
   // youtube-page-bridge.src.js
   (() => {
-    if (window.__youtubeResearchSessionPageBridgeInstalled) return;
-    window.__youtubeResearchSessionPageBridgeInstalled = true;
+    if (window.__researchtubeYouTubePageBridgeVersion === version2) return;
+    window.__researchtubeYouTubePageBridgeVersion = version2;
     parser_exports.setParserErrorHandler((error2) => {
       if (error2?.error_type === "class_not_found" && error2.classname === "CommentFilterContextView") {
         return;
       }
       console.info("[ResearchTube][YouTube.js parser]", { type: error2?.error_type, classname: error2?.classname });
     });
-    const SOURCE = "researchtube-session-page-bridge";
-    const COMMAND_SOURCE = "researchtube-session-extension-content";
+    const SOURCE = `researchtube-page-bridge:${version2}`;
+    const COMMAND_SOURCE = `researchtube-extension-content:${version2}`;
     const originalFetch = window.fetch.bind(window);
     const originalXhrOpen = XMLHttpRequest.prototype.open;
     const originalXhrSend = XMLHttpRequest.prototype.send;
@@ -39545,7 +39548,8 @@ ${getNsigProcessorFn(eval_args.n, eval_args.sp, eval_args.sig)}`;
       if (message?.source !== COMMAND_SOURCE || message.type !== "command" || !message.id) return;
       try {
         let data;
-        if (message.action === "storyboard-context") data = storyboardContext(message.payload?.videoId);
+        if (message.action === "bridge-version") data = { version: version2 };
+        else if (message.action === "storyboard-context") data = storyboardContext(message.payload?.videoId);
         else if (message.action === "page-state") data = pageState();
         else if (message.action === "search") data = await searchPublicVideos(message.payload || {});
         else if (message.action === "channel-videos") data = await getChannelVideos(message.payload || {});

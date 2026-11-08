@@ -1,8 +1,9 @@
-if (!globalThis.__youtubeResearchSessionContentBridgeInstalled) {
-globalThis.__youtubeResearchSessionContentBridgeInstalled = true;
+if (globalThis.__researchtubeYouTubeContentBridgeVersion !== chrome.runtime.getManifest().version) {
+globalThis.__researchtubeYouTubeContentBridgeVersion = chrome.runtime.getManifest().version;
 
-const MAIN_BRIDGE_SOURCE = "researchtube-session-page-bridge";
-const CONTENT_SOURCE = "researchtube-session-extension-content";
+const BRIDGE_VERSION = chrome.runtime.getManifest().version;
+const MAIN_BRIDGE_SOURCE = `researchtube-page-bridge:${BRIDGE_VERSION}`;
+const CONTENT_SOURCE = `researchtube-extension-content:${BRIDGE_VERSION}`;
 const pendingMainWorldCalls = new Map();
 
 window.addEventListener("message", (event) => {
@@ -47,7 +48,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 });
 
 async function runUiTool({ action, videoId, args }) {
-  if (action === "bridge-version") return { version: "1.12.0" };
+  if (action === "bridge-version") {
+    const page = await callMainWorld("bridge-version", {}, 1500);
+    return { version: BRIDGE_VERSION, pageVersion: page.version };
+  }
   if (action === "storyboard-context") return callMainWorld("storyboard-context", { videoId }, 5000);
   if (["account-state", "comments-export-page", "comments-export-close"].includes(action)) return callMainWorld(action, args, 60_000);
   if (action === "page-state") return waitForPageData();

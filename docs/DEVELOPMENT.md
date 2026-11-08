@@ -155,6 +155,11 @@ Keep the isolated ↔ MAIN boundary typed and narrow. Validate origin and source
 
 When a stale content script is possible, use the existing bounded recovery pattern rather than reloading the user's tab. Background service tabs should open inactive and should not be closed unless the feature contract says so.
 
+YouTube page tools handshake both bridge versions before execution. The build
+embeds the manifest version in MAIN; the content script reads it from the runtime.
+Keep their versioned message namespaces aligned. Cover upgrades with surviving
+legacy MAIN listeners as well as first injection into an unprepared document.
+
 CDP attachment is serialized where Chrome permits only one debugger session. Always detach and clear temporary focus emulation in cleanup paths. Do not log CDP response bodies.
 
 ## Workspace and output files

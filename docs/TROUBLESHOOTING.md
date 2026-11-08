@@ -2,8 +2,11 @@
 
 ## Local Codex YouTube MCP
 
-If transcripts stopped after the session-transport update, update/reload the
-Extension and reload the YouTube context tab once. Transcripts use the restored
+If transcripts stopped after an Extension update, update/reload the Extension.
+Older versions could leave the previous MAIN-world code in an already open
+YouTube tab even when the popup displayed the new version; reloading that
+YouTube tab once recovers those versions. Current versions verify and replace
+both page bridge layers automatically without navigating the tab. Transcripts use the restored
 anonymous ANDROID player/timedtext path; search, comments and other research
 also retain the original anonymous requests without browser cookies.
 

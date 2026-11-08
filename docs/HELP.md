@@ -131,6 +131,7 @@ If Site actions feel slow, ask the leading chat to call `site_diagnostics_start`
 | Component missing or stale | Check `system_agent_status`; install/extract only the relevant component, remove ambiguous duplicate executables, restart Agent. |
 | Chrome flag still Disabled/Mixed | Fully exit Chrome; relaunch with the edited shortcut; restart Agent for a fresh snapshot. Flag is optional. |
 | YouTube verification/403/429 | Respect the returned retry time. Open YouTube normally and complete visible verification if requested. Missing captions/comments can be a property of the video. |
+| Transcripts broke after an Extension update | Older versions may keep stale code in an open YouTube tab; reload that tab once. Current versions check and replace both YouTube bridge layers automatically. See [YouTube recovery](TROUBLESHOOTING.md#local-codex-youtube-mcp). |
 | Task fails or remains working | Check its status, phase, percentage, error code and completed files. Do not start a duplicate operation solely because a result is delayed. |
 | Media card blank | Keep Extension and Agent running; check Extension permissions on ChatGPT and the declared sandbox origin; try the card's Refresh and a small known file. See the detailed viewer troubleshooting. |
 | File attachment/Send fails | Keep the originating conversation open and leave its draft unchanged. A wrong chat, user edit, active generation or attachment limits can prevent delivery. Saved files remain; don't repeatedly upload them. |

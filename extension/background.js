@@ -7459,8 +7459,11 @@ async function waitForYouTubeTab(tabId, timeoutMs = 45_000) {
 }
 
 async function sendYouTubePageTool(tabId, message) {
+  const version = chrome.runtime.getManifest().version;
+  const isCurrent = response => response?.ok && response.data?.version === version && response.data?.pageVersion === version;
   try {
-    return await chrome.tabs.sendMessage(tabId, message);
+    const bridge = await chrome.tabs.sendMessage(tabId, { type: "youtube-ui-tool", action: "bridge-version" });
+    if (isCurrent(bridge)) return await chrome.tabs.sendMessage(tabId, message);
   } catch (error) {
     if (!/Receiving end does not exist|Could not establish connection/i.test(String(error?.message || error))) {
       if (isRecoverablePageContextError(error)) {
@@ -7470,8 +7473,8 @@ async function sendYouTubePageTool(tabId, message) {
     }
   }
 
-  // A tab opened before the extension was installed does not yet contain the
-  // declarative content scripts. Inject both bridge layers once on demand.
+  // A live tab can retain old MAIN-world listeners across Extension updates.
+  // Install and verify both current layers before issuing a productive command.
   try {
     await chrome.scripting.executeScript({
       target: { tabId },
@@ -7485,6 +7488,8 @@ async function sendYouTubePageTool(tabId, message) {
       world: "ISOLATED",
       injectImmediately: true
     });
+    const bridge = await chrome.tabs.sendMessage(tabId, { type: "youtube-ui-tool", action: "bridge-version" });
+    if (!isCurrent(bridge)) throw createPageContextError("The YouTube page bridge did not confirm the current Extension version");
     return await chrome.tabs.sendMessage(tabId, message);
   } catch (error) {
     if (isRecoverablePageContextError(error)) {

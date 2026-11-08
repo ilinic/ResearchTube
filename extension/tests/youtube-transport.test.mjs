@@ -79,3 +79,68 @@ await transport.searchFetch([], '/youtubei/v1/search', {method:'POST'});
 assert.ok(network.every(item=>item.init.credentials==='omit'));
 assert.ok(network.slice(1).every(item=>item.init.redirect==='manual'));
 console.log('Anonymous YouTube: search/cache, comments client, transcript and full export pagination passed');
+
+// Extension updates do not remove the old MAIN-world listener or its guard.
+// Exercise both actual layers together in that surviving document.
+const manifest=JSON.parse(await readFile(new URL('../manifest.json',import.meta.url),'utf8'));
+const contentSource=await readFile(new URL('../youtube-content.js',import.meta.url),'utf8');
+const listeners=[];let runtimeListener,legacyCommands=0;
+const pageWindow={
+  __youtubeResearchSessionPageBridgeInstalled:true,
+  fetch:transcriptContext.originalFetch,
+  addEventListener:(_type,fn)=>listeners.push(fn),
+  postMessage(data){queueMicrotask(()=>{for(const fn of listeners)void fn({source:pageWindow,origin:'https://www.youtube.com',data});});}
+};
+listeners.push(event=>{if(event.data?.source==='researchtube-session-extension-content')legacyCommands++;});
+function Xhr(){}
+Xhr.prototype.open=function(){};Xhr.prototype.send=function(){};
+const upgraded=vm.createContext({window:pageWindow,location:{href:'https://www.youtube.com/',origin:'https://www.youtube.com'},
+  URL,XMLHttpRequest:Xhr,crypto:webcrypto,setTimeout,clearTimeout,
+  EXTENSION_VERSION:manifest.version,Parser:{setParserErrorHandler(){}},console,
+  __youtubeResearchSessionContentBridgeInstalled:true,
+  chrome:{runtime:{getManifest:()=>manifest,onMessage:{addListener:fn=>{runtimeListener=fn;}}}}
+});
+vm.runInContext(source.replace(/^import .*;\r?\n/gm,''),upgraded);
+vm.runInContext(contentSource,upgraded);
+const installedListenerCount=listeners.length;
+vm.runInContext(source.replace(/^import .*;\r?\n/gm,''),upgraded);
+vm.runInContext(contentSource,upgraded);
+assert.equal(listeners.length,installedListenerCount,'same-version reinjection must be idempotent');
+const send=message=>new Promise(resolve=>runtimeListener({type:'youtube-ui-tool',...message},{},resolve));
+const handshake=await send({action:'bridge-version'});
+assert.equal(handshake.data.version,manifest.version);assert.equal(handshake.data.pageVersion,manifest.version);
+unsafeTrack=false;
+const liveUpgrade=await send({action:'transcript',videoId:'abcdefghijk',args:{limit:1,trackIndex:1}});
+assert.equal(liveUpgrade.ok,true);assert.equal(liveUpgrade.data.segments[0].text,'Restored & tested');
+assert.equal(legacyCommands,0,'old session listeners must never receive current commands');
+
+// Worker must upgrade a stale but responsive bridge before productive work,
+// verify both layers, and retain the existing no-receiver recovery path.
+let mode='legacy',installed=[],productive=0,probes=0;
+const workerChrome={runtime:{getManifest:()=>manifest},tabs:{async sendMessage(_id,message){
+  if(message.action==='bridge-version'){
+    probes++;
+    if(mode==='missing')throw Error('Could not establish connection. Receiving end does not exist.');
+    if(mode==='legacy')return {ok:true,data:{version:'1.12.0'}};
+    return {ok:true,data:{version:manifest.version,pageVersion:mode==='broken'?'old':manifest.version}};
+  }
+  assert.equal(mode,'current');productive++;return {ok:true,data:{returned:1}};
+}},scripting:{async executeScript(options){
+  installed.push([options.world,options.files[0]]);
+  if(options.world==='ISOLATED'&&mode!=='broken')mode='current';
+}}};
+const upgradeWorker=vm.createContext({chrome:workerChrome,
+  isRecoverablePageContextError:error=>error.code==='RESEARCHTUBE_PAGE_CONTEXT_UNAVAILABLE',
+  createPageContextError:message=>Object.assign(Error(message),{code:'RESEARCHTUBE_PAGE_CONTEXT_UNAVAILABLE'})
+});
+vm.runInContext(background.slice(background.indexOf('async function sendYouTubePageTool('),background.indexOf('function normalizeCommentThread(')),upgradeWorker);
+for(const initial of ['legacy','missing','current']){
+  mode=initial;installed=[];probes=0;
+  await upgradeWorker.sendYouTubePageTool(42,{type:'youtube-ui-tool',action:'transcript'});
+  assert.equal(probes,initial==='current'?1:2);
+  assert.deepEqual(installed,initial==='current'?[]:[['MAIN','youtube-page-bridge.js'],['ISOLATED','youtube-content.js']]);
+}
+mode='broken';
+await assert.rejects(()=>upgradeWorker.sendYouTubePageTool(42,{type:'youtube-ui-tool',action:'transcript'}),/confirm the current Extension version|preparing the page bridge/);
+assert.equal(productive,3,'failed verification must not execute a productive request');
+console.log('YouTube upgrade: surviving old listener/guards, version handshake, reinjection and failed-upgrade guard passed');

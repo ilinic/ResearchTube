@@ -1,11 +1,14 @@
 import { Innertube, Parser } from "youtubei.js";
+import { version as EXTENSION_VERSION } from "./manifest.json";
 
 // Runs in YouTube's MAIN JavaScript world. It deliberately never reads or
 // exports cookies. It observes the same JSON responses used by the page and
 // can perform a narrowly scoped timed-text request in the page's own origin.
 (() => {
-  if (window.__youtubeResearchSessionPageBridgeInstalled) return;
-  window.__youtubeResearchSessionPageBridgeInstalled = true;
+  // MAIN-world code survives Extension reloads. A versioned protocol prevents
+  // an older listener from answering commands intended for the new bundle.
+  if (window.__researchtubeYouTubePageBridgeVersion === EXTENSION_VERSION) return;
+  window.__researchtubeYouTubePageBridgeVersion = EXTENSION_VERSION;
 
   // YouTube occasionally adds an otherwise harmless renderer to comment
   // responses before youtubei.js has a compiled parser for it. The library
@@ -20,8 +23,8 @@ import { Innertube, Parser } from "youtubei.js";
     console.info("[ResearchTube][YouTube.js parser]", { type: error?.error_type, classname: error?.classname });
   });
 
-  const SOURCE = "researchtube-session-page-bridge";
-  const COMMAND_SOURCE = "researchtube-session-extension-content";
+  const SOURCE = `researchtube-page-bridge:${EXTENSION_VERSION}`;
+  const COMMAND_SOURCE = `researchtube-extension-content:${EXTENSION_VERSION}`;
   const originalFetch = window.fetch.bind(window);
   const originalXhrOpen = XMLHttpRequest.prototype.open;
   const originalXhrSend = XMLHttpRequest.prototype.send;
@@ -1165,7 +1168,8 @@ import { Innertube, Parser } from "youtubei.js";
     if (message?.source !== COMMAND_SOURCE || message.type !== "command" || !message.id) return;
     try {
       let data;
-      if (message.action === "storyboard-context") data = storyboardContext(message.payload?.videoId);
+      if (message.action === "bridge-version") data = { version: EXTENSION_VERSION };
+      else if (message.action === "storyboard-context") data = storyboardContext(message.payload?.videoId);
       else if (message.action === "page-state") data = pageState();
       else if (message.action === "search") data = await searchPublicVideos(message.payload || {});
       else if (message.action === "channel-videos") data = await getChannelVideos(message.payload || {});

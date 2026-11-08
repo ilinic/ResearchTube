@@ -41,9 +41,18 @@ try {
   await writeFile(join(extension,'local-mcp-fixture.js'),`
       window.testSignedIn=true;window.testExportPage=0;
       window.__youtubeResearchPageBridgeInstalled=true; // Legacy live-tab guard.
+      // Start without a responding current MAIN bridge, like a live document
+      // surviving an Extension update. Only worker reinjection can recover it.
+      window.__researchtubeYouTubePageBridgeVersion='${manifest.version}';
+      window.testStaleBridge=true;window.testBridgeProbes=0;
       window.ytcfg={get:key=>({LOGGED_IN:window.testSignedIn,SESSION_INDEX:2,INNERTUBE_API_KEY:'test-page-config',INNERTUBE_CLIENT_VERSION:'2.20260101.00.00'})[key]};
       addEventListener('message',event=>{
-        const v=event.data;if(event.source!==window||v?.source!=='researchtube-session-extension-content'||v.type!=='command')return;
+        const v=event.data;if(event.source!==window||v?.source!=='researchtube-extension-content:${manifest.version}'||v.type!=='command')return;
+        if(v.action==='bridge-version'){
+          window.testBridgeProbes++;
+          if(window.testStaleBridge){window.testStaleBridge=false;delete window.__researchtubeYouTubePageBridgeVersion;}
+          return;
+        }
         if(v.action==='search'||v.action==='transcript-player'&&window.testRealProvider)return;
         event.stopImmediatePropagation();let data={responses:[]};
         if(v.action==='account-state')data={signedIn:window.testSignedIn};
@@ -52,7 +61,7 @@ try {
           const n=window.testExportPage++;data={sessionId:'exp_'+'a'.repeat(32),hasMore:n<2,records:[{videoId:v.payload.videoId,commentId:'comment'+n,parentCommentId:null,author:{name:'Public author',channelId:null},text:'Record '+n,publishedAt:null,publishedText:'today',likes:0,authorIsCreator:false,isHearted:false}]};
         }
         if(v.action==='comments-export-close')data={closed:true};
-        window.postMessage({source:'researchtube-session-page-bridge',type:'command-result',payload:{id:v.id,ok:true,data}},location.origin);
+        window.postMessage({source:'researchtube-page-bridge:${manifest.version}',type:'command-result',payload:{id:v.id,ok:true,data}},location.origin);
       },true);
     `);
   browser=await chromium.launchPersistentContext(join(folder,'profile'),{channel:process.env.RESEARCHTUBE_BROWSER_CHANNEL||'msedge',headless:true,
@@ -111,6 +120,7 @@ try {
   assert.equal(tabs.length,1);assert.equal(tabs[0].active,false);
   assert.equal((await settings.evaluate(()=>chrome.tabs.query({active:true,currentWindow:true})))[0].id,before[0].id);
   const youtube=browser.pages().find(page=>page.url().startsWith('https://www.youtube.com/'));
+  assert.ok(await youtube.evaluate(()=>window.testBridgeProbes>=2),'missing current MAIN bridge must trigger a verified reinjection');
   await youtube.evaluate(()=>{window.testSignedIn=false;});
   assert.equal((await call('youtube_get_transcript',{videoId:'abcdefghijk'})).error.code,'YOUTUBE_LOGIN_REQUIRED');
   await youtube.evaluate(()=>{window.testSignedIn=true;});
