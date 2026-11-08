@@ -11,11 +11,12 @@ for (const file of ['background.js', 'dist/background.js']) {
   let starts = 0;
   const context = {
     DEFAULTS: { agentPort: 17843, youtubeSearchCooldownUntil: 0 }, Date,
-    EXTENSION_VERSION: 'test', REQUIRED_AGENT_INTERFACE_VERSION: 83,
+    EXTENSION_VERSION: 'test', REQUIRED_AGENT_INTERFACE_VERSION: 84,
     chrome: { storage: { local: {
       get: async defaults => ({ ...defaults, ...data }),
       remove: async keys => { for (const key of keys) { removed.push(key); delete data[key]; } }
     } }, alarms: { clear: async name => alarms.push(['clear', name]), create: async name => alarms.push(['create', name]) } },
+    localMcpConnection: { start: async () => {} },
     cloudConnection: { status: async () => cloud, ensureAccount: async () => { starts++; } },
     normalizeAgentPort: port => port, refreshActionBadge: async () => {},
     getAgentStatus: async () => { throw Error('Status should not contact Agent'); }
@@ -32,7 +33,7 @@ for (const file of ['background.js', 'dist/background.js']) {
   for (const key of ['tunnelId', 'runtimeApiKey', 'connectionMode']) assert.ok(removed.includes(key));
   assert.equal(data.agentPort, 17844);
   assert.ok(data.mcpToolPreferences);
-  assert.deepEqual(alarms, [['clear', 'tunnel-poll'], ['create', 'public-relay']]);
+  assert.deepEqual(alarms, [['create', 'local-mcp'], ['clear', 'tunnel-poll'], ['create', 'public-relay']]);
 }
 const manifest = JSON.parse(await readFile(new URL('../manifest.json', import.meta.url), 'utf8'));
 assert.ok(!manifest.host_permissions.includes('https://api.openai.com/*'));

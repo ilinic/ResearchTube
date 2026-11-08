@@ -1,3 +1,5 @@
+import { createLocalMcpConnection } from "./local-mcp.js";
+import { LOCAL_YOUTUBE_TOOLS, localResearchDefinitions, projectCommentRecord, validateLocalArguments } from "./local-mcp-tools.js";
 import { createBrowserOwner } from "./browser-owner.js";
 import { createCloudConnection } from "./cloud-connection.js";
 import { taskTabSchema, normalizeTaskTabId, createTaskCompletionDelivery, installComposerWatchdog } from "./task-chat.js";
@@ -67,6 +69,7 @@ const MCP_TOOL_SETTINGS = Object.freeze({
   visual_map_create: { group: "visualMaps" }, visual_map_get_task: { group: "visualMaps" }, visual_map_cancel_task: { group: "visualMaps" },
   media_view: { group: "media" }, media_view_status: { group: "media" }, media_view_cancel: { group: "media" }, media_task_status: { group: "media" }, media_task_cancel: { group: "media" },
   camera_list: { group: "camera" }, camera_capture_frame: { group: "camera" }, camera_record_video: { group: "camera" }, camera_record_audio: { group: "camera" }, camera_record_status: { group: "camera" }, camera_record_stop: { group: "camera" },
+  youtube_comments_export: { group: "youtube" }, youtube_research_task_status: { group: "youtube" }, youtube_research_task_cancel: { group: "youtube" }, youtube_dataset_read: { group: "youtube" }, youtube_bridge_status: { group: "youtube", alwaysEnabled: true },
   youtube_search: { group: "youtube" }, youtube_get_video: { group: "youtube" }, youtube_get_channel_videos: { group: "youtube" }, youtube_get_channel_playlists: { group: "youtube" }, youtube_get_playlist_videos: { group: "youtube" }, youtube_get_transcript: { group: "youtube" }, youtube_get_comments: { group: "youtube" }, youtube_get_comment_replies: { group: "youtube" },
   youtube_download_get_formats: { group: "downloads" }, youtube_download: { group: "downloads" }, youtube_download_get_task: { group: "downloads" }, youtube_download_task_diagnostics: { group: "downloads" }, youtube_download_cancel_task: { group: "downloads" },
   clipboard_status: { group: "clipboard" }, clipboard_get: { group: "clipboard" }, clipboard_set: { group: "clipboard" },
@@ -98,7 +101,7 @@ globalThis.addEventListener?.("fetch", createMediaStreamHandler({
   fetchMedia: (url, options) => fetch(url, options),
   log: (stage, details = {}) => consoleAction(`[ResearchTube media stream ${EXTENSION_VERSION}]`, stage, details)
 }));
-const REQUIRED_AGENT_INTERFACE_VERSION = 83;
+const REQUIRED_AGENT_INTERFACE_VERSION = 84;
 // A UI resource URI is a cache key in MCP Apps. Increment it whenever the
 // rendered template changes so ChatGPT does not reuse a stale iframe bundle.
 const MEDIA_TO_CHAT_WIDGET_URI = "ui://researchtube/chat-target-v8.html";
@@ -1520,7 +1523,7 @@ function toolDefinitions() {
     {
       name: "youtube_search",
       title: "Search public YouTube videos",
-      description: "Search public YouTube videos by keywords. Returns IDs, titles, channel, duration, views and snippets. Does not retrieve transcripts/comments or navigate the context tab.",
+      description: "Search YouTube videos by keywords using the current browser session. Returns IDs, titles, channel, duration, views and snippets; results may reflect the signed-in account. Does not retrieve transcripts/comments or navigate the context tab.",
       // Search may create one inactive YouTube tab if the browser has none,
       // just like the other page-context reads.
       annotations: pageReadAnnotations,
@@ -1660,7 +1663,7 @@ async function mcpToolPreferences() {
     }
     preferences.newToolsEnabledByDefault = developerNewToolsDefault;
   }
-  for (const tool of publicMcpTools()) {
+  for (const tool of [...publicMcpTools(), ...localResearchDefinitions()]) {
     const { alwaysEnabled } = toolSettingsMetadata(tool.name);
     if (!alwaysEnabled && !Object.hasOwn(preferences.enabledByName, tool.name)) {
       preferences.enabledByName[tool.name] = toolSettingsMetadata(tool.name).group === "custom"
@@ -1674,7 +1677,7 @@ async function mcpToolPreferences() {
 
 async function mcpToolSettingsCatalog() {
   const preferences = await mcpToolPreferences();
-  return publicMcpTools().map((tool) => {
+  return [...publicMcpTools(), ...localResearchDefinitions()].map((tool) => {
     const metadata = toolSettingsMetadata(tool.name);
     return {
       name: tool.name,
@@ -1699,7 +1702,7 @@ async function enabledMcpToolDefinitions() {
 }
 
 async function isMcpToolEnabled(name) {
-  const tool = publicMcpTools().find((candidate) => candidate.name === name);
+  const tool = [...publicMcpTools(), ...localResearchDefinitions()].find((candidate) => candidate.name === name);
   if (!tool) return true;
   const metadata = toolSettingsMetadata(name);
   if (metadata.alwaysEnabled) return true;
@@ -1708,7 +1711,7 @@ async function isMcpToolEnabled(name) {
 }
 
 async function updateMcpToolEnabled(name, enabled) {
-  const tool = publicMcpTools().find((candidate) => candidate.name === name);
+  const tool = [...publicMcpTools(), ...localResearchDefinitions()].find((candidate) => candidate.name === name);
   if (!tool) return { ok: false, errorCode: "MCP_TOOL_UNKNOWN", message: "Unknown public MCP tool." };
   if (toolSettingsMetadata(name).alwaysEnabled) return { ok: false, errorCode: "MCP_TOOL_REQUIRED", message: "This MCP tool is always enabled." };
   if (typeof enabled !== "boolean") return { ok: false, errorCode: "MCP_TOOL_INVALID", message: "enabled must be a boolean." };
@@ -3582,6 +3585,7 @@ chrome.runtime.onStartup.addListener(() => {
 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === "local-mcp") void localMcpConnection.start();
   if (alarm.name === "public-relay") void cloudConnection.ensureAccount();
   if (alarm.name === "background-task-completions") void taskCompletionDelivery.tick();
   if (alarm.name.startsWith("artifact-task:")) void artifactTaskManager.advance(alarm.name.slice("artifact-task:".length));
@@ -3590,9 +3594,10 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 });
 
 async function bootstrapConnection() {
-  // These were experimental controls in older builds. The transport is now
-  // permanently anonymous WEB page-context, so retaining stale values would
-  // be misleading and serves no purpose.
+  void localMcpConnection.start();
+  chrome.alarms.create("local-mcp", { periodInMinutes: 1 });
+  // Remove obsolete controls. YouTube research now always uses page-session
+  // cookies; account credentials never enter Extension storage.
   await chrome.storage.local.remove([
     "connectionMode", "tunnelId", "runtimeApiKey", "lastConnectionTest",
     "lastTunnelConnection", "onboardingCompleted",
@@ -4019,6 +4024,8 @@ async function saveAgentPort(payload = {}) {
     return { ok: false, errorCode: "AGENT_PORT_INVALID", message: "Enter a port from 1 to 65535." };
   }
   await chrome.storage.local.set({ agentPort: supplied });
+  localMcpConnection.close();
+  void localMcpConnection.start();
   return { ok: true, port: supplied };
 }
 
@@ -6952,9 +6959,10 @@ function pruneSearchCache(now = Date.now()) {
 }
 
 async function youtubeSearch(query, limit) {
+  const session = await runYouTubePageTool("account-state", null, {});
   const now = Date.now();
   pruneSearchCache(now);
-  const key = searchCacheKey(query, limit);
+  const key = `${session?.contextId || crypto.randomUUID()}\u0000${searchCacheKey(query, limit)}`;
   const cached = searchCache.get(key);
   if (cached) {
     void recordSearchDiagnostic("cache_reused", {
@@ -7096,7 +7104,7 @@ async function applySearchCooldown(context = null) {
 }
 
 function createSearchVerificationError(searchDiagnostic = {}) {
-  const error = new Error("YouTube redirected or rejected this anonymous search request");
+  const error = new Error("YouTube redirected or rejected this browser-session search request");
   error.code = "YOUTUBE_SEARCH_VERIFICATION";
   error.search_diagnostic = searchDiagnostic;
   return error;
@@ -7176,14 +7184,14 @@ function normalizeVideoRenderer(renderer) {
 }
 
 async function youtubeGetVideo(videoId) {
-  const { player, initial } = await fetchVideoPage(videoId);
+  const { player, initial, counts } = await fetchVideoPage(videoId);
   const details = player?.videoDetails;
   if (!details?.videoId) throw new Error("YouTube video metadata was not found");
   const microformat = player?.microformat?.playerMicroformatRenderer ?? {};
   const tracks = captionTracks(player).map(normalizeCaptionTrack);
-  const viewsText = findViewText(initial) || (details.viewCount ? `${details.viewCount} views` : null);
-  const likesText = findLikeText(initial);
-  const commentCountText = findCommentCountText(initial);
+  const viewsText = counts?.viewsText || findViewText(initial) || (details.viewCount ? `${details.viewCount} views` : null);
+  const likesText = counts?.likesText || findLikeText(initial);
+  const commentCountText = counts?.commentCountText || findCommentCountText(initial);
   return {
     videoId,
     title: details.title, description: details.shortDescription || "",
@@ -7403,11 +7411,13 @@ function isRecoverablePageContextError(error) {
   return /No tab with id|tab was closed|Receiving end does not exist|Could not establish connection|message port closed|frame with ID .* was removed|Cannot access contents of url|MAIN-world bridge timed out/i.test(message);
 }
 
+let youtubeTabOpening = null;
 async function getOrCreateYouTubeTab() {
   const tabs = await chrome.tabs.query({ url: ["https://www.youtube.com/*"] });
   if (tabs[0]?.id) return { tab: tabs[0], created: false };
 
-  return { tab: await createYouTubeTab(), created: true };
+  if (!youtubeTabOpening) youtubeTabOpening = createYouTubeTab();
+  try { return { tab: await youtubeTabOpening, created: true }; } finally { youtubeTabOpening = null; }
 }
 
 async function createYouTubeTab() {
@@ -7509,32 +7519,7 @@ function normalizeCommentThread(thread, rank) {
 }
 
 async function fetchVideoPage(videoId) {
-  const response = await fetchStandardWatchPage(videoId);
-  if (!response.ok) throw new Error(`YouTube HTTP ${response.status}`);
-  const html = await response.text();
-  const player = extractAnyJson(html, ["var ytInitialPlayerResponse =", "ytInitialPlayerResponse ="]);
-  if (!player) throw new Error("ytInitialPlayerResponse was not found (consent or changed YouTube page)");
-  return { player, initial: extractAnyJson(html, ["var ytInitialData =", "ytInitialData ="]) };
-}
-
-async function fetchStandardWatchPage(videoId) {
-  try {
-    const response = await fetch(`https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`, {
-      credentials: "omit",
-      headers: { Accept: "text/html" }
-    });
-    void recordCommandDiagnostic("youtube_http_response", {
-      action: "youtube_get_video", videoId, endpoint: "/watch", method: "GET",
-      status: response.status, response_type: response.type, redirected: response.redirected
-    });
-    return response;
-  } catch (error) {
-    void recordCommandDiagnostic("youtube_http_network_error", {
-      action: "youtube_get_video", videoId, endpoint: "/watch", method: "GET",
-      error: searchDiagnosticMessage(error)
-    });
-    throw error;
-  }
+  return runYouTubePageTool("video-page-data", videoId, {});
 }
 
 function captionTracks(player) {
@@ -7675,4 +7660,47 @@ function extractJsonAfterMarker(text, marker) {
     }
   }
   return null;
+}
+
+
+// Independent local MCP shares the same signed-in page research behavior.
+const localMcpConnection = createLocalMcpConnection({
+  extensionId: chrome.runtime.id, extensionVersion: EXTENSION_VERSION, interfaceVersion: REQUIRED_AGENT_INTERFACE_VERSION,
+  port: async () => normalizeAgentPort((await getConfig()).agentPort),
+  fetch: (url, options) => fetch(url, options), webSocket: url => new WebSocket(url),
+  setInterval: (...args) => setInterval(...args), clearInterval: id => clearInterval(id),
+  enabledTools: async () => (await mcpToolSettingsCatalog()).filter(t => t.enabled && (LOCAL_YOUTUBE_TOOLS.includes(t.name) || localResearchDefinitions().some(d => d.name === t.name))).map(t => t.name),
+  dispatch: dispatchLocalYoutube
+});
+async function requireLocalYoutubeLogin() {
+  const { tab } = await getOrCreateYouTubeTab();
+  const result = await sendYouTubePageTool(tab.id, { type: "youtube-ui-tool", action: "account-state", args: {} });
+  if (!result?.ok || typeof result.data?.signedIn !== "boolean") throw Object.assign(Error("YouTube login state unavailable"), { code: "YOUTUBE_LOGIN_UNKNOWN" });
+  if (!result.data.signedIn) throw Object.assign(Error("Sign in to YouTube"), { code: "YOUTUBE_LOGIN_REQUIRED" });
+  return tab.id;
+}
+async function dispatchLocalYoutube(name, input) {
+  const fail = code => { throw Object.assign(Error(code), { code }); };
+  if (name.startsWith("__comments_")) {
+    if (!await isMcpToolEnabled("youtube_comments_export") || !await isMcpToolEnabled("youtube_get_comments") || input.includeReplies === true && !await isMcpToolEnabled("youtube_get_comment_replies")) fail("MCP_TOOL_DISABLED");
+    const allowed = { __comments_check: ["includeReplies"], __comments_page: ["videoId", "sort", "includeReplies", "sessionId"], __comments_close: ["sessionId"] }[name];
+    if (!allowed || Object.keys(input).some(k => !allowed.includes(k)) || name === "__comments_page" && (!/^[A-Za-z0-9_-]{6,}$/.test(input.videoId) || !["top", "newest"].includes(input.sort) || typeof input.includeReplies !== "boolean" || input.sessionId !== null && !/^exp_[A-Za-z0-9_-]{16,64}$/.test(input.sessionId)) || name === "__comments_check" && typeof input.includeReplies !== "boolean" || name === "__comments_close" && !/^exp_[A-Za-z0-9_-]{16,64}$/.test(input.sessionId)) fail("INVALID_ARGUMENT");
+    const tabId = await requireLocalYoutubeLogin();
+    if (name === "__comments_check") return { ready: true };
+    const response = await sendYouTubePageTool(tabId, { type: "youtube-ui-tool", action: name === "__comments_page" ? "comments-export-page" : "comments-export-close", args: input });
+    if (!response?.ok) fail(/session/i.test(response?.error || "") ? "YOUTUBE_EXPORT_SESSION_LOST" : "YOUTUBE_REQUEST_FAILED");
+    if (name === "__comments_close") return { closed: true };
+    const page = response.data;
+    if (!page || !Array.isArray(page.records) || page.records.length > 1000 || typeof page.hasMore !== "boolean" || !/^exp_[A-Za-z0-9_-]{16,64}$/.test(page.sessionId)) fail("YOUTUBE_REQUEST_FAILED");
+    return { sessionId: page.sessionId, records: page.records.map(projectCommentRecord), hasMore: page.hasMore };
+  }
+  if (!LOCAL_YOUTUBE_TOOLS.includes(name) || !await isMcpToolEnabled(name)) fail("MCP_TOOL_DISABLED");
+  const definition = publicMcpTools().find(t => t.name === name);
+  // Independently validate the canonical input schema before the browser boundary.
+  if (!definition || !validateLocalArguments(definition.inputSchema, input)) fail("INVALID_ARGUMENT");
+  await requireLocalYoutubeLogin();
+  const response = await handleMcpRequest({ jsonrpc: "2.0", id: crypto.randomUUID(), method: "tools/call", params: { name, arguments: input } });
+  const result = response?.result?.structuredContent;
+  if (!result || response.result.isError || result.status === "rejected") fail(result?.error?.code || "YOUTUBE_REQUEST_FAILED");
+  return result;
 }

@@ -11,6 +11,26 @@ The server adds `system_connection_status` for optional, user-requested account 
 YouTube research and local reads need no chat target. Delivery uses explicit `tabId`; Site tools use `chatTabId`, from the startup prompt. The extension checks the exact live document inside execution. Missing or changed targets fail immediately without selecting another tab. There is no server-side transcript service.
 See [Public connection](features/PUBLIC_CONNECTION.md).
 
+## Local YouTube MCP
+
+For independent Codex use, the Agent also serves **http://127.0.0.1:17843/mcp**.
+This local-only catalog includes the eight YouTube read tools below and these
+five additional tools. It requires the updated Agent and Extension, but no
+cloud enrollment or ChatGPT tab. See [Local YouTube MCP](features/LOCAL_YOUTUBE_MCP.md).
+
+| Local-only tool | Behavior |
+| --- | --- |
+| `youtube_comments_export` | Starts paginated comment/reply collection into a new Workspace JSONL dataset; counts roots plus replies against the requested ceiling. |
+| `youtube_research_task_status` | Returns export progress, counts, saved path and terminal error. |
+| `youtube_research_task_cancel` | Stops collection and preserves already saved records. |
+| `youtube_dataset_read` | Reads bounded dataset records with optional text/parent filtering. |
+| `youtube_bridge_status` | Reports local Extension connectivity without opening YouTube. |
+
+Local browser calls require YouTube sign-in and reuse or create one inactive
+YouTube tab. Requests use the current page session and can reflect the signed-in
+account; cookies and authorization stay inside the browser. Files persist
+after Agent restart, while task IDs do not.
+
 ## Artifact tasks and paths
 
 Every artifact producer accepts `addToChat` (false by default) and `sendDelaySeconds` (zero by default). Captures, cropping and clipboard reads are asynchronous as well. One task covers creation plus optional upload/Send in the originating chat. Use `media_task_status` and `media_task_cancel`; specialized status/cancel commands return the same complete workflow. `files[].workspacePath` selects created outputs uniformly; native results and counters are in `creation.data`, upload and delay information in `chat`. See [Artifact tasks](features/ARTIFACT_TASKS.md) for limits, cancellation and restart behavior.

@@ -24,6 +24,24 @@ ResearchTube uses stable public error codes so an assisting chat can distinguish
 | `BROWSER_TARGET_MISMATCH` | Original document changed | Check the intended tab; no fallback or automatic replay |
 | `BROWSER_OUTCOME_UNKNOWN` | A dispatched request timed out | Inspect its state before repeating an action |
 
+## Local YouTube MCP
+
+| Code | Meaning / corrective action |
+| --- | --- |
+| `YOUTUBE_BRIDGE_OFFLINE` | Open Chrome, reload the matching Extension and restart the matching Agent; check the configured loopback port. |
+| `YOUTUBE_BRIDGE_TIMEOUT` | Browser request exceeded its deadline; inspect Chrome and retry later. |
+| `YOUTUBE_BRIDGE_BUSY` | Local queue or four-export ceiling reached; wait or cancel an export. |
+| `YOUTUBE_LOGIN_REQUIRED` | Sign in to YouTube in the Extension's Chrome profile. |
+| `YOUTUBE_LOGIN_UNKNOWN` | Wait for the YouTube page to finish loading, then retry. |
+| `MCP_TOOL_DISABLED` | Enable the exact local/browser tool in Extension Settings. |
+| `YOUTUBE_REQUEST_FAILED` | Check YouTube availability/verification and retry later. |
+| `YOUTUBE_EXPORT_SESSION_LOST` | Page document or continuation session changed; saved records remain, start a new export. |
+| `YOUTUBE_EXPORT_LIMIT` | One-hour/page/empty-page budget reached; saved records remain. |
+| `YOUTUBE_EXPORT_FAILED` | Export failed; inspect saved records and bounded task error. |
+| `YOUTUBE_RESEARCH_TASK_NOT_FOUND` | Agent restarted or terminal history evicted the task; saved files remain. |
+| `YOUTUBE_RESULT_TOO_LARGE` | Request a smaller result or export/read a dataset in batches. |
+| `INVALID_ARGUMENT` | Use the advertised strict tool schema and logical Workspace paths. |
+
 ## Workspace and files
 
 | Code | Meaning | Corrective action |

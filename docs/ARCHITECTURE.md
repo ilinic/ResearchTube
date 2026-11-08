@@ -33,7 +33,7 @@ requirement independently of automated test success.
 | --- | --- | --- |
 | MCP service worker | `extension/background.js` | Public relay, MCP schemas, validation, task orchestration, Settings state and browser automation |
 | YouTube isolated bridge | `extension/youtube-content.js` | Typed boundary between Extension messages and the YouTube page world |
-| YouTube MAIN bridge | `extension/youtube-page-bridge.src.js` | Anonymous requests in a normal `youtube.com` origin for public research data |
+| YouTube MAIN bridge | `extension/youtube-page-bridge.src.js` | Session requests in the normal `youtube.com` origin; only normalized research data leaves the page |
 | Storyboard Extension module | `extension/storyboards.js` | Storyboard schemas, validation and public result projection |
 | ChatGPT media bridge | `extension/chatgpt-capture-frame-bridge.js` | Finds the exact MCP widget iframe and installs the local viewer overlay |
 | System context and diagnostics | `extension/system-tools.js`, `extension/chat-context.js`, `extension/system-diagnostics.js` | Widget-authenticated manual group discovery and bounded sanitized error journal |
@@ -57,13 +57,24 @@ The Extension exposes JSON text and structured content. Expected state and input
 
 ## Browser research path
 
-Public search, metadata, transcript, channel, playlist and comment operations use the YouTube page context when required. The Extension reuses a matching open YouTube tab when possible or creates an inactive tab. It never reads YouTube cookies, requests Chrome's cookies permission or performs account actions.
+Public search, metadata, transcript, channel, playlist and comment operations use the YouTube page context when required. The Extension reuses a matching open YouTube tab when possible or creates an inactive tab. It uses browser-managed session cookies and generates WEB authorization inside the page. It never exports cookies, requests Chrome's cookies permission or performs account mutations.
 
 The isolated bridge checks the page origin and message source. The MAIN-world bridge receives only allowlisted actions and arguments. Sensitive page state, request headers, raw response bodies and private diagnostics are not returned through MCP.
 
 Search requests are serialized, briefly cached and placed into a bounded backoff after verification, HTTP 403 or HTTP 429 responses. ResearchTube reports a retry delay rather than attempting to bypass YouTube verification.
 
 ## Local Agent boundary
+
+The Agent also exposes an independent, stateless Streamable HTTP YouTube MCP
+on `/mcp`. `agent/local_mcp.py` owns this transport and local dataset tasks;
+`extension/local-mcp.js` maintains the outbound private loopback WebSocket.
+An exact Extension identity and per-run pairing secret protect that browser
+bridge. Host/Origin validation rejects website-origin MCP requests. This path
+does not use cloud enrollment or ChatGPT. Canonical browser schemas are
+generated into `agent/local_mcp_catalog.py` during the Extension build; five
+dataset/diagnostic tools are local-only. Productive browser calls check YouTube
+sign-in and use the current browser session. See
+[Local YouTube MCP](features/LOCAL_YOUTUBE_MCP.md) for boundaries and budgets.
 
 The Agent is a Python asyncio HTTP service bound to `127.0.0.1`. It has no OpenAI credential. The Extension checks `/health` and requires the Agent's positive integer `interfaceVersion` to equal the Extension's required interface version before using Agent-backed tools.
 
@@ -175,7 +186,7 @@ For file-only output, the tab is muted during playback. ResearchTube waits for p
 ## Security and privacy
 
 - Installation credentials stay in trusted Extension storage; only hashes are stored on the server.
-- YouTube requests omit credentials and do not use account actions.
+- YouTube browser research uses the signed-in page session; cookies and authorization remain in the browser, with no account mutations.
 - Diagnostics exclude credentials, cookies, request headers, signed URLs, transcript bodies and unbounded child-process output.
 - Agent HTTP access is loopback-only.
 - Public shares are explicit, temporary cloudflared operations and never expose the Agent API.

@@ -38484,23 +38484,70 @@ ${getNsigProcessorFn(eval_args.n, eval_args.sp, eval_args.sig)}`;
     CustomEvent: globalThis.CustomEvent
   });
 
+  // youtube-session.js
+  async function sessionRequestOptions(input, init, environment) {
+    const url = new URL(typeof input === "string" ? input : input.url || input.href, environment.origin);
+    if (url.origin !== "https://www.youtube.com") throw Error("YouTube session requests must stay on www.youtube.com");
+    const headers = new Headers(init.headers || input?.headers);
+    headers.delete("Cookie");
+    let body = init.body;
+    if (url.pathname.startsWith("/youtubei/v1/")) {
+      const account = environment.config("SESSION_INDEX");
+      headers.set("X-Goog-AuthUser", String(Number.isInteger(Number(account)) ? Number(account) : 0));
+      const delegated = environment.config("DELEGATED_SESSION_ID");
+      if (typeof delegated === "string" && delegated) headers.set("X-Goog-PageId", delegated);
+      if (environment.config("LOGGED_IN") === true) {
+        const cookies = environment.cookies();
+        const read = (name) => cookies.split(";").map((part) => part.trim()).find((part) => part.startsWith(name + "="))?.slice(name.length + 1);
+        const sid = read("SAPISID") || read("__Secure-3PAPISID") || read("__Secure-1PAPISID");
+        if (!sid) throw Error("YouTube session signing state is unavailable; reload YouTube and sign in again");
+        const timestamp = Math.floor(Date.now() / 1e3);
+        const bytes = new TextEncoder().encode(`${timestamp} ${sid} ${environment.origin}`);
+        const digest = await crypto.subtle.digest("SHA-1", bytes);
+        const hash = Array.from(new Uint8Array(digest), (value) => value.toString(16).padStart(2, "0")).join("");
+        headers.set("Authorization", `SAPISIDHASH ${timestamp}_${hash}`);
+        headers.set("X-Origin", environment.origin);
+      }
+      if (typeof body === "string" && headers.get("Content-Type")?.includes("application/json")) {
+        const data = JSON.parse(body);
+        if (data.context) {
+          const user = environment.config("INNERTUBE_CONTEXT")?.user || {};
+          data.context.user = { ...data.context.user, ...user, ...delegated ? { onBehalfOfUser: delegated } : {} };
+          body = JSON.stringify(data);
+        }
+      }
+    }
+    return { ...init, headers, ...body !== void 0 ? { body } : {}, credentials: "include", redirect: "manual" };
+  }
+
   // youtube-page-bridge.src.js
   (() => {
-    if (window.__youtubeResearchPageBridgeInstalled) return;
-    window.__youtubeResearchPageBridgeInstalled = true;
+    if (window.__youtubeResearchSessionPageBridgeInstalled) return;
+    window.__youtubeResearchSessionPageBridgeInstalled = true;
     parser_exports.setParserErrorHandler((error2) => {
       if (error2?.error_type === "class_not_found" && error2.classname === "CommentFilterContextView") {
         return;
       }
-      console.info("[ResearchTube][YouTube.js parser]", error2);
+      console.info("[ResearchTube][YouTube.js parser]", { type: error2?.error_type, classname: error2?.classname });
     });
-    const SOURCE = "researchtube-page-bridge";
-    const COMMAND_SOURCE = "researchtube-extension-content";
+    const SOURCE = "researchtube-session-page-bridge";
+    const COMMAND_SOURCE = "researchtube-session-extension-content";
     const originalFetch = window.fetch.bind(window);
     const originalXhrOpen = XMLHttpRequest.prototype.open;
     const originalXhrSend = XMLHttpRequest.prototype.send;
     const responseLog = [];
     let innertubePromise = null;
+    let innertubeContextId = null;
+    let accountFingerprint = null, accountContextId = null;
+    function accountState() {
+      const get = (key) => window.ytcfg?.get?.(key);
+      const fingerprint = JSON.stringify([get("LOGGED_IN"), get("SESSION_INDEX"), get("DELEGATED_SESSION_ID"), get("DATASYNC_ID")]);
+      if (fingerprint !== accountFingerprint) {
+        accountFingerprint = fingerprint;
+        accountContextId = crypto.randomUUID();
+      }
+      return { signedIn: typeof get("LOGGED_IN") === "boolean" ? get("LOGGED_IN") : null, contextId: accountContextId };
+    }
     function isRelevant(url) {
       return /\/(?:watch|results)(?:\?|$)|\/youtubei\/v1\/|\/api\/timedtext(?:\?|$)/.test(url);
     }
@@ -38531,7 +38578,12 @@ ${getNsigProcessorFn(eval_args.n, eval_args.sp, eval_args.sig)}`;
       post("network-response", payload);
     }
     async function observedFetch(input, init = {}) {
-      const response = await originalFetch(input, init);
+      const options = await sessionRequestOptions(input, init, {
+        origin: location.origin,
+        config: (key) => window.ytcfg?.get?.(key),
+        cookies: () => document.cookie
+      });
+      const response = await originalFetch(input, options);
       captureResponse(urlFrom(input), response, String(init.method || "GET").toUpperCase());
       return response;
     }
@@ -38630,6 +38682,11 @@ ${getNsigProcessorFn(eval_args.n, eval_args.sp, eval_args.sig)}`;
       }
     }
     async function getInnertube() {
+      const contextId = accountState().contextId;
+      if (innertubeContextId !== contextId) {
+        innertubePromise = null;
+        innertubeContextId = contextId;
+      }
       if (!innertubePromise) {
         const visitorData = window.ytcfg?.get?.("VISITOR_DATA") || void 0;
         innertubePromise = Innertube.create({
@@ -38639,8 +38696,11 @@ ${getNsigProcessorFn(eval_args.n, eval_args.sp, eval_args.sig)}`;
           visitor_data: visitorData,
           fetch: (input, init) => observedFetch(input, {
             ...init,
-            credentials: "omit"
+            credentials: "include"
           })
+        }).catch((error2) => {
+          if (innertubeContextId === contextId) innertubePromise = null;
+          throw error2;
         });
       }
       return innertubePromise;
@@ -38686,13 +38746,13 @@ ${getNsigProcessorFn(eval_args.n, eval_args.sp, eval_args.sig)}`;
       const reason = player?.playabilityStatus?.reason || "no caption tracks";
       return `${status}: ${reason}`;
     }
-    async function getAnonymousWatchHtml(videoId) {
+    async function getSessionWatchHtml(videoId) {
       const response = await observedFetch(`/watch?v=${encodeURIComponent(videoId)}`, {
-        credentials: "omit",
+        credentials: "include",
         cache: "no-store",
         headers: { Accept: "text/html" }
       });
-      if (!response.ok) throw new Error(`YouTube anonymous watch page failed: HTTP ${response.status}`);
+      if (!response.ok) throw new Error(`YouTube session watch page failed: HTTP ${response.status}`);
       return response.text();
     }
     function parseCaptionResponse(rawData) {
@@ -38737,21 +38797,24 @@ ${getNsigProcessorFn(eval_args.n, eval_args.sp, eval_args.sig)}`;
       return segments;
     }
     async function getTranscriptFromPlayer({ videoId, limit, trackIndex = 0 }) {
-      const pageHtml = await getAnonymousWatchHtml(videoId);
+      const pageHtml = await getSessionWatchHtml(videoId);
       const apiKey = pageHtml.match(/"INNERTUBE_API_KEY":"([^"]+)"/)?.[1];
-      if (!apiKey) throw new Error("INNERTUBE_API_KEY was not found in the anonymous YouTube watch page");
-      const playerResponse = await observedFetch(`/youtubei/v1/player?key=${encodeURIComponent(apiKey)}`, {
-        method: "POST",
-        credentials: "omit",
-        cache: "no-store",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          context: { client: { clientName: "ANDROID", clientVersion: "20.10.38" } },
-          videoId
-        })
-      });
-      if (!playerResponse.ok) throw new Error(`YouTube ANDROID /player failed: HTTP ${playerResponse.status}`);
-      const player = await playerResponse.json();
+      if (!apiKey) throw new Error("INNERTUBE_API_KEY was not found in the YouTube watch page");
+      let player = extractSearchJson(pageHtml, ["var ytInitialPlayerResponse =", "ytInitialPlayerResponse ="]);
+      if (!playerTracks(player).length) {
+        const playerResponse = await observedFetch(`/youtubei/v1/player?key=${encodeURIComponent(apiKey)}`, {
+          method: "POST",
+          credentials: "include",
+          cache: "no-store",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            context: { client: { clientName: "WEB", clientVersion: window.ytcfg?.get?.("INNERTUBE_CLIENT_VERSION") || "2.20260101.00.00" } },
+            videoId
+          })
+        });
+        if (!playerResponse.ok) throw new Error(`YouTube WEB /player failed: HTTP ${playerResponse.status}`);
+        player = await playerResponse.json();
+      }
       const tracks = playerTracks(player);
       if (!tracks.length) {
         throw new Error(`No public caption track is available (${playerStatus(player)})`);
@@ -38766,7 +38829,7 @@ ${getNsigProcessorFn(eval_args.n, eval_args.sp, eval_args.sig)}`;
         throw new Error(`Caption track ${selectedTrackIndex} did not contain a valid YouTube timedtext URL`);
       }
       const captionResponse = await observedFetch(track.baseUrl, {
-        credentials: "omit",
+        credentials: "include",
         cache: "no-store"
       });
       if (!captionResponse.ok) throw new Error(`YouTube timedtext request failed: HTTP ${captionResponse.status}`);
@@ -38797,7 +38860,7 @@ ${getNsigProcessorFn(eval_args.n, eval_args.sp, eval_args.sig)}`;
       const endpoint = searchEndpoint(url);
       trace.push({ event: "http_request", endpoint, request_number: requestNumber, method: init.method || "GET" });
       try {
-        const response = await observedFetch(url, { ...init, credentials: "omit", redirect: "manual" });
+        const response = await observedFetch(url, { ...init, credentials: "include", redirect: "manual" });
         trace.push({
           event: "http_response",
           endpoint,
@@ -38987,7 +39050,7 @@ ${getNsigProcessorFn(eval_args.n, eval_args.sp, eval_args.sig)}`;
     }
     async function loadCataloguePage(path) {
       const response = await observedFetch(path, {
-        credentials: "omit",
+        credentials: "include",
         redirect: "manual",
         headers: { Accept: "text/html" }
       });
@@ -39009,7 +39072,7 @@ ${getNsigProcessorFn(eval_args.n, eval_args.sp, eval_args.sig)}`;
       if (!config.apiKey) throw new Error("YouTube did not provide an Innertube key for this catalogue continuation");
       const response = await observedFetch(`/youtubei/v1/browse?key=${encodeURIComponent(config.apiKey)}&prettyPrint=false`, {
         method: "POST",
-        credentials: "omit",
+        credentials: "include",
         redirect: "manual",
         headers: { "Content-Type": "application/json", "X-YouTube-Client-Name": "1", "X-YouTube-Client-Version": config.clientVersion },
         body: JSON.stringify({
@@ -39474,6 +39537,84 @@ ${getNsigProcessorFn(eval_args.n, eval_args.sp, eval_args.sig)}`;
         totalReplies
       };
     }
+    const exportSessions = /* @__PURE__ */ new Map();
+    async function exportCommentPage({ videoId, sort, includeReplies, sessionId }) {
+      const now = Date.now();
+      for (const [id, session] of exportSessions) if (now - session.touched > 6e5) exportSessions.delete(id);
+      let state = sessionId ? exportSessions.get(sessionId) : null;
+      if (sessionId && !state) throw Error("Comment export session expired or changed document");
+      if (!state) {
+        if (exportSessions.size >= 4) throw Error("Too many comment export sessions");
+        const yt = await getInnertube();
+        state = { videoId, sort, includeReplies, contextId: accountState().contextId, touched: now, page: await yt.getComments(videoId, sort === "newest" ? "NEWEST_FIRST" : "TOP_COMMENTS"), parents: [], replyPage: null, advance: false };
+        sessionId = "exp_" + crypto.randomUUID().replaceAll("-", "");
+        exportSessions.set(sessionId, state);
+      }
+      if (state.videoId !== videoId || state.sort !== sort || state.includeReplies !== includeReplies || state.contextId !== accountState().contextId) throw Error("Comment export session mismatch");
+      state.touched = now;
+      let records;
+      if (state.parents.length) {
+        const parent = state.parents[0];
+        if (!state.replyPage) {
+          await parent.getReplies();
+          state.replyPage = parent;
+        } else state.replyPage = await state.replyPage.getContinuation();
+        records = (state.replyPage.replies || []).map((thread, i) => {
+          const record = normalizeReplyThread(thread, i + 1);
+          return record ? { ...record, videoId, parentCommentId: parent.comment.comment_id } : null;
+        }).filter(Boolean);
+        if (!state.replyPage.has_continuation) {
+          state.parents.shift();
+          state.replyPage = null;
+        }
+      } else {
+        if (state.advance) {
+          if (!state.page.has_continuation) return { sessionId, records: [], hasMore: false };
+          state.page = await state.page.getContinuation();
+        }
+        const threads = state.page.contents || [];
+        records = threads.map((thread, i) => {
+          const record = normalizeCommentThread(thread, i + 1);
+          return record ? { ...record, videoId, parentCommentId: null } : null;
+        }).filter(Boolean);
+        if (includeReplies) state.parents = threads.filter((thread) => thread.has_replies);
+        state.advance = true;
+      }
+      return { sessionId, records, hasMore: state.parents.length > 0 || Boolean(state.page.has_continuation) };
+    }
+    async function getVideoPageData(videoId) {
+      const html = await getSessionWatchHtml(videoId);
+      const raw = extractSearchJson(html, ["var ytInitialPlayerResponse =", "ytInitialPlayerResponse ="]);
+      if (!raw?.videoDetails?.videoId) throw Error("YouTube video metadata was not found");
+      const select = (value, keys) => Object.fromEntries(keys.filter((key) => value?.[key] !== void 0).map((key) => [key, value[key]]));
+      const details = select(raw.videoDetails, ["videoId", "title", "shortDescription", "author", "channelId", "lengthSeconds", "viewCount"]);
+      details.thumbnail = { thumbnails: (raw.videoDetails.thumbnail?.thumbnails || []).map((item) => select(item, ["url", "width", "height"])) };
+      const format = (item) => select(item, ["itag", "mimeType", "width", "height", "fps", "averageBitrate", "bitrate", "audioSampleRate", "audioChannels", "qualityLabel", "contentLength"]);
+      const tracks = playerTracks(raw).map((track) => select(track, ["languageCode", "name", "kind"]));
+      const initial = extractSearchJson(html, ["var ytInitialData =", "ytInitialData ="]);
+      const counts = { viewsText: null, likesText: null, commentCountText: null };
+      walkSearchData(initial, (node) => {
+        counts.viewsText ||= textOf(node?.videoPrimaryInfoRenderer?.viewCount?.videoViewCountRenderer?.viewCount) || null;
+        counts.commentCountText ||= textOf(node?.commentsEntryPointHeaderRenderer?.commentCount) || null;
+        const old = node?.segmentedLikeDislikeButtonRenderer?.likeButton?.toggleButtonRenderer;
+        for (const candidate of [
+          old?.defaultText,
+          old?.accessibility?.accessibilityData?.label,
+          node?.accessibilityText,
+          node?.buttonViewModel?.accessibilityText,
+          node?.toggleButtonViewModel?.defaultButtonViewModel?.buttonViewModel?.accessibilityText
+        ]) {
+          const text = typeof candidate === "string" ? candidate : textOf(candidate);
+          if (!counts.likesText && /\d/.test(text) && /\b(?:likes?|thumbs up)\b|нравится/i.test(text)) counts.likesText = text;
+        }
+      });
+      return { player: {
+        videoDetails: details,
+        microformat: { playerMicroformatRenderer: select(raw.microformat?.playerMicroformatRenderer, ["publishDate", "uploadDate", "category", "tags"]) },
+        captions: { playerCaptionsTracklistRenderer: { captionTracks: tracks } },
+        streamingData: { formats: (raw.streamingData?.formats || []).map(format), adaptiveFormats: (raw.streamingData?.adaptiveFormats || []).map(format) }
+      }, counts };
+    }
     function parentSummary(comment) {
       return {
         commentId: comment.commentId,
@@ -39492,13 +39633,19 @@ ${getNsigProcessorFn(eval_args.n, eval_args.sp, eval_args.sig)}`;
         let data;
         if (message.action === "storyboard-context") data = storyboardContext(message.payload?.videoId);
         else if (message.action === "page-state") data = pageState();
+        else if (message.action === "video-page-data") data = await getVideoPageData(message.payload?.videoId);
         else if (message.action === "search") data = await searchPublicVideos(message.payload || {});
         else if (message.action === "channel-videos") data = await getChannelVideos(message.payload || {});
         else if (message.action === "channel-playlists") data = await getChannelPlaylists(message.payload || {});
         else if (message.action === "playlist-videos") data = await getPlaylistVideos(message.payload || {});
         else if (message.action === "transcript-player") data = await getTranscriptFromPlayer(message.payload || {});
         else if (message.action === "network-after") data = { responses: responseLog.filter((response) => response.at >= Number(message.payload?.after ?? 0)) };
-        else if (message.action === "comments-ytjs") data = await getCommentsWithYtjs(message.payload || {});
+        else if (message.action === "account-state") data = accountState();
+        else if (message.action === "comments-export-page") data = await exportCommentPage(message.payload || {});
+        else if (message.action === "comments-export-close") {
+          exportSessions.delete(message.payload?.sessionId);
+          data = { closed: true };
+        } else if (message.action === "comments-ytjs") data = await getCommentsWithYtjs(message.payload || {});
         else if (message.action === "replies-ytjs") data = await getCommentRepliesWithYtjs(message.payload || {});
         else throw new Error("Unsupported MAIN-world bridge action");
         post("command-result", { id: message.id, ok: true, data });

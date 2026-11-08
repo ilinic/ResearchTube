@@ -1,5 +1,22 @@
 # ResearchTube troubleshooting
 
+## Local Codex YouTube MCP
+
+Use `http://127.0.0.1:17843/mcp`, including `/mcp`, with the actual Agent port.
+Use `127.0.0.1` rather than `localhost`; Host validation is deliberate. A missing
+catalog usually means the Agent is stopped or outdated. A discoverable catalog
+with `YOUTUBE_BRIDGE_OFFLINE` means the Extension has not paired: update both
+components, reload the Extension and allow up to one minute for reconnect.
+Public cloud connection status is independent of this local connection.
+
+`YOUTUBE_LOGIN_REQUIRED` means sign in to YouTube in that Chrome profile;
+`YOUTUBE_LOGIN_UNKNOWN` means wait for the page to load. The tool reuses an
+existing YouTube tab or creates one inactive tab. Research requests still use
+the current signed-in page session. A changed/reloaded page can invalidate an
+export session; partial JSONL records remain in Workspace. After Agent restart,
+task IDs are unavailable but files remain. See
+[Local YouTube MCP](features/LOCAL_YOUTUBE_MCP.md) and [Error reference](ERRORS.md).
+
 Start with popup **Help** or [User help](HELP.md) for a single setup/use entry guide. If Help opens a chat without its initial prompt, sign in, wait for a normal Composer and retry; see [Help recovery](HELP.md#common-problems-start-here). The public guide can also be pasted into an ordinary chat while MCP is disconnected.
 
 ## Instructions for an assisting chat

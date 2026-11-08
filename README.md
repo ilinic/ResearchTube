@@ -12,6 +12,8 @@ The [ResearchTube website](https://rtube.win) has the installation link and all 
 
 Need help? Open **Help** in the ResearchTube extension or read the [installation guide](docs/INSTALLATION.md).
 
+For independent Codex YouTube research through the Local Agent, see [Local YouTube MCP](docs/features/LOCAL_YOUTUBE_MCP.md).
+
 ---
 
 **Give ChatGPT the power to explore websites, investigate videos and discussions, and work with media on your computer — just by asking.**

@@ -72,7 +72,7 @@ const ctx=vm.createContext({
  LEGACY_SITE_TOOL_NAMES,
  chrome:{storage:{local:{get:async()=>storage,set:async v=>Object.assign(storage,v)}}},
  DEFAULT_MCP_TOOL_PREFERENCES:{enabledByName:{}}, developerNewToolsDefault:false,
- publicMcpTools:()=>[{name:'existing'},{name:'new_custom'},{name:'new_builtin'}],
+ publicMcpTools:()=>[{name:'existing'},{name:'new_custom'},{name:'new_builtin'}], localResearchDefinitions:()=>[],
  toolSettingsMetadata:(name)=>({alwaysEnabled:false,group:name==='new_custom'?'custom':'media'}),
  refreshTaskHistorySettings:async()=>{ctx.developerNewToolsDefault=developerDefault;}
 });

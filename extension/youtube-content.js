@@ -1,8 +1,8 @@
-if (!globalThis.__youtubeResearchContentBridgeInstalled) {
-globalThis.__youtubeResearchContentBridgeInstalled = true;
+if (!globalThis.__youtubeResearchSessionContentBridgeInstalled) {
+globalThis.__youtubeResearchSessionContentBridgeInstalled = true;
 
-const MAIN_BRIDGE_SOURCE = "researchtube-page-bridge";
-const CONTENT_SOURCE = "researchtube-extension-content";
+const MAIN_BRIDGE_SOURCE = "researchtube-session-page-bridge";
+const CONTENT_SOURCE = "researchtube-session-extension-content";
 const pendingMainWorldCalls = new Map();
 
 window.addEventListener("message", (event) => {
@@ -47,9 +47,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 });
 
 async function runUiTool({ action, videoId, args }) {
-  if (action === "bridge-version") return { version: "1.11.0" };
+  if (action === "bridge-version") return { version: "1.12.0" };
   if (action === "storyboard-context") return callMainWorld("storyboard-context", { videoId }, 5000);
+  if (["account-state", "comments-export-page", "comments-export-close"].includes(action)) return callMainWorld(action, args, 60_000);
   if (action === "page-state") return waitForPageData();
+  if (action === "video-page-data") return callMainWorld(action, { videoId }, 45_000);
   if (action === "search") return callMainWorld("search", args, 45_000);
   if (action === "channel-videos") return callMainWorld("channel-videos", args, 60_000);
   if (action === "channel-playlists") return callMainWorld("channel-playlists", args, 60_000);

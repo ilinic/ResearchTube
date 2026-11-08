@@ -48,8 +48,8 @@ except ImportError:
     from task_history import TaskHistory
     from browser_resources import save_browser_resource
 
-AGENT_VERSION = "2.7.1"
-INTERFACE_VERSION = 83
+AGENT_VERSION = "2.8.0"
+INTERFACE_VERSION = 84
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
 MAX_GOOGLE_TRANSLATE_AUDIO_BYTES = 16 * 1024 * 1024
@@ -6202,6 +6202,9 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
     method, path = "", ""
     try:
         method, path, query, body, headers = await read_request(reader)
+        if path == "/mcp" or path.startswith("/internal/local-mcp/"):
+            await LOCAL_MCP.http(method, path, headers, body, reader, writer)
+            return
         if method == "OPTIONS":
             response_status, response_body = "204 No Content", None
         elif method == "GET" and path == "/health":
@@ -6436,6 +6439,7 @@ async def serve(port: int, on_started: Callable[[], None] | None = None) -> None
         await asyncio.gather(diagnostics, return_exceptions=True)
         async with PUBLIC_SHARE_LOCK:
             await stop_public_share_unlocked()
+        await LOCAL_MCP.shutdown()
         await TIMER_TASKS.shutdown()
         await CAPTURE_FRAME_TASKS.shutdown()
         await MEDIA_CLIP_TASKS.shutdown()
@@ -6513,6 +6517,13 @@ def main(argv=None) -> int:
             lock.close()
     return 0
 
+
+try:
+    from .local_mcp import LocalMcpService
+except ImportError:
+    from local_mcp import LocalMcpService
+import sys as _local_mcp_sys
+LOCAL_MCP = LocalMcpService(_local_mcp_sys.modules[__name__])
 
 if __name__ == "__main__":
     raise SystemExit(main())

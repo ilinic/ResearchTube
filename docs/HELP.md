@@ -21,6 +21,18 @@ ResearchTube connects ChatGPT to public YouTube research, local media tools and 
 
 Browser-based YouTube research works with the Agent stopped. Local media requires it. Reading this Help guide needs neither.
 
+## Independent Codex connection
+
+The Local Agent also provides a YouTube-only MCP at
+`http://127.0.0.1:17843/mcp`. Use the configured Agent port if different.
+Update/restart the Agent, reload the matching Extension, keep Chrome open and
+sign in to YouTube. Add that URL as a Streamable HTTP MCP server in Codex.
+This route works independently of public OAuth and ChatGPT setup. It includes
+large comment exports, progress, cancellation and bounded dataset reads.
+Browser calls reuse a YouTube tab or open one inactive tab. Research requests
+use that page's signed-in session; cookies remain in the browser.
+See [Local YouTube MCP setup and limitations](features/LOCAL_YOUTUBE_MCP.md).
+
 ## First installation
 
 The [ResearchTube website](https://rtube.win) links to [GitHub Releases](https://github.com/ilinic/ResearchTube/releases): download the latest release and extract the archive to a location of your choice. It also lists the details to enter in ChatGPT: Server URL, Name, Description and Authentication. Use the copy buttons for text. For the plugin icon, select `icons/researchtube-64.png` inside your installed ResearchTube folder.

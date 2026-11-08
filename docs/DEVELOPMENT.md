@@ -142,6 +142,15 @@ Tests should cover:
 
 ## Browser bridge changes
 
+Local Codex YouTube transport lives in `agent/local_mcp.py` and
+`extension/local-mcp.js`; local-only definitions belong to
+`extension/local-mcp-tools.js`. Build regenerates `agent/local_mcp_catalog.py`
+from the canonical Extension definitions. Never hand-edit the generated catalog.
+Comment exports have their own Agent lifecycle and JSONL publication, without
+ChatGPT delivery. Run `npm run test:local-mcp:chrome --prefix extension` for an
+isolated real Chromium/Agent/MCP-client integration with simulated YouTube.
+See [Local YouTube MCP](features/LOCAL_YOUTUBE_MCP.md).
+
 Keep the isolated ↔ MAIN boundary typed and narrow. Validate origin and source on page messages. Avoid passing complete page objects or raw response documents. Prefer normalized public fields.
 
 When a stale content script is possible, use the existing bounded recovery pattern rather than reloading the user's tab. Background service tabs should open inactive and should not be closed unless the feature contract says so.

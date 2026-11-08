@@ -24,6 +24,12 @@ The Windows EXE includes tray, Chrome-process inspection and speech dependencies
 
 The optional `limits` object in `agent-config.json` controls `mediaCaptureFrameMaxFrames` (default 20), `mediaClipMaxSegments` (20), `cameraRecordAudioMaxMinutes` (10), `cameraRecordVideoMaxMinutes` (1), `libraryStoreMaxFiles` (5), `libraryStoreMaxFileSizeMiB` (20), `mediaToChatMaxFiles` (20), and `mediaToChatMaxFileSizeMiB` (20). Limits are read for each new request, so a restart is not needed. Count limits accept 1–100; recording minutes accept 1–1440; file size accepts 1–512 MiB. Exceeding a count or duration rejects the entire tool call with the configured maximum. Library and current-chat attachment limits are independent. Files above the applicable per-file size limit are reported in `skippedFiles`; eligible files are submitted together. If none qualify, the task fails without opening a file chooser. ChatGPT may apply its own upload restrictions to individual file types and sizes.
 
+The Agent also serves independent Codex YouTube tools on
+`http://127.0.0.1:17843/mcp` (or the configured port), using the matching
+Extension's outbound loopback connection. No extra Python dependencies or
+cloud enrollment are needed. See [Local YouTube MCP](../docs/features/LOCAL_YOUTUBE_MCP.md)
+for setup, sign-in behavior, comment datasets and limits.
+
 Canonical documentation:
 
 - [`docs/INSTALLATION.md`](../docs/INSTALLATION.md)
