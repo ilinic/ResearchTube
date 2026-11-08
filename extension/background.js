@@ -1523,7 +1523,7 @@ function toolDefinitions() {
     {
       name: "youtube_search",
       title: "Search public YouTube videos",
-      description: "Search YouTube videos by keywords using the current browser session. Returns IDs, titles, channel, duration, views and snippets; results may reflect the signed-in account. Does not retrieve transcripts/comments or navigate the context tab.",
+      description: "Search public YouTube videos by keywords. Returns IDs, titles, channel, duration, views and snippets. Does not retrieve transcripts/comments or navigate the context tab.",
       // Search may create one inactive YouTube tab if the browser has none,
       // just like the other page-context reads.
       annotations: pageReadAnnotations,
@@ -3596,8 +3596,8 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 async function bootstrapConnection() {
   void localMcpConnection.start();
   chrome.alarms.create("local-mcp", { periodInMinutes: 1 });
-  // Remove obsolete controls. YouTube research now always uses page-session
-  // cookies; account credentials never enter Extension storage.
+  // Remove obsolete controls. Research uses the established anonymous page
+  // transport; no account-cookie options are stored.
   await chrome.storage.local.remove([
     "connectionMode", "tunnelId", "runtimeApiKey", "lastConnectionTest",
     "lastTunnelConnection", "onboardingCompleted",
@@ -6959,10 +6959,9 @@ function pruneSearchCache(now = Date.now()) {
 }
 
 async function youtubeSearch(query, limit) {
-  const session = await runYouTubePageTool("account-state", null, {});
   const now = Date.now();
   pruneSearchCache(now);
-  const key = `${session?.contextId || crypto.randomUUID()}\u0000${searchCacheKey(query, limit)}`;
+  const key = searchCacheKey(query, limit);
   const cached = searchCache.get(key);
   if (cached) {
     void recordSearchDiagnostic("cache_reused", {
@@ -7184,14 +7183,14 @@ function normalizeVideoRenderer(renderer) {
 }
 
 async function youtubeGetVideo(videoId) {
-  const { player, initial, counts } = await fetchVideoPage(videoId);
+  const { player, initial } = await fetchVideoPage(videoId);
   const details = player?.videoDetails;
   if (!details?.videoId) throw new Error("YouTube video metadata was not found");
   const microformat = player?.microformat?.playerMicroformatRenderer ?? {};
   const tracks = captionTracks(player).map(normalizeCaptionTrack);
-  const viewsText = counts?.viewsText || findViewText(initial) || (details.viewCount ? `${details.viewCount} views` : null);
-  const likesText = counts?.likesText || findLikeText(initial);
-  const commentCountText = counts?.commentCountText || findCommentCountText(initial);
+  const viewsText = findViewText(initial) || (details.viewCount ? `${details.viewCount} views` : null);
+  const likesText = findLikeText(initial);
+  const commentCountText = findCommentCountText(initial);
   return {
     videoId,
     title: details.title, description: details.shortDescription || "",
@@ -7519,7 +7518,32 @@ function normalizeCommentThread(thread, rank) {
 }
 
 async function fetchVideoPage(videoId) {
-  return runYouTubePageTool("video-page-data", videoId, {});
+  const response = await fetchStandardWatchPage(videoId);
+  if (!response.ok) throw new Error(`YouTube HTTP ${response.status}`);
+  const html = await response.text();
+  const player = extractAnyJson(html, ["var ytInitialPlayerResponse =", "ytInitialPlayerResponse ="]);
+  if (!player) throw new Error("ytInitialPlayerResponse was not found (consent or changed YouTube page)");
+  return { player, initial: extractAnyJson(html, ["var ytInitialData =", "ytInitialData ="]) };
+}
+
+async function fetchStandardWatchPage(videoId) {
+  try {
+    const response = await fetch(`https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`, {
+      credentials: "omit",
+      headers: { Accept: "text/html" }
+    });
+    void recordCommandDiagnostic("youtube_http_response", {
+      action: "youtube_get_video", videoId, endpoint: "/watch", method: "GET",
+      status: response.status, response_type: response.type, redirected: response.redirected
+    });
+    return response;
+  } catch (error) {
+    void recordCommandDiagnostic("youtube_http_network_error", {
+      action: "youtube_get_video", videoId, endpoint: "/watch", method: "GET",
+      error: searchDiagnosticMessage(error)
+    });
+    throw error;
+  }
 }
 
 function captionTracks(player) {
@@ -7663,7 +7687,7 @@ function extractJsonAfterMarker(text, marker) {
 }
 
 
-// Independent local MCP shares the same signed-in page research behavior.
+// Independent local MCP reuses the established anonymous page research.
 const localMcpConnection = createLocalMcpConnection({
   extensionId: chrome.runtime.id, extensionVersion: EXTENSION_VERSION, interfaceVersion: REQUIRED_AGENT_INTERFACE_VERSION,
   port: async () => normalizeAgentPort((await getConfig()).agentPort),

@@ -4,7 +4,8 @@
 
 If transcripts stopped after the session-transport update, update/reload the
 Extension and reload the YouTube context tab once. Transcripts use the restored
-anonymous ANDROID player/timedtext path; other research keeps browser cookies.
+anonymous ANDROID player/timedtext path; search, comments and other research
+also retain the original anonymous requests without browser cookies.
 
 Use `http://127.0.0.1:17843/mcp`, including `/mcp`, with the actual Agent port.
 Use `127.0.0.1` rather than `localhost`; Host validation is deliberate. A missing
@@ -16,7 +17,7 @@ Public cloud connection status is independent of this local connection.
 `YOUTUBE_LOGIN_REQUIRED` means sign in to YouTube in that Chrome profile;
 `YOUTUBE_LOGIN_UNKNOWN` means wait for the page to load. The tool reuses an
 existing YouTube tab or creates one inactive tab. Research requests still use
-the current signed-in page session. A changed/reloaded page can invalidate an
+anonymous requests without account cookies. A changed/reloaded page can invalidate an
 export session; partial JSONL records remain in Workspace. After Agent restart,
 task IDs are unavailable but files remain. See
 [Local YouTube MCP](features/LOCAL_YOUTUBE_MCP.md) and [Error reference](ERRORS.md).

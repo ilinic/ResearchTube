@@ -22,21 +22,20 @@ tool_timeout_sec = 120
 
 The productive tool checks login itself. It reuses an existing YouTube tab or
 opens one inactive tab if necessary, without switching focus or navigating the
-user's current page. Concurrent calls share tab creation. Research requests use
-that page's browser-managed cookies and origin-bound
-authorization. Search can reflect the signed-in account. Account selection
-follows the active YouTube page profile, including delegated channels. Only
-the advertised read operations are supported; this does not add subscriptions,
-posting, likes or other account mutations.
+user's current page. Concurrent calls share tab creation. Research requests
+retain the original anonymous public-data transport with credentials omitted.
+Sign-in is a local readiness gate, not authentication of research requests.
+Personalized search and private account data are not supported. Only the
+advertised read operations are available; no account mutations are added.
 No cookies or credentials are exported to Codex.
 
-Transcript retrieval retains its established exception: anonymous watch HTML,
+Transcript retrieval retains its established path: anonymous watch HTML,
 the minimal ANDROID player request, then the selected timedtext URL, all with
 credentials omitted. The local tool still checks browser sign-in. Search,
-comments and catalogues continue using the browser session.
+comments and catalogues also retain anonymous requests.
 
 `youtube_bridge_status` diagnoses the local connection without opening YouTube.
-Its `authentication: browser-session` describes the research request mode,
+Its `authentication: public-page-context` describes the research request mode,
 not a live check of whether the browser is currently signed in. It is not a
 required preflight.
 Browser tools honor their existing Extension Settings switches; the five
@@ -103,12 +102,10 @@ reads. `extension/local-mcp.js` owns the connection and ordered dispatch;
 The existing page bridge owns private comment sessions. Generated
 `agent/local_mcp_catalog.py` is rebuilt by `npm run build --prefix extension`;
 change source definitions instead of editing it. Agent and Extension enforce
-the same interface version. Both local and cloud research use the signed-in
-page session. Native cookies,
-including HttpOnly cookies, are attached by the browser; the page reads only
-its signing-cookie state to create short-lived WEB authorization headers.
-Requests and redirects are restricted to the exact YouTube origin. No cookie
-permission, cookie export or persisted cookie file is used.
+the same interface version. Both local and cloud research retain their
+established anonymous requests with credentials omitted. No cookie reading,
+authorization signing, cookie permission, export or persisted cookie file is
+used. The local MCP and dataset collection reuse that existing research path.
 
 ## Verification
 

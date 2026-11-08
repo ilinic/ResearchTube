@@ -38484,42 +38484,6 @@ ${getNsigProcessorFn(eval_args.n, eval_args.sp, eval_args.sig)}`;
     CustomEvent: globalThis.CustomEvent
   });
 
-  // youtube-session.js
-  async function sessionRequestOptions(input, init, environment) {
-    const url = new URL(typeof input === "string" ? input : input.url || input.href, environment.origin);
-    if (url.origin !== "https://www.youtube.com") throw Error("YouTube session requests must stay on www.youtube.com");
-    const headers = new Headers(init.headers || input?.headers);
-    headers.delete("Cookie");
-    let body = init.body;
-    if (url.pathname.startsWith("/youtubei/v1/")) {
-      const account = environment.config("SESSION_INDEX");
-      headers.set("X-Goog-AuthUser", String(Number.isInteger(Number(account)) ? Number(account) : 0));
-      const delegated = environment.config("DELEGATED_SESSION_ID");
-      if (typeof delegated === "string" && delegated) headers.set("X-Goog-PageId", delegated);
-      if (environment.config("LOGGED_IN") === true) {
-        const cookies = environment.cookies();
-        const read = (name) => cookies.split(";").map((part) => part.trim()).find((part) => part.startsWith(name + "="))?.slice(name.length + 1);
-        const sid = read("SAPISID") || read("__Secure-3PAPISID") || read("__Secure-1PAPISID");
-        if (!sid) throw Error("YouTube session signing state is unavailable; reload YouTube and sign in again");
-        const timestamp = Math.floor(Date.now() / 1e3);
-        const bytes = new TextEncoder().encode(`${timestamp} ${sid} ${environment.origin}`);
-        const digest = await crypto.subtle.digest("SHA-1", bytes);
-        const hash = Array.from(new Uint8Array(digest), (value) => value.toString(16).padStart(2, "0")).join("");
-        headers.set("Authorization", `SAPISIDHASH ${timestamp}_${hash}`);
-        headers.set("X-Origin", environment.origin);
-      }
-      if (typeof body === "string" && headers.get("Content-Type")?.includes("application/json")) {
-        const data = JSON.parse(body);
-        if (data.context) {
-          const user = environment.config("INNERTUBE_CONTEXT")?.user || {};
-          data.context.user = { ...data.context.user, ...user, ...delegated ? { onBehalfOfUser: delegated } : {} };
-          body = JSON.stringify(data);
-        }
-      }
-    }
-    return { ...init, headers, ...body !== void 0 ? { body } : {}, credentials: "include", redirect: "manual" };
-  }
-
   // youtube-page-bridge.src.js
   (() => {
     if (window.__youtubeResearchSessionPageBridgeInstalled) return;
@@ -38537,7 +38501,6 @@ ${getNsigProcessorFn(eval_args.n, eval_args.sp, eval_args.sig)}`;
     const originalXhrSend = XMLHttpRequest.prototype.send;
     const responseLog = [];
     let innertubePromise = null;
-    let innertubeContextId = null;
     let accountFingerprint = null, accountContextId = null;
     function accountState() {
       const get = (key) => window.ytcfg?.get?.(key);
@@ -38578,12 +38541,7 @@ ${getNsigProcessorFn(eval_args.n, eval_args.sp, eval_args.sig)}`;
       post("network-response", payload);
     }
     async function observedFetch(input, init = {}) {
-      const options = await sessionRequestOptions(input, init, {
-        origin: location.origin,
-        config: (key) => window.ytcfg?.get?.(key),
-        cookies: () => document.cookie
-      });
-      const response = await originalFetch(input, options);
+      const response = await originalFetch(input, init);
       captureResponse(urlFrom(input), response, String(init.method || "GET").toUpperCase());
       return response;
     }
@@ -38682,11 +38640,6 @@ ${getNsigProcessorFn(eval_args.n, eval_args.sp, eval_args.sig)}`;
       }
     }
     async function getInnertube() {
-      const contextId = accountState().contextId;
-      if (innertubeContextId !== contextId) {
-        innertubePromise = null;
-        innertubeContextId = contextId;
-      }
       if (!innertubePromise) {
         const visitorData = window.ytcfg?.get?.("VISITOR_DATA") || void 0;
         innertubePromise = Innertube.create({
@@ -38696,11 +38649,8 @@ ${getNsigProcessorFn(eval_args.n, eval_args.sp, eval_args.sig)}`;
           visitor_data: visitorData,
           fetch: (input, init) => observedFetch(input, {
             ...init,
-            credentials: "include"
+            credentials: "omit"
           })
-        }).catch((error2) => {
-          if (innertubeContextId === contextId) innertubePromise = null;
-          throw error2;
         });
       }
       return innertubePromise;
@@ -38746,24 +38696,8 @@ ${getNsigProcessorFn(eval_args.n, eval_args.sp, eval_args.sig)}`;
       const reason = player?.playabilityStatus?.reason || "no caption tracks";
       return `${status}: ${reason}`;
     }
-    async function getSessionWatchHtml(videoId) {
-      const response = await observedFetch(`/watch?v=${encodeURIComponent(videoId)}`, {
-        credentials: "include",
-        cache: "no-store",
-        headers: { Accept: "text/html" }
-      });
-      if (!response.ok) throw new Error(`YouTube session watch page failed: HTTP ${response.status}`);
-      return response.text();
-    }
-    async function transcriptFetch(input, init = {}) {
-      const url = new URL(input, location.href);
-      if (url.origin !== location.origin) throw new Error("Transcript requests must stay on YouTube");
-      const response = await originalFetch(input, { ...init, credentials: "omit" });
-      captureResponse(url.href, response, String(init.method || "GET").toUpperCase());
-      return response;
-    }
     async function getAnonymousWatchHtml(videoId) {
-      const response = await transcriptFetch(`/watch?v=${encodeURIComponent(videoId)}`, {
+      const response = await observedFetch(`/watch?v=${encodeURIComponent(videoId)}`, {
         credentials: "omit",
         cache: "no-store",
         headers: { Accept: "text/html" }
@@ -38816,7 +38750,7 @@ ${getNsigProcessorFn(eval_args.n, eval_args.sp, eval_args.sig)}`;
       const pageHtml = await getAnonymousWatchHtml(videoId);
       const apiKey = pageHtml.match(/"INNERTUBE_API_KEY":"([^"]+)"/)?.[1];
       if (!apiKey) throw new Error("INNERTUBE_API_KEY was not found in the anonymous YouTube watch page");
-      const playerResponse = await transcriptFetch(`/youtubei/v1/player?key=${encodeURIComponent(apiKey)}`, {
+      const playerResponse = await observedFetch(`/youtubei/v1/player?key=${encodeURIComponent(apiKey)}`, {
         method: "POST",
         credentials: "omit",
         cache: "no-store",
@@ -38841,7 +38775,7 @@ ${getNsigProcessorFn(eval_args.n, eval_args.sp, eval_args.sig)}`;
       if (!track?.baseUrl || !isAllowedTimedTextUrl(track.baseUrl)) {
         throw new Error(`Caption track ${selectedTrackIndex} did not contain a valid YouTube timedtext URL`);
       }
-      const captionResponse = await transcriptFetch(track.baseUrl, {
+      const captionResponse = await observedFetch(track.baseUrl, {
         credentials: "omit",
         cache: "no-store"
       });
@@ -38873,7 +38807,7 @@ ${getNsigProcessorFn(eval_args.n, eval_args.sp, eval_args.sig)}`;
       const endpoint = searchEndpoint(url);
       trace.push({ event: "http_request", endpoint, request_number: requestNumber, method: init.method || "GET" });
       try {
-        const response = await observedFetch(url, { ...init, credentials: "include", redirect: "manual" });
+        const response = await observedFetch(url, { ...init, credentials: "omit", redirect: "manual" });
         trace.push({
           event: "http_response",
           endpoint,
@@ -39063,7 +38997,7 @@ ${getNsigProcessorFn(eval_args.n, eval_args.sp, eval_args.sig)}`;
     }
     async function loadCataloguePage(path) {
       const response = await observedFetch(path, {
-        credentials: "include",
+        credentials: "omit",
         redirect: "manual",
         headers: { Accept: "text/html" }
       });
@@ -39085,7 +39019,7 @@ ${getNsigProcessorFn(eval_args.n, eval_args.sp, eval_args.sig)}`;
       if (!config.apiKey) throw new Error("YouTube did not provide an Innertube key for this catalogue continuation");
       const response = await observedFetch(`/youtubei/v1/browse?key=${encodeURIComponent(config.apiKey)}&prettyPrint=false`, {
         method: "POST",
-        credentials: "include",
+        credentials: "omit",
         redirect: "manual",
         headers: { "Content-Type": "application/json", "X-YouTube-Client-Name": "1", "X-YouTube-Client-Version": config.clientVersion },
         body: JSON.stringify({
@@ -39595,39 +39529,6 @@ ${getNsigProcessorFn(eval_args.n, eval_args.sp, eval_args.sig)}`;
       }
       return { sessionId, records, hasMore: state.parents.length > 0 || Boolean(state.page.has_continuation) };
     }
-    async function getVideoPageData(videoId) {
-      const html = await getSessionWatchHtml(videoId);
-      const raw = extractSearchJson(html, ["var ytInitialPlayerResponse =", "ytInitialPlayerResponse ="]);
-      if (!raw?.videoDetails?.videoId) throw Error("YouTube video metadata was not found");
-      const select = (value, keys) => Object.fromEntries(keys.filter((key) => value?.[key] !== void 0).map((key) => [key, value[key]]));
-      const details = select(raw.videoDetails, ["videoId", "title", "shortDescription", "author", "channelId", "lengthSeconds", "viewCount"]);
-      details.thumbnail = { thumbnails: (raw.videoDetails.thumbnail?.thumbnails || []).map((item) => select(item, ["url", "width", "height"])) };
-      const format = (item) => select(item, ["itag", "mimeType", "width", "height", "fps", "averageBitrate", "bitrate", "audioSampleRate", "audioChannels", "qualityLabel", "contentLength"]);
-      const tracks = playerTracks(raw).map((track) => select(track, ["languageCode", "name", "kind"]));
-      const initial = extractSearchJson(html, ["var ytInitialData =", "ytInitialData ="]);
-      const counts = { viewsText: null, likesText: null, commentCountText: null };
-      walkSearchData(initial, (node) => {
-        counts.viewsText ||= textOf(node?.videoPrimaryInfoRenderer?.viewCount?.videoViewCountRenderer?.viewCount) || null;
-        counts.commentCountText ||= textOf(node?.commentsEntryPointHeaderRenderer?.commentCount) || null;
-        const old = node?.segmentedLikeDislikeButtonRenderer?.likeButton?.toggleButtonRenderer;
-        for (const candidate of [
-          old?.defaultText,
-          old?.accessibility?.accessibilityData?.label,
-          node?.accessibilityText,
-          node?.buttonViewModel?.accessibilityText,
-          node?.toggleButtonViewModel?.defaultButtonViewModel?.buttonViewModel?.accessibilityText
-        ]) {
-          const text = typeof candidate === "string" ? candidate : textOf(candidate);
-          if (!counts.likesText && /\d/.test(text) && /\b(?:likes?|thumbs up)\b|нравится/i.test(text)) counts.likesText = text;
-        }
-      });
-      return { player: {
-        videoDetails: details,
-        microformat: { playerMicroformatRenderer: select(raw.microformat?.playerMicroformatRenderer, ["publishDate", "uploadDate", "category", "tags"]) },
-        captions: { playerCaptionsTracklistRenderer: { captionTracks: tracks } },
-        streamingData: { formats: (raw.streamingData?.formats || []).map(format), adaptiveFormats: (raw.streamingData?.adaptiveFormats || []).map(format) }
-      }, counts };
-    }
     function parentSummary(comment) {
       return {
         commentId: comment.commentId,
@@ -39646,7 +39547,6 @@ ${getNsigProcessorFn(eval_args.n, eval_args.sp, eval_args.sig)}`;
         let data;
         if (message.action === "storyboard-context") data = storyboardContext(message.payload?.videoId);
         else if (message.action === "page-state") data = pageState();
-        else if (message.action === "video-page-data") data = await getVideoPageData(message.payload?.videoId);
         else if (message.action === "search") data = await searchPublicVideos(message.payload || {});
         else if (message.action === "channel-videos") data = await getChannelVideos(message.payload || {});
         else if (message.action === "channel-playlists") data = await getChannelPlaylists(message.payload || {});

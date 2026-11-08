@@ -51,7 +51,6 @@ async function runUiTool({ action, videoId, args }) {
   if (action === "storyboard-context") return callMainWorld("storyboard-context", { videoId }, 5000);
   if (["account-state", "comments-export-page", "comments-export-close"].includes(action)) return callMainWorld(action, args, 60_000);
   if (action === "page-state") return waitForPageData();
-  if (action === "video-page-data") return callMainWorld(action, { videoId }, 45_000);
   if (action === "search") return callMainWorld("search", args, 45_000);
   if (action === "channel-videos") return callMainWorld("channel-videos", args, 60_000);
   if (action === "channel-playlists") return callMainWorld("channel-playlists", args, 60_000);

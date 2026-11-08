@@ -1,11 +1,9 @@
 import { Innertube, Parser } from "youtubei.js";
-import { sessionRequestOptions } from "./youtube-session.js";
 
-// Runs in YouTube's MAIN world. Browser cookies and origin-bound authorization
-// stay in this document; only normalized research data crosses the bridge.
+// Runs in YouTube's MAIN JavaScript world. It deliberately never reads or
+// exports cookies. It observes the same JSON responses used by the page and
+// can perform a narrowly scoped timed-text request in the page's own origin.
 (() => {
-  // Separate protocol/guard allows upgrading a live tab with the old anonymous
-  // bridge still installed, without reloading or navigating the user's page.
   if (window.__youtubeResearchSessionPageBridgeInstalled) return;
   window.__youtubeResearchSessionPageBridgeInstalled = true;
 
@@ -29,7 +27,6 @@ import { sessionRequestOptions } from "./youtube-session.js";
   const originalXhrSend = XMLHttpRequest.prototype.send;
   const responseLog = [];
   let innertubePromise = null;
-  let innertubeContextId = null;
   let accountFingerprint = null, accountContextId = null;
   function accountState() {
     const get = key => window.ytcfg?.get?.(key);
@@ -39,6 +36,7 @@ import { sessionRequestOptions } from "./youtube-session.js";
     }
     return { signedIn: typeof get("LOGGED_IN") === "boolean" ? get("LOGGED_IN") : null, contextId: accountContextId };
   }
+
 
   function isRelevant(url) {
     return /\/(?:watch|results)(?:\?|$)|\/youtubei\/v1\/|\/api\/timedtext(?:\?|$)/.test(url);
@@ -71,10 +69,7 @@ import { sessionRequestOptions } from "./youtube-session.js";
   }
 
   async function observedFetch(input, init = {}) {
-    const options = await sessionRequestOptions(input, init, {
-      origin: location.origin, config: key => window.ytcfg?.get?.(key), cookies: () => document.cookie
-    });
-    const response = await originalFetch(input, options);
+    const response = await originalFetch(input, init);
     captureResponse(urlFrom(input), response, String(init.method || "GET").toUpperCase());
     return response;
   }
@@ -161,8 +156,6 @@ import { sessionRequestOptions } from "./youtube-session.js";
   // getter for this document's live INNERTUBE_API_KEY, so no such literal is
   // committed in the extension bundle.
   async function getInnertube() {
-    const contextId = accountState().contextId;
-    if (innertubeContextId !== contextId) { innertubePromise = null; innertubeContextId = contextId; }
     if (!innertubePromise) {
       const visitorData = window.ytcfg?.get?.("VISITOR_DATA") || undefined;
       innertubePromise = Innertube.create({
@@ -172,9 +165,9 @@ import { sessionRequestOptions } from "./youtube-session.js";
         visitor_data: visitorData,
         fetch: (input, init) => observedFetch(input, {
           ...init,
-          credentials: "include"
+          credentials: "omit"
         })
-      }).catch(error => { if (innertubeContextId === contextId) innertubePromise = null; throw error; });
+      });
     }
     return innertubePromise;
   }
@@ -226,28 +219,8 @@ import { sessionRequestOptions } from "./youtube-session.js";
     return `${status}: ${reason}`;
   }
 
-  async function getSessionWatchHtml(videoId) {
-    const response = await observedFetch(`/watch?v=${encodeURIComponent(videoId)}`, {
-      credentials: "include",
-      cache: "no-store",
-      headers: { Accept: "text/html" }
-    });
-    if (!response.ok) throw new Error(`YouTube session watch page failed: HTTP ${response.status}`);
-    return response.text();
-  }
-
-  // Preserve the working anonymous ANDROID transcript transport. Session
-  // decoration is intentionally excluded for watch, player and timedtext here.
-  async function transcriptFetch(input, init = {}) {
-    const url = new URL(input, location.href);
-    if (url.origin !== location.origin) throw new Error("Transcript requests must stay on YouTube");
-    const response = await originalFetch(input, { ...init, credentials: "omit" });
-    captureResponse(url.href, response, String(init.method || "GET").toUpperCase());
-    return response;
-  }
-
   async function getAnonymousWatchHtml(videoId) {
-    const response = await transcriptFetch(`/watch?v=${encodeURIComponent(videoId)}`, {
+    const response = await observedFetch(`/watch?v=${encodeURIComponent(videoId)}`, {
       credentials: "omit",
       cache: "no-store",
       headers: { Accept: "text/html" }
@@ -318,7 +291,7 @@ import { sessionRequestOptions } from "./youtube-session.js";
     const apiKey = pageHtml.match(/"INNERTUBE_API_KEY":"([^"]+)"/)?.[1];
     if (!apiKey) throw new Error("INNERTUBE_API_KEY was not found in the anonymous YouTube watch page");
 
-    const playerResponse = await transcriptFetch(`/youtubei/v1/player?key=${encodeURIComponent(apiKey)}`, {
+    const playerResponse = await observedFetch(`/youtubei/v1/player?key=${encodeURIComponent(apiKey)}`, {
       method: "POST",
       credentials: "omit",
       cache: "no-store",
@@ -344,7 +317,7 @@ import { sessionRequestOptions } from "./youtube-session.js";
     if (!track?.baseUrl || !isAllowedTimedTextUrl(track.baseUrl)) {
       throw new Error(`Caption track ${selectedTrackIndex} did not contain a valid YouTube timedtext URL`);
     }
-    const captionResponse = await transcriptFetch(track.baseUrl, {
+    const captionResponse = await observedFetch(track.baseUrl, {
       credentials: "omit",
       cache: "no-store",
     });
@@ -371,7 +344,8 @@ import { sessionRequestOptions } from "./youtube-session.js";
 
   // Search deliberately uses fetch from the already-open YouTube document.
   // It does not navigate, alter, pause, or otherwise interact with that page.
-  // Requests use the viewer's current YouTube account without account mutations.
+  // Credentials remain omitted; this is a public-data request, not an account
+  // action or a way to use the viewer's YouTube session.
   function searchEndpoint(url) {
     return new URL(url, location.href).pathname.replace("/youtubei/v1/", "youtubei/");
   }
@@ -389,7 +363,7 @@ import { sessionRequestOptions } from "./youtube-session.js";
     const endpoint = searchEndpoint(url);
     trace.push({ event: "http_request", endpoint, request_number: requestNumber, method: init.method || "GET" });
     try {
-      const response = await observedFetch(url, { ...init, credentials: "include", redirect: "manual" });
+      const response = await observedFetch(url, { ...init, credentials: "omit", redirect: "manual" });
       trace.push({
         event: "http_response", endpoint, request_number: requestNumber,
         status: response.status, response_type: response.type, redirected: response.redirected
@@ -575,7 +549,7 @@ import { sessionRequestOptions } from "./youtube-session.js";
 
   async function loadCataloguePage(path) {
     const response = await observedFetch(path, {
-      credentials: "include", redirect: "manual", headers: { Accept: "text/html" }
+      credentials: "omit", redirect: "manual", headers: { Accept: "text/html" }
     });
     if (publicPageFailure(response)) {
       throw new Error(`YouTube rejected the public catalogue page (HTTP ${response.status || 0})`);
@@ -596,7 +570,7 @@ import { sessionRequestOptions } from "./youtube-session.js";
     if (!config.apiKey) throw new Error("YouTube did not provide an Innertube key for this catalogue continuation");
     const response = await observedFetch(`/youtubei/v1/browse?key=${encodeURIComponent(config.apiKey)}&prettyPrint=false`, {
       method: "POST",
-      credentials: "include",
+      credentials: "omit",
       redirect: "manual",
       headers: { "Content-Type": "application/json", "X-YouTube-Client-Name": "1", "X-YouTube-Client-Version": config.clientVersion },
       body: JSON.stringify({
@@ -1174,34 +1148,6 @@ import { sessionRequestOptions } from "./youtube-session.js";
     return { sessionId, records, hasMore: state.parents.length > 0 || Boolean(state.page.has_continuation) };
   }
 
-  async function getVideoPageData(videoId) {
-    const html = await getSessionWatchHtml(videoId);
-    const raw = extractSearchJson(html, ["var ytInitialPlayerResponse =", "ytInitialPlayerResponse ="]);
-    if (!raw?.videoDetails?.videoId) throw Error("YouTube video metadata was not found");
-    const select = (value, keys) => Object.fromEntries(keys.filter(key => value?.[key] !== undefined).map(key => [key, value[key]]));
-    const details = select(raw.videoDetails, ["videoId", "title", "shortDescription", "author", "channelId", "lengthSeconds", "viewCount"]);
-    details.thumbnail = { thumbnails: (raw.videoDetails.thumbnail?.thumbnails || []).map(item => select(item, ["url", "width", "height"])) };
-    const format = item => select(item, ["itag", "mimeType", "width", "height", "fps", "averageBitrate", "bitrate", "audioSampleRate", "audioChannels", "qualityLabel", "contentLength"]);
-    const tracks = playerTracks(raw).map(track => select(track, ["languageCode", "name", "kind"]));
-    const initial = extractSearchJson(html, ["var ytInitialData =", "ytInitialData ="]);
-    const counts = { viewsText: null, likesText: null, commentCountText: null };
-    walkSearchData(initial, node => {
-      counts.viewsText ||= textOf(node?.videoPrimaryInfoRenderer?.viewCount?.videoViewCountRenderer?.viewCount) || null;
-      counts.commentCountText ||= textOf(node?.commentsEntryPointHeaderRenderer?.commentCount) || null;
-      const old = node?.segmentedLikeDislikeButtonRenderer?.likeButton?.toggleButtonRenderer;
-      for (const candidate of [old?.defaultText, old?.accessibility?.accessibilityData?.label, node?.accessibilityText,
-        node?.buttonViewModel?.accessibilityText, node?.toggleButtonViewModel?.defaultButtonViewModel?.buttonViewModel?.accessibilityText]) {
-        const text = typeof candidate === "string" ? candidate : textOf(candidate);
-        if (!counts.likesText && /\d/.test(text) && /\b(?:likes?|thumbs up)\b|нравится/i.test(text)) counts.likesText = text;
-      }
-    });
-    return { player: { videoDetails: details,
-      microformat: { playerMicroformatRenderer: select(raw.microformat?.playerMicroformatRenderer, ["publishDate", "uploadDate", "category", "tags"]) },
-      captions: { playerCaptionsTracklistRenderer: { captionTracks: tracks } },
-      streamingData: { formats: (raw.streamingData?.formats || []).map(format), adaptiveFormats: (raw.streamingData?.adaptiveFormats || []).map(format) }
-    }, counts };
-  }
-
   function parentSummary(comment) {
     return {
       commentId: comment.commentId,
@@ -1221,7 +1167,6 @@ import { sessionRequestOptions } from "./youtube-session.js";
       let data;
       if (message.action === "storyboard-context") data = storyboardContext(message.payload?.videoId);
       else if (message.action === "page-state") data = pageState();
-      else if (message.action === "video-page-data") data = await getVideoPageData(message.payload?.videoId);
       else if (message.action === "search") data = await searchPublicVideos(message.payload || {});
       else if (message.action === "channel-videos") data = await getChannelVideos(message.payload || {});
       else if (message.action === "channel-playlists") data = await getChannelPlaylists(message.payload || {});

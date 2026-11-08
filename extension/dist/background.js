@@ -116,7 +116,7 @@ function localResearchDefinitions() {
     define("youtube_research_task_status", "Read local comment-export progress and retained results. Poll no faster than pollIntervalMs. Progress is measured against the requested collection ceiling; completion may contain fewer comments when YouTube has no more pages.", object({ taskId }), task),
     define("youtube_research_task_cancel", "Stop a local comment export. Already saved comments and the dataset file are preserved. Returns the terminal task snapshot.", object({ taskId }), task),
     define("youtube_dataset_read", "Read bounded records from a task's saved comment dataset, optionally filtering text or parent comment ID. offset is a matching-record offset. Files survive later collection failures; read only records actually published by this task.", object({ taskId, offset: { ...num, default: 0 }, limit: { type: "integer", minimum: 1, maximum: 100, default: 20 }, query: { type: "string", maxLength: 500 }, parentCommentId: { type: "string", maxLength: 500 } }, ["taskId"]), object({ records: { type: "array", items: commentRecordSchema() }, returned: num, nextOffset: { type: ["integer", "null"] }, collected: num })),
-    define("youtube_bridge_status", "Diagnose the local Agent-to-extension connection without opening a tab. Browser tools use the signed-in YouTube page session, reused or created inactive inside the productive call. Cookies and authorization stay inside the browser.", object({}), object({ connected: { type: "boolean" }, extensionVersion: nullable, interfaceVersion: num, authentication: { const: "browser-session" } }))
+    define("youtube_bridge_status", "Diagnose the local Agent-to-extension connection without opening a tab. Browser calls require YouTube sign-in but retain anonymous page-context requests. Reuses a tab or creates one inactive; no account cookies are used.", object({}), object({ connected: { type: "boolean" }, extensionVersion: nullable, interfaceVersion: num, authentication: { const: "public-page-context" } }))
   ];
 }
 function commentRecordSchema() {
@@ -5903,7 +5903,7 @@ function toolDefinitions() {
     {
       name: "youtube_search",
       title: "Search public YouTube videos",
-      description: "Search YouTube videos by keywords using the current browser session. Returns IDs, titles, channel, duration, views and snippets; results may reflect the signed-in account. Does not retrieve transcripts/comments or navigate the context tab.",
+      description: "Search public YouTube videos by keywords. Returns IDs, titles, channel, duration, views and snippets. Does not retrieve transcripts/comments or navigate the context tab.",
       // Search may create one inactive YouTube tab if the browser has none,
       // just like the other page-context reads.
       annotations: pageReadAnnotations,
@@ -11239,10 +11239,9 @@ function pruneSearchCache(now = Date.now()) {
   }
 }
 async function youtubeSearch(query, limit) {
-  const session = await runYouTubePageTool("account-state", null, {});
   const now = Date.now();
   pruneSearchCache(now);
-  const key = `${session?.contextId || crypto.randomUUID()}\0${searchCacheKey(query, limit)}`;
+  const key = searchCacheKey(query, limit);
   const cached = searchCache.get(key);
   if (cached) {
     void recordSearchDiagnostic("cache_reused", {
@@ -11438,14 +11437,14 @@ async function youtubeSearchViaPageContext(query, limit, context2) {
   };
 }
 async function youtubeGetVideo(videoId2) {
-  const { player, initial, counts } = await fetchVideoPage(videoId2);
+  const { player, initial } = await fetchVideoPage(videoId2);
   const details = player?.videoDetails;
   if (!details?.videoId) throw new Error("YouTube video metadata was not found");
   const microformat = player?.microformat?.playerMicroformatRenderer ?? {};
   const tracks = captionTracks(player).map(normalizeCaptionTrack);
-  const viewsText = counts?.viewsText || findViewText(initial) || (details.viewCount ? `${details.viewCount} views` : null);
-  const likesText = counts?.likesText || findLikeText(initial);
-  const commentCountText = counts?.commentCountText || findCommentCountText(initial);
+  const viewsText = findViewText(initial) || (details.viewCount ? `${details.viewCount} views` : null);
+  const likesText = findLikeText(initial);
+  const commentCountText = findCommentCountText(initial);
   return {
     videoId: videoId2,
     title: details.title,
@@ -11714,7 +11713,39 @@ async function sendYouTubePageTool(tabId2, message) {
   }
 }
 async function fetchVideoPage(videoId2) {
-  return runYouTubePageTool("video-page-data", videoId2, {});
+  const response = await fetchStandardWatchPage(videoId2);
+  if (!response.ok) throw new Error(`YouTube HTTP ${response.status}`);
+  const html = await response.text();
+  const player = extractAnyJson(html, ["var ytInitialPlayerResponse =", "ytInitialPlayerResponse ="]);
+  if (!player) throw new Error("ytInitialPlayerResponse was not found (consent or changed YouTube page)");
+  return { player, initial: extractAnyJson(html, ["var ytInitialData =", "ytInitialData ="]) };
+}
+async function fetchStandardWatchPage(videoId2) {
+  try {
+    const response = await fetch(`https://www.youtube.com/watch?v=${encodeURIComponent(videoId2)}`, {
+      credentials: "omit",
+      headers: { Accept: "text/html" }
+    });
+    void recordCommandDiagnostic("youtube_http_response", {
+      action: "youtube_get_video",
+      videoId: videoId2,
+      endpoint: "/watch",
+      method: "GET",
+      status: response.status,
+      response_type: response.type,
+      redirected: response.redirected
+    });
+    return response;
+  } catch (error5) {
+    void recordCommandDiagnostic("youtube_http_network_error", {
+      action: "youtube_get_video",
+      videoId: videoId2,
+      endpoint: "/watch",
+      method: "GET",
+      error: searchDiagnosticMessage(error5)
+    });
+    throw error5;
+  }
 }
 function captionTracks(player) {
   return player?.captions?.playerCaptionsTracklistRenderer?.captionTracks ?? [];
@@ -11793,6 +11824,44 @@ function walk(value, visitor) {
   visitor(value);
   if (!value || typeof value !== "object") return;
   for (const child of Object.values(value)) walk(child, visitor);
+}
+function extractAnyJson(text3, markers) {
+  for (const marker of markers) {
+    const result = extractJsonAfterMarker(text3, marker);
+    if (result) return result;
+  }
+  return null;
+}
+function extractJsonAfterMarker(text3, marker) {
+  const start = text3.indexOf(marker);
+  if (start < 0) return null;
+  const objectStart = text3.indexOf("{", start + marker.length);
+  if (objectStart < 0) return null;
+  let depth2 = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = objectStart; i < text3.length; i += 1) {
+    const ch = text3[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+    if (ch === "{") depth2 += 1;
+    else if (ch === "}" && --depth2 === 0) {
+      try {
+        return JSON.parse(text3.slice(objectStart, i + 1));
+      } catch {
+        return null;
+      }
+    }
+  }
+  return null;
 }
 var localMcpConnection = createLocalMcpConnection({
   extensionId: chrome.runtime.id,

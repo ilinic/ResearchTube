@@ -30,7 +30,7 @@ sign in to YouTube. Add that URL as a Streamable HTTP MCP server in Codex.
 This route works independently of public OAuth and ChatGPT setup. It includes
 large comment exports, progress, cancellation and bounded dataset reads.
 Browser calls reuse a YouTube tab or open one inactive tab. Research requests
-use that page's signed-in session; cookies remain in the browser.
+retain the original anonymous transport without account cookies.
 See [Local YouTube MCP setup and limitations](features/LOCAL_YOUTUBE_MCP.md).
 
 ## First installation

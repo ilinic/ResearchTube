@@ -294,7 +294,7 @@ class LocalMcpService:
         envelope = {"jsonrpc": "2.0", "id": identifier}
         if method == "initialize":
             requested = params.get("protocolVersion") if isinstance(params, dict) else None
-            return {**envelope, "result": {"protocolVersion": requested if requested in {"2025-03-26", "2025-06-18", "2025-11-25"} else "2025-06-18", "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": "researchtube-local-youtube", "version": self.agent.AGENT_VERSION}, "instructions": "YouTube research through the local Chrome extension. Productive browser calls require YouTube sign-in. Requests use the signed-in browser session; cookies and authorization stay in the page. Export large comment datasets and read them in bounded batches; use local yt-dlp/FFmpeg directly for media."}}
+            return {**envelope, "result": {"protocolVersion": requested if requested in {"2025-03-26", "2025-06-18", "2025-11-25"} else "2025-06-18", "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": "researchtube-local-youtube", "version": self.agent.AGENT_VERSION}, "instructions": "YouTube research through the local Chrome extension. Productive browser calls require YouTube sign-in. Requests retain the established anonymous page-context transport without account cookies. Export large comment datasets and read them in bounded batches; use local yt-dlp/FFmpeg directly for media."}}
         if method == "ping":
             return {**envelope, "result": {}}
         if method == "tools/list":
@@ -327,7 +327,7 @@ class LocalMcpService:
         if name in BASE_TOOLS:
             return await self.browser(name, arguments)
         if name == "youtube_bridge_status":
-            return {"connected": self.writer is not None and not self.writer.is_closing(), "extensionVersion": self.extension_version, "interfaceVersion": self.agent.INTERFACE_VERSION, "authentication": "browser-session"}
+            return {"connected": self.writer is not None and not self.writer.is_closing(), "extensionVersion": self.extension_version, "interfaceVersion": self.agent.INTERFACE_VERSION, "authentication": "public-page-context"}
         if name == "youtube_comments_export":
             if sum(task.status == "working" for task in self.tasks.values()) >= 4:
                 raise LocalError("YOUTUBE_BRIDGE_BUSY", "At most four comment exports may be active.")

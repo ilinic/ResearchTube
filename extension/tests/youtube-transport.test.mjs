@@ -1,33 +1,15 @@
 import assert from 'node:assert/strict';
-import { createHash, webcrypto } from 'node:crypto';
+import { webcrypto } from 'node:crypto';
 import vm from 'node:vm';
 import { readFile } from 'node:fs/promises';
-import { sessionRequestOptions } from '../youtube-session.js';
 
-const env = { origin: 'https://www.youtube.com', cookies: () => 'OTHER=ignored; SAPISID=private-test-signing-value',
-  config: key => ({LOGGED_IN:true,SESSION_INDEX:2,DELEGATED_SESSION_ID:'test-channel',INNERTUBE_CONTEXT:{user:{lockedSafetyMode:false}}})[key] };
-const options = await sessionRequestOptions('/youtubei/v1/search', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({context:{client:{clientName:'WEB'}}})}, env);
-assert.equal(options.credentials,'include'); assert.equal(options.redirect,'manual');
-assert.equal(options.headers.get('Cookie'),null);
-assert.equal(options.headers.get('X-Goog-AuthUser'),'2');
-assert.equal(options.headers.get('X-Goog-PageId'),'test-channel');
-const authorization=options.headers.get('Authorization');
-const [timestamp,hash]=authorization.replace('SAPISIDHASH ','').split('_');
-assert.equal(hash,createHash('sha1').update(`${timestamp} private-test-signing-value ${env.origin}`).digest('hex'));
-assert.equal(JSON.parse(options.body).context.user.onBehalfOfUser,'test-channel');
-const html = await sessionRequestOptions('/results?search_query=test', {}, env);
-assert.equal(html.credentials,'include');assert.equal(html.headers.get('Authorization'),null);
-await assert.rejects(()=>sessionRequestOptions('https://evil.test/youtubei/v1/search',{},env),/must stay/);
-await assert.rejects(()=>sessionRequestOptions('/youtubei/v1/next',{}, {...env,cookies:()=>''}),/signing state/);
-
-// Exercise pagination through roots, multiple reply pages and next root page.
 const source=await readFile(new URL('../youtube-page-bridge.src.js',import.meta.url),'utf8');
 // Transcript regression: always use the original anonymous ANDROID player,
 // even when watch HTML already contains WEB caption tracks.
 const transcriptRequests=[];
 let unsafeTrack=false;
 const transcriptContext=vm.createContext({URL,location:{href:'https://www.youtube.com/',origin:'https://www.youtube.com'},
-  observedFetch:()=>{throw Error('Transcript must not enter session transport');},captureResponse(){},
+  captureResponse(){},urlFrom:input=>new URL(input,'https://www.youtube.com').href,
   originalFetch:async(input,init)=>{
     transcriptRequests.push({input,init});
     assert.equal(init.credentials,'omit');
@@ -46,7 +28,7 @@ const transcriptContext=vm.createContext({URL,location:{href:'https://www.youtub
     return {ok:true,text:async()=>'<timedtext><body><p t="1250" d="2500">Restored &amp; tested</p><p t="3750" d="1000">Next</p></body></timedtext>'};
   }});
 const allowedStart=source.indexOf('  function isAllowedTimedTextUrl(');
-vm.runInContext(source.slice(allowedStart,source.indexOf('  // The library is bundled',allowedStart))+
+vm.runInContext(source.slice(source.indexOf('  async function observedFetch('),source.indexOf('  window.fetch ='))+source.slice(allowedStart,source.indexOf('  // The library is bundled',allowedStart))+
   source.slice(source.indexOf('  function textOf('),source.indexOf('  // Search deliberately uses fetch')),transcriptContext);
 const restored=await transcriptContext.getTranscriptFromPlayer({videoId:'abcdefghijk',limit:1,trackIndex:1});
 assert.equal(restored.selectedTrack.languageCode,'ru');assert.equal(restored.returned,1);
@@ -62,7 +44,7 @@ const comment=id=>({comment:{comment_id:id}});
 const parent=Object.assign(comment('root1'),{has_replies:true,has_continuation:true,replies:[comment('reply1')],async getReplies(){return this;},async getContinuation(){return {replies:[comment('reply2')],has_continuation:false};}});
 const page={contents:[parent],has_continuation:true,async getContinuation(){return {contents:[comment('root2')],has_continuation:false};}};
 const ctx=vm.createContext({Date,crypto:webcrypto,accountState:()=>({contextId:'test-context'}),getInnertube:async()=>({getComments:async()=>page}),normalizeCommentThread:t=>({commentId:t.comment.comment_id}),normalizeReplyThread:t=>({commentId:t.comment.comment_id})});
-vm.runInContext(source.slice(source.indexOf('  const exportSessions ='),source.indexOf('  async function getVideoPageData(')),ctx);
+vm.runInContext(source.slice(source.indexOf('  const exportSessions ='),source.indexOf('  function parentSummary(')),ctx);
 let sessionId=null;const seen=[];
 for(let i=0;i<4;i++) {const result=await ctx.exportCommentPage({videoId:'abcdefghijk',sort:'newest',includeReplies:true,sessionId});sessionId=result.sessionId;seen.push(...result.records.map(r=>[r.commentId,r.parentCommentId]));assert.equal(result.hasMore,i<3);}
 assert.deepEqual(seen,[['root1',null],['reply1','root1'],['reply2','root1'],['root2',null]]);
@@ -71,14 +53,29 @@ await assert.rejects(()=>ctx.exportCommentPage({videoId:'abcdefghijk',sort:'newe
 ctx.accountState=()=>({contextId:'other-account'});
 await assert.rejects(()=>ctx.exportCommentPage({videoId:'abcdefghijk',sort:'newest',includeReplies:true,sessionId}),/mismatch/);
 
-// A signed-in account switch must not reuse another account's cached results.
+// Preserve the original query cache without introducing account-state requests.
 const background=await readFile(new URL('../background.js',import.meta.url),'utf8');
-let account='account-one',searches=0;
+let searches=0;
 const cache=vm.createContext({Date,crypto:webcrypto,searchCache:new Map(),searchQueue:Promise.resolve(),searchRequestSequence:0,searchQueueDepth:0,SEARCH_CACHE_TTL_MS:30000,
-  runYouTubePageTool:async()=>({contextId:account}),recordSearchDiagnostic(){},searchDiagnosticQuery:v=>v,finishQueuedSearch(){},
+  runYouTubePageTool:()=>{throw Error('Anonymous cache must not inspect account');},recordSearchDiagnostic(){},searchDiagnosticQuery:v=>v,finishQueuedSearch(){},
   runQueuedYouTubeSearch:async()=>({search:++searches})});
 vm.runInContext(background.slice(background.indexOf('function searchCacheKey('),background.indexOf('function finishQueuedSearch(')),cache);
 assert.equal((await cache.youtubeSearch('same query',10)).search,1);
 assert.equal((await cache.youtubeSearch('same query',10)).search,1);
-account='account-two';assert.equal((await cache.youtubeSearch('same query',10)).search,2);
-console.log('YouTube session: cookie inclusion, origin-bound signing, account selection, origin guard and full comment pagination passed');
+assert.equal((await cache.youtubeSearch('different query',10)).search,2);
+// The bundled comments client must keep credentials omitted for its fetches.
+let clientOptions;
+const network=[];
+const transport=vm.createContext({URL,location:{href:'https://www.youtube.com/'},window:{ytcfg:{get:()=>undefined}},innertubePromise:null,
+  Innertube:{create:async options=>{clientOptions=options;return {getComments(){}};}},
+  observedFetch:async(input,init)=>{network.push({input,init});return {ok:true};}});
+vm.runInContext(source.slice(source.indexOf('  async function getInnertube('),source.indexOf('  function textOf(')),transport);
+await transport.getInnertube();
+await clientOptions.fetch('https://www.youtube.com/youtubei/v1/next',{credentials:'include',method:'POST'});
+assert.equal(network[0].init.credentials,'omit');
+vm.runInContext(source.slice(source.indexOf('  function searchEndpoint('),source.indexOf('  function extractSearchJson(')),transport);
+await transport.searchFetch([], '/results?search_query=topic');
+await transport.searchFetch([], '/youtubei/v1/search', {method:'POST'});
+assert.ok(network.every(item=>item.init.credentials==='omit'));
+assert.ok(network.slice(1).every(item=>item.init.redirect==='manual'));
+console.log('Anonymous YouTube: search/cache, comments client, transcript and full export pagination passed');

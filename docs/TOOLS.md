@@ -27,11 +27,11 @@ cloud enrollment or ChatGPT tab. See [Local YouTube MCP](features/LOCAL_YOUTUBE_
 | `youtube_bridge_status` | Reports local Extension connectivity without opening YouTube. |
 
 Local browser calls require YouTube sign-in and reuse or create one inactive
-YouTube tab. Requests use the current page session and can reflect the signed-in
-account; cookies and authorization stay inside the browser. Files persist
+YouTube tab. Requests retain the original anonymous transport without account
+cookies or authorization. Files persist
 after Agent restart, while task IDs do not.
 
-Transcript requests are the exception: the established anonymous ANDROID
+Transcript requests use the established anonymous ANDROID
 player/timedtext path omits credentials. Local sign-in checks still apply.
 
 ## Artifact tasks and paths
