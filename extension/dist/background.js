@@ -3807,6 +3807,7 @@ function createArtifactTaskManager(host) {
 var WORKSPACE_ARGUMENT_NAMES = Object.freeze({
   workspace_list: { path: "workspacePath" },
   workspace_stat: { path: "workspacePath" },
+  workspace_open_folder: { path: "workspacePath" },
   workspace_mkdir: { path: "workspacePath" },
   workspace_delete: { path: "workspacePath" },
   workspace_move: { source: "workspacePath", destination: "destinationWorkspacePath" },
@@ -4226,6 +4227,7 @@ var MCP_TOOL_SETTINGS = Object.freeze({
   system_speech_cancel: { group: "speech" },
   workspace_list: { group: "workspace" },
   workspace_stat: { group: "workspace" },
+  workspace_open_folder: { group: "workspace" },
   workspace_mkdir: { group: "workspace" },
   workspace_move: { group: "workspace" },
   workspace_delete: { group: "workspace" },
@@ -4311,7 +4313,7 @@ globalThis.addEventListener?.("fetch", createMediaStreamHandler({
   fetchMedia: (url, options) => fetch(url, options),
   log: (stage, details = {}) => consoleAction(`[ResearchTube media stream ${EXTENSION_VERSION}]`, stage, details)
 }));
-var REQUIRED_AGENT_INTERFACE_VERSION = 84;
+var REQUIRED_AGENT_INTERFACE_VERSION = 85;
 var MEDIA_TO_CHAT_WIDGET_URI = "ui://researchtube/chat-target-v8.html";
 var MEDIA_TO_CHAT_WIDGET_ALIASES = /* @__PURE__ */ new Set(["ui://researchtube/chat-target-v4.html", "ui://researchtube/chat-target-v5.html", "ui://researchtube/chat-target-v6.html", "ui://researchtube/chat-target-v7.html"]);
 var MEDIA_TO_CHAT_BIND_TIMEOUT_MS = 3e4;
@@ -4841,6 +4843,12 @@ var workspaceStatSchema = {
     modifiedAt: { type: "string", format: "date-time" }
   },
   required: ["path", "type", "size", "modifiedAt"]
+};
+var workspaceOpenFolderSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: { path: { type: "string" }, requested: { type: "boolean", const: true } },
+  required: ["path", "requested"]
 };
 var workspaceMkdirSchema = {
   type: "object",
@@ -5437,6 +5445,15 @@ function toolDefinitions() {
       annotations: localAgentReadAnnotations,
       inputSchema: { type: "object", additionalProperties: false, properties: { path: { type: "string", minLength: 1, description: "Logical workspace-relative POSIX path. Do not use absolute paths, backslashes, . or .. components." } }, required: ["path"] },
       outputSchema: workspaceStatSchema
+    },
+    {
+      name: "workspace_open_folder",
+      title: "Open a ResearchTube workspace folder in Windows Explorer",
+      description: "Open an existing Workspace directory in Windows File Explorer on the computer running the Local Agent. Use only when the user explicitly requests opening the folder, not when they want to list files or download them. An empty path opens the Workspace root. This is a desktop action, not a file transfer or a public link.",
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+      inputSchema: { type: "object", additionalProperties: false, properties: { path: { type: "string", default: "", description: "Existing logical Workspace directory; empty string opens the Workspace root. Never pass a physical host path, a file path, or . or .. components." } }, required: [] },
+      outputSchema: workspaceOpenFolderSchema,
+      _meta: { "openai/toolInvocation/invoking": "Opening Workspace folder\u2026", "openai/toolInvocation/invoked": "Folder opening requested." }
     },
     {
       name: "workspace_mkdir",
@@ -9518,6 +9535,14 @@ async function workspaceStat(path) {
   const document2 = await agentJsonRequest("/workspace/stat", { method: "POST", body: { path: normalizeWorkspacePath(path, "path") } });
   return normalizeWorkspaceStat(document2);
 }
+async function workspaceOpenFolder(path = "") {
+  const logicalPath = normalizeWorkspacePath(path, "path", { allowRoot: true });
+  const document2 = await agentJsonRequest("/workspace/open-folder", { method: "POST", body: { path: logicalPath } });
+  if (!document2 || typeof document2 !== "object" || Array.isArray(document2) || document2.path !== logicalPath || document2.requested !== true) {
+    throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid folder-open result.");
+  }
+  return { path: logicalPath, requested: true };
+}
 function normalizeMediaInspectImage(value) {
   if (!value || typeof value !== "object" || Array.isArray(value) || !(/* @__PURE__ */ new Set(["png", "jpeg", "webp"])).has(value.format) || !(/* @__PURE__ */ new Set(["image/png", "image/jpeg", "image/webp"])).has(value.mimeType) || !Number.isInteger(value.width) || value.width < 1 || !Number.isInteger(value.height) || value.height < 1 || !Number.isInteger(value.imageSizeBytes) || value.imageSizeBytes < 0) {
     throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned invalid image metadata.");
@@ -10791,6 +10816,10 @@ async function handleMcpRequest(request) {
   if (request?.method === "tools/call" && request.params?.name === "workspace_stat") {
     const path = request.params.arguments?.path;
     return executeToolCall(request.id, "workspace_stat", { path }, () => workspaceStat(path));
+  }
+  if (request?.method === "tools/call" && request.params?.name === "workspace_open_folder") {
+    const path = request.params.arguments?.path === void 0 ? "" : request.params.arguments.path;
+    return executeToolCall(request.id, "workspace_open_folder", { path }, () => workspaceOpenFolder(path));
   }
   if (request?.method === "tools/call" && request.params?.name === "workspace_mkdir") {
     const path = request.params.arguments?.path;

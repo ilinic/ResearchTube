@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 
 const background = await readFile(new URL("../background.js", import.meta.url), "utf8");
 
-for (const tool of ["system_agent_status", "workspace_list", "workspace_stat", "workspace_mkdir", "workspace_move", "workspace_delete", "online_share_start", "online_share_status", "online_share_stop", "media_probe", "media_clip", "media_clip_get_task", "media_clip_cancel_task", "media_capture_frame", "media_capture_frame_get_task", "media_capture_frame_task_diagnostics", "media_capture_frame_cancel_task", "visual_map_create", "visual_map_get_task", "visual_map_cancel_task", "camera_list", "camera_capture_frame", "camera_record_video", "camera_record_audio", "camera_record_status", "camera_record_stop", "media_capture_screen", "media_image_crop", "media_show", "media_image_inspect", "clipboard_status", "clipboard_get", "clipboard_set", "media_load_workspace_image", "media_copy_workspace_path"]) {
+for (const tool of ["system_agent_status", "workspace_list", "workspace_stat", "workspace_open_folder", "workspace_mkdir", "workspace_move", "workspace_delete", "online_share_start", "online_share_status", "online_share_stop", "media_probe", "media_clip", "media_clip_get_task", "media_clip_cancel_task", "media_capture_frame", "media_capture_frame_get_task", "media_capture_frame_task_diagnostics", "media_capture_frame_cancel_task", "visual_map_create", "visual_map_get_task", "visual_map_cancel_task", "camera_list", "camera_capture_frame", "camera_record_video", "camera_record_audio", "camera_record_status", "camera_record_stop", "media_capture_screen", "media_image_crop", "media_show", "media_image_inspect", "clipboard_status", "clipboard_get", "clipboard_set", "media_load_workspace_image", "media_copy_workspace_path"]) {
   assert.match(background, new RegExp(`name: "${tool}"`), `${tool} must be published in tools/list`);
 }
 for (const tool of ["system_speech_list_voices", "system_speech_speak", "system_speech_status", "system_speech_cancel"]) {
@@ -28,7 +28,33 @@ for (const tool of ["youtube_download_get_formats", "youtube_download_get_task",
 assert.match(background, /youtubeFormats: youtubeFormatsSchema/);
 assert.match(background, /youtube_download_get_formats\.downloadFormats/);
 assert.match(background, /afterEventId/);
-assert.match(background, /const REQUIRED_AGENT_INTERFACE_VERSION = 84;/);
+assert.match(background, /const REQUIRED_AGENT_INTERFACE_VERSION = 85;/);
+assert.match(background, /workspace_open_folder: \{ group: "workspace" \}/);
+assert.match(background, /"\/workspace\/open-folder"/, "folder opening must use the Local Agent");
+assert.doesNotMatch(background, /"openai\/outputTemplate": WORKSPACE_FOLDER/, "opening a folder needs no custom widget");
+const openStart = background.indexOf("async function workspaceOpenFolder(");
+const openEnd = background.indexOf("\nfunction normalizeMediaInspectImage", openStart);
+assert.ok(openStart >= 0 && openEnd > openStart);
+const requests = [];
+let agentResponse = { path: "downloads/music", requested: true };
+const workspaceOpenFolder = new Function("normalizeWorkspacePath", "agentJsonRequest", "localAgentError", `${background.slice(openStart, openEnd)}\nreturn workspaceOpenFolder;`)(
+  (path, field, options) => {
+    assert.equal(field, "path");
+    assert.equal(options?.allowRoot, true);
+    if (typeof path !== "string" || (path !== "" && (path.startsWith("/") || path.includes("..") || path.includes("\\")))) throw new Error("invalid path");
+    return path;
+  },
+  async (endpoint, options) => { requests.push({ endpoint, options }); return agentResponse; },
+  (code, message) => Object.assign(new Error(message), { code })
+);
+assert.deepEqual(await workspaceOpenFolder("downloads/music"), { path: "downloads/music", requested: true });
+assert.deepEqual(requests[0], { endpoint: "/workspace/open-folder", options: { method: "POST", body: { path: "downloads/music" } } });
+agentResponse = { path: "", requested: true };
+assert.deepEqual(await workspaceOpenFolder(), { path: "", requested: true });
+assert.deepEqual(requests[1].options.body, { path: "" });
+await assert.rejects(workspaceOpenFolder("../secret"), /invalid path/);
+agentResponse = { path: "C:/Users/user", requested: true };
+await assert.rejects(workspaceOpenFolder("downloads/music"), { code: "AGENT_INVALID_RESPONSE" });
 assert.match(background, /outputMode: \{ type: "string", enum: \["file", "speakers", "both"\]/, "speech must choose exactly one output mode");
 assert.match(background, /voiceName: \{ type: "string", minLength: 1 \}/, "speech status must report the selected voice name");
 assert.match(background, /engine: \{ type: "string", enum: \["googleTranslate", "windows"\], default: "googleTranslate" \}/, "Google Translate must be the default TTS engine");

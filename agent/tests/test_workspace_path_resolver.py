@@ -101,6 +101,36 @@ class WorkspacePathResolverTests(unittest.TestCase):
             agent.workspace_list({"path": "external"})
         self.assertEqual(raised.exception.code, "WORKSPACE_PATH_INVALID")
 
+    def test_open_folder_requests_windows_explorer_only_for_existing_workspace_directories(self) -> None:
+        folder = agent.WORKSPACE_PATH / "downloads" / "music"
+        folder.mkdir(parents=True)
+        (folder / "track.mp3").write_bytes(b"audio")
+
+        with patch.object(agent.sys, "platform", "win32"), patch.object(agent.os, "startfile", create=True) as startfile:
+            self.assertEqual(agent.workspace_open_folder({"path": "downloads/music"}), {"path": "downloads/music", "requested": True})
+            startfile.assert_called_once_with(str(folder))
+            startfile.reset_mock()
+            self.assertEqual(agent.workspace_open_folder({"path": ""}), {"path": "", "requested": True})
+            startfile.assert_called_once_with(str(agent.WORKSPACE_PATH))
+            startfile.reset_mock()
+
+            for bad in ["../outside", "C:/Windows", "downloads\\music", "downloads/music/track.mp3", "missing"]:
+                with self.subTest(path=bad), self.assertRaises(agent.AgentApiError):
+                    agent.workspace_open_folder({"path": bad})
+            startfile.assert_not_called()
+            with self.assertRaises(agent.AgentApiError) as raised:
+                agent.workspace_open_folder({"path": "downloads/music", "other": "extra"})
+            self.assertEqual(raised.exception.code, "INVALID_REQUEST")
+            startfile.side_effect = OSError("desktop unavailable")
+            with self.assertRaises(agent.AgentApiError) as raised:
+                agent.workspace_open_folder({"path": "downloads"})
+            self.assertEqual(raised.exception.code, "FOLDER_OPEN_FAILED")
+
+        with patch.object(agent.sys, "platform", "linux"):
+            with self.assertRaises(agent.AgentApiError) as raised:
+                agent.workspace_open_folder({"path": "downloads"})
+            self.assertEqual(raised.exception.code, "PLATFORM_UNSUPPORTED")
+
     def test_widget_image_url_resolves_only_a_workspace_image(self) -> None:
         image = agent.WORKSPACE_PATH / "captures" / "frame.png"
         image.parent.mkdir(parents=True, exist_ok=True)

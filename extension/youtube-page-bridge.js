@@ -38485,7 +38485,7 @@ ${getNsigProcessorFn(eval_args.n, eval_args.sp, eval_args.sig)}`;
   });
 
   // manifest.json
-  var version2 = "2.11.3";
+  var version2 = "2.11.4";
 
   // youtube-page-bridge.src.js
   (() => {

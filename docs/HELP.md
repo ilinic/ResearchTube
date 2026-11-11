@@ -97,7 +97,7 @@ Browse [MCP Tools](MCP_TOOLS.md) for plain-language descriptions of every tool, 
 | Inspect/edit local media | `media_probe`, frame capture, `media_image_crop`, `media_clip`, `media_show`. Request frames, ordered clips or format conversion from a Workspace file. `media_clip` uses optional outputFormat with intervals; whole-file conversion/audio extraction requires it. Compatible streams retain original quality; necessary encoding uses automatic quality profiles. Lossless output can be much larger. |
 | Capture or record | Screen/region capture, `camera_*`, and Windows clipboard tools. Request these explicitly. |
 | Read text aloud | `system_speech_*`: Google Translate by default or Windows voices; speakers, saved file, or both. |
-| Manage/share files | `workspace_*`, `media_view`, `library_store_*`, `online_share_*`. Sending/sharing is deliberate, not automatic for every saved file. |
+| Manage/share files | `workspace_*`, `media_view`, `library_store_*`, `online_share_*`. `workspace_open_folder` opens an existing logical folder in Windows Explorer through the Local Agent, without any link or download. Sending/sharing is deliberate, not automatic for every saved file. |
 | Timers | `timer_start/status/cancel` for real durations or deadlines. |
 | Study a website | **Study this site** in the popup; `site_*` tools operate the sites and ChatGPT participants in its tab group. |
 | Custom Tools | Trusted Python packages; bundled **Count Words Example** and **Wait Asynchronous Task Example** demonstrate sync/task execution. |

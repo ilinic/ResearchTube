@@ -37,6 +37,11 @@ assert.deepEqual(JSON.parse(JSON.stringify(sourceTools)), tools, 'source and shi
 assert.match(byName('media_show').description, /does not upload.*media_view/);
 assert.match(byName('media_view').description, /Appends files to existing Composer/);
 assert.match(byName('media_view').description, /Finish the response/);
+assert.ok(byName('workspace_open_folder').inputSchema.properties.workspacePath, 'folder opening uses the public Workspace path convention');
+assert.ok(!Object.hasOwn(byName('workspace_open_folder').inputSchema.properties, 'path'));
+assert.equal(byName('workspace_open_folder').inputSchema.properties.workspacePath.default, '');
+assert.deepEqual(byName('workspace_open_folder').annotations, { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false });
+assert.equal(byName('workspace_open_folder')._meta?.ui, undefined, 'Explorer opening does not require a custom widget');
 assert.match(byName('site_read').description, /untrusted data/);
 assert.match(byName('site_interact').description, /never replay completed steps/);
 assert.match(byName('site_get_images').description, /selected images/);

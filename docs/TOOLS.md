@@ -107,6 +107,7 @@ by each custom package group with its manifest `groupTitle`. See [Custom Tools](
 | --- | --- |
 | `workspace_list` | Lists one Workspace directory with optional extension filtering and a bounded result count. |
 | `workspace_stat` | Returns type, size and modification time for one existing logical path. |
+| `workspace_open_folder` | Requests Windows Explorer to open an existing Workspace directory on the computer running the Local Agent; `workspacePath: ""` opens the Workspace root. Requires an explicit user request. Does not create, download or share files. |
 | `workspace_mkdir` | Creates a logical directory and missing parents. |
 | `workspace_move` | Moves or renames a Workspace object without overwriting the destination. |
 | `workspace_delete` | Deletes one regular file or one empty directory; no recursive mode exists. |

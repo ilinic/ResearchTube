@@ -64,7 +64,7 @@ const MCP_TOOL_SETTINGS = Object.freeze({
   system_get_chat_context: { group: "system" }, system_get_diagnostics: { group: "system" },
   timer_start: { group: "timers" }, timer_status: { group: "timers" }, timer_cancel: { group: "timers" },
   system_speech_list_voices: { group: "speech" }, system_speech_speak: { group: "speech" }, system_speech_status: { group: "speech" }, system_speech_cancel: { group: "speech" },
-  workspace_list: { group: "workspace" }, workspace_stat: { group: "workspace" }, workspace_mkdir: { group: "workspace" }, workspace_move: { group: "workspace" }, workspace_delete: { group: "workspace" },
+  workspace_list: { group: "workspace" }, workspace_stat: { group: "workspace" }, workspace_open_folder: { group: "workspace" }, workspace_mkdir: { group: "workspace" }, workspace_move: { group: "workspace" }, workspace_delete: { group: "workspace" },
   media_probe: { group: "media" }, media_clip: { group: "media" }, media_clip_get_task: { group: "media" }, media_clip_cancel_task: { group: "media" }, media_capture_frame: { group: "media" }, media_capture_frame_get_task: { group: "media" }, media_capture_frame_task_diagnostics: { group: "media" }, media_capture_frame_cancel_task: { group: "media" }, media_capture_screen: { group: "media" }, media_image_crop: { group: "media" }, media_show: { group: "media" }, media_image_inspect: { group: "media" },
   visual_map_create: { group: "visualMaps" }, visual_map_get_task: { group: "visualMaps" }, visual_map_cancel_task: { group: "visualMaps" },
   media_view: { group: "media" }, media_view_status: { group: "media" }, media_view_cancel: { group: "media" }, media_task_status: { group: "media" }, media_task_cancel: { group: "media" },
@@ -101,7 +101,7 @@ globalThis.addEventListener?.("fetch", createMediaStreamHandler({
   fetchMedia: (url, options) => fetch(url, options),
   log: (stage, details = {}) => consoleAction(`[ResearchTube media stream ${EXTENSION_VERSION}]`, stage, details)
 }));
-const REQUIRED_AGENT_INTERFACE_VERSION = 84;
+const REQUIRED_AGENT_INTERFACE_VERSION = 85;
 // A UI resource URI is a cache key in MCP Apps. Increment it whenever the
 // rendered template changes so ChatGPT does not reuse a stale iframe bundle.
 const MEDIA_TO_CHAT_WIDGET_URI = "ui://researchtube/chat-target-v8.html";
@@ -559,6 +559,11 @@ const workspaceStatSchema = {
     modifiedAt: { type: "string", format: "date-time" }
   },
   required: ["path", "type", "size", "modifiedAt"]
+};
+const workspaceOpenFolderSchema = {
+  type: "object", additionalProperties: false,
+  properties: { path: { type: "string" }, requested: { type: "boolean", const: true } },
+  required: ["path", "requested"]
 };
 const workspaceMkdirSchema = {
   type: "object", additionalProperties: false,
@@ -1081,6 +1086,15 @@ function toolDefinitions() {
       annotations: localAgentReadAnnotations,
       inputSchema: { type: "object", additionalProperties: false, properties: { path: { type: "string", minLength: 1, description: "Logical workspace-relative POSIX path. Do not use absolute paths, backslashes, . or .. components." } }, required: ["path"] },
       outputSchema: workspaceStatSchema
+    },
+    {
+      name: "workspace_open_folder",
+      title: "Open a ResearchTube workspace folder in Windows Explorer",
+      description: "Open an existing Workspace directory in Windows File Explorer on the computer running the Local Agent. Use only when the user explicitly requests opening the folder, not when they want to list files or download them. An empty path opens the Workspace root. This is a desktop action, not a file transfer or a public link.",
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+      inputSchema: { type: "object", additionalProperties: false, properties: { path: { type: "string", default: "", description: "Existing logical Workspace directory; empty string opens the Workspace root. Never pass a physical host path, a file path, or . or .. components." } }, required: [] },
+      outputSchema: workspaceOpenFolderSchema,
+      _meta: { "openai/toolInvocation/invoking": "Opening Workspace folder…", "openai/toolInvocation/invoked": "Folder opening requested." }
     },
     {
       name: "workspace_mkdir",
@@ -5120,6 +5134,15 @@ async function workspaceStat(path) {
   return normalizeWorkspaceStat(document);
 }
 
+async function workspaceOpenFolder(path = "") {
+  const logicalPath = normalizeWorkspacePath(path, "path", { allowRoot: true });
+  const document = await agentJsonRequest("/workspace/open-folder", { method: "POST", body: { path: logicalPath } });
+  if (!document || typeof document !== "object" || Array.isArray(document) || document.path !== logicalPath || document.requested !== true) {
+    throw localAgentError("AGENT_INVALID_RESPONSE", "The Local Agent returned an invalid folder-open result.");
+  }
+  return { path: logicalPath, requested: true };
+}
+
 function normalizeMediaInspectImage(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)
     || !new Set(["png", "jpeg", "webp"]).has(value.format)
@@ -6467,6 +6490,10 @@ async function handleMcpRequest(request) {
   if (request?.method === "tools/call" && request.params?.name === "workspace_stat") {
     const path = request.params.arguments?.path;
     return executeToolCall(request.id, "workspace_stat", { path }, () => workspaceStat(path));
+  }
+  if (request?.method === "tools/call" && request.params?.name === "workspace_open_folder") {
+    const path = request.params.arguments?.path === undefined ? "" : request.params.arguments.path;
+    return executeToolCall(request.id, "workspace_open_folder", { path }, () => workspaceOpenFolder(path));
   }
   if (request?.method === "tools/call" && request.params?.name === "workspace_mkdir") {
     const path = request.params.arguments?.path;

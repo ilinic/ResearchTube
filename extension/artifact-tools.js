@@ -3,7 +3,7 @@ import { ARTIFACT_TOOLS, ARTIFACT_STATUS_TOOLS, ARTIFACT_CANCEL_TOOLS, artifactO
 // Public names are uniform. Agent request names remain private and are
 // translated once at the MCP boundary, avoiding unrelated Agent migrations.
 export const WORKSPACE_ARGUMENT_NAMES = Object.freeze({
-  workspace_list:{path:'workspacePath'},workspace_stat:{path:'workspacePath'},
+  workspace_list:{path:'workspacePath'},workspace_stat:{path:'workspacePath'},workspace_open_folder:{path:'workspacePath'},
   workspace_mkdir:{path:'workspacePath'},workspace_delete:{path:'workspacePath'},
   workspace_move:{source:'workspacePath',destination:'destinationWorkspacePath'},
   media_probe:{path:'workspacePath'},media_show:{path:'workspacePath'},media_image_inspect:{path:'workspacePath'},

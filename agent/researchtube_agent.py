@@ -48,8 +48,8 @@ except ImportError:
     from task_history import TaskHistory
     from browser_resources import save_browser_resource
 
-AGENT_VERSION = "2.8.1"
-INTERFACE_VERSION = 84
+AGENT_VERSION = "2.8.2"
+INTERFACE_VERSION = 85
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
 MAX_GOOGLE_TRANSLATE_AUDIO_BYTES = 16 * 1024 * 1024
@@ -1164,6 +1164,22 @@ def workspace_stat(payload: Any) -> dict[str, Any]:
         raise AgentApiError("PERMISSION_DENIED", "The requested workspace path could not be inspected.") from error
     log(f"workspace_stat path={item.logical_path} -> ok")
     return {"path": item.logical_path, "type": item_type, "size": size, "modifiedAt": modified_at}
+
+
+def workspace_open_folder(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict) or set(payload) != {"path"}:
+        raise AgentApiError("INVALID_REQUEST", "workspace_open_folder requires only path.")
+    directory = WorkspacePathResolver().resolve_existing(
+        payload["path"], field_name="path", expected_type="directory", allow_root=True,
+    )
+    if sys.platform != "win32":
+        raise AgentApiError("PLATFORM_UNSUPPORTED", "Opening a folder in Windows Explorer requires Windows.")
+    try:
+        os.startfile(str(directory.physical_path))
+    except OSError as error:
+        raise AgentApiError("FOLDER_OPEN_FAILED", "Windows Explorer could not be started.") from error
+    log(f"workspace_open_folder path={directory.logical_path or '<root>'} -> requested")
+    return {"path": directory.logical_path, "requested": True}
 
 
 def workspace_mkdir(payload: Any) -> dict[str, Any]:
@@ -6238,6 +6254,8 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             response_status, response_body = "200 OK", workspace_list(parse_json_body(body))
         elif method == "POST" and path == "/workspace/stat":
             response_status, response_body = "200 OK", workspace_stat(parse_json_body(body))
+        elif method == "POST" and path == "/workspace/open-folder":
+            response_status, response_body = "200 OK", workspace_open_folder(parse_json_body(body))
         elif method == "POST" and path == "/workspace/mkdir":
             response_status, response_body = "200 OK", workspace_mkdir(parse_json_body(body))
         elif method == "POST" and path == "/workspace/move":

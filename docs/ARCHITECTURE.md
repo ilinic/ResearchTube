@@ -116,6 +116,8 @@ The Agent console may show physical installation paths for the local user. Norma
 
 The Extension independently validates paths and allowlists Agent response fields. Built-in Workspace protection does not sandbox future trusted external modules, which run with the operating-system user's permissions.
 
+`workspace_open_folder` is an explicit Windows desktop action: the Extension validates the logical directory path, the Agent resolves the existing directory inside Workspace and requests Explorer to open it. The MCP result includes only the logical path and whether the desktop launch was requested; it cannot confirm that the window became visible. No public URL, local HTTP navigation link or custom ChatGPT widget is used.
+
 ## Asynchronous task model
 
 All artifact producers use one public creation-and-optional-delivery supervisor in extension/artifact-tasks.js. media_task_status/media_task_cancel and specialized aliases expose the same lifecycle. Native metadata is in creation.data, created paths in files, and optional upload/delay/Send in chat. Single captures/crops/clipboard reads also return an asynchronous handle. Public file sources use workspacePath; destination roles have explicit Workspace-qualified names. See [Artifact tasks](features/ARTIFACT_TASKS.md).
