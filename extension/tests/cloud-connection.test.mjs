@@ -52,9 +52,17 @@ assert.equal(cloudConversation('https://evil.test/c/chat-1'),null);
  await f.connection.suspend();assert.equal(f.intervals.size,0);
 }
 const request=(name,args={},installationId=credential.installationId)=>({type:'request',requestId:randomUUID(),installationId,
- request:{jsonrpc:'2.0',method:'tools/call',params:{name,arguments:args}},timing:{workerReceivedAtMs:Date.now()-30,roomReceivedAtMs:Date.now()-20,roomForwardedAtMs:Date.now()-10}});
+ request:{jsonrpc:'2.0',method:'tools/call',params:{name,arguments:args,chatSession:'a'.repeat(64)}},timing:{workerReceivedAtMs:Date.now()-30,roomReceivedAtMs:Date.now()-20,roomForwardedAtMs:Date.now()-10}});
+async function bind(f,ws) {
+ f.handle(async command=>{const value=await f.connection.startChatBinding(command.id,false);return {result:{content:[],_meta:{'researchtube/chatTarget':value.metadata}}};});
+ await f.receive(ws,request('system_get_chat_context'));
+ const metadata=JSON.parse(ws.sent.at(-1)).result._meta['researchtube/chatTarget'];
+ await f.connection.bindChat(metadata,f.sender);
+ f.handle(async()=>({result:{content:[{type:'text',text:'ok'}]}}));
+ f.dispatches.length=0;f.timings.length=0;
+}
 {
- const f=fixture(),ws=await f.online();const call=request('site_list_tabs',{chatTabId:7});
+ const f=fixture(),ws=await f.online();await bind(f,ws);const call=request('site_list_tabs',{});
  await f.receive(ws,call);
  assert.deepEqual(f.timings.slice(0,4).map(row=>row.stage),['worker.received','room.received','room.forwarded','extension.received']);
  assert.equal(f.timings.at(-1).stage,'extension.returned');
@@ -74,30 +82,30 @@ const request=(name,args={},installationId=credential.installationId)=>({type:'r
  await f.receive(ws,request('media_probe',{workspacePath:'video.mp4'}));assert.equal(f.dispatches.length,2,'local reads do not require a chat');
 }
 {
- const f=fixture(),ws=await f.online();let target;
+ const f=fixture(),ws=await f.online();await bind(f,ws);let target;
  f.handle(async command=>{target=f.connection.targetForRequest(command.id);return {result:{content:[{type:'text',text:'done'}]}};});
- await f.receive(ws,request('timer_start',{durationSeconds:1,tabId:7}));
+ await f.receive(ws,request('timer_start',{duration:1,notifyInChat:true}));
  assert.equal(target.tabId,7);assert.equal(target.documentId,'doc-1');
  await f.connection.verifyTarget(target);
  f.navigate();await assert.rejects(f.connection.verifyTarget(target),{code:'BROWSER_TARGET_MISMATCH'});
  assert.equal(f.dispatches.length,1);
 }
 for(const change of ['duplicate','navigate']){
- const f=fixture(),ws=await f.online();
+ const f=fixture(),ws=await f.online();await bind(f,ws);
  if(change==='duplicate')f.duplicate();
  else f.handle(async()=>{f.navigate();return {result:{content:[{type:'text',text:'wrong document'}]}};});
- await f.receive(ws,request('timer_start',{durationSeconds:1,tabId:7}));
+ await f.receive(ws,request('timer_start',{duration:1,notifyInChat:true}));
  assert.ok(JSON.parse(ws.sent.at(-1)).result.isError);
  assert.equal(f.dispatches.length,change==='duplicate'?0:1);
 }
 {
- const f=fixture(),ws=await f.online();let target;
+ const f=fixture(),ws=await f.online();await bind(f,ws);let target;
  f.handle(async command=>{target=f.connection.targetForRequest(command.id);return {result:{content:[]}};});
- await f.receive(ws,request('media_view',{files:[{workspacePath:'a.png'}],tabId:7}));
+ await f.receive(ws,request('media_view',{files:[{workspacePath:'a.png'}]}));
  assert.ok(target);await f.connection.tabChanged(7);await assert.rejects(f.connection.verifyTarget(target));
  assert.equal(f.invalidated.length,1);
 }
-for(const [name,args] of [['media_view',{files:[{workspacePath:'a.png'}]}],['media_clip',{workspacePath:'a.mp4',addToChat:true}],['system_get_chat_context',{}]]){
+for(const [name,args] of [['media_view',{files:[{workspacePath:'a.png'}]}],['media_clip',{workspacePath:'a.mp4',addToChat:true}]]){
  const f=fixture(),ws=await f.online();await f.receive(ws,request(name,args));
  assert.equal(f.dispatches.length,0);assert.equal(JSON.parse(ws.sent.at(-1)).result.structuredContent.error.code,'BROWSER_CONTEXT_REQUIRED');
 }

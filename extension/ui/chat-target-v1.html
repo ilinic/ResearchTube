@@ -7,7 +7,7 @@ body{display:flex;align-items:center;gap:8px;padding:0 8px;box-sizing:border-box
 #status{overflow:hidden;text-overflow:ellipsis;color:#6b7280}
 @media(prefers-color-scheme:dark){html,body{color:#e5e7eb}#status{color:#9ca3af}}
 </style></head>
-<body><span class="brand">ResearchTube</span><span id="status" role="status">Adding files to chat…</span><div id="anchor" hidden></div>
+<body><span class="brand">ResearchTube</span><span id="status" role="status">Connecting this chat…</span><div id="anchor" hidden></div>
 <script>
 (()=>{
   const SOURCE='researchtube-chat-target-widget';
@@ -72,6 +72,7 @@ body{display:flex;align-items:center;gap:8px;padding:0 8px;box-sizing:border-box
       }
     }
     if(metadata?.mode==='group' && !bound && !stopped) status.textContent='Connecting tab group…';
+    if(metadata?.mode==='connection' && !bound && !stopped) status.textContent='Connecting this chat…';
     if(bound || stopped) return true;
     if(artifact && !artifact.addToChat) {
       status.textContent=typeof artifact.operationLabel==='string' && artifact.operationLabel.length<=160?artifact.operationLabel:(artifact.tool==='system_speech_speak'?'Synthesizing speech…':'Processing media task…');bound=true;finish();return true;
@@ -100,13 +101,15 @@ body{display:flex;align-items:center;gap:8px;padding:0 8px;box-sizing:border-box
         if(value.context?.status!=='completed' || !Number.isSafeInteger(value.context?.chatTabId) || !group) return;
         showGroup(group);
       }
+      if(metadata.mode==='connection') status.textContent='Connected to this chat.';
       bound=true;finish();
     }
     else if(value.errorCode) {
+      if(metadata.mode==='connection' && value.errorCode==='CHAT_BINDING_NOT_READY') return;
       // Authoritative task errors stop. A transport/reload failure can be
       // temporary, so retry it until the binding deadline instead.
       console.info(`[ResearchTube] Chat binding stopped: ${value.errorCode}`);
-      status.textContent=metadata.mode==='group'?(value.errorCode==='BROWSER_GROUP_NOT_FOUND'?'Place this chat and the sites in one tab group.':'Unable to connect group. Check task status.'):'Unable to add files. Check task status.';
+      status.textContent=metadata.mode==='connection'?'Unable to connect this chat. Check task status.':metadata.mode==='group'?(value.errorCode==='BROWSER_GROUP_NOT_FOUND'?'Place this chat and the sites in one tab group.':'Unable to connect group. Check task status.'):'Unable to add files. Check task status.';
       finish();
     }
   }

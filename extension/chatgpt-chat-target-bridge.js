@@ -15,7 +15,7 @@ if (!globalThis.__researchTubeChatTargetBridgeInstalled) {
     if (settled.get(value.taskId)?.bindingToken===value.bindingToken) { respond(settled.get(value.taskId).result); return; }
     inFlight.add(value.taskId);
     // A stale extension context can throw before returning a Promise.
-    Promise.resolve().then(()=>chrome.runtime.sendMessage({type:'researchtube_chat_target_bind', taskId:value.taskId, bindingToken:value.bindingToken, ...(value.mode==='group'?{mode:'group'}:{})})).then(
+    Promise.resolve().then(()=>chrome.runtime.sendMessage({type:'researchtube_chat_target_bind', taskId:value.taskId, bindingToken:value.bindingToken, ...(['group','connection'].includes(value.mode)?{mode:value.mode}:{})})).then(
       response => {
         if(response?.ok) {
           settled.set(value.taskId,{bindingToken:value.bindingToken,result:response});

@@ -19,10 +19,10 @@ committed. `extension/cloud-connection.js` implements enrollment and the outboun
 adapter and local exact-document guards. Setup
 starts in ChatGPT with root-origin MCP/OAuth before local installation. Follow
 [Public connection](features/PUBLIC_CONNECTION.md) and the protocol document;
-each account has one active extension, and explicit tab targets are pinned locally without connection widgets. CI checks this package without
+each account has one active extension, with lazy widget-authenticated chat targets pinned locally. See [Chat binding](features/CHAT_BINDING.md). CI checks this package without
 deploying or requiring Cloudflare/provider credentials.
 
-Productive calls route straight to the authenticated account's active extension. Keep startup free of connection widgets and model-side status checks. New enrollment revokes the old credential and stops its retries. Give a transiently disconnected extension a bounded reconnect window before reporting it offline; never replay a command after it has been sent or its outcome is unknown. Tab-free tools must not read ChatGPT; delivery needs explicit tabId/chatTabId and fails immediately if absent. Pin the live document inside execution and preserve navigation/closure/disconnect guards for delayed work.
+Productive calls route straight to the authenticated account's active extension. Keep startup free of connection widgets and model-side status checks. New enrollment revokes the old credential and stops its retries. Give a transiently disconnected extension a bounded reconnect window before reporting it offline; never replay a command after it has been sent or its outcome is unknown. Tab-free tools must not read ChatGPT. Delivery/Site tools use the account-scoped MCP conversation key and a widget-authenticated exact document. Missing connections fail before executing productive work; only system_get_chat_context has the connection template, while its status/cancel and productive tools have none. Pin the live document inside execution and preserve navigation/closure/disconnect guards for delayed work.
 
 `npm run test:chrome` in `cloudflare-worker/` runs the real unpacked Extension
 in an isolated Windows Chromium profile against local workerd. It needs an

@@ -139,8 +139,9 @@ await invalid.context.mediaToChatCancel(protectedTask.task.taskId);
 assert.equal(invalid.alarms.size,0);
 await assert.rejects(invalid.context.bindMediaToChatTarget(protectedTask.metadata,sender()),e=>e.code==='MEDIA_TO_CHAT_TARGET_NOT_FOUND');
 // Tools/list and resources/read expose the correct task template, not a media viewer.
-const tool=current.context.publicMcpTools().find(tool=>tool.name==='media_view');
-assert.equal(tool._meta.ui.resourceUri,'ui://researchtube/chat-target-v8.html');
+assert.equal(current.context.publicMcpTools().find(tool=>tool.name==='media_view')._meta?.ui, undefined, 'delivery does not render connection widgets');
+const tool=current.context.publicMcpTools().find(tool=>tool.name==='system_get_chat_context');
+assert.equal(tool._meta.ui.resourceUri,'ui://researchtube/chat-target-v9.html');
 const resources=await current.context.handleMcpRequest({id:2,method:'resources/list'});
 assert.ok(resources.result.resources.some(item=>item.uri===tool._meta.ui.resourceUri));
 const resource=await current.context.readMcpResource(3,tool._meta.ui.resourceUri);
@@ -159,7 +160,7 @@ assert.equal(resource.result.contents[0]._meta['openai/widgetPrefersBorder'],fal
 assert.deepEqual(JSON.parse(JSON.stringify(resource.result.contents[0]._meta['openai/ui'])),{availableDisplayModes:['inline']});
 assert.equal((await current.context.readMcpResource(5,mediaResource.uri)).result.contents[0]._meta['openai/ui'],undefined,'media viewer display modes remain unchanged');
 assert.match(widget,/<body><span class="brand">ResearchTube<\/span>/);
-assert.match(widget,/id="status" role="status">Adding files to chat…/);
+assert.match(widget,/id="status" role="status">Connecting this chat…/);
 assert.match(widget,/html,body\{height:32px;margin:0;padding:0/);
 assert.doesNotMatch(widget,/<body[^>]*(?:hidden|aria-hidden)|visibility:hidden|height:0|<(?:(?:img|video|audio|button))\b/);
 assert.doesNotMatch(bridge,/\.style\.|\.setAttribute\(|\.closest\(|surface-collapsed|data-mcp-app-portal-target/,'the bridge must not mutate or size host containers');
@@ -322,22 +323,11 @@ const legacySpeech=pageHarness({metadata:{'researchtube/artifactTask':{taskId:'t
 assert.equal(legacySpeech.status.textContent,'Synthesizing speech…');
 console.log('Artifact captions: operation-specific speech, no file claim or current-chat binding in speakers mode: ok');
 
-// Manual group inspection uses an explicit tab directly, without a widget.
+// Public connection routing uses no model-supplied chat ID. Missing client
+// metadata fails explicitly rather than guessing a tab or mutating its Composer.
 const groupWorker=worker();
-groupWorker.tabs.get(42).groupId=7;
-groupWorker.tabs.set(51,{id:51,groupId:7,url:'https://forum.test/thread',title:'Forum'});
-groupWorker.context.chrome.tabs.query=async query=>[...groupWorker.tabs.values()].filter(tab=>query.groupId==null || tab.groupId===query.groupId);
-groupWorker.context.configuredBrowserStudyOptions=async()=>({detailedLogging:false});
 const callContext=args=>groupWorker.context.handleMcpRequest({id:10,method:'tools/call',params:{name:'system_get_chat_context',arguments:args}});
-const groupStart=await callContext({chatTabId:42});
-assert.equal(groupStart.result.structuredContent.status,'completed');
-assert.equal(groupStart.result._meta,undefined);
-assert.equal(groupStart.result.structuredContent.chatTabId,42);
-assert.deepEqual(JSON.parse(JSON.stringify(groupStart.result.structuredContent.group.tabs.map(tab=>tab.tabId))),[42,51]);
+assert.equal((await callContext({chatTabId:42})).result.structuredContent.error.code,'INVALID_ARGUMENT');
+assert.equal((await callContext({})).result.structuredContent.error.code,'CHAT_SESSION_UNAVAILABLE');
 assert.equal(groupWorker.mutations.length,0);
-assert.equal((await callContext({})).result.structuredContent.status,'rejected','missing target never opens a setup widget');
-const noGroup=worker();const noGroupStart=await noGroup.context.handleMcpRequest({id:11,method:'tools/call',params:{name:'system_get_chat_context',arguments:{chatTabId:42}}});
-assert.equal(noGroupStart.result.structuredContent.status,'rejected');
-const diagnosticResult=await noGroup.context.handleMcpRequest({id:12,method:'tools/call',params:{name:'system_get_diagnostics',arguments:{}}});
-assert.equal(noGroupStart.result.structuredContent.error.code,'BROWSER_GROUP_NOT_FOUND',JSON.stringify(noGroupStart.result.structuredContent));
-console.log('Direct group context: exact supplied tab, no widget, preserved Composer and failure diagnostics passed');
+console.log('Connection routing: no public chat ID, explicit missing-session error and preserved Composer passed');

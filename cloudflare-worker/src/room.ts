@@ -3,7 +3,7 @@ import { z } from "zod";
 import validateArguments from "./validators.js";
 import { SOCKET_TTL, MAX_BYTES, PublicError, errorResponse, json, readJson, type Env } from "./types";
 
-type ToolCallRequest = { jsonrpc: "2.0"; method: "tools/call"; params: { name: string; arguments: Record<string, unknown> } };
+type ToolCallRequest = { jsonrpc: "2.0"; method: "tools/call"; params: { name: string; arguments: Record<string, unknown>; chatSession?: string } };
 
 interface SocketIdentity { installationId: string; expiresAt: number; directTools?: boolean }
 interface Pending {
@@ -14,8 +14,8 @@ interface Pending {
   chatTabId?: number;
   tool: string;
 }
-// Exactly one authenticated extension per account. No conversation handshakes,
-// focus guesses, queued execution or automatic replay after an unknown outcome.
+// Exactly one authenticated extension per account. Chat capabilities and Chrome
+// document bindings stay local; never replay actions after an unknown outcome.
 export class BrowserRoom extends DurableObject<Env> {
   private pending = new Map<string, Pending>();
   private connectionWaiters = new Set<() => void>();
@@ -68,7 +68,7 @@ export class BrowserRoom extends DurableObject<Env> {
       }
       if (path === "/dispatch") {
         const body = z.object({ request: z.object({ jsonrpc: z.literal("2.0"), method: z.literal("tools/call"),
-          params: z.object({ name: z.string(), arguments: z.record(z.string(), z.unknown()) }).strict() }).strict(),
+          params: z.object({ name: z.string(), arguments: z.record(z.string(), z.unknown()), chatSession: z.string().regex(/^[a-f0-9]{64}$/).optional() }).strict() }).strict(),
           workerReceivedAtMs: z.number().int().nonnegative() }).strict().parse(await readJson(request));
         const name = body.request.params.name;
         if (!Object.hasOwn(validateArguments, name) || name === "system_connection_status" || !(validateArguments as Record<string, any>)[name](body.request.params.arguments))
@@ -143,15 +143,17 @@ export class BrowserRoom extends DurableObject<Env> {
     if (typeof data !== "string" || new TextEncoder().encode(data).length > MAX_BYTES) { socket.close(1009, "Invalid payload"); this.rejectSocket(socket, "BROWSER_PROTOCOL_ERROR", "Invalid extension response."); return; }
     try {
       const msg = z.object({ type: z.literal("response"), requestId: z.string().uuid(),
+        chatTabId: z.number().int().nonnegative().optional(),
         result: z.record(z.string(), z.unknown()).optional(), error: z.object({ code: z.number().int(), message: z.string().max(500) }).strict().optional()
       }).strict().refine(value => (value.result !== undefined) !== (value.error !== undefined)).parse(JSON.parse(data));
       const pending = this.pending.get(msg.requestId);
       if (!pending || pending.socket !== socket) return;
       clearTimeout(pending.timer); this.pending.delete(msg.requestId);
       // Only safe correlation/timestamps return to the extension recorder.
-      if (pending.tool.startsWith("site_") && pending.chatTabId !== undefined) {
+      const chatTabId = pending.chatTabId ?? msg.chatTabId;
+      if (pending.tool.startsWith("site_") && chatTabId !== undefined) {
         try { socket.send(JSON.stringify({ type: "timing", requestId: msg.requestId, tool: pending.tool,
-          chatTabId: pending.chatTabId, roomRespondedAtMs: Date.now() })); } catch {}
+          chatTabId, roomRespondedAtMs: Date.now() })); } catch {}
       }
       pending.resolve(msg.error ? { error: msg.error } : { result: msg.result });
     } catch { socket.close(1008, "Invalid response"); this.rejectSocket(socket, "BROWSER_PROTOCOL_ERROR", "Invalid extension response."); }

@@ -9,7 +9,7 @@ const f=fixture();const started=await f.agent.start(10);
 assert.equal(started.chatTabId,22);assert.equal(started.group.groupId,100);
 assertSchema(definitions.find(t=>t.name==='site_list_tabs').outputSchema,{chatTabId:22,group:started.group});
 const prompt=f.events.find(e=>e[0]==='prompt')[2];
-assert.match(prompt,/leading chatTabId/);assert.match(prompt,/chatTabId: 22/);
+assert.doesNotMatch(prompt,/chatTabId|chat_tab_id|tabId:/);
 assert.equal(started.group.chatTabId,22);assert.equal(started.group.totalTabs,2);assert.equal(f.events.filter(e=>e[0]==='prompt').length,1);
 assert.doesNotMatch(prompt,/sessionId|bas_|site_get_images|site_get_files/);
 for(const tool of definitions){assert.ok(!tool.inputSchema.properties.sessionId);assert.ok(tool.inputSchema.required.includes('chatTabId'));}
@@ -39,7 +39,7 @@ const task=await f.run('site_get_images',{resourceId});assert.equal(task.status,
 await f.scheduled.shift()();const done=await f.run('site_files_status',{taskId:task.taskId});
 assert.equal(done.status,'completed');assert.equal(done.progressPercent,100);assert.equal(done.submittedFiles.length,1);
 assert.equal(f.uploads[0].options.target.tabId,22);assert.equal(f.uploads[0].options.target.chatPath,'/c/study22');
-assert.match(f.uploads[0].options.continuation,/chatTabId: 22 and source tabId: 21/);assert.doesNotMatch(f.uploads[0].options.continuation,/bas_/);
+assert.match(f.uploads[0].options.continuation,/in this conversation/);assert.doesNotMatch(f.uploads[0].options.continuation,/chatTabId|source tabId/);assert.doesNotMatch(f.uploads[0].options.continuation,/bas_/);
 assert.equal((await f.run('site_files_cancel',{taskId:task.taskId})).cancelled,false);
 f.setOriginalFailure();const fallback=await f.run('site_get_images',{resourceId,addToChat:false});await f.scheduled.shift()();
 assert.equal((await f.run('site_files_status',{taskId:fallback.taskId})).extraction,'element-screenshot');

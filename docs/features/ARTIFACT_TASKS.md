@@ -48,7 +48,7 @@ With delivery disabled, completed creation completes the overall task. With deli
 
 ## Originating tab and automation
 
-For public MCP delivery, provide the exact tabId from the startup prompt. The extension pins the live Chrome document and saved conversation during the productive call; no connection widget or handshake is needed. Missing targets fail before creation. Navigation, duplicate conversations, closed tabs and connection replacement stop delivery without switching destinations. The reservation holds no placeholder file and does not change the draft during creation. Existing output files survive later delivery failure.
+Public MCP delivery resolves the chat from its verified conversation connection. Missing connections fail before creation with BROWSER_CONTEXT_REQUIRED; call system_get_chat_context and poll system_chat_context_status, then retry. File-only creation has no connection widget. See [Chat binding](CHAT_BINDING.md). Navigation, duplicate conversations, closed tabs and connection replacement stop delivery without switching destinations. The reservation holds no placeholder file and does not change the draft during creation. Existing output files survive later delivery failure.
 
 The compact service widget remains a progress surface for artifact tools. Its legacy local-only handshake is not used by the public account relay, which supplies an already pinned document.
 

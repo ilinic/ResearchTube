@@ -75,13 +75,14 @@ const inactiveShare={...singleShare,state:'inactive',file:null,publicFileUrl:nul
 assert.equal(w.context.normalizeWorkspaceShareStatus(inactiveShare).state,'inactive');
 for(const name of BROWSER_TOOL_NAMES) {
  const tool=definitions.find(t=>t.name===name);assert.ok(tool,'generated bundle must expose '+name);
- assert.equal(tool.inputSchema.additionalProperties,false);assert.ok(tool.inputSchema.required.includes('chatTabId'));
+ assert.equal(tool.inputSchema.additionalProperties,false);assert.ok(!tool.inputSchema.required.includes('chatTabId'));
  assert.equal(w.context.toolSettingsMetadata(name).group,'browser');
 }
 const browserCalls=[];
 w.context.browserAgent.execute=async(name,args)=>{browserCalls.push({name,args});return {mockBrowserResult:true,group:{groupId:73}};};
-const browserRouted=await w.call('site_session_status',{chatTabId:22});
-assert.equal(browserRouted.result.structuredContent.mockBrowserResult,true);assert.equal(browserCalls[0].name,'site_session_status');
+vm.runInContext('cloudConnection.targetForRequest=()=>({tabId:22}); cloudConnection.verifyTarget=async()=>{}; cloudConnection.assertLive=()=>{};',w.context);
+const browserRouted=await w.call('site_session_status',{});
+assert.equal(browserRouted.result.structuredContent.mockBrowserResult,true);assert.equal(browserCalls[0].name,'site_session_status'); assert.equal(browserCalls[0].args.chatTabId,22,'caller resolved privately');
 assert.equal((await w.call('site_session_status',{chatTabId:22,tabId:81})).result.isError,false,'extra browser arguments are rejected before routing');
 assert.equal(browserCalls.length,1);
 
@@ -90,7 +91,7 @@ assert.equal(BROWSER_TOOL_NAMES.length,14);
 assert.ok(definitions.every(tool=>!tool.name.startsWith('browser_')));
 for(const name of BROWSER_TOOL_NAMES) {
  const properties=definitions.find(tool=>tool.name===name).inputSchema.properties;
- const args={chatTabId:22};
+ const args={};
  if(properties.tabId) args.tabId=21;
  if(properties.text) args.text='Hello';
  if(properties.nodeId) args.nodeId='n_21_1_1';
@@ -140,7 +141,7 @@ for(const name of ARTIFACT_TOOLS){const tool=definitions.find(t=>t.name===name);
  assert.equal(tool.inputSchema.additionalProperties,false);assert.equal(tool.outputSchema.properties.statusTool.const,'media_task_status');
  assert.equal(tool.inputSchema.properties.showInChat,undefined,'presentation flag must not compete with uploading');
  assert.match(tool.description,/asynchronous/);assert.match(tool.description,/creation.data/);assert.match(tool.description,/addToChat/);
- assert.ok(!tool._meta['openai/outputTemplate'].includes('capture-frame'),'no artifact producer renders a media viewer');
+ assert.equal(tool._meta['openai/outputTemplate'],undefined,'file-only or already-bound artifact producers have no widget');
 }
 for(const name of Object.keys({...ARTIFACT_STATUS_TOOLS,...ARTIFACT_CANCEL_TOOLS})) {
  const tool=definitions.find(t=>t.name===name);assert.ok(tool.outputSchema.properties.taskId || tool.outputSchema.properties.task);

@@ -2,7 +2,7 @@
 // No requests are sent to production, Google, ChatGPT or the user's browser.
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -58,6 +58,7 @@ try {
       ...(request.postDataBuffer()?{body:request.postDataBuffer()}:{}),redirect:'manual'});
     return route.fulfill({status:response.status,headers:Object.fromEntries(response.headers),body:Buffer.from(await response.arrayBuffer())});
    }
+   if(url.origin==='https://web-sandbox.oaiusercontent.com') return route.fulfill({contentType:'text/html',body:await readFile(new URL('../../extension/ui/chat-target-v1.html',import.meta.url),'utf8')});
    if(url.origin==='https://chatgpt.com')return route.fulfill({contentType:'text/html',body:'<!doctype html><title>Simulated ChatGPT host</title><p>Test conversation</p>'});
    if(url.origin==='https://www.youtube.com')return route.fulfill({contentType:'text/html',body:`<!doctype html><title>Simulated public YouTube</title><script>
     addEventListener('message',event=>{
@@ -102,7 +103,8 @@ try {
  assert.equal(browser.pages().some(page=>page.url().startsWith(ROOT+'/setup?')),false);
  assert.equal(await chat.locator('iframe').count(),0,'no connection widget in the chat');
  console.log('Automatic enrollment: native external messaging, existing sign-in, no Settings click or chat widget');
- const run=async(name,args={})=>(await roomPost(room,'/dispatch',{workerReceivedAtMs:Date.now(),request:{jsonrpc:'2.0',method:'tools/call',params:{name,arguments:args}}})).json();
+ const chatSession='a'.repeat(64);
+ const run=async(name,args={},key=chatSession)=>(await roomPost(room,'/dispatch',{workerReceivedAtMs:Date.now(),request:{jsonrpc:'2.0',method:'tools/call',params:{name,arguments:args,chatSession:key}}})).json();
  const youtube=await browser.newPage();await youtube.goto('https://www.youtube.com/');await chat.bringToFront();
  const transcript=await run('youtube_get_transcript',{videoId:'aqz-KE-bpKQ',limit:10});
  assert.equal(transcript.result?.structuredContent?.segments?.[0]?.text,'Native direct transcript',JSON.stringify(transcript));
@@ -112,13 +114,43 @@ try {
  const chatId=tabs.find(tab=>tab.url==='https://chatgpt.com/c/native-integration').id;
  const youtubeId=tabs.find(tab=>tab.url?.startsWith('https://www.youtube.com/')).id;
  await settings.evaluate(ids=>chrome.tabs.group({tabIds:ids}),[chatId,youtubeId]);
- const group=await run('site_list_tabs',{chatTabId:chatId});
+ const unbound=await run('site_list_tabs');
+ assert.equal(unbound.result.structuredContent.error.code,'BROWSER_CONTEXT_REQUIRED');
+ const connect=async()=>{
+  const started=await run('system_get_chat_context');
+  assert.equal(started.result.structuredContent.status,'working',JSON.stringify(started));
+  const metadata=started.result._meta;
+  // A forged settings-page message has no sender.tab and cannot claim a chat.
+  const forged=await settings.evaluate(metadata=>chrome.runtime.sendMessage({type:'researchtube_chat_target_bind',...metadata['researchtube/chatTarget']}),metadata);
+  assert.equal(forged.ok,false);
+  await chat.evaluate(()=>{const frame=document.createElement('iframe');frame.id='binding';frame.src='https://web-sandbox.oaiusercontent.com/binding';document.body.append(frame);});
+  await chat.frameLocator('#binding').locator('#status').waitFor();
+  await chat.evaluate(metadata=>document.querySelector('#binding').contentWindow.postMessage({jsonrpc:'2.0',method:'ui/notifications/tool-result',params:{_meta:metadata}},'*'),metadata);
+  try { await chat.frameLocator('#binding').getByText('Connected to this chat.',{exact:true}).waitFor({timeout:10000}); }
+  catch(error) {
+    console.log('Binding diagnostic',await chat.frameLocator('#binding').locator('#status').textContent(), JSON.stringify(await run('system_chat_context_status',{taskId:started.result.structuredContent.taskId})), JSON.stringify(await run('system_get_diagnostics',{limit:5})),await worker.evaluate(()=>globalThis.__integrationInternal));
+    throw error;
+  }
+  const status=await run('system_chat_context_status',{taskId:started.result.structuredContent.taskId});
+  assert.equal(status.result.structuredContent.status,'completed',JSON.stringify(status));
+  assert.equal(status.result._meta,undefined,'polling has no widget metadata');
+ };
+ await connect();
+ const group=await run('site_list_tabs');
  assert.equal(group.result?.structuredContent?.chatTabId,chatId,JSON.stringify(group));
+ const reused=await run('site_list_tabs');
+ assert.equal(reused.result?.structuredContent?.chatTabId,chatId);
+ assert.equal(await chat.locator('iframe').count(),1,'productive tools reuse binding without adding widgets');
+ const foreign=await run('site_list_tabs',{},'b'.repeat(64));
+ assert.equal(foreign.result.structuredContent.error.code,'BROWSER_CONTEXT_REQUIRED','another conversation cannot reuse the target');
  await chat.reload();
- const afterReload=await run('site_list_tabs',{chatTabId:chatId});
- assert.equal(afterReload.result?.structuredContent?.chatTabId,chatId,JSON.stringify(afterReload));
- console.log('Exact chat target: first Site call claims the group; page reload requires no widget');
- const missing=await run('media_view',{files:[{workspacePath:'test.png'}]});
+ const afterReload=await run('site_list_tabs');
+ assert.equal(afterReload.result.structuredContent.error.code,'BROWSER_CONTEXT_REQUIRED','reload invalidates the old document');
+ await connect();
+ const rebound=await run('site_list_tabs');
+ assert.equal(rebound.result?.structuredContent?.chatTabId,chatId,JSON.stringify(rebound));
+ console.log('Lazy binding: real iframe sender, no forged tab, session isolation, reuse and document reload rebind');
+ const missing=await run('media_view',{files:[{workspacePath:'test.png'}]},'c'.repeat(64));
  assert.equal(missing.result.structuredContent.error.code,'BROWSER_CONTEXT_REQUIRED');
  const stored=await settings.evaluate(()=>chrome.storage.local.get('researchtubeCloudCredential'));
  const installationId=stored.researchtubeCloudCredential.installationId;

@@ -264,7 +264,6 @@ export function createBrowserAgent(host) {
       await queue(agent.id, async () => { checkStarting(); await ensureTarget(target, () => notify("waitingForPage")); checkStarting(); });
       await notify("waitingForChat");
       const prompt = renderStartupPrompt("studyThisSitePrompt", templates, {
-        chat_tab_id: chat.id, site_tab_id: agent.id, group_id: groupId,
         site_title: source.title || "", site_link: safePageUrl(source.url)
       });
       const chatPath = await host.startChat(chat.id, prompt, checkStarting, notify, trace);
@@ -408,7 +407,7 @@ export function createBrowserAgent(host) {
         progress(task, "attaching", 65);
         const files = await session.trace.span("resource.resolveFiles", () => host.resolveFiles(task.files.map(file => file.workspacePath)), { taskId: task.taskId });
         checkTask(task, session);
-        const continuation = `Requested browser resource(s) ${task.resourceIds.join(", ")} attached. Continue the current Study Page task using chatTabId: ${task.chatTabId} and source tabId: ${task.tabId}.`;
+        const continuation = `Requested browser resource(s) ${task.resourceIds.join(", ")} attached. Continue the current Study Page task in this conversation. Use site_list_tabs if the site roster needs refreshing.`;
         await host.attachFiles(files, {
           target: { tabId: task.chatTabId, chatPath: task.caller.chatPath, ...(task.caller.cloudGuard?.target ? { cloudTarget: task.caller.cloudGuard.target } : {}) }, continuation,
           trace: session.trace, taskId: task.taskId,

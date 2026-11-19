@@ -1,4 +1,5 @@
 // Public transport only. All actual tools still run through handleMcpRequest.
+import { createChatBindings, needsChatTarget } from './chat-bindings.js';
 
 export const CLOUD_ORIGIN = "https://rtube.win";
 const KEY = "researchtubeCloudCredential";
@@ -7,7 +8,6 @@ const DISABLED_KEY = "researchtubeCloudDisabled";
 const SIGN_IN_KEY = "researchtubeCloudSignInRequired";
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 const SECRET = /^[a-f0-9-]{72}$/;
-const SOURCE_TABS = new Set(["site_read", "site_get_children", "site_get_node", "site_get_text", "site_interact", "site_get_images", "site_get_files", "system_get_diagnostics"]);
 const fail = (code, message) => Object.assign(new Error(message), { code });
 export function cloudConversation(value) {
   try {
@@ -24,8 +24,13 @@ export function createCloudConnection(host) {
   let socket = null, opening = null, retryTimer = null, heartbeat = null, generation = 0, attempts = 0, nextRetryAt = 0;
   let openedAt = 0, lastPong = 0, state = "not-configured", errorCode = null;
   const bindings = new Map(), requests = new Map(), pending = new Set(), seen = new Set();
+  const requestSessions = new Map();
   let automatic = null, accountOpening = null, accountRetryAt = 0;
   const now = () => host.now?.() ?? Date.now();
+  const chatBindings = createChatBindings({ now, extensionId: host.chrome.runtime.id, isChat: cloudConversation,
+    id: () => 'tsk_' + host.uuid().replaceAll('-', '').slice(0, 10), uuid: host.uuid,
+    setTimeout: host.setTimeout, clearTimeout: host.clearTimeout, pin: pinTarget, verify: verifyTarget, live,
+    connectGroup: (...args) => host.connectGroup(...args) });
   // Defer browser API access until an operation runs (also permits catalog
   // export to instantiate the module without browser/storage authority).
   const local = Object.fromEntries(["get", "set", "remove"].map(name => [name, (...args) => host.chrome.storage.local[name](...args)]));
@@ -58,6 +63,7 @@ export function createCloudConnection(host) {
   }
   async function readTarget(tabId) {
     const tab = await host.chrome.tabs.get(tabId);
+    if (!cloudConversation(tab.url)) throw fail('BROWSER_CONTEXT_REQUIRED', 'The target is not a saved ChatGPT conversation.');
     const results = await host.chrome.scripting.executeScript({ target: { tabId, frameIds: [0] }, func: cloudDocumentSnapshot });
     const top = results?.find(result => result.frameId === 0);
     const conversationId = cloudConversation(top?.result?.url);
@@ -87,13 +93,29 @@ export function createCloudConnection(host) {
   function invalidate(id) {
     const target = bindings.get(id);
     bindings.delete(id);
+    if (target) chatBindings.invalidate(target);
     if (target) void host.invalidated?.(target);
   }
   function invalidateAll() { for (const id of [...bindings.keys()]) invalidate(id); }
+  async function pinTarget(tabId, expectedUrl) {
+    const revision = generation, ws = socket;
+    if (!ws || ws.readyState !== 1) throw fail('EXTENSION_OFFLINE', 'The extension connection ended.');
+    const snapshot = await readTarget(tabId);
+    if (cloudConversation(expectedUrl) !== snapshot.conversationId) throw fail('BROWSER_TARGET_MISMATCH', 'The invoking conversation changed during binding.');
+    if (socket !== ws || revision !== generation) throw fail('EXTENSION_OFFLINE', 'The extension connection ended.');
+    let target = [...bindings.values()].find(value => value.tabId === tabId && value.documentId === snapshot.documentId && value.conversationId === snapshot.conversationId && value.expiresAt > now());
+    if (!target) {
+      for (const [id, value] of bindings) if (value.tabId === tabId || value.expiresAt <= now()) invalidate(id);
+      if (bindings.size >= 200) throw fail('BROWSER_BUSY', 'Too many chat targets are in use.');
+      target = { ...snapshot, bindingId: host.uuid(), expiresAt: now() + 3600000 };
+      bindings.set(target.bindingId, target);
+    }
+    return target;
+  }
   function stopSocket() {
     const old = socket; socket = null;
     if (heartbeat !== null) host.clearInterval(heartbeat); heartbeat = null;
-    invalidateAll(); seen.clear();
+    invalidateAll(); chatBindings.reset(); seen.clear();
     old?.close();
   }
   function retry() {
@@ -182,18 +204,16 @@ export function createCloudConnection(host) {
         !["workerReceivedAtMs", "roomReceivedAtMs", "roomForwardedAtMs"].every(key => Number.isSafeInteger(message.timing[key])) ||
         !message.request || Object.keys(message.request).some(key => !["jsonrpc", "method", "params"].includes(key)) ||
         message.request.jsonrpc !== "2.0" || message.request.method !== "tools/call" ||
-        !message.request.params || Object.keys(message.request.params).some(key => !["name", "arguments"].includes(key)) ||
+        !message.request.params || Object.keys(message.request.params).some(key => !["name", "arguments", "chatSession"].includes(key)) ||
+        (message.request.params.chatSession !== undefined && (typeof message.request.params.chatSession !== 'string' || !/^[a-f0-9]{64}$/.test(message.request.params.chatSession))) ||
         typeof message.request.params.name !== "string" || !message.request.params.arguments || typeof message.request.params.arguments !== "object" || Array.isArray(message.request.params.arguments))
       throw fail("CLOUD_PROTOCOL_ERROR", "Invalid relay request.");
-    const toolName = message.request.params.name, chatTabId = message.request.params.arguments.chatTabId;
+    const toolName = message.request.params.name;
+    let chatTabId;
     const record = (stage, atMs) => {
       if (!/^site_[a-z_]+$/.test(toolName) || !Number.isSafeInteger(chatTabId) || chatTabId < 0) return;
       try { host.timing?.({ chatTabId, requestId: message.requestId, stage, event: "stamp", atMs }); } catch {}
     };
-    record("worker.received", message.timing.workerReceivedAtMs);
-    record("room.received", message.timing.roomReceivedAtMs);
-    record("room.forwarded", message.timing.roomForwardedAtMs);
-    record("extension.received", Date.now());
     if (seen.has(message.requestId)) return;
     seen.add(message.requestId);
     if (seen.size > 4096 || pending.size >= 100) { ws.close(); return; }
@@ -203,36 +223,34 @@ export function createCloudConnection(host) {
       const { name, arguments: args } = message.request.params;
       if (!await host.accepts(name, args)) throw fail("INVALID_ARGUMENT", "Arguments do not match an available tool.");
       if (socket !== ws || requestGeneration !== generation || ws.readyState !== 1) throw fail("EXTENSION_OFFLINE", "The extension connection ended.");
-      const tabId = args.chatTabId ?? (!SOURCE_TABS.has(name) ? args.tabId : undefined);
-      if ((args.addToChat === true || name === "media_view" || name === "system_get_chat_context") && tabId === undefined)
-        throw fail("BROWSER_CONTEXT_REQUIRED", "Provide the exact ChatGPT tabId from the startup prompt. No other tab was selected.");
       let target = null;
-      if (tabId !== undefined) {
-        if (!Number.isSafeInteger(tabId) || tabId < 0) throw fail("INVALID_ARGUMENT", "The ChatGPT tabId must be a nonnegative integer.");
-        const revision = generation;
-        const snapshot = await readTarget(tabId);
-        if (socket !== ws || revision !== generation) throw fail("EXTENSION_OFFLINE", "The extension connection ended.");
-        target = [...bindings.values()].find(value => value.tabId === tabId && value.documentId === snapshot.documentId && value.conversationId === snapshot.conversationId && value.expiresAt > now());
-        if (!target) {
-          for (const [id, value] of bindings) if (value.tabId === tabId || value.expiresAt <= now()) invalidate(id);
-          if (bindings.size >= 200) throw fail("BROWSER_BUSY", "Too many chat targets are in use.");
-          target = { ...snapshot, bindingId: host.uuid(), expiresAt: now() + 3600000 };
-          bindings.set(target.bindingId, target);
-        }
+      const chatSession = message.request.params.chatSession;
+      requestSessions.set(message.requestId, chatSession);
+      if (needsChatTarget(name, args)) {
+        target = await chatBindings.target(chatSession);
+        if (!target) throw fail('BROWSER_CONTEXT_REQUIRED', 'Call system_get_chat_context, poll system_chat_context_status until completed, then retry this operation. It has not executed.');
         requests.set(message.requestId, target);
       }
-      const result = await host.dispatch({ jsonrpc: "2.0", id: message.requestId, method: "tools/call", params: message.request.params });
+      if (target && /^site_[a-z_]+$/.test(name) && chatTabId === undefined) {
+        chatTabId = target.tabId;
+        record('worker.received', message.timing.workerReceivedAtMs);
+        record('room.received', message.timing.roomReceivedAtMs);
+        record('room.forwarded', message.timing.roomForwardedAtMs);
+        record('extension.received', Date.now());
+      }
+      const result = await host.dispatch({ jsonrpc: "2.0", id: message.requestId, method: "tools/call", params: { name, arguments: args } });
       if (target) await verifyTarget(target);
       response = result?.error ? { error: { code: -32603, message: "The extension could not complete this request." } } : { result: result.result };
     } catch (error) {
       response = error?.code && /^[A-Z][A-Z0-9_]{0,63}$/.test(error.code)
-        ? { result: { isError: true, content: [{ type: "text", text: "The requested operation could not run." }], structuredContent: { error: { code: error.code, message: error.code === "BROWSER_CONTEXT_REQUIRED" ? "Provide the exact ChatGPT tabId from the startup prompt. No other tab was selected." : "The requested tool or exact browser target is unavailable. No alternate tab was selected." } } } }
+        ? { result: { isError: true, content: [{ type: "text", text: error.code === 'BROWSER_CONTEXT_REQUIRED' ? 'Call system_get_chat_context and poll system_chat_context_status until completed, then retry this operation. It has not executed.' : 'The requested operation could not run.' }], structuredContent: { error: { code: error.code, message: error.code === "BROWSER_CONTEXT_REQUIRED" || error.code === 'CHAT_SESSION_UNAVAILABLE' ? error.message : "The requested tool or exact browser target is unavailable. No alternate tab was selected." } } } }
         : { error: { code: -32000, message: "The extension could not complete this request." } };
     }
-    finally { requests.delete(message.requestId); pending.delete(message.requestId); }
+    finally { requests.delete(message.requestId); requestSessions.delete(message.requestId); pending.delete(message.requestId); }
     if (socket !== ws || ws.readyState !== 1) return;
     record("extension.returned", Date.now());
-    const payload = { type: "response", requestId: message.requestId, ...response };
+    const payload = { type: "response", requestId: message.requestId, ...response,
+      ...(/^site_[a-z_]+$/.test(toolName) && Number.isSafeInteger(chatTabId) && chatTabId >= 0 ? { chatTabId } : {}) };
     const text = JSON.stringify(payload);
     ws.send(new TextEncoder().encode(text).length <= 1048576 ? text : JSON.stringify({ type: "response", requestId: message.requestId,
       error: { code: -32000, message: "The response exceeded the relay limit. Request a smaller result." } }));
@@ -360,5 +378,9 @@ export function createCloudConnection(host) {
   }
   async function suspend() { generation++; stopSocket(); if (retryTimer !== null) host.clearTimeout(retryTimer); retryTimer = null; nextRetryAt = 0; }
   return { start, ensureAccount, status, external, beginEnrollment, disconnect, suspend, tabChanged, verifyTarget,
+    bindChat: chatBindings.bind,
+    startChatBinding: (id, resumeGroup) => chatBindings.start(requestSessions.get(id), resumeGroup),
+    chatBindingStatus: (id, taskId) => chatBindings.status(taskId, requestSessions.get(id)),
+    cancelChatBinding: (id, taskId) => chatBindings.cancel(taskId, requestSessions.get(id)),
     targetForRequest: id => requests.get(id) || null, assertLive: live };
 }

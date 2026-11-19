@@ -1,7 +1,7 @@
 // Defaults cover missing settings or an unavailable optional Agent.
 export const DEFAULT_STARTUP_PROMPTS = Object.freeze({
-  studyThisSitePrompt: "@ResearchTube Study the text and images of the sites in my tab group and explain in my language. Use site_list_tabs to find the current sites; download and inspect relevant images. Users may add or remove site tabs during research: check groupChanges and refresh the tab list when needed. Your leading chatTabId: [chat_tab_id].",
-  describeThisVideoPrompt: "@ResearchTube [video_link] [video_title]\nStudy this video and explain it in my language. Use tabId: [chat_tab_id] for async tasks."
+  studyThisSitePrompt: "@ResearchTube Study the text and images of the sites in my tab group and explain in my language. Use site_list_tabs to find the current sites; download and inspect relevant images. Users may add or remove site tabs during research: check groupChanges and refresh the tab list when needed.",
+  describeThisVideoPrompt: "@ResearchTube [video_link] [video_title]\nStudy this video and explain it in my language. When visual details matter, also inspect relevant video frames or storyboards and upload selected frames for visual analysis; do not rely on the transcript alone."
 });
 const PLACEHOLDERS = Object.freeze({
   studyThisSitePrompt: ["chat_tab_id", "site_tab_id", "site_title", "site_link", "group_id"],
@@ -34,6 +34,7 @@ export function renderStartupPrompt(key, templates, values) {
   if (!template) throw invalid("Unknown startup prompt setting.");
   // One pass: bracketed text in a page title is data, not another placeholder.
   return template.replace(/\[([a-z][a-z0-9_]*)\]/g, (_, name) => {
+    if (['chat_tab_id', 'site_tab_id', 'group_id'].includes(name)) return '';
     if (!Object.hasOwn(values, name) || values[name] === undefined || values[name] === null) throw invalid(`Missing startup prompt value: [${name}].`);
     return String(values[name]);
   });

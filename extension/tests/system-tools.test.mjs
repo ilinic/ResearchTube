@@ -39,7 +39,7 @@ for(const kind of ["ungrouped","duplicate","closed","not-chat"]){
  await assert.rejects(test.context.direct(41),undefined,kind);
 }
 await assert.rejects(f.context.direct(undefined));
-assert.equal(definitions[0]._meta,undefined);
+assert.equal(definitions[0]._meta.ui.resourceUri,'ui://widget');
 
 let stored = [], writes = 0;
 const options = { version: "fixture", capacity: 25, read: async () => stored, write: async value => { stored = structuredClone(value); writes++; } };
@@ -68,7 +68,8 @@ assert.equal(failures.length, 2); assert.doesNotMatch(JSON.stringify(failures), 
 
 for (const value of [{ limit: 0 }, { limit: 101 }, { limit: true }, { tabId: -1 }, { taskId: "bad" }, { url: "https://test" }]) assert.throws(() => validateSystemInput("system_get_diagnostics", value));
 assert.throws(() => validateSystemInput("system_get_chat_context", { cancel: true }));
-assert.deepEqual(validateSystemInput("system_get_chat_context", { chatTabId: 41 }), { chatTabId: 41 });
-assert.throws(() => validateSystemInput("system_get_chat_context", {}));
+assert.deepEqual(validateSystemInput("system_get_chat_context", { resumeGroup: true }), { resumeGroup: true });
+assert.throws(() => validateSystemInput("system_get_chat_context", { chatTabId: 41 }));
+assert.deepEqual(validateSystemInput("system_get_chat_context", {}), {});
 
 console.log("System tools: direct exact targets, manual groups, explicit resume and bounded sanitized diagnostics passed");

@@ -30,9 +30,9 @@ test("productive dispatch needs only the account extension and returns its first
 });
 test("site requests receive correlated UTC relay stamps without page contents", async () => {
   const {stub,socket} = await setup();
-  const incoming = message(socket), pending = roomPost(stub,"/dispatch",request("site_list_tabs",{chatTabId:42})), command = await incoming;
+  const incoming = message(socket), pending = roomPost(stub,"/dispatch",request("site_list_tabs",{})), command = await incoming;
   const stamp = message(socket);
-  socket.send(JSON.stringify({type:"response",requestId:command.requestId,result:{content:[{type:"text",text:"ok"}]}}));
+  socket.send(JSON.stringify({type:"response",requestId:command.requestId,chatTabId:42,result:{content:[{type:"text",text:"ok"}]}}));
   const timing = await stamp;
   expect(timing).toMatchObject({type:"timing",requestId:command.requestId,chatTabId:42,tool:"site_list_tabs"});
   expect(timing.roomRespondedAtMs).toBeGreaterThanOrEqual(command.timing.roomForwardedAtMs);

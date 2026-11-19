@@ -1,16 +1,16 @@
 # Browser Agent: group automation
 
-**Study this site** duplicates the site and opens one leading ChatGPT conversation in a blue `RT · …` Chrome group. The source stays in place. The prompt supplies the leading `chatTabId`. Add other site tabs to this group by dragging them in; remove, close or duplicate sites during research. All file results and continuations go to the leading chat.
+**Study this site** duplicates the site and opens one leading ChatGPT conversation in a blue `RT · …` Chrome group. The source stays in place. The prompt contains no tab or group IDs. Add other site tabs to this group by dragging them in; remove, close or duplicate sites during research. All file results and continuations go to the leading chat.
 
-Reload the Extension and refresh the MCP catalog after upgrading. Study this site supplies the exact chatTabId in its startup prompt. First productive Site calls identify the group automatically without a connection widget. Explicit `system_get_chat_context` with chatTabId reads or resumes a stopped group immediately.
+Reload the Extension and refresh the MCP catalog after upgrading. Site tools use a verified conversation connection. On BROWSER_CONTEXT_REQUIRED, call system_get_chat_context and poll system_chat_context_status before retrying. This one compact widget binds the exact Chrome document automatically. Later calls reuse the connection. resumeGroup=true explicitly resumes a stopped group.
 
 ## Manually created groups
 
-A manually created group needs its exact leading chatTabId. When that ID is available, the first Site call can claim a group containing exactly one saved ChatGPT conversation. Unknown IDs are never guessed from focus; use Study this site to create a study with a supplied ID. Extra chats cannot take over an existing owner, and ambiguous unowned groups are refused. A moved, closed, duplicate or changed leading chat fails closed. Stop is preserved until explicit resume; cancelled tasks are never restarted.
+A manually created group needs one saved leading ChatGPT conversation. The lazy connection widget identifies it without a prompt marker or manual ID. The first productive Site call can then claim the group. Focus is never used to guess a target. Extra chats cannot take over an existing owner, and ambiguous unowned groups are refused. A moved, closed, duplicate or changed leading chat fails closed. Stop is preserved until explicit resume; cancelled tasks are never restarted.
 
 ## Prompt templates
 
-Edit `studyThisSitePrompt.value` and `describeThisVideoPrompt.value` in the external `agent/agent-config.json` beside the Agent script or EXE. The Agent loads both templates once at startup and serves them from memory. Restart the Agent after editing. These settings change the initial ChatGPT message, not the tool catalog or an existing chat. Active shipped defaults request answers **in my language**. The site prompt asks for text/image research. The video prompt places the YouTube link before the title and asks to study and explain the video, without requesting storyboards or visual maps. The original shorter prompts are preserved as numbered variants.
+Edit `studyThisSitePrompt.value` and `describeThisVideoPrompt.value` in the external `agent/agent-config.json` beside the Agent script or EXE. The Agent loads both templates once at startup and serves them from memory. Restart the Agent after editing. These settings change the initial ChatGPT message, not the tool catalog or an existing chat. Active shipped defaults request answers **in my language**. The site prompt asks for text/image research. The video prompt places the YouTube link before the title and asks to study and explain the video, and requests relevant video frames or storyboards when visual details matter. Selected frames must be uploaded for model visual analysis; playback alone is insufficient. The original shorter prompts are preserved as numbered variants.
 
 Only the exact keys `studyThisSitePrompt` and `describeThisVideoPrompt` are active. Store alternatives as separate JSON entries with any positive integer suffix: `studyThisSitePrompt1`, `studyThisSitePrompt2`, `describeThisVideoPrompt1`, etc. Each entry keeps the same `value`/`comment` structure. Numbered entries are stored only; they are not sent to the Extension and never selected automatically.
 
@@ -18,21 +18,21 @@ The shipped `...Prompt1` entries preserve the original **in my language** wordin
 
 | Placeholder | Study this site | Describe this video |
 | --- | --- | --- |
-| `[chat_tab_id]` | New ChatGPT tab ID | New ChatGPT tab ID |
-| `[site_tab_id]` | Duplicated site tab ID | — |
-| `[group_id]` | Chrome tab group ID | — |
+| `[chat_tab_id]` | Deprecated; expands to empty text | Deprecated; expands to empty text |
+| `[site_tab_id]` | Deprecated; expands to empty text | — |
+| `[group_id]` | Deprecated; expands to empty text | — |
 | `[site_title]` | Original site's title | — |
 | `[site_link]` | Original site's URL without query or fragment | — |
 | `[video_title]` | — | Current video's title |
 | `[video_link]` | — | Canonical YouTube video URL |
 
-Keep `[chat_tab_id]` so ChatGPT can route tools to its own tab, and `[video_link]` so it knows which video to study. Site automation uses the group and tab IDs; there is no `[session_id]`. Use `\n` inside JSON strings for line breaks. Each template must be nonempty, at most 16000 characters; unknown square-bracket lowercase identifiers report `CONFIG_INVALID`. Substitution happens once, so brackets in titles remain ordinary text.
+Keep `[video_link]` so ChatGPT knows which video to study. Chat identity is obtained automatically; numeric routing placeholders never insert IDs. Site automation still uses returned source-site tab IDs; there is no `[session_id]`. Use `\n` inside JSON strings for line breaks. Each template must be nonempty, at most 16000 characters; unknown square-bracket lowercase identifiers report `CONFIG_INVALID`. Substitution happens once, so brackets in titles remain ordinary text.
 
 Missing entries use the built-in defaults. Both shortcuts support offline defaults when the optional Local Agent is unavailable. Invalid configured values report `CONFIG_INVALID` at Agent startup; they are not silently replaced by defaults. Existing sessions keep the message they started with.
 
 ## Participants and identity
 
-A group has one exact leading `chatTabId`, a live site roster, page connections and file tasks. Every Site tool checks that its supplied caller ID is this group's controller. Page tools additionally require a site `tabId` from `site_list_tabs`; ChatGPT pages cannot be targeted. MCP transport does not authenticate the originating tab: `chatTabId` remains explicit routing, not proof of request origin. The active account authorizes its extension; it pins the explicitly supplied chat document inside execution. No focus, similar-URL guess or election chooses a controller.
+A group has one exact leading `chatTabId`, a live site roster, page connections and file tasks. Every Site tool checks that the privately resolved chat is this group's controller. Page tools additionally require a site `tabId` from `site_list_tabs`; ChatGPT pages cannot be targeted. The account-scoped MCP conversation key is a routing hint, while the widget capability and Chrome sender establish the actual tab. The active account authorizes its extension; it pins the verified chat document inside execution. No focus, similar-URL guess or election chooses a controller.
 
 `site_list_tabs` lists the leading chat and manageable sites, with safe URLs, roles and automation state. Additional ChatGPT tabs are excluded. `offset`/`limit` pagination defaults to 50 and allows up to 200 per page; restart at offset 0 if revision changes. There is no configured site count cap.
 
@@ -46,7 +46,7 @@ A small controller marker in the Extension's isolated page world survives servic
 
 `tab-automation.js` supplies a shared queue per physical tab. Work in different tabs can proceed independently. Page input, Composer messages and file delivery in one tab are serialized. Resource extraction releases its source queue before waiting for the receiving chat, preventing cross-chat delivery deadlocks. Temporary file/Composer operations borrow debugger leases and cannot detach a retained page connection.
 
-`site_files_status` and `site_files_cancel` are available only to the leading chat for its original group's file tasks. Their history remains worker-local. `site_session_status` and `site_session_stop` use the same owner check. Stop cancels page/file work and preserves tabs, files and drafts. Explicit `system_get_chat_context` reconnection in the leading chat resumes it; status reads and worker recovery do not undo Stop.
+`site_files_status` and `site_files_cancel` are available only to the leading chat for its original group's file tasks. Their history remains worker-local. `site_session_status` and `site_session_stop` use the same owner check. Stop cancels page/file work and preserves tabs, files and drafts. Explicit `system_get_chat_context` with resumeGroup=true in the leading chat resumes it; status reads and worker recovery do not undo Stop.
 
 ## Observation and navigation
 
@@ -84,7 +84,7 @@ AUTO appears on group participants and ERR on a failed page/startup. The popup h
 
 ### Copyable performance trace
 
-Use `site_diagnostics_start` with the leading `chatTabId` before a test on the group (for example, searching for a product on AliExpress). Perform ordinary `site_read` and `site_interact` operations, then call `site_diagnostics_report` with the same chatTabId. The report returns a single `reportMarkdown` string ready to paste into a bug report or another chat. Its default `stop: true` ends capture; `stop: false` lets a test inspect progress and continue. A second start resets the previous capture.
+Use `site_diagnostics_start` in the connected leading chat before a test on the group (for example, searching for a product on AliExpress). Perform ordinary `site_read` and `site_interact` operations, then call `site_diagnostics_report` in that same conversation. The report returns a single `reportMarkdown` string ready to paste into a bug report or another chat. Its default `stop: true` ends capture; `stop: false` lets a test inspect progress and continue. A second start resets the previous capture.
 
 The report ranks slow tool calls and gaps between consecutive Site calls, then shows the latest timeline, per-step action durations and slow internal browser stages. A type-and-Enter pair within one `site_interact.steps` batch eliminates the between-call gap; each step retains its own measured duration. Gaps between separate calls include ChatGPT decision time, client scheduling, network and relay delays; they cannot be attributed exclusively to model reasoning. Tool durations and action-step durations are measured in the Extension. Optional low-level browser stages depend on `browserStudyDetailedLogging` at group creation.
 

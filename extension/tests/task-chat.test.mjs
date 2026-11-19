@@ -21,7 +21,7 @@ assert.match(pageBundle, /function resolveChatComposer\(/, "packaged Composer re
 assert.match(pageBundle, /function inspectChatComposer\(/, "packaged attachment inspection is present");
 new Function(pageBundle);
 assert.match(source, /renderStartupPrompt\("describeThisVideoPrompt", templates/);
-assert.match(source, /chat_tab_id: chatTab\.id/);
+assert.doesNotMatch(source, /chat_tab_id: chatTab\.id/);
 
 // Fast completion, duplicate status reads, busy tabs and autonomous Agent polls.
 let now = 0, records = [], pollResult, pollGate = null;
@@ -186,13 +186,13 @@ const launchNames = ["youtube_download", "youtube_storyboard_download", "media_c
  "clipboard_get", "media_view", "library_store_start", "timer_start"];
 for (const name of launchNames) {
  const tool = tools.find(t => t.name === name);
- assert.ok(tool, name); assert.equal(tool.inputSchema.properties.tabId.type, "integer", name);
+ assert.ok(tool, name); assert.equal(tool.inputSchema.properties.tabId, undefined, name);
  assert.ok(!(tool.inputSchema.required || []).includes("tabId"), name + " optional context");
  assert.ok(tool.description.length <= 600, name);
 }
 for (const name of ["site_get_images", "site_get_files"]) {
  const tool = tools.find(t => t.name === name);
- assert.ok(tool.inputSchema.required.includes("chatTabId"));
+ assert.ok(!tool.inputSchema.required.includes("chatTabId"));
  assert.ok(tool.inputSchema.required.includes("tabId"));
  assert.ok(tool.outputSchema.properties.chatTabId);
  assert.ok(!tool.inputSchema.properties.sessionId);

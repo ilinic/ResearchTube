@@ -2,7 +2,7 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { CallToolRequestSchema, CallToolResultSchema, ListToolsRequestSchema, ListResourcesRequestSchema, ReadResourceRequestSchema, McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import { authenticateMcp, MCP_SCOPE, type Auth } from "./auth";
-import { errorResponse, json, origin, PublicError, readJson, room, type Env } from "./types";
+import { digest, errorResponse, json, origin, PublicError, readJson, room, type Env } from "./types";
 import { WORKER_VERSION } from "./version";
 import { setupResult } from "./onboarding";
 
@@ -44,7 +44,7 @@ export async function mcpResponse(request: Request, env: Env, auth: Auth): Promi
   }
   const server = new Server({ name: "researchtube", version: WORKER_VERSION }, {
     capabilities: { tools: {}, resources: {} },
-    instructions: "Immediately call the requested productive tool. Never start with connection diagnostics or add a connection widget. Each authenticated account has one active extension; requests go straight to it. New extension enrollment replaces the previous extension. A transiently disconnected extension gets a brief automatic reconnect window. tabId/chatTabId from the startup prompt is required for chat delivery and browser actions targeting a chat. Never guess a tab or use focus. The extension pins the exact live document inside execution and refuses changed or unavailable targets. No separate connection or handshake is needed per chat. Never automatically replay BROWSER_OUTCOME_UNKNOWN or an unacknowledged action. Local file/media tools require the optional Agent. Existing tool validation and task status/cancel semantics apply."
+    instructions: "Immediately call the requested productive tool. Never start with connection diagnostics or a preemptive connection widget. Each authenticated account has one active extension; requests go straight to it. New extension enrollment replaces the previous extension. A transiently disconnected extension gets a brief automatic reconnect window. Chat tab IDs are never model inputs. Ordinary research and file-only tools need no chat connection. On BROWSER_CONTEXT_REQUIRED, call system_get_chat_context and poll system_chat_context_status at pollIntervalMs until completed, then retry the unexecuted operation. Its compact widget automatically binds Chrome sender identity to this MCP conversation. Reuse valid bindings; never ask the user for tab IDs or add connection widgets preemptively. Never guess a tab or use focus. The extension pins the exact live document inside execution and refuses changed or unavailable targets. No user action or prompt marker is needed for chat binding. Missing conversation metadata is reported explicitly; never guess a target. Never automatically replay BROWSER_OUTCOME_UNKNOWN or an unacknowledged action. Local file/media tools require the optional Agent. Existing tool validation and task status/cancel semantics apply."
   });
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: tools as any }));
   server.setRequestHandler(ListResourcesRequestSchema, async () => ({ resources: [
@@ -65,9 +65,15 @@ export async function mcpResponse(request: Request, env: Env, auth: Auth): Promi
       if (params.name === "system_connection_status") {
         return toolResult(setupResult(env, await roomRequest(env, userId, "/status", {})));
       }
+      // Only bounded conversation-routing hints cross the private relay. They
+      // are account-scoped, hashed and never returned to the model or logs.
+      const session = params._meta?.['openai/session'];
+      const hint = (key: string) => typeof params._meta?.[key] === 'string' && (params._meta[key] as string).length <= 256 ? params._meta[key] : null;
+      const chatSession = typeof session === 'string' && session.length > 0 && session.length <= 256
+        ? await digest(JSON.stringify([userId, hint('openai/subject'), hint('openai/organization'), session])) : undefined;
       const response = await roomRequest(env, userId, "/dispatch", {
         workerReceivedAtMs,
-        request: { jsonrpc: "2.0", method: "tools/call", params: { name: params.name, arguments: args } } });
+        request: { jsonrpc: "2.0", method: "tools/call", params: { name: params.name, arguments: args, ...(chatSession ? { chatSession } : {}) } } });
       if (response.error) throw new PublicError("BROWSER_TOOL_ERROR", "The browser could not execute this tool. Check ResearchTube diagnostics.");
       return CallToolResultSchema.parse(response.result);
     } catch (error) {

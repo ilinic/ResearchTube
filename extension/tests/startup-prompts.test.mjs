@@ -13,12 +13,13 @@ for (const [key, value] of Object.entries(DEFAULT_STARTUP_PROMPTS)) {
   assert.match(config[key + '1'].value, /in my language/, 'saved variants retain their original language instruction');
 }
 assert.match(DEFAULT_STARTUP_PROMPTS.describeThisVideoPrompt, /^@ResearchTube \[video_link\] \[video_title\]/, 'video link precedes its title');
-assert.doesNotMatch(DEFAULT_STARTUP_PROMPTS.describeThisVideoPrompt, /storyboards|visual maps|visuals/i, 'video startup does not request visual downloads');
+assert.match(DEFAULT_STARTUP_PROMPTS.describeThisVideoPrompt, /When visual details matter.*video frames or storyboards.*upload selected frames/);
+for (const prompt of Object.values(DEFAULT_STARTUP_PROMPTS)) assert.doesNotMatch(prompt, /chatTabId|tabId|chat_tab_id|site_tab_id|group_id/);
 assert.doesNotMatch(config.describeThisVideoPrompt1.value, /storyboards|visual maps/, 'the saved original video prompt is unchanged');
 assert.deepEqual(normalizeStartupPrompts(), DEFAULT_STARTUP_PROMPTS);
 assert.equal(renderStartupPrompt('describeThisVideoPrompt', { describeThisVideoPrompt: '[video_title]\n[video_link] → [chat_tab_id] [chat_tab_id]' }, {
   video_title: 'Кириллица 🐈 [chat_tab_id] $&', video_link: 'https://www.youtube.com/watch?v=MxJLoHLhlQM', chat_tab_id: 22
-}), 'Кириллица 🐈 [chat_tab_id] $&\nhttps://www.youtube.com/watch?v=MxJLoHLhlQM → 22 22', 'substituted values are literal and never expanded again');
+}), 'Кириллица 🐈 [chat_tab_id] $&\nhttps://www.youtube.com/watch?v=MxJLoHLhlQM →  ', 'substituted values are literal and never expanded again');
 assert.equal(renderStartupPrompt('studyThisSitePrompt', { studyThisSitePrompt: 'Plain text [not a placeholder]' }, {}), 'Plain text [not a placeholder]');
 for (const input of [null, [], { extra: 'text' }, { studyThisSitePrompt: '' }, { studyThisSitePrompt: 3 }, { studyThisSitePrompt: 'x'.repeat(16001) }, { studyThisSitePrompt: '[video_link]' }, { describeThisVideoPrompt: '[session_id]' }]) {
   assert.throws(() => normalizeStartupPrompts(input), e => e.code === 'AGENT_INVALID_RESPONSE');
@@ -29,10 +30,10 @@ assert.throws(() => renderStartupPrompt('describeThisVideoPrompt', {}, {}), e =>
 const site = fixture();
 site.host.promptTemplates = async () => ({ studyThisSitePrompt: 'Исследуй [site_title]\n[site_link] site=[site_tab_id] chat=[chat_tab_id] group=[group_id]' });
 await site.agent.start(10);
-assert.equal(site.events.find(e => e[0] === 'prompt')[2], 'Исследуй Site\nhttps://site.test/article site=21 chat=22 group=100');
+assert.equal(site.events.find(e => e[0] === 'prompt')[2], 'Исследуй Site\nhttps://site.test/article site= chat= group=');
 site.host.promptTemplates = async () => ({ studyThisSitePrompt: 'Updated chat=[chat_tab_id]' });
 await site.agent.start(10);
-assert.equal(site.events.filter(e => e[0] === 'prompt').at(-1)[2], 'Updated chat=24', 'new launches use the current Agent snapshot');
+assert.equal(site.events.filter(e => e[0] === 'prompt').at(-1)[2], 'Updated chat=', 'new launches use the current Agent snapshot');
 const badSite = fixture();
 badSite.host.promptTemplates = async () => ({ studyThisSitePrompt: '[typo]' });
 await assert.rejects(badSite.agent.start(10), e => e.code === 'AGENT_INVALID_RESPONSE');
@@ -58,11 +59,11 @@ context.cdpSendComposerText = async (id, prompt, guard) => { await guard(); sent
 const source = { id: 10, index: 3, title: 'Песня 🐈 - YouTube', url: 'https://www.youtube.com/watch?v=MxJLoHLhlQM&feature=share' };
 await context.describeYouTubeVideoInChatGPT(source);
 assert.deepEqual(requests, ['/internal/prompt-templates']);
-assert.deepEqual(sent, [['insert', 72, 'Describe Песня 🐈\nhttps://www.youtube.com/watch?v=MxJLoHLhlQM chat=72'], ['send', 72, 'Describe Песня 🐈\nhttps://www.youtube.com/watch?v=MxJLoHLhlQM chat=72']]);
+assert.deepEqual(sent, [['insert', 72, 'Describe Песня 🐈\nhttps://www.youtube.com/watch?v=MxJLoHLhlQM chat='], ['send', 72, 'Describe Песня 🐈\nhttps://www.youtube.com/watch?v=MxJLoHLhlQM chat=']]);
 assert.equal(created[0].active, false);
 supplied = { describeThisVideoPrompt: 'Updated [video_link] [chat_tab_id]' };
 await context.describeYouTubeVideoInChatGPT({ ...source, url: 'https://www.youtube.com/shorts/abcdefghijk' });
-assert.equal(sent.at(-1)[2], 'Updated https://www.youtube.com/watch?v=abcdefghijk 73');
+assert.equal(sent.at(-1)[2], 'Updated https://www.youtube.com/watch?v=abcdefghijk ');
 
 for (const code of ['AGENT_UNAVAILABLE', 'NOT_FOUND']) {
   context.agentJsonRequest = async () => { throw Object.assign(new Error('Unavailable'), { code }); };

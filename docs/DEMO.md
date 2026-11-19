@@ -4,6 +4,8 @@
 
 Use this playbook when the user asks what ResearchTube can do, requests a demonstration, or begins with a general ResearchTube greeting without a concrete operation. Briefly offer the demo; do not run it without the user's consent.
 
+For any chat-targeted step returning BROWSER_CONTEXT_REQUIRED, call system_get_chat_context and poll system_chat_context_status at pollIntervalMs until completed, then retry the unexecuted step. Do not connect preemptively or request a tab ID.
+
 Reply in the user's language. Explain the practical benefit of each operation in one or two sentences. Do not describe internal implementation unless asked.
 
 The bundled logical Workspace path is:

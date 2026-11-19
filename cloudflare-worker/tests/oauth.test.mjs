@@ -85,7 +85,7 @@ test("the first OAuth-authenticated tool executes without a conversation or conn
     socket.send("direct-tools-v1"); expect(await ready).toBe("direct-tools-ready");
     // No openai/session metadata, challenge, bind call, status check or resource read.
     const call = (name, args) => rpc(mf, "tools/call", { name, arguments: args }, tokens.access_token);
-    for (const [name,args] of [["youtube_get_transcript",{videoId:"aqz-KE-bpKQ"}],["media_probe",{workspacePath:"a.mp4"}],["timer_start",{duration:1,tabId:7}]]) {
+    for (const [name,args] of [["youtube_get_transcript",{videoId:"aqz-KE-bpKQ"}],["media_probe",{workspacePath:"a.mp4"}],["timer_start",{duration:1}]]) {
       const received = message(socket), pending = call(name,args), command = await Promise.race([received,pending.then(async response => {throw Error("Call completed without dispatch: "+await response.clone().text());})]);
       expect(command.request.params).toEqual({ name, arguments: args });
       expect(command.installationId).toBe(installed.installationId);
@@ -99,6 +99,24 @@ test("the first OAuth-authenticated tool executes without a conversation or conn
     expect(forged.result.structuredContent.error.code).toBe("INVALID_ARGUMENT");
     const unknown = await (await call("constructor", {})).json();
     expect(unknown.result.structuredContent.error.code).toBe("TOOL_NOT_FOUND");
+    // Only account-scoped hashed conversation hints reach the Extension. No
+    // model argument, raw _meta or hint is echoed in the tool result.
+    const keys = [];
+    for (const [sessionId, subject] of [['conversation-a','subject-a'],['conversation-a','subject-a'],['conversation-b','subject-a'],['conversation-a','subject-b']]) {
+      const incoming = message(socket);
+      const pending = rpc(mf, 'tools/call', { name: 'youtube_get_video', arguments: { videoId: 'aqz-KE-bpKQ' },
+        _meta: { 'openai/session': sessionId, 'openai/subject': subject, 'private/unrelated': 'SECRET' } }, tokens.access_token);
+      const command = await incoming;
+      expect(command.request.params.chatSession).toMatch(/^[a-f0-9]{64}$/);
+      expect(JSON.stringify(command)).not.toMatch(/conversation-a|conversation-b|subject-a|subject-b|SECRET|_meta/);
+      keys.push(command.request.params.chatSession);
+      socket.send(JSON.stringify({ type: 'response', requestId: command.requestId, result: { content: [{ type: 'text', text: 'ok' }] } }));
+      const result = await (await pending).text(); expect(result).not.toContain(command.request.params.chatSession);
+    }
+    expect(keys[0]).toBe(keys[1]); expect(keys[0]).not.toBe(keys[2]); expect(keys[0]).not.toBe(keys[3]);
+    for (const [name, args] of [['media_view',{files:[{workspacePath:'a.png'}],tabId:7}],['site_list_tabs',{chatTabId:7}]]) {
+      expect((await (await call(name,args)).json()).result.structuredContent.error.code).toBe('INVALID_ARGUMENT');
+    }
     const foreign = await begin();
     const foreignTokens = await (await mf.dispatchFetch(BASE + "/api/auth/oauth2/token", form({ grant_type: "authorization_code", client_id: foreign.client.client_id,
       code: foreign.code, code_verifier: verifier, redirect_uri: CALLBACK, resource: BASE }))).json();

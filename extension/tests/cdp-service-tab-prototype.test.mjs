@@ -44,7 +44,7 @@ assert.doesNotMatch(background, /currentDescribeYouTubeVideo/, "the shortcut mus
 assert.match(background, /shortMatch = url\.pathname\.match/, "the shortcut must normalize a YouTube Short to its video ID");
 assert.match(background, /Open one YouTube video or Short/, "the shortcut must describe ordinary videos and Shorts");
 assert.match(background, /renderStartupPrompt\("describeThisVideoPrompt", templates/, "the shortcut renders its configured prompt");
-assert.match(background, /video_title: videoTitle, video_link: videoUrl, chat_tab_id: chatTab.id/, "the startup prompt receives the exact video and destination tab");
+assert.match(background, /video_title: videoTitle, video_link: videoUrl/, "the startup prompt receives the exact video without a destination tab ID");
 assert.match(background, /cdpSetComposerText\(chatTab\.id, prompt\)/, "the shortcut must place its prompt in Composer");
 assert.match(background, /Input\.insertText/, "the shortcut must insert its complete prompt immediately");
 assert.match(background, /CDP_COMPOSER_PROMPT_ATTEMPTS = 4/, "the shortcut must allow four complete prompt replacement attempts");
