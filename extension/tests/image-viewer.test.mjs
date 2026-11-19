@@ -468,10 +468,30 @@ timeoutPage.context.location.hash=`#${encodeURIComponent(JSON.stringify({...payl
 timeoutPage.context.chrome.runtime.sendMessage=async()=>({ok:true,data:{localAgentImageUrl:'http://127.0.0.1/private'}});
 timeoutPage.context.fetch=async()=>({ok:true,status:206,body:{async cancel(){}}});
 Object.assign(timeoutPage.ids.get('audio'),{networkState:2,readyState:0});
-vm.runInContext(viewerCode,timeoutPage.context);await flush();timeoutTime.advance(10000);await flush();
-assert.equal(timeoutPage.posts.at(-1).state,'error');assert.match(timeoutPage.posts.at(-1).error,/networkState=2, readyState=0/);
+vm.runInContext(viewerCode,timeoutPage.context);await flush();timeoutTime.advance(8000);await flush();
+assert.equal(timeoutPage.posts.at(-1).state,undefined,'a first timeout must remain pending during automatic recovery');
+assert.ok(timeoutPage.posts.some(item=>item.stage==='retrying transient media failure'&&item.details.delayMs===1000));
 const deadlineTrace=timeoutPage.posts.find(item=>item.stage==='native media deadline');
 assert.equal(deadlineTrace.details.version,manifest.version);assert.equal(deadlineTrace.details.networkState,2);
+
+// Temporary Agent failures retry after 1, 2, 4 and 6 seconds, then stop.
+const retryTime=clock(), retryPage=surface(retryTime), retryPayload={...payload,mediaKind:'audio',mimeType:'audio/mpeg',workspacePath:'demo/test.mp3'};
+retryPage.context.location.hash=`#${encodeURIComponent(JSON.stringify(retryPayload))}`;
+let retryCalls=0;
+retryPage.context.chrome.runtime.sendMessage=async()=>{retryCalls++;return {ok:false,error:'Agent network unavailable'};};
+vm.runInContext(viewerCode,retryPage.context);await flush();
+const retryDelays=[];
+for(const delay of [1000,2000,4000,6000]){
+  const scheduled=retryPage.posts.findLast(item=>item.stage==='retrying transient media failure');
+  assert.equal(scheduled.details.delayMs,delay);
+  retryDelays.push(scheduled.details.delayMs);
+  retryTime.advance(delay);await flush();
+}
+assert.deepEqual(retryDelays,[1000,2000,4000,6000]);
+assert.equal(retryCalls,5,'one initial load and four automatic retries are attempted');
+assert.equal(retryPage.posts.at(-1).state,'error','the final failed attempt reports the error');
+retryTime.advance(60_000);await flush();
+assert.equal(retryCalls,5,'recovery gives up after the retry delayed by six seconds');
 
 // MCP size notifications also measure only the owned card, not its viewport.
 const sizeTime = clock(), sized = surface(sizeTime); sized.widget(); start(sized);
@@ -650,9 +670,12 @@ const privateMetadata=await new Promise(resolve=>{
 assert.equal(privateMetadata.ok,true);assert.equal(privateMetadata.data.handshakeTimeoutSeconds,4);
 assert.deepEqual(JSON.parse(JSON.stringify(privateMetadata.data.metadata)),{workspacePath:'demo/researchtube-demo.mp4',mediaKind:'video',mimeType:'video/mp4'});
 assert.ok(!JSON.stringify(privateMetadata).includes('127.0.0.1'));
-worker.showWorkspaceImage = async () => ({ metadata: output, localAgentImageUrl: 'http://127.0.0.1/private' });
+let showOptions;
+worker.showWorkspaceImage = async (_path, options) => { showOptions=options; return { metadata: { workspacePath:'demo/test.mp4',mediaKind:'video',mimeType:'video/mp4',sizeBytes:123,showInChat:true }, localAgentImageUrl: 'http://127.0.0.1/private' }; };
 worker.recordCommandDiagnostic = () => {};
 const displayed = await worker.executeShowWorkspaceImageToolCall(1, 'crops/test-crop.jpg');
-assert.equal(displayed.result._meta['researchtube/mediaWidget'].handshakeTimeoutSeconds, 4);
+assert.deepEqual(JSON.parse(JSON.stringify(showOptions)),{allowImage:false});
+assert.equal(displayed.result._meta['researchtube/mediaWidget'].handshakeTimeoutSeconds, 60);
 assert.ok(!JSON.stringify(displayed).includes('127.0.0.1'));
+assert.throws(()=>worker.assertMediaShowSupported({mediaKind:'image'}),error=>error.code==='MEDIA_PLAYBACK_ONLY');
 console.log('Image viewer: timed retries, late/nested opaque frames, idempotence, load acknowledgment, Retry, private transport and configured timeout passed');

@@ -397,8 +397,10 @@ class CustomToolRegistry:
         return task.document()
 
     async def shutdown(self) -> None:
-        for task in self.tasks.values():
-            if task.runner is not None and not task.runner.done():
-                task.runner.cancel()
-        if self.tasks:
-            await asyncio.gather(*(task.runner for task in self.tasks.values() if task.runner is not None), return_exceptions=True)
+        runners = [task.runner for task in self.tasks.values() if task.runner is not None]
+        for runner in runners:
+            if not runner.done():
+                runner.cancel()
+        active = [runner for runner in runners if not runner.done()]
+        if active:
+            await asyncio.gather(*active, return_exceptions=True)

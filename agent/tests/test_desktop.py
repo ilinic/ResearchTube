@@ -253,7 +253,7 @@ class DesktopTests(unittest.TestCase):
              patch.object(desktop.subprocess, 'Popen') as spawn:
             self.assertTrue(desktop.launch_pythonw(Path('agent/researchtube_agent.py'), ['--port', '17843']))
             command = spawn.call_args.args[0]
-            self.assertEqual(command, ['C:/Python/pythonw.exe', 'agent/researchtube_agent.py', '--port', '17843'])
+            self.assertEqual(command, [str(Path('C:/Python/pythonw.exe')), str(Path('agent/researchtube_agent.py')), '--port', '17843'])
             self.assertEqual(spawn.call_args.kwargs['creationflags'], 520)
             with patch.object(sys, 'executable', 'C:/Python/pythonw.exe'):
                 self.assertFalse(desktop.launch_pythonw(Path('agent.py'), []))
@@ -268,7 +268,7 @@ class DesktopTests(unittest.TestCase):
             with patch.object(sys, 'executable', 'C:/Python/pythonw.exe'), \
                  patch.object(sys, 'frozen', False, create=True), \
                  patch.object(Path, 'is_file', return_value=True):
-                self.assertEqual(agent.windows_speech_python(), 'C:/Python/python.exe')
+                self.assertEqual(agent.windows_speech_python(), str(Path('C:/Python/python.exe')))
         with patch.object(sys, 'platform', 'linux'):
             self.assertFalse(agent.parse_args([]).tray)
         with patch.object(agent, 'run_tray', return_value=0) as tray, \

@@ -10,7 +10,7 @@ The extension connects automatically using the ResearchTube website session in t
 
 Each account has one current extension installation. Enrolling a new extension revokes the old installation credential and closes its socket. The old extension displays Disconnected with a red toolbar badge and stays stopped, including after restart. It does not automatically enroll again or reclaim the account. Other users' connections are unaffected. Explicit installation revocation also stops access.
 
-Transient network loss displays an error on the toolbar and connection status in the popup. The current extension reconnects with bounded exponential backoff. An alarm restores its outbound connection after service-worker suspension; bounded heartbeat messages keep it alive between requests. The Agent remains on `127.0.0.1`.
+Transient network loss displays connection status in the popup. The current extension retries with bounded exponential backoff, starting after about two seconds. An alarm restores its outbound connection after service-worker suspension; bounded heartbeat messages keep it alive between requests. A productive call arriving during a disconnect waits up to 12 seconds for reconnection before returning `EXTENSION_OFFLINE`. The relay sends a waiting call once after reconnection, but never replays a command already sent to the Extension. The Agent remains on `127.0.0.1`.
 
 ## Productive calls
 

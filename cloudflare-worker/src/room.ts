@@ -18,6 +18,7 @@ interface Pending {
 // focus guesses, queued execution or automatic replay after an unknown outcome.
 export class BrowserRoom extends DurableObject<Env> {
   private pending = new Map<string, Pending>();
+  private connectionWaiters = new Set<() => void>();
   async fetch(request: Request): Promise<Response> {
     try {
       const path = new URL(request.url).pathname;
@@ -72,7 +73,9 @@ export class BrowserRoom extends DurableObject<Env> {
         const name = body.request.params.name;
         if (!Object.hasOwn(validateArguments, name) || name === "system_connection_status" || !(validateArguments as Record<string, any>)[name](body.request.params.arguments))
           throw new PublicError("INVALID_ARGUMENT", "Arguments do not match an available tool.");
-        const socket = await this.activeSocket();
+        if (this.pending.size + this.connectionWaiters.size >= 100)
+          throw new PublicError("BROWSER_BUSY", "Too many requests are running.", 429);
+        const socket = await this.activeSocket() ?? await this.waitForActiveSocket(12_000);
         if (!socket) throw new PublicError("EXTENSION_OFFLINE", "Open Chrome with the connected ResearchTube extension.", 409);
         return json(await this.dispatch(socket, body.request, body.workerReceivedAtMs, Date.now()));
       }
@@ -92,6 +95,25 @@ export class BrowserRoom extends DurableObject<Env> {
     if (requireDirect && sockets.length && !(sockets[0].deserializeAttachment() as SocketIdentity).directTools)
       throw new PublicError("EXTENSION_UPDATE_REQUIRED", "Update the ResearchTube extension to run tools directly.", 409);
     return sockets[0];
+  }
+  private async waitForActiveSocket(timeoutMs: number): Promise<WebSocket | undefined> {
+    return new Promise(resolve => {
+      let settled = false;
+      const finish = (socket?: WebSocket) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        this.connectionWaiters.delete(check);
+        resolve(socket);
+      };
+      const check = () => { void this.activeSocket().then(socket => { if (socket) finish(socket); }, () => finish()); };
+      const timer = setTimeout(() => finish(), timeoutMs);
+      this.connectionWaiters.add(check);
+      check();
+    });
+  }
+  private signalConnectionReady() {
+    for (const check of [...this.connectionWaiters]) check();
   }
   private dispatch(socket: WebSocket, request: ToolCallRequest, workerReceivedAtMs: number, roomReceivedAtMs: number): Promise<Record<string, unknown>> {
     if (this.pending.size >= 100) throw new PublicError("BROWSER_BUSY", "Too many requests are running.", 429);
@@ -114,7 +136,8 @@ export class BrowserRoom extends DurableObject<Env> {
     const identity = socket.deserializeAttachment() as SocketIdentity;
     if (!identity || identity.expiresAt <= Date.now()) { this.rejectSocket(socket, "EXTENSION_OFFLINE", "The extension session expired."); socket.close(1008, "Expired"); return; }
     if (data === "direct-tools-v1") {
-      socket.serializeAttachment({ ...identity, directTools: true }); socket.send("direct-tools-ready"); return;
+      socket.serializeAttachment({ ...identity, directTools: true }); socket.send("direct-tools-ready");
+      this.signalConnectionReady(); return;
     }
     if (data === "ping") { socket.send("pong"); return; }
     if (typeof data !== "string" || new TextEncoder().encode(data).length > MAX_BYTES) { socket.close(1009, "Invalid payload"); this.rejectSocket(socket, "BROWSER_PROTOCOL_ERROR", "Invalid extension response."); return; }

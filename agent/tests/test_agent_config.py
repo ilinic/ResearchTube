@@ -70,7 +70,8 @@ class AgentConfigTests(unittest.TestCase):
         self.write({'workspacePath': {'value': 12}})
         with patch.object(agent, 'parse_args', return_value=type('Args', (), {'port': 17843})()), \
              patch.object(agent, 'clear_console'), patch.object(agent, 'log') as logged, \
-             patch.object(agent.asyncio, 'start_server') as bind:
+             patch.object(agent.asyncio, 'start_server') as bind, patch.object(agent, 'InstanceLock') as lock:
+            lock.return_value.acquire.return_value = True
             self.assertEqual(agent.main(), 1)
             bind.assert_not_called()
             self.assertIn('CONFIG_INVALID', logged.call_args.args[0])

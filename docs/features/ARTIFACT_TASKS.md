@@ -25,7 +25,7 @@ The last four tools now use the same public task lifecycle as the others, even w
 - Chat delivery always appends to the existing Composer and sends its text and attachments together with the new files. There is no Composer policy parameter. Text edits and extra attachments do not stop Send. Delivery verifies a minimum visible count: existing cards plus new files; same-count replacements are allowed.
 - `sendDelaySeconds` defaults to zero. Positive values pause after the files are accepted in Composer. Readiness is still checked separately. The current-chat task reports `sendNotBefore` in UTC and `remainingSeconds` during `waitingToSend`.
 
-`addToChat` supplies actual file attachments to ChatGPT. `media_show` displays a local viewer and does not supply visual input. Do not call `media_view` again for outputs whose creation task already requested delivery.
+`addToChat` supplies actual file attachments to ChatGPT. Use `media_view` to upload Workspace images for visual input; `media_show` plays audio/video locally and does not upload files. Do not call `media_view` again for outputs whose creation task already requested delivery.
 
 For speech, `addToChat` requires `outputMode: file` or `both`; speakers-only is rejected before starting work. Clipboard text may complete locally with the default flag; with `addToChat: true`, creation completes but delivery fails with `MEDIA_ARTIFACT_NO_FILES`. Text is never submitted implicitly.
 

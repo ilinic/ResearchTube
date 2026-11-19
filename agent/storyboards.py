@@ -64,6 +64,8 @@ def failure_details(error, stage, http_status=None):
     elif stage == 'url': reason = 'INVALID_URL'
     elif stage == 'http' and reason == 'INTERNAL_ERROR': reason = 'INVALID_HTTP_RESPONSE'
     os_code = errno.errorcode.get(getattr(error, 'errno', None))
+    if os_code and os_code.startswith('WSA') and os_code[3:].startswith('E'):
+        os_code = os_code[3:]
     if os_code is None and type(getattr(error, 'winerror', None)) is int:
         os_code = f'WINERROR_{error.winerror}'
     exception_type = type(error).__name__

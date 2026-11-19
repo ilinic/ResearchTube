@@ -1,5 +1,6 @@
 """Behavioral checks for private metadata, selection, transfers and publication."""
 import asyncio
+import errno
 import json
 import shutil
 import subprocess
@@ -492,7 +493,7 @@ class TransferTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(writer.closed)
 
     async def test_connection_os_error_does_not_publish_hostname(self):
-        with patch.object(sb.asyncio, 'open_connection', AsyncMock(side_effect=ConnectionRefusedError(111, 'PRIVATE host and token'))):
+        with patch.object(sb.asyncio, 'open_connection', AsyncMock(side_effect=ConnectionRefusedError(errno.ECONNREFUSED, 'PRIVATE host and token'))):
             with self.assertRaises(sb.SheetTransferError) as caught:
                 await sb.fetch_sheet(f'https://i.ytimg.com/sb/{VID}/a.jpg?sigh=SECRET', lambda *_: None)
         self.assertEqual(caught.exception.details['stage'], 'connect')

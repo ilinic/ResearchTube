@@ -120,7 +120,7 @@ for(const mutate of [command=>({...command,installationId:randomUUID()}),command
 {
  const f=fixture(),ws=await f.online();ws.close();await flush();
  assert.equal((await f.connection.status()).state,'offline');assert.equal((await f.connection.status()).errorCode,'CLOUD_DISCONNECTED');
- assert.ok([...f.timers.values()].some(t=>t.ms>=5000));
+ assert.ok([...f.timers.values()].some(t=>t.ms>=2000 && t.ms<3000));
 }
 {
  const f=fixture(),ws=await f.online();await f.receive(ws,{type:'disconnect',code:'EXTENSION_REPLACED'});

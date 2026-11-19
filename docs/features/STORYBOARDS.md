@@ -84,7 +84,7 @@ Existing files are reused only after byte verification. A conflicting file is ne
 
 ## Privacy
 
-Raw storyboard specs, signed URLs, cookies, tokens, physical paths and image bytes never enter MCP results or diagnostics. HTTPS transfers and redirects are restricted to expected YouTube storyboard paths. Sheets are not displayed automatically; use the task files or creation.data.publishedSheets with media_show deliberately. Exact published paths are available without scanning storyboards/.
+Raw storyboard specs, signed URLs, cookies, tokens, physical paths and image bytes never enter MCP results or diagnostics. HTTPS transfers and redirects are restricted to expected YouTube storyboard paths. Sheets are not displayed automatically; upload a requested sheet for visual input with media_view using its Workspace path. Exact published paths are available without scanning storyboards/.
 
 The authoritative implementation is `extension/storyboards.js` and `agent/storyboards.py`.
 

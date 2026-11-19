@@ -13,6 +13,12 @@ async function setup(ready = true) {
   }
   return {stub,...connection};
 }
+async function setupOn(stub) {
+  const connection = await socketFor(stub); sockets.push(connection.socket);
+  const ack = new Promise(resolve => connection.socket.addEventListener("message", event => resolve(event.data), {once:true}));
+  connection.socket.send("direct-tools-v1"); expect(await ack).toBe("direct-tools-ready");
+  return connection;
+}
 test("productive dispatch needs only the account extension and returns its first response", async () => {
   const {stub,socket,installationId} = await setup();
   const incoming = message(socket), pending = roomPost(stub,"/dispatch",request()), command = await incoming;
@@ -33,9 +39,15 @@ test("site requests receive correlated UTC relay stamps without page contents", 
   expect(JSON.stringify(timing)).not.toContain("SECRET");
   expect((await (await pending).json()).result.content[0].text).toBe("ok");
 });
-test("offline and old extensions fail immediately without a queued request", async () => {
+test("an offline call waits for reconnect while an old extension is rejected", async () => {
   const empty = await doRoom(mf,randomUUID());
-  expect((await (await roomPost(empty,"/dispatch",request())).json()).error.code).toBe("EXTENSION_OFFLINE");
+  const pending = roomPost(empty,"/dispatch",request());
+  await new Promise(resolve => setTimeout(resolve, 100));
+  const {socket} = await setupOn(empty);
+  const command = await message(socket);
+  expect(command.type).toBe("request");
+  socket.send(JSON.stringify({type:"response",requestId:command.requestId,result:{content:[{type:"text",text:"recovered"}]}}));
+  expect((await (await pending).json()).result.content[0].text).toBe("recovered");
   const {stub} = await setup(false);
   expect((await (await roomPost(stub,"/dispatch",request())).json()).error.code).toBe("EXTENSION_UPDATE_REQUIRED");
 });

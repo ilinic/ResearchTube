@@ -65,7 +65,7 @@ Timers live only in Agent memory. Optional `tabId` enables an idle-only completi
 - Workspace paths are logical `/`-separated paths, never physical paths.
 - Creation tools do not overwrite existing files silently.
 - Long operations return a task ID. Poll the matching status tool no faster than `pollIntervalMs`.
-- Local media is shown only through an explicit `media_show` call unless a tool description states otherwise.
+- Workspace images for visual input are uploaded with `media_view`; `media_show` is reserved for deliberate audio/video playback.
 
 ## Custom Tools
 
@@ -126,7 +126,7 @@ by each custom package group with its manifest `groupTitle`. See [Custom Tools](
 | `media_capture_frame_cancel_task` | Cancels frame extraction and preserves completed frames. |
 | `media_capture_screen` | Captures the complete virtual desktop or an explicit global `x`, `y`, `width`, `height` region. |
 | `media_image_crop` | Writes a rectangular crop from an existing PNG, JPEG or WebP source. |
-| `media_show` | Displays image, video or audio through the Extension-owned viewer; native audio/video playback and seeking stream through byte ranges. It does not upload attachments or autoplay. |
+| `media_show` | Plays video or audio through the Extension-owned viewer; native playback and seeking stream through byte ranges. Images are rejected; upload them for visual input with `media_view`. |
 | `media_view` | Queues selected Workspace files of any type for upload and Send in the ChatGPT conversation that invoked the tool. Uses independent configured count and per-file size limits. |
 | `media_view_status` | Reports phase, approximate percentage, submitted files and oversized skipped files. Polling is allowed in the initiating turn; actual Send may require finishing the response. |
 | `media_view_cancel` | Cancels queued or working delivery before Send commits, including waitingToSend; leaves Composer contents untouched. |
@@ -208,7 +208,7 @@ Built-in MCP descriptions are limited to 600 characters; detailed behavior is do
 
 ## Files in the current chat
 
-`media_view` accepts `files: [{"workspacePath": "reports/notes.txt"}]` and the exact ChatGPT `tabId` from the startup prompt. Direct relay execution pins that tab's live document immediately, without a connection widget. Missing targets fail before creating a task. Navigation, closure, duplicate conversations or disconnect stop delivery without selecting another chat. Task status confirms upload and Send. Delivery always appends to existing Composer text and attachments, then sends everything together. There is no Composer policy parameter. Existing drafts, new text edits and extra attachments do not block Send and are not cleared. Inspection, file acceptance and Send share the same visible draft editor; hidden legacy textareas are ignored. Attachment wrappers and nested previews count once. Acceptance requires at least the previous visible attachment count plus the requested new files; names and native FileList identities do not participate.
+`media_view` accepts `files: [{"workspacePath": "reports/notes.txt"}]` and the exact ChatGPT `tabId` from the startup prompt. Use it for Workspace images that ChatGPT should inspect visually; `media_show` is reserved for audio/video playback and rejects images. Direct relay execution pins that tab's live document immediately, without a connection widget. Missing targets fail before creating a task. Navigation, closure, duplicate conversations or disconnect stop delivery without selecting another chat. Task status confirms upload and Send. Delivery always appends to existing Composer text and attachments, then sends everything together. There is no Composer policy parameter. Existing drafts, new text edits and extra attachments do not block Send and are not cleared. Inspection, file acceptance and Send share the same visible draft editor; hidden legacy textareas are ignored. Attachment wrappers and nested previews count once. Acceptance requires at least the previous visible attachment count plus the requested new files; names and native FileList identities do not participate.
 
 Before Send and while waiting for it, ResearchTube verifies the exact destination, cancellation and the minimum visible attachment count. Text edits and added attachments remain in the Composer and are sent with the task data. Removing files below the required count, changing the conversation or cancellation still prevents Send. Removal from the Composer does not delete Workspace files.
 

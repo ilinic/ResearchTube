@@ -42,4 +42,4 @@ Inside execution the extension pins the specified tab's saved conversation and C
 
 ## Diagnostics
 
-Offline/replaced extensions fail immediately. Toolbar and popup display connection status. system_connection_status is optional user-requested diagnostics, never a preflight. Public connect/disconnect-chat tools and their connection resources are removed. Media presentation resources retain their own display contracts.
+If no active socket is available, dispatch waits up to 12 seconds for the current installation to reconnect and complete protocol negotiation. A still-offline or replaced extension returns a structured error. The Extension retries transient disconnects with bounded exponential backoff. Waiting requests are sent once after reconnection; requests already sent are never replayed when their outcome is unknown. Toolbar and popup display connection status. system_connection_status is optional user-requested diagnostics, never a preflight. Public connect/disconnect-chat tools and their connection resources are removed. Media presentation resources retain their own display contracts.

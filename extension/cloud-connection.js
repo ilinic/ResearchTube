@@ -98,7 +98,7 @@ export function createCloudConnection(host) {
   }
   function retry() {
     if (retryTimer !== null) return;
-    const delay = Math.min(60000, 5000 * 2 ** Math.min(attempts++, 4)) + Math.floor((host.random?.() ?? Math.random()) * 1000);
+    const delay = Math.min(30000, 2000 * 2 ** Math.min(attempts++, 4)) + Math.floor((host.random?.() ?? Math.random()) * 1000);
     nextRetryAt = now() + delay;
     retryTimer = host.setTimeout(() => { retryTimer = null; void ensureAccount(); }, delay);
   }

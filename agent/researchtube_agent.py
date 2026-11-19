@@ -48,7 +48,7 @@ except ImportError:
     from task_history import TaskHistory
     from browser_resources import save_browser_resource
 
-AGENT_VERSION = "2.8.2"
+AGENT_VERSION = "2.8.3"
 INTERFACE_VERSION = 85
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
@@ -207,6 +207,7 @@ PUBLIC_SHARE_FILE_TYPE_SUFFIXES: dict[str, frozenset[str]] = {
     "documents": frozenset({".csv", ".html", ".htm", ".json", ".md", ".pdf", ".rtf", ".text", ".txt", ".xml"}),
     "archives": frozenset({".7z", ".bz2", ".gz", ".rar", ".tar", ".xz", ".zip"}),
 }
+PUBLIC_SHARE_MIME_TYPES = {".avif": "image/avif", ".webp": "image/webp"}
 PUBLIC_SHARE_FILE_TYPE_NAMES = frozenset((*PUBLIC_SHARE_FILE_TYPE_SUFFIXES, "other", "all"))
 
 
@@ -225,7 +226,12 @@ def log(message: str, *, error: bool = False, color: str | None = None) -> None:
     # line easy to spot in the Agent console.
     if color == "red" and stream is not None and stream.isatty():
         line = f"\x1b[31m{line}\x1b[0m"
-    print(line, file=stream, flush=True)
+    try:
+        print(line, file=stream, flush=True)
+    except UnicodeEncodeError:
+        encoding = getattr(stream, "encoding", None) or "utf-8"
+        printable = line.encode(encoding, errors="backslashreplace").decode(encoding)
+        print(printable, file=stream, flush=True)
 
 
 def clear_console() -> None:
@@ -5838,7 +5844,7 @@ def public_share_file(path: str) -> tuple[Path, str]:
         file_parts, _ = WorkspacePathResolver.logical_parts(PUBLIC_SHARE_FILE.logical_path, field_name="shared file", error_code="PUBLIC_SHARE_NOT_FOUND")
         if tuple(segments) != file_parts:
             raise AgentApiError("PUBLIC_SHARE_NOT_FOUND", "The requested shared file was not found.")
-        mime_type = mimetypes.guess_type(PUBLIC_SHARE_FILE.physical_path.name)[0] or "application/octet-stream"
+        mime_type = public_share_mime_type(PUBLIC_SHARE_FILE.physical_path)
         return PUBLIC_SHARE_FILE.physical_path, mime_type
     assert PUBLIC_SHARE_FOLDER is not None
     folder_parts, _ = WorkspacePathResolver.logical_parts(
@@ -5864,8 +5870,12 @@ def public_share_file(path: str) -> tuple[Path, str]:
     file_type = public_share_file_type(resolved)
     if "all" not in PUBLIC_SHARE_FILE_TYPES and file_type not in PUBLIC_SHARE_FILE_TYPES:
         raise AgentApiError("PUBLIC_SHARE_NOT_FOUND", "The requested shared file was not found.")
-    mime_type = mimetypes.guess_type(resolved.name)[0] or "application/octet-stream"
+    mime_type = public_share_mime_type(resolved)
     return resolved, mime_type
+
+
+def public_share_mime_type(path: Path) -> str:
+    return PUBLIC_SHARE_MIME_TYPES.get(path.suffix.lower()) or mimetypes.guess_type(path.name)[0] or "application/octet-stream"
 
 
 async def handle_public_share_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:

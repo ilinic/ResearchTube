@@ -35,7 +35,7 @@ Do not implement a fix only in a generated file. Change the source and run `npm 
 4. Never return credentials, cookies, signed media URLs, tokens, host paths or unbounded process output through MCP.
 5. Existing output files are never overwritten silently.
 6. Asynchronous tools return a task immediately, expose monotonic `progressPercent`, publish `pollIntervalMs`, support bounded status polling and preserve completed outputs on later failure where practical.
-7. A creation tool does not display media automatically unless its documented contract explicitly says so. Use `media_show` for deliberate presentation.
+7. A creation tool does not display media automatically unless its documented contract explicitly says so. Use `media_show` for deliberate audio/video playback; upload Workspace images for visual input with `media_view`.
 8. Public MCP inputs and Agent responses are allowlisted with strict schemas or explicit normalization.
 9. Expected input, availability and state errors use stable structured codes; unexpected transport or implementation failures remain tool errors.
 10. Browser automation must not steal focus unless the public tool contract explicitly requires it.

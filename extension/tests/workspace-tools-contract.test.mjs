@@ -131,8 +131,10 @@ assert.doesNotMatch(background, /researchtube-busy-/, "ordinary MCP work must re
 assert.match(background, /state === "working" && cameraRecordingBadgeKind/, "a camera recording badge must take precedence over the general MCP hourglass");
 assert.match(background, /No automatic media viewer is created by artifact tools/);
 assert.match(background, /No automatic media viewer is created by artifact tools/, "creation tools must keep media presentation separate from file delivery");
-assert.match(background, /After a successful result, call media_show/, "showInChat must route presentation through the dedicated display tool");
-assert.match(background, /Call once per requested display; a successful result already shows the card/, "the display tool must prevent duplicate retries");
+assert.match(background, /After success, call media_view with files:/, "image showInChat guidance must upload the Workspace image");
+assert.match(background, /Never use media_show for images/);
+assert.match(background, /showWorkspaceImage\(path, \{ allowImage: false \}\)/, "the playback tool rejects Workspace images at execution time");
+assert.match(background, /Call once per requested playback; a successful result already shows the player/, "the display tool must prevent duplicate retries");
 assert.match(background, /text: "Workspace media shown\."/, "the display tool must return an explicit compact success result to the model");
 assert.match(background, /Validate a Workspace PNG\/JPEG\/WebP/, "image inspection must be distinct from generic workspace stat");
 assert.equal((background.match(/"openai\/outputTemplate": CAPTURE_FRAME_WIDGET_URI/g) || []).length, 1, "only the explicit workspace-image display tool may declare the widget template");

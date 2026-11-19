@@ -14,7 +14,7 @@
     if (validKind(media?.mediaKind) && media.viewId && media.requestId) {
       const details = { version: viewerVersion };
       for (const name of ['valid', 'ok', 'timedOut']) if (typeof extra[name] === 'boolean') details[name] = extra[name];
-      for (const name of ['status', 'sizeBytes', 'height', 'readyState', 'networkState', 'mediaErrorCode']) if (Number.isFinite(extra[name])) details[name] = extra[name];
+      for (const name of ['status', 'sizeBytes', 'height', 'readyState', 'networkState', 'mediaErrorCode', 'retry', 'delayMs']) if (Number.isFinite(extra[name])) details[name] = extra[name];
       if (typeof extra.event === 'string') details.event = extra.event;
       window.parent.postMessage({ source: 'researchtube-image-view', type: 'viewer-diagnostic',
         viewId: media.viewId, requestId: media.requestId, stage, details }, '*');
@@ -113,13 +113,13 @@
     }
   }
   const nativeState = target => ({ readyState: target.readyState, networkState: target.networkState, mediaErrorCode: target.error?.code || 0 });
-  async function load() {
+  async function load(retryAttempt = 0) {
     if (!valid) { log('invalid media anchor'); setStatus('The media anchor is invalid.', true); return; }
     loadController?.abort();
     const controller = loadController = new AbortController();
     let probeController = null, nativeFailure = null, loadingState = null;
     let timedOut = false;
-    const timeoutSeconds = media.timeoutSeconds || 20;
+    const timeoutSeconds = Math.min(8, media.timeoutSeconds || 8);
     const timer = setTimeout(() => {
       timedOut = true;
       if (media.mediaKind !== 'image') { loadingState = nativeState(element()); log('native media deadline', loadingState); }
@@ -211,8 +211,23 @@
       // keeps this iframe hidden until it receives this very acknowledgment.
       reportLoaded();
     } catch (error) {
+      const mediaErrorCode = element().error?.code || loadingState?.mediaErrorCode || 0;
       hideMedia();
       const message = timedOut ? `The local media did not finish loading${loadingState ? ` (networkState=${loadingState.networkState}, readyState=${loadingState.readyState}, mediaError=${loadingState.mediaErrorCode})` : ''}. Retry.` : error instanceof Error ? error.message : 'The local media could not be loaded.';
+      const retryable = media.mediaKind !== 'image' && timedOut ||
+        media.mediaKind !== 'image' && mediaErrorCode === 2 ||
+        media.mediaKind !== 'image' && /HTTP 5\d\d/.test(message) ||
+        media.mediaKind !== 'image' && !/HTTP 4\d\d|codec is unsupported|media error [134]/i.test(message) && /Agent|network|stream|load|stalled|Retry/i.test(message);
+      const retryDelaysMs = [1000, 2000, 4000, 6000];
+      if (retryable && retryAttempt < retryDelaysMs.length) {
+        const delayMs = retryDelaysMs[retryAttempt];
+        log('retrying transient media failure', { mediaKind: media.mediaKind, timedOut, mediaErrorCode, retry: retryAttempt + 1, delayMs });
+        setStatus(`Playback connection interrupted. Retrying in ${delayMs / 1000}s…`);
+        await new Promise(resolve => setTimeout(resolve, delayMs));
+        if (!valid || loadController !== controller) return;
+        await load(retryAttempt + 1);
+        return;
+      }
       log('media load failed', { error: message, timedOut });
       setStatus(message, true); notifyMedia('error', { error: message });
     } finally {
@@ -220,7 +235,7 @@
       if (loadController === controller) { loadController = null; refresh.disabled = false; refresh.classList.remove('refreshing'); copy.disabled = false; }
     }
   }
-  refresh.addEventListener('click', () => void load());
+  refresh.addEventListener('click', () => void load(0));
   copy.addEventListener('click', async () => {
     if (!valid) return;
     copy.disabled = true;
@@ -237,5 +252,5 @@
   if (typeof ResizeObserver === 'function') new ResizeObserver(() => {
     if (valid && mediaReady && element().style.display === 'block') reportLoaded();
   }).observe(main);
-  void load();
+  void load(0);
 })();

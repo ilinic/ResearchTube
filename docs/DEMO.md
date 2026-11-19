@@ -50,7 +50,7 @@ Call `media_capture_frame` with:
 }
 ```
 
-Poll `media_task_status` no faster than `pollIntervalMs`. After completion, call `media_show` with `workspacePath: files[0].workspacePath` only for the first returned frame. Native frame timestamps remain in creation.data.frames. Explain that batch extraction avoids repeated setup and can also work from selected YouTube ranges.
+Poll `media_task_status` no faster than `pollIntervalMs`. After completion, upload the first returned frame for visual input with `media_view` using files: [{workspacePath: files[0].workspacePath}]. Native frame timestamps remain in creation.data.frames. Explain that batch extraction avoids repeated setup and can also work from selected YouTube ranges.
 
 ### 4. Build a visual map
 
@@ -67,7 +67,7 @@ Call `visual_map_create` with:
 }
 ```
 
-Poll `media_task_status`, then show files[0].workspacePath through `media_show` using its workspacePath argument. Native map details are in creation.data.result.maps. Explain how a visual map provides a compact timeline and how scene-detect or hybrid selection can be used for real videos.
+Poll `media_task_status`, then upload the generated visual map for inspection with `media_view` using files: [{workspacePath: files[0].workspacePath}]. Native map details are in creation.data.result.maps. Explain how a visual map provides a compact timeline and how scene-detect or hybrid selection can be used for real videos.
 
 ### 5. Cut two video intervals
 

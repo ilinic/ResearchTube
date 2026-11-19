@@ -34,7 +34,9 @@ for (const tool of [...browserToolDefinitions(), ...timerDefinitions({}, {}), st
 const sourceFunction = source.slice(source.indexOf('function toolDefinitions()'), source.indexOf('\nfunction isPrivateMcpTool'));
 const sourceTools = vm.runInContext(sourceFunction + '; publicMcpTools()', context);
 assert.deepEqual(JSON.parse(JSON.stringify(sourceTools)), tools, 'source and shipped worker definitions must agree');
-assert.match(byName('media_show').description, /does not upload.*media_view/);
+assert.match(byName('media_show').description, /audio or video.*Images are not supported.*media_view/);
+assert.match(byName('media_show').description, /Images are not supported/);
+assert.deepEqual(byName('media_show').outputSchema.properties.mediaKind.enum, ['video', 'audio']);
 assert.match(byName('media_view').description, /Appends files to existing Composer/);
 assert.match(byName('media_view').description, /Finish the response/);
 assert.ok(byName('workspace_open_folder').inputSchema.properties.workspacePath, 'folder opening uses the public Workspace path convention');
