@@ -1,7 +1,8 @@
 // Defaults cover missing settings or an unavailable optional Agent.
+const VIDEO_FRAME_GUIDANCE = "When needed, extract relevant video frames or select storyboard frames and upload them to this chat for visual analysis; do not rely on the transcript alone.";
 export const DEFAULT_STARTUP_PROMPTS = Object.freeze({
   studyThisSitePrompt: "@ResearchTube Study the text and images of the sites in my tab group and explain in my language. Use site_list_tabs to find the current sites; download and inspect relevant images. Users may add or remove site tabs during research: check groupChanges and refresh the tab list when needed.",
-  describeThisVideoPrompt: "@ResearchTube [video_link] [video_title]\nStudy this video and explain it in my language. When visual details matter, also inspect relevant video frames or storyboards and upload selected frames for visual analysis; do not rely on the transcript alone."
+  describeThisVideoPrompt: `@ResearchTube [video_link] [video_title]\nStudy this video and explain it in my language. ${VIDEO_FRAME_GUIDANCE}`
 });
 const PLACEHOLDERS = Object.freeze({
   studyThisSitePrompt: ["chat_tab_id", "site_tab_id", "site_title", "site_link", "group_id"],
@@ -30,8 +31,17 @@ export function normalizeStartupPrompts(value = {}) {
 }
 
 export function renderStartupPrompt(key, templates, values) {
-  const template = normalizeStartupPrompts(templates)[key];
+  let template = normalizeStartupPrompts(templates)[key];
   if (!template) throw invalid("Unknown startup prompt setting.");
+  // A running Agent may still serve a pre-binding template from its startup snapshot.
+  // Remove known routing clauses before substitution so page titles remain literal.
+  const migrated = template.replace(/[ \t]*\b(?:Use (?:tabId|chatTabId):\s*(?:\[chat_tab_id\])?\s*(?:for async tasks)?|Your leading chatTabId:\s*(?:\[chat_tab_id\])?\s*)\./g, '');
+  if (migrated !== template) {
+    template = migrated.trim();
+    if (key === 'describeThisVideoPrompt' && !/\bupload\b[^.!?\n]*\bframes\b/i.test(template) && !template.includes(VIDEO_FRAME_GUIDANCE)) {
+      template += ` ${VIDEO_FRAME_GUIDANCE}`;
+    }
+  }
   // One pass: bracketed text in a page title is data, not another placeholder.
   return template.replace(/\[([a-z][a-z0-9_]*)\]/g, (_, name) => {
     if (['chat_tab_id', 'site_tab_id', 'group_id'].includes(name)) return '';

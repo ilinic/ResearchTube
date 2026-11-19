@@ -18,6 +18,11 @@ class StartupPromptTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn('in my language', active[key])
             self.assertNotIn('in English', active[key])
             self.assertIn('in my language', original[key])
+            for prompt in (active[key], original[key]):
+                self.assertNotRegex(prompt, r'chatTabId|tabId|chat_tab_id|site_tab_id|group_id')
+        for prompt in (active['describeThisVideoPrompt'], original['describeThisVideoPrompt']):
+            self.assertIn('When needed, extract relevant video frames', prompt)
+            self.assertIn('upload them to this chat', prompt)
         with tempfile.TemporaryDirectory() as folder:
             config = Path(folder) / 'agent-config.json'
             with patch.object(agent, 'CONFIG_PATH', config):

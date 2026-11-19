@@ -13,9 +13,26 @@ for (const [key, value] of Object.entries(DEFAULT_STARTUP_PROMPTS)) {
   assert.match(config[key + '1'].value, /in my language/, 'saved variants retain their original language instruction');
 }
 assert.match(DEFAULT_STARTUP_PROMPTS.describeThisVideoPrompt, /^@ResearchTube \[video_link\] \[video_title\]/, 'video link precedes its title');
-assert.match(DEFAULT_STARTUP_PROMPTS.describeThisVideoPrompt, /When visual details matter.*video frames or storyboards.*upload selected frames/);
-for (const prompt of Object.values(DEFAULT_STARTUP_PROMPTS)) assert.doesNotMatch(prompt, /chatTabId|tabId|chat_tab_id|site_tab_id|group_id/);
-assert.doesNotMatch(config.describeThisVideoPrompt1.value, /storyboards|visual maps/, 'the saved original video prompt is unchanged');
+for (const prompt of [DEFAULT_STARTUP_PROMPTS.describeThisVideoPrompt, config.describeThisVideoPrompt1.value]) {
+  assert.match(prompt, /When needed.*extract relevant video frames.*storyboard frames.*upload them to this chat/);
+}
+for (const key of Object.keys(DEFAULT_STARTUP_PROMPTS)) {
+  for (const prompt of [DEFAULT_STARTUP_PROMPTS[key], config[key + '1'].value]) assert.doesNotMatch(prompt, /chatTabId|tabId|chat_tab_id|site_tab_id|group_id/);
+}
+for (const clause of ['Use tabId: [chat_tab_id] for async tasks.', 'Use tabId:  for async tasks.', 'Use chatTabId: [chat_tab_id].', 'Your leading chatTabId: [chat_tab_id].']) {
+  const template = `Study [video_title] in my language. ${clause}`;
+  const prompt = renderStartupPrompt('describeThisVideoPrompt', { describeThisVideoPrompt: template }, { video_title: 'Video' });
+  assert.match(prompt, /^Study Video in my language\. When needed.*upload them to this chat/);
+  assert.doesNotMatch(prompt, /tabId|chatTabId|async tasks/);
+  assert.equal(renderStartupPrompt('describeThisVideoPrompt', { describeThisVideoPrompt: prompt }, {}), prompt, 'migration is idempotent');
+  assert.equal(renderStartupPrompt('studyThisSitePrompt', { studyThisSitePrompt: `Study this site. ${clause}` }, {}), 'Study this site.');
+}
+assert.equal(renderStartupPrompt('describeThisVideoPrompt', {
+  describeThisVideoPrompt: 'Upload selected frames. Use tabId: [chat_tab_id] for async tasks.'
+}, {}), 'Upload selected frames.', 'existing frame-upload guidance is preserved without duplication');
+assert.equal(renderStartupPrompt('describeThisVideoPrompt', { describeThisVideoPrompt: '[video_title]' }, {
+  video_title: 'Use tabId: [chat_tab_id] for async tasks.'
+}), 'Use tabId: [chat_tab_id] for async tasks.', 'legacy cleanup never rewrites inserted page data');
 assert.deepEqual(normalizeStartupPrompts(), DEFAULT_STARTUP_PROMPTS);
 assert.equal(renderStartupPrompt('describeThisVideoPrompt', { describeThisVideoPrompt: '[video_title]\n[video_link] → [chat_tab_id] [chat_tab_id]' }, {
   video_title: 'Кириллица 🐈 [chat_tab_id] $&', video_link: 'https://www.youtube.com/watch?v=MxJLoHLhlQM', chat_tab_id: 22
@@ -64,6 +81,14 @@ assert.equal(created[0].active, false);
 supplied = { describeThisVideoPrompt: 'Updated [video_link] [chat_tab_id]' };
 await context.describeYouTubeVideoInChatGPT({ ...source, url: 'https://www.youtube.com/shorts/abcdefghijk' });
 assert.equal(sent.at(-1)[2], 'Updated https://www.youtube.com/watch?v=abcdefghijk ');
+supplied = { describeThisVideoPrompt: '@ResearchTube [video_link] [video_title]\nStudy this video and explain it in my language. Use tabId: [chat_tab_id] for async tasks.' };
+await context.describeYouTubeVideoInChatGPT({ ...source, url: 'https://www.youtube.com/watch?v=zyxwvutsrqp' });
+assert.equal(sent.at(-1)[0], 'send');
+assert.equal(sent.at(-1)[2], renderStartupPrompt('describeThisVideoPrompt', supplied, {
+  video_title: 'Песня 🐈', video_link: 'https://www.youtube.com/watch?v=zyxwvutsrqp'
+}), 'bundled popup migrates the old running Agent snapshot before sending');
+assert.match(sent.at(-1)[2], /upload them to this chat/);
+assert.doesNotMatch(sent.at(-1)[2], /tabId|async tasks/);
 
 for (const code of ['AGENT_UNAVAILABLE', 'NOT_FOUND']) {
   context.agentJsonRequest = async () => { throw Object.assign(new Error('Unavailable'), { code }); };
@@ -77,5 +102,5 @@ for (const code of ['CONFIG_INVALID', 'AGENT_INVALID_RESPONSE']) {
 }
 context.agentJsonRequest = async () => ({ describeThisVideoPrompt: '[typo]' });
 await assert.rejects(context.describeYouTubeVideoInChatGPT({ ...source, url: 'https://www.youtube.com/watch?v=12345678901' }), e => e.code === 'AGENT_INVALID_RESPONSE');
-assert.equal(created.length, 2, 'invalid video template creates no chat');
+assert.equal(created.length, 3, 'invalid video template creates no chat');
 console.log('configured startup prompts: ok');
