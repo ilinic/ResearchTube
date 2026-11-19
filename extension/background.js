@@ -2378,10 +2378,11 @@ async function cdpClickEnabledSendButton(tabId, timeoutMs = 45_000, beforeClick 
       throw error;
     }
     const enabled = (await cdpEvaluate(tabId, CDP_ENABLED_SEND_BUTTON_EXPRESSION))?.value === true;
-    if (enabled) {
+    if (enabled && !state.generating) {
       // Recheck after the awaited readiness probe: acceptance may arrive late.
       state = await cdpReadMediaSubmissionState(tabId);
       if (attempts && composerSendAcknowledged(state, baseline)) return { ready: true };
+      if (state.generating) return { ready: false, busy: !attempts };
       if (!attempts) baseline = state;
       attempts++;
       cdpLog("ChatGPT Send attempt", { tabId, attempt: attempts, maximumAttempts: policy.retryCount + 1, intervalSeconds: policy.retryIntervalSeconds });
@@ -2397,9 +2398,10 @@ async function cdpClickEnabledSendButton(tabId, timeoutMs = 45_000, beforeClick 
       if (composerSendAcknowledged(state, baseline)) return { ready: true };
     }
     cdpLog("ChatGPT Send not yet confirmed", { tabId, attempts, sendPresent: state.sendPresent, disabled: state.sendDisabled, ariaDisabled: state.sendAriaDisabled, label: state.sendLabel, generating: state.generating });
-    // Before the first dispatch retain the existing response wait. Afterwards,
-    // never resubmit while Send is absent/disabled or an answer is generating.
-    return { ready: false, busy: !attempts && Boolean(state.generating || !state.sendPresent) };
+    // Preview cards can appear long before ChatGPT enables Send. Waiting for
+    // initial readiness (including disabled Send) must not spend the dispatch /
+    // acknowledgement retry budget. Keep the caller's bounded response wait.
+    return { ready: false, busy: !attempts };
   }, policy, { stage: "Send and submission acknowledgement", log: cdpLog, sleep, busyTimeoutMs: timeoutMs });
   cdpLog("ChatGPT Send confirmed; attempts stopped", { tabId, attempts });
 }

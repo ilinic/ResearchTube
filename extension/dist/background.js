@@ -6962,9 +6962,10 @@ async function cdpClickEnabledSendButton(tabId2, timeoutMs = 45e3, beforeClick =
       throw error5;
     }
     const enabled = (await cdpEvaluate(tabId2, CDP_ENABLED_SEND_BUTTON_EXPRESSION))?.value === true;
-    if (enabled) {
+    if (enabled && !state.generating) {
       state = await cdpReadMediaSubmissionState(tabId2);
       if (attempts && composerSendAcknowledged(state, baseline)) return { ready: true };
+      if (state.generating) return { ready: false, busy: !attempts };
       if (!attempts) baseline = state;
       attempts++;
       cdpLog("ChatGPT Send attempt", { tabId: tabId2, attempt: attempts, maximumAttempts: policy.retryCount + 1, intervalSeconds: policy.retryIntervalSeconds });
@@ -6983,7 +6984,7 @@ async function cdpClickEnabledSendButton(tabId2, timeoutMs = 45e3, beforeClick =
       if (composerSendAcknowledged(state, baseline)) return { ready: true };
     }
     cdpLog("ChatGPT Send not yet confirmed", { tabId: tabId2, attempts, sendPresent: state.sendPresent, disabled: state.sendDisabled, ariaDisabled: state.sendAriaDisabled, label: state.sendLabel, generating: state.generating });
-    return { ready: false, busy: !attempts && Boolean(state.generating || !state.sendPresent) };
+    return { ready: false, busy: !attempts };
   }, policy, { stage: "Send and submission acknowledgement", log: cdpLog, sleep, busyTimeoutMs: timeoutMs });
   cdpLog("ChatGPT Send confirmed; attempts stopped", { tabId: tabId2, attempts });
 }

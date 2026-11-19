@@ -117,6 +117,37 @@ assert.equal(unaccepted.page.input.files.length, 1, 'failure preserves the selec
 const instant = worker(); await instant.run(); assert.equal(instant.now(), 0); assert.equal(instant.sleeps.length, 0);
 const duringGeneration = worker({ enabledAt: 120000, busyUntil: 120000 });
 await duringGeneration.run(); assert.equal(duringGeneration.sentAt(), 120000);
+const enabledWhileGenerating = worker({ busyUntil: 120000 });
+await enabledWhileGenerating.run();
+assert.equal(enabledWhileGenerating.sentAt(), 120000, 'an enabled-looking Send must not submit during active generation');
+// Visible previews do not mean ChatGPT has finished uploading/processing them.
+// A disabled Send without a Stop button must retain the long readiness wait.
+const processingImages = worker({ enabledAt: 90000, acknowledgedAfter: 20000 });
+await processingImages.run();
+assert.equal(processingImages.sentAt(), 90000);
+assert.equal(processingImages.now(), 110000, 'readiness does not consume acknowledgement retries');
+assert.equal(processingImages.commands.filter(c => c.method === 'DOM.setFileInputFiles').length, 1);
+assert.equal(processingImages.submissions.length, 1);
+
+const processingThenIgnored = worker({ enabledAt: 90000, sendWorksAt: 110000 });
+await processingThenIgnored.run();
+assert.equal(processingThenIgnored.sentAt(), 110000, 'Send retries get their full budget after image processing');
+assert.equal(processingThenIgnored.commands.filter(c => c.method === 'DOM.setFileInputFiles').length, 1);
+
+const neverReady = worker({ enabledAt: Infinity });
+await assert.rejects(neverReady.run(), e => e.code === 'MEDIA_TO_CHAT_TIMEOUT');
+assert.equal(neverReady.now(), 300000, 'unavailable Send remains bounded to the file-delivery readiness timeout');
+assert.equal(neverReady.submissions.length, 0);
+assert.equal(neverReady.page.run(inspectChatComposer).attachments.length, 1);
+
+for (const mutation of ['cancel', 'close', 'navigate']) {
+  const waiting = worker({ enabledAt: 120000 });
+  waiting.onSleep(() => { if (waiting.now() >= 60000) waiting[mutation](); });
+  await assert.rejects(waiting.run());
+  assert.equal(waiting.now(), 60000);
+  assert.equal(waiting.sentAt(), null);
+  assert.equal(waiting.page.run(inspectChatComposer).attachments.length, 1);
+}
 const messageAck = worker({ acknowledgedAfter: 10000, newMessage: true });
 await messageAck.run(); assert.equal(messageAck.now(), 10000, 'a new user turn also acknowledges the Send');
 
@@ -142,7 +173,7 @@ for (const mutation of ['cancel', 'close', 'navigate', 'edit']) {
     assert.equal(w.now(), 10000, 'target/cancellation guards run during every readiness retry');
   }
 }
-console.log('Composer media: 30-second acceptance/readiness/ack retries, immediate success, bounded busy wait, exact background tab, one upload/Send, and cancellation/edit/closure preservation: ok');
+console.log('Composer media: independent five-minute Send readiness and 30-second acceptance/ack retries, disabled processing, generation, exact background tab, one upload and cancellation/navigation preservation: ok');
 
 // CDP mouse dispatch acknowledgement is not proof of a page click. The native
 // form must submit in a background page even when all pointer events are ignored.
