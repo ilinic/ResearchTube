@@ -63,6 +63,20 @@ test("heartbeat survives hibernation state and same-installation reconnect rejec
   const rejected = await stub.fetch("https://room.internal/connect",{headers:{Upgrade:"websocket","X-Installation-Id":randomUUID()}});
   expect(rejected.status).toBe(401);
 });
+test("rapid reconnects select only the latest socket without an ambiguous-extension error", async () => {
+  const {stub, installationId} = await setup();
+  const first = await socketFor(stub, installationId); sockets.push(first.socket);
+  const latest = await socketFor(stub, installationId); sockets.push(latest.socket);
+  const ready = new Promise(resolve => latest.socket.addEventListener("message", event => resolve(event.data), {once:true}));
+  latest.socket.send("direct-tools-v1");
+  expect(await ready).toBe("direct-tools-ready");
+  const incoming = message(latest.socket), pending = roomPost(stub, "/dispatch", request());
+  const command = await incoming;
+  expect(command).toMatchObject({type:"request", installationId});
+  latest.socket.send(JSON.stringify({type:"response",requestId:command.requestId,result:{content:[{type:"text",text:"latest"}]}}));
+  expect((await (await pending).json()).result.content[0].text).toBe("latest");
+  expect((await (await roomPost(stub, "/status", {})).json()).extensionConnected).toBe(true);
+});
 test("malformed response closes only its socket and settles its pending request", async () => {
   const {stub,socket} = await setup();
   const incoming = message(socket), pending = roomPost(stub,"/dispatch",request());await incoming;

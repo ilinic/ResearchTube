@@ -5,7 +5,7 @@ import { SOCKET_TTL, MAX_BYTES, PublicError, errorResponse, json, readJson, type
 
 type ToolCallRequest = { jsonrpc: "2.0"; method: "tools/call"; params: { name: string; arguments: Record<string, unknown> } };
 
-interface SocketIdentity { installationId: string; expiresAt: number; directTools?: boolean }
+interface SocketIdentity { installationId: string; connectionId?: string; expiresAt: number; directTools?: boolean }
 interface Pending {
   socket: WebSocket;
   resolve: (value: Record<string, unknown>) => void;
@@ -26,7 +26,9 @@ export class BrowserRoom extends DurableObject<Env> {
         return await this.ctx.blockConcurrencyWhile(async () => {
           const valid = await this.env.DB.prepare("SELECT id FROM rt_installation WHERE id = ? AND revoked_at IS NULL").bind(installationId).first();
           if (!valid) return errorResponse(new PublicError("EXTENSION_AUTHENTICATION_REQUIRED", "This extension connection was replaced.", 401));
+          const previous = await this.ctx.storage.get<string>("active-installation");
           await this.ctx.storage.put("active-installation", installationId);
+          if (previous !== installationId) await this.ctx.storage.delete("active-connection");
           for (const ws of this.ctx.getWebSockets()) {
             if ((ws.deserializeAttachment() as SocketIdentity)?.installationId === installationId) continue;
             try { ws.send(JSON.stringify({ type: "disconnect", code: "EXTENSION_REPLACED" })); } catch {}
@@ -48,8 +50,10 @@ export class BrowserRoom extends DurableObject<Env> {
             old.close(1000, "Replaced");
           }
           const pair = new WebSocketPair();
-          this.ctx.acceptWebSocket(pair[1], [installationId]);
-          pair[1].serializeAttachment({ installationId, expiresAt: Date.now() + SOCKET_TTL } satisfies SocketIdentity);
+          const connectionId = crypto.randomUUID();
+          this.ctx.acceptWebSocket(pair[1], [installationId, connectionId]);
+          pair[1].serializeAttachment({ installationId, connectionId, expiresAt: Date.now() + SOCKET_TTL } satisfies SocketIdentity);
+          await this.ctx.storage.put("active-connection", connectionId);
           return new Response(null, { status: 101, webSocket: pair[0] });
         });
       }
@@ -62,7 +66,10 @@ export class BrowserRoom extends DurableObject<Env> {
         for (const ws of this.ctx.getWebSockets(installationId)) {
           this.rejectSocket(ws, "EXTENSION_OFFLINE", "The extension was disconnected."); ws.close(1000, "Revoked");
         }
-        if (await this.ctx.storage.get("active-installation") === installationId) await this.ctx.storage.put("active-installation", "revoked:" + installationId);
+        if (await this.ctx.storage.get("active-installation") === installationId) {
+          await this.ctx.storage.put("active-installation", "revoked:" + installationId);
+          await this.ctx.storage.delete("active-connection");
+        }
         return json({ revoked: true });
       }
       if (path === "/dispatch") {
@@ -84,14 +91,24 @@ export class BrowserRoom extends DurableObject<Env> {
   }
   private async activeSocket(requireDirect = true): Promise<WebSocket | undefined> {
     const active = await this.ctx.storage.get<string>("active-installation");
-    const sockets = this.ctx.getWebSockets().filter(ws => {
+    const connectionId = await this.ctx.storage.get<string>("active-connection");
+    if (!connectionId) {
+      // One-time migration: legacy sockets have no connection ID. Close them so
+      // their owner reconnects with an explicit active connection; never guess.
+      for (const old of this.ctx.getWebSockets()) {
+        this.rejectSocket(old, "EXTENSION_OFFLINE", "Reconnect ResearchTube to select the active extension.");
+        try { old.close(1012, "Reconnect required"); } catch {}
+      }
+      return undefined;
+    }
+    const socket = this.ctx.getWebSockets(connectionId).find(ws => {
       const value = ws.deserializeAttachment() as SocketIdentity;
-      return value?.expiresAt > Date.now() && value.installationId === active && ws.readyState === 1;
+      return value?.connectionId === connectionId && value.installationId === active &&
+        value.expiresAt > Date.now() && ws.readyState === 1;
     });
-    if (sockets.length > 1) throw new PublicError("EXTENSION_AMBIGUOUS", "Reconnect one ResearchTube extension.", 409);
-    if (requireDirect && sockets.length && !(sockets[0].deserializeAttachment() as SocketIdentity).directTools)
+    if (requireDirect && socket && !(socket.deserializeAttachment() as SocketIdentity).directTools)
       throw new PublicError("EXTENSION_UPDATE_REQUIRED", "Update the ResearchTube extension to run tools directly.", 409);
-    return sockets[0];
+    return socket;
   }
   private dispatch(socket: WebSocket, request: ToolCallRequest, workerReceivedAtMs: number, roomReceivedAtMs: number): Promise<Record<string, unknown>> {
     if (this.pending.size >= 100) throw new PublicError("BROWSER_BUSY", "Too many requests are running.", 429);
