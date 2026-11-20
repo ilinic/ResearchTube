@@ -1,4 +1,5 @@
 import { beforeAll, afterAll, expect, test } from "vitest";
+import { readFile } from "node:fs/promises";
 import { start, seedSession, rpc, post, BASE, EXTENSION, doRoom, roomPost, message } from "./helpers.mjs";
 let mf, db;
 beforeAll(async () => { ({ mf, db } = await start()); });
@@ -46,7 +47,9 @@ test("serves bounded public status and OAuth discovery without a browser", async
 });
 test("MCP discovery uses canonical Extension tools; execution challenges missing credentials", async () => {
   const response = await rpc(mf, "tools/list"); expect(response.status).toBe(200);
-  const listing = await response.json(); expect(listing.result.tools).toHaveLength(84);
+  const listing = await response.json();
+  const catalog = JSON.parse(await readFile(new URL("../src/catalog.json", import.meta.url), "utf8"));
+  expect(listing.result.tools).toHaveLength(catalog.tools.length + 1);
   for (const name of ["site_diagnostics_start", "site_diagnostics_report"]) {
     const diagnostic = listing.result.tools.find(tool => tool.name === name);
     expect(diagnostic).toBeDefined();
