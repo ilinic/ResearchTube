@@ -165,4 +165,4 @@ Clock-change and execution-gap warnings are task metadata rather than MCP tool e
 
 ## Site group controller
 
-`BROWSER_OWNER_NOT_CONNECTED` requires an explicit widget connection in the leading chat. `BROWSER_NOT_GROUP_OWNER` refuses Site tools from another ChatGPT tab. `BROWSER_OWNER_CONFLICT` refuses ambiguous or conflicting controller markers; connect a group containing one ChatGPT or start a fresh study. Closing the owner never transfers control.
+`BROWSER_GROUP_NOT_CONNECTED` asks you to connect a grouped saved chat through `system_get_chat_context`. The former `BROWSER_OWNER_NOT_CONNECTED`, `BROWSER_NOT_GROUP_OWNER` and `BROWSER_OWNER_CONFLICT` codes belong to older single-owner versions; refresh the Extension and MCP catalog if they appear. Any saved ChatGPT tab in the group can now initiate Site tools.

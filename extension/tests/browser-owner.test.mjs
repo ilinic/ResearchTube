@@ -90,7 +90,19 @@ assert.equal((await ambiguous.agent.connectGroup(41)).chatTabId,41);
 assert.equal((await ambiguous.agent.connectGroup(42)).chatTabId,42);
 assert.equal(ambiguous.ownerMarkers.size,2);
 
-// Twenty-image batches stay whole and use the same leading Composer once.
+// Delivery is pinned to each caller, never the initial chat.
+const delivery=fixture();await delivery.agent.start(10);
+delivery.tabs.set(23,{id:23,url:'https://chatgpt.com/c/second',groupId:100});await delivery.agent.onCreated();
+const secondRead=await delivery.run('site_read',{chatTabId:23});
+const secondImage=secondRead.nodes.find(n=>n.role==='image').resources[0].resourceId;
+const secondTask=await delivery.run('site_get_images',{chatTabId:23,resourceId:secondImage});
+delivery.tabs.delete(22);await delivery.agent.onRemoved(22);
+await delivery.scheduled.shift()();
+assert.equal((await delivery.run('site_files_status',{chatTabId:23,taskId:secondTask.taskId})).status,'completed');
+assert.equal(delivery.uploads[0].options.target.tabId,23);
+assert.equal(delivery.uploads[0].options.target.chatPath,'/c/second');
+
+// Twenty-image batches stay whole and use the initiating Composer once.
 const twenty=fixture({imageCount:21});await twenty.agent.start(10);
 const ids=(await twenty.run('site_read')).nodes.flatMap(n=>n.resources).map(r=>r.resourceId);
 assert.equal(ids.length,21);

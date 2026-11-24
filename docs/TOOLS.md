@@ -234,17 +234,17 @@ The original Workspace files are unchanged. A restarted Extension worker marks q
 
 ## Browser Agent
 
-Start **Study this site** from the popup to create a site copy and one leading ChatGPT chat in a Chrome group, leaving the source in place. Drag more sites into the group or remove/close them during research. Only the leading `chatTabId` can use Site tools; other GPT chats are ignored. Page operations also take an exact site `tabId`. All file outputs/continuations go to the leading chat. Closing a site cancels its work only; closing the leader stops the group without a replacement. Chrome supplies live membership, with no session token or stored roster. See [Browser Agent](features/BROWSER_AGENT.md).
+Start **Study this site** from the popup to create a site copy and initial ChatGPT chat in a Chrome group, leaving the source in place. Drag ordinary sites or additional ChatGPT chats into the group. Every saved ChatGPT tab can use Site tools; page operations take the exact target `tabId` for any grouped HTTP/HTTPS tab. File outputs/continuations go to the initiating `chatTabId`. Closing a tab cancels only work involving it. Chrome supplies live membership, with no owner, session token or stored roster. See [Browser Agent](features/BROWSER_AGENT.md).
 
 | Tool | Behavior |
 | --- | --- |
-| `site_list_tabs` | Discover the leading chat and current sites, titles, safe URLs, IDs and state; paginate large groups with offset/limit. |
+| `site_list_tabs` | Discover all group tabs, including ChatGPT, titles, safe URLs, IDs and state; paginate large groups with offset/limit. |
 | `site_read` | Bounded full-depth AX/DOM content and resource references from the exact target; optional outline/subtree and pagination. |
 | `site_get_children` | Expand current children with depth and pagination. |
 | `site_get_node` | Inspect AX details, safe DOM geometry and resource references. |
 | `site_get_text` | Read deferred subtree text with offset/limit. |
-| `site_interact` | Run 1–20 ordered `steps` (click/type/key/select/scroll/hover) in one call; stop on failure/navigation, return `completedSteps` and `failedStep`. Ordinary actions observe once at the end; Enter/link/navigation defers AX refresh to the next `site_read` (`observeAgain: true`). No legacy single-action input. ChatGPT tabs cannot be targeted. |
-| `site_diagnostics_start` | Start a bounded timing capture for the leading `chatTabId` and its site group. Resets that chat's earlier capture. |
+| `site_interact` | Run 1–20 ordered `steps` (click/type/key/select/scroll/hover) in one call; stop on failure/navigation, return `completedSteps` and `failedStep`. Ordinary actions observe once at the end; Enter/link/navigation defers AX refresh to the next `site_read` (`observeAgain: true`). No legacy single-action input. Other grouped ChatGPT tabs are ordinary targets. |
+| `site_diagnostics_start` | Start a bounded timing capture for the initiating `chatTabId` and its site group. Resets that chat's earlier capture. |
 | `site_diagnostics_report` | Return a copyable Markdown timeline of Site calls, per-step timings, gaps, browser stages and correlated Cloudflare/Extension UTC stamps. Stops the capture by default. |
 | `site_get_images` | Download observed images from the target tab and optionally attach/send an ordered batch to the initiating chat; labelled screenshot fallbacks. |
 | `site_get_files` | Download observed documents/audio/video from the target and optionally attach/send one batch to the initiating chat. |

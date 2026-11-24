@@ -51,7 +51,7 @@ Find and organize files in ResearchTube's local working folder.
 
 ## Browser Agent
 
-Research several websites from one leading ChatGPT chat. Drag site tabs into its Chrome group, remove them or close them while working. All images and files arrive in the leading chat. Additional ChatGPT tabs cannot use Site tools; closing the leader stops the group.
+Research several websites and ChatGPT conversations from any saved ChatGPT tab in a Chrome group. Drag ordinary sites or other chats into the group and remove or close them while working. Every grouped chat can use Site tools independently and may be read or interacted with by another grouped chat. Images and files arrive in the initiating chat; closing a tab cancels only work involving it.
 
 | Tool | What you can do |
 | --- | --- |
@@ -63,7 +63,7 @@ Research several websites from one leading ChatGPT chat. Drag site tabs into its
 | **Inspect site node** | Examine an element and discover details, images or files. |
 | **Read site node text** | Read a selected section in more detail. |
 | **Interact with site element** | Click, type, select, hover or scroll on a site page. |
-| **List group tabs** | Discover current sites and the leading chat. |
+| **List group tabs** | Discover all current tabs, including grouped ChatGPT chats. |
 | **Read site page** | Read a site's accessible content and discover available files. |
 | **Group automation status** | Check the group's participants and current automation state. |
 | **Stop group automation** | End group automation while leaving tabs, files and drafts in place. |

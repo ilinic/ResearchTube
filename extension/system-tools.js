@@ -9,7 +9,7 @@ const error = { ...object({ code: text, message: text }), type: ["object", "null
 export function systemToolDefinitions(widgetUri) {
   return [{
     name: "system_get_chat_context", title: "Read or resume this tab group",
-    description: "Read or explicitly resume the tab group for the exact chatTabId from the startup prompt. Returns its leading chat and live site tabs immediately. First productive Site calls identify their group automatically; no setup widget or polling is needed. Never guess a chatTabId.",
+    description: "Read or explicitly resume the tab group for the exact chatTabId from the startup prompt. Returns the initiating chat and all live group tabs, including other ChatGPT chats, immediately. First productive Site calls identify their group automatically; no setup widget or polling is needed. Never guess a chatTabId.",
     inputSchema: object({ chatTabId: id }),
     outputSchema: object({ taskId, status: { enum: ["working", "completed", "failed", "cancelled"] }, phase: text, progressPercent: { type: "number", minimum: 0, maximum: 100 }, pollIntervalMs: { type: "integer", minimum: 100 }, chatTabId: nullableId, group: { ...browserGroupSchema, type: ["object", "null"] }, error }),
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }

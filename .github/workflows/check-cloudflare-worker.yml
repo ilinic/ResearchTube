@@ -31,7 +31,7 @@ jobs:
             extension/package-lock.json
             cloudflare-worker/package-lock.json
       - run: npm ci --prefix extension
-      - run: npm run build --prefix extension
+      - run: npm test --prefix extension
       - run: npm ci --prefix cloudflare-worker
       - run: npm run check --prefix cloudflare-worker
       - run: npm run build:production --prefix cloudflare-worker

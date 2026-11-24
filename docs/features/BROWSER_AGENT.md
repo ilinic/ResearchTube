@@ -1,12 +1,12 @@
 # Browser Agent: group automation
 
-**Study this site** duplicates the site and opens one leading ChatGPT conversation in a blue `RT · …` Chrome group. The source stays in place. The prompt supplies the leading `chatTabId`. Add other site tabs to this group by dragging them in; remove, close or duplicate sites during research. All file results and continuations go to the leading chat.
+**Study this site** duplicates the site and opens an initial ChatGPT conversation in a blue `RT · …` Chrome group. The source stays in place. The prompt supplies the initiating `chatTabId`. Drag ordinary sites or additional ChatGPT chats into the group; remove, close or duplicate tabs during research. Each saved ChatGPT conversation can use Site tools independently. File results and continuations go to the initiating chat.
 
 Reload the Extension and refresh the MCP catalog after upgrading. Study this site supplies the exact chatTabId in its startup prompt. First productive Site calls identify the group automatically without a connection widget. Explicit `system_get_chat_context` with chatTabId reads or resumes a stopped group immediately.
 
 ## Manually created groups
 
-A manually created group needs its exact leading chatTabId. When that ID is available, the first Site call can claim a group containing exactly one saved ChatGPT conversation. Unknown IDs are never guessed from focus; use Study this site to create a study with a supplied ID. Extra chats cannot take over an existing owner, and ambiguous unowned groups are refused. A moved, closed, duplicate or changed leading chat fails closed. Stop is preserved until explicit resume; cancelled tasks are never restarted.
+A manually created group needs an exact initiating `chatTabId`. The first Site call from any saved ChatGPT conversation in that group can connect it. Unknown IDs are never guessed from focus; use Study this site to create a study with a supplied ID. A moved, closed, duplicate or changed initiating conversation fails closed for its own work. Stop is preserved until explicit resume; cancelled tasks are never restarted.
 
 ## Prompt templates
 
@@ -32,21 +32,21 @@ Missing entries use the built-in defaults. Both shortcuts support offline defaul
 
 ## Participants and identity
 
-A group has one exact leading `chatTabId`, a live site roster, page connections and file tasks. Every Site tool checks that its supplied caller ID is this group's controller. Page tools additionally require a site `tabId` from `site_list_tabs`; ChatGPT pages cannot be targeted. MCP transport does not authenticate the originating tab: `chatTabId` remains explicit routing, not proof of request origin. The active account authorizes its extension; it pins the explicitly supplied chat document inside execution. No focus, similar-URL guess or election chooses a controller.
+A group is a shared workspace with a live tab roster, page connections and file tasks, not a chat-owned session. Every Site tool validates its initiating `chatTabId`; page tools also require an exact target `tabId` from `site_list_tabs`. Both ordinary sites and ChatGPT pages can be read and interacted with, including typing and sending messages in another chat. MCP transport does not authenticate the originating tab: `chatTabId` is explicit routing, not proof of request origin. The active account authorizes its extension; it pins the explicitly supplied chat document inside execution. No focus-based target guessing or election is used.
 
-`site_list_tabs` lists the leading chat and manageable sites, with safe URLs, roles and automation state. Additional ChatGPT tabs are excluded. `offset`/`limit` pagination defaults to 50 and allows up to 200 per page; restart at offset 0 if revision changes. There is no configured site count cap.
+`site_list_tabs` lists every current HTTP/HTTPS group tab, with safe URLs, roles and automation state. The returned group `chatTabId` identifies the caller. `offset`/`limit` pagination defaults to 50 and allows up to 200 per page; restart at offset 0 if revision changes. There is no configured tab count cap.
 
-Successful Site calls may include compact `groupChanges` for added/removed sites. A failed call does not acknowledge changes. Title/URL edits and unrelated ChatGPT tabs do not create membership noise. After losing a prior snapshot, `resyncRequired` asks the model to refresh `site_list_tabs`. Changes never insert messages into Composer.
+Successful Site calls may include compact `groupChanges` for added/removed tabs, including ChatGPT. Each caller has its own acknowledged roster and page-change baseline. A failed call does not acknowledge changes. Title/URL edits do not create membership noise; a role change or missing snapshot requests a refresh. Changes never automatically insert messages into Composer.
 
-Removing a site cancels only its queued work and releases its page connection. Other sites continue. With no sites the group is `idle`; adding a site makes it available again. Removing or closing the leading chat stops all group work; other ChatGPT tabs never become substitutes.
+Removing a tab cancels only work involving that tab and releases its page connection. Other tabs and chats continue. With no other tabs the caller sees the group as `idle`; adding any tab makes it available again. Different callers' actions on the same physical tab are serialized by the shared per-tab queue. Navigation and stale-node checks still apply.
 
-A small controller marker in the Extension's isolated page world survives service-worker suspension. Ignored ChatGPT tabs mirror only this identity/state, so a closed leader cannot be replaced after worker recreation. The marker never touches page text, Composer or Chrome Storage. Site membership is queried from Chrome. A page reload can recreate the marker from the running worker; if both the worker and all marker-bearing documents are lost, reconnect the single leading chat explicitly. An ambiguous group is refused. Browser restart or Extension reload can require a new connection. Page IDs must be re-observed after worker restart, and in-memory file tasks cannot resume.
+A small group-state marker in the Extension's isolated page world survives service-worker suspension. Grouped ChatGPT tabs mirror only the group ID and automation state; there is no owner identity. The marker never touches page text, Composer or Chrome Storage. Membership is queried from Chrome. A page reload can recreate the marker from the running worker; reconnect any grouped saved chat if markers are lost. Browser restart or Extension reload can require a new connection. Page IDs must be re-observed after worker restart, and in-memory file tasks cannot resume.
 
 ## Per-site queues and file delivery
 
 `tab-automation.js` supplies a shared queue per physical tab. Work in different tabs can proceed independently. Page input, Composer messages and file delivery in one tab are serialized. Resource extraction releases its source queue before waiting for the receiving chat, preventing cross-chat delivery deadlocks. Temporary file/Composer operations borrow debugger leases and cannot detach a retained page connection.
 
-`site_files_status` and `site_files_cancel` are available only to the leading chat for its original group's file tasks. Their history remains worker-local. `site_session_status` and `site_session_stop` use the same owner check. Stop cancels page/file work and preserves tabs, files and drafts. Explicit `system_get_chat_context` reconnection in the leading chat resumes it; status reads and worker recovery do not undo Stop.
+`site_files_status` and `site_files_cancel` operate on tasks in the caller's current group. Each task retains its original initiating conversation and destination. History remains worker-local. `site_session_status` and `site_session_stop` are available to any grouped saved chat; Stop cancels group page/file work and preserves tabs, files and drafts. Explicit `system_get_chat_context` reconnection from any grouped saved chat resumes it; status reads and worker recovery do not undo Stop.
 
 ## Observation and navigation
 
@@ -68,7 +68,7 @@ Optional Agent `browserStudyMaxNodes` (200) and `browserStudyMaxChars` (48000) s
 
 `site_get_images` accepts current observed image IDs only. `site_get_files` accepts observed documents, audio or video only. Both take one `resourceId` or an ordered `resourceIds` batch from the selected target tab, never arbitrary resource URLs. Wrong/mixed kinds reject the complete request before creating a task; downloaded bytes are checked again before saving.
 
-Tasks return immediately with standard `tsk_…` IDs, monotonic `progressPercent` and `pollIntervalMs`. The Agent saves new files in `study-this-site/` with exclusive filenames `res_… [tsk_…].ext`; its existing private filename-tag contract is preserved. All batch files are saved before one attachment and continuation to the **leading chat**. `addToChat:false` saves only. `limits.mediaToChatMaxFiles` defaults to 20, and `mediaToChatMaxFileSizeMiB` bounds each resource. Partial failure/cancel preserves saved files but does not send a partial batch.
+Tasks return immediately with standard `tsk_…` IDs, monotonic `progressPercent` and `pollIntervalMs`. The Agent saves new files in `study-this-site/` with exclusive filenames `res_… [tsk_…].ext`; its existing private filename-tag contract is preserved. All batch files are saved before one attachment and continuation to the **initiating chat**. `addToChat:false` saves only. `limits.mediaToChatMaxFiles` defaults to 20, and `mediaToChatMaxFileSizeMiB` bounds each resource. Partial failure/cancel preserves saved files but does not send a partial batch.
 
 CDP's authenticated streaming resource loader is preferred, followed by a known bounded cache entry or fixed DOM rendering for data/blob/canvas/SVG images. An unavailable original image can use a labelled element/viewport screenshot fallback. Audio/video/documents cannot substitute screenshots. Signed URLs, credentials, physical paths and resource bytes are not returned through MCP.
 
@@ -84,15 +84,15 @@ AUTO appears on group participants and ERR on a failed page/startup. The popup h
 
 ### Copyable performance trace
 
-Use `site_diagnostics_start` with the leading `chatTabId` before a test on the group (for example, searching for a product on AliExpress). Perform ordinary `site_read` and `site_interact` operations, then call `site_diagnostics_report` with the same chatTabId. The report returns a single `reportMarkdown` string ready to paste into a bug report or another chat. Its default `stop: true` ends capture; `stop: false` lets a test inspect progress and continue. A second start resets the previous capture.
+Use `site_diagnostics_start` with the initiating `chatTabId` before a test on the group (for example, searching for a product on AliExpress). Perform ordinary `site_read` and `site_interact` operations, then call `site_diagnostics_report` with the same chatTabId. The report returns a single `reportMarkdown` string ready to paste into a bug report or another chat. Its default `stop: true` ends capture; `stop: false` lets a test inspect progress and continue. A second start resets the previous capture.
 
 The report ranks slow tool calls and gaps between consecutive Site calls, then shows the latest timeline, per-step action durations and slow internal browser stages. A type-and-Enter pair within one `site_interact.steps` batch eliminates the between-call gap; each step retains its own measured duration. Gaps between separate calls include ChatGPT decision time, client scheduling, network and relay delays; they cannot be attributed exclusively to model reasoning. Tool durations and action-step durations are measured in the Extension. Optional low-level browser stages depend on `browserStudyDetailedLogging` at group creation.
 
 When using the Cloudflare server, the same report also correlates safe UTC timestamps (`Date.now()` in milliseconds) recorded by the Worker, the account-isolated Durable Object and the Extension, using a random request ID. This is an approximate cross-machine timeline, not a precise distributed trace: local clocks may differ, and timestamps do not isolate network transit or model processing time. The Extension also records its reply and a later acknowledgment stamp from the Durable Object. No extra public diagnostic tool is needed.
 
-Capture is explicitly enabled, bounded to the most recent 100–800 events (600 by default), and kept in Chrome's Extension session storage across service-worker restarts. Up to four leading chats may be captured at once. Only tool names, safe action types, group/tab identifiers, random request IDs, stage names, UTC timestamps, numeric measurements and error codes are retained. Typed text, website content, page URLs, prompts, headers, cookies and private CDP payloads are excluded. Reports never request a page rescan or modify the target tab. Console timing output remains available independently of these capture tools.
+Capture is explicitly enabled, bounded to the most recent 100–800 events (600 by default), and kept in Chrome's Extension session storage across service-worker restarts. Up to four initiating chats may be captured at once. Only tool names, safe action types, group/tab identifiers, random request IDs, stage names, UTC timestamps, numeric measurements and error codes are retained. Typed text, website content, page URLs, prompts, headers, cookies and private CDP payloads are excluded. Reports never request a page rescan or modify the target tab. Console timing output remains available independently of these capture tools.
 
-Example instruction in the leading chat: *"Start ResearchTube browser diagnostics; search AliExpress for Xeon E5-2699 v4 using the ordinary Site tools, then print the full timing report. Do not repeat a browser action merely to measure it."*
+Example instruction in the initiating chat: *"Start ResearchTube browser diagnostics; search AliExpress for Xeon E5-2699 v4 using the ordinary Site tools, then print the full timing report. Do not repeat a browser action merely to measure it."*
 
 ## Composer delivery retries
 
@@ -100,7 +100,7 @@ Existing guarded file/startup delivery uses `composerMediaRetryCount` (15) and `
 
 ## Verification
 
-Run the normal Extension suite, including browser-agent, browser-resource-groups, tab-automation, browser-page-updates, browser-visible-images, browser-diagnostics and task-chat tests; Agent byte-ingestion tests remain required. Actual Chrome/ChatGPT verification must cover adding/removing/duplicating sites, refusing an extra ChatGPT, restoring owner markers after worker suspension, background reads, authenticated images, navigation, twenty-file delivery and closing the owner. Mocked protocol tests do not establish that an external site or the current ChatGPT UI passed a live browser test.
+Run the normal Extension suite, including browser-agent, browser-owner, browser-resource-groups, tab-automation, browser-page-updates, browser-visible-images, browser-diagnostics and task-chat tests; Agent byte-ingestion tests remain required. Actual Chrome/ChatGPT verification must cover adding/removing/duplicating tabs, two ChatGPT callers targeting the same site and each other, independent change baselines, group-state recovery after worker suspension, background reads, authenticated images, navigation, twenty-file delivery to the correct caller and closing one chat while another continues. Mocked protocol tests do not establish that an external site or the current ChatGPT UI passed a live browser test.
 
 ## Errors available to ChatGPT
 
