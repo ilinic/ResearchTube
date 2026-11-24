@@ -9,7 +9,7 @@ const f=fixture();const started=await f.agent.start(10);
 assert.equal(started.chatTabId,22);assert.equal(started.group.groupId,100);
 assertSchema(definitions.find(t=>t.name==='site_list_tabs').outputSchema,{chatTabId:22,group:started.group});
 const prompt=f.events.find(e=>e[0]==='prompt')[2];
-assert.match(prompt,/leading chatTabId/);assert.match(prompt,/chatTabId: 22/);
+assert.match(prompt,/initiating chatTabId/);assert.match(prompt,/chatTabId: 22/);
 assert.equal(started.group.chatTabId,22);assert.equal(started.group.totalTabs,2);assert.equal(f.events.filter(e=>e[0]==='prompt').length,1);
 assert.doesNotMatch(prompt,/sessionId|bas_|site_get_images|site_get_files/);
 for(const tool of definitions){assert.ok(!tool.inputSchema.properties.sessionId);assert.ok(tool.inputSchema.required.includes('chatTabId'));}
@@ -50,19 +50,24 @@ await f.run('site_read');
 await f.run('site_session_stop');assert.equal((await f.run('site_session_status')).group.state,'stopped');
 assert.equal(f.tabs.size,3);await assert.rejects(f.run('site_read'),{code:'BROWSER_SESSION_STOPPED'});
 
-// The leading chat controls all current sites; extra ChatGPT tabs are ignored.
+// Every grouped chat can control all current tabs.
 const multi=fixture();await multi.agent.start(10);
 multi.tabs.set(30,{id:30,url:'https://chatgpt.com/c/other',title:'Other chat',groupId:100,windowId:2});
 multi.tabs.set(31,{id:31,url:'https://site.test/second?token=PRIVATE',title:'Second',groupId:100,windowId:2});
 await multi.agent.onCreated();
-assert.equal((await multi.run('site_list_tabs')).group.tabs.length,3);
+assert.equal((await multi.run('site_list_tabs')).group.tabs.length,4);
 const a=await multi.run('site_read');const b=await multi.run('site_read',{tabId:31});
 assert.equal(b.chatTabId,22);assert.equal(b.tabId,31);
 assert.notEqual(a.nodes.find(n=>n.role==='image').nodeId,b.nodes.find(n=>n.role==='image').nodeId);
 await assert.rejects(multi.run('site_get_node',{tabId:31,nodeId:a.nodes[0].nodeId}),{code:'PAGE_CHANGED'});
-await assert.rejects(multi.run('site_read',{tabId:30}),{code:'BROWSER_INVALID'});
-await assert.rejects(multi.run('site_read',{chatTabId:30,tabId:31}),{code:'BROWSER_NOT_GROUP_OWNER'});
-await assert.rejects(multi.agent.connectGroup(30),{code:'BROWSER_NOT_GROUP_OWNER'});
+const chatRead=await multi.run('site_read',{tabId:30});
+assert.equal(chatRead.tabId,30);assert.equal(chatRead.chatTabId,22);
+const sharedRead=await multi.run('site_read',{chatTabId:30,tabId:31});
+assert.equal(sharedRead.chatTabId,30);assert.equal(sharedRead.group.chatTabId,30);
+assert.equal(sharedRead.nodes[0].nodeId,b.nodes[0].nodeId);
+assert.ok(sharedRead.changes.addedNodes>0,'each chat has an independent page baseline');
+assert.equal((await multi.agent.connectGroup(30)).chatTabId,30);
+assert.equal((await multi.run('site_interact',{tabId:30,steps:[{action:'type',nodeId:chatRead.nodes.find(n=>n.role==='textbox').nodeId,text:'Research this topic'},{action:'key',key:'Enter'}]})).completedSteps,2);
 
 // Removing one site cancels its work only; removing all sites leaves idle state.
 const queuedA=await multi.run('site_get_images',{resourceId:a.nodes.find(n=>n.role==='image').resources[0].resourceId});
@@ -75,10 +80,10 @@ const queuedB=await multi.run('site_get_images',{tabId:31,resourceId:b.nodes.fin
 multi.tabs.delete(31);await multi.agent.onRemoved(31);
 assert.equal((await multi.run('site_files_status',{taskId:queuedB.taskId})).status,'cancelled');
 await multi.scheduled.shift()();
-assert.equal((await multi.run('site_list_tabs')).group.state,'idle');
+assert.equal((await multi.run('site_list_tabs')).group.state,'running');
 multi.tabs.delete(22);await multi.agent.onRemoved(22);
-await assert.rejects(multi.run('site_list_tabs',{chatTabId:30}),{code:'BROWSER_NOT_GROUP_OWNER'});
-await assert.rejects(multi.agent.connectGroup(30),{code:'BROWSER_NOT_GROUP_OWNER'});
+assert.equal((await multi.run('site_list_tabs',{chatTabId:30})).group.state,'idle');
+assert.equal((await multi.agent.connectGroup(30)).chatTabId,30);
 
 // Group exclusion and queued actions are revalidated against actual Chrome state.
 const moved=fixture();await moved.agent.start(10);
@@ -174,7 +179,7 @@ assert.equal(await waitForBrowserConversation(chatHost,22),saved);assert.equal(t
 assert.equal(browserStudyGroupTitle({title:'Marketplace - Insulation | Facebook',url:'https://facebook.com/item'}),'RT · Insulation');
 assert.equal(Array.from(browserStudyGroupTitle({title:'😀'.repeat(30)})).length,25);
 for(const input of [{sessionId:'bas_abcdefghij'},{chatTabId:22,tabId:21,depth:21},{chatTabId:22,tabId:21,mode:'subtree'}])assert.throws(()=>validateBrowserInput('site_read',input),{code:'BROWSER_INVALID'});
-console.log('Browser groups: one controller, dynamic sites, strict schemas, resource delivery, closure, movement, worker recovery and cancellation: ok');
+console.log('Browser groups: multiple callers, dynamic sites, strict schemas, resource delivery, closure, movement, worker recovery and cancellation: ok');
 
 // Protected OOP targets never receive domain-enable or tree-read commands.
 const protectedFrame=fixture();await protectedFrame.agent.start(10);

@@ -82,7 +82,10 @@ export function createBrowserPage(session, host) {
   const limits = session.observation || DEFAULT_BROWSER_OBSERVATION;
   const frameParents = new Map(), frameEpochs = new Map(), targetEpochs = new Map();
   const liveTarget = target => target.epoch === (frameEpochs.get(target.frameId) || 0) && target.targetEpoch === (targetEpochs.get(target.sessionId || "root") || 0);
-  let reported = { version: null, nodes: new Map(), resources: new Set() };
+  const reportedByCaller = new Map();
+  const callerKey = () => session.operation?.chatTabId ?? null;
+  const reportedForCaller = () => reportedByCaller.get(callerKey()) || { version: null, nodes: new Map(), resources: new Set() };
+  const forgetCaller = tabId => reportedByCaller.delete(tabId);
   const command = (method, params = {}, target = {}) => {
     const work = () => host.command(session.agentTabId, method, params, target.sessionId);
     const child = target.sessionId || target.frameId && target.frameId !== session.mainFrameId;
@@ -372,10 +375,10 @@ export function createBrowserPage(session, host) {
     await enrichMedia(entries.slice(input.offset ?? 0, (input.offset ?? 0) + Math.min(input.maxNodes ?? limits.maxNodes, limits.maxNodes)));
     await host.check(session, false);
     if (indexedVersion !== session.pageVersion) throw browserError("PAGE_CHANGED", "The page navigated during observation. Read the current page again.");
-    const delta = difference(reported);
+    const delta = difference(reportedForCaller());
     const result = serialize(entries.filter(entry => index.get(entry.id) === entry), input, delta.changes);
     result.roots = base.slice(0, limits.maxNodes);
-    reported = delta.current;
+    reportedByCaller.set(callerKey(), delta.current);
     finish?.({ outcome: "ok", returnedNodes: result.nodes.length, totalNodes: entries.length, characters: JSON.stringify(result.nodes).length });
     return result;
   }
@@ -490,12 +493,12 @@ export function createBrowserPage(session, host) {
       await refresh();
       // Bound DOM work too: inspect new media and previously referenced media,
       // rather than synchronously enriching thousands of off-page images.
-      const media = [...index.values()].filter(entry => (RESOURCE_ROLES.has(entry.role) || entry.visualMedia) && (entry.resources.length || !reported.nodes.has(entry.id)));
+      const media = [...index.values()].filter(entry => (RESOURCE_ROLES.has(entry.role) || entry.visualMedia) && (entry.resources.length || !reportedForCaller().nodes.has(entry.id)));
       await enrichMedia(media.slice(0, limits.maxNodes)); await host.check(session, false);
       if (indexedVersion !== session.pageVersion) throw browserError("PAGE_CHANGED", "The page navigated during the post-action read.");
-      const delta = difference(reported);
+      const delta = difference(reportedForCaller());
       const observation = serialize(delta.entries, {}, delta.changes);
-      reported = delta.current;
+      reportedByCaller.set(callerKey(), delta.current);
       return { ...context(), completedSteps, failedStep, page: metadata(), observeAgain: Boolean(failedStep) || session.observedRevision !== session.revision || observation.truncated || delta.changes.truncated, observation, observationError: null };
     } catch (error) {
       // Input has already been dispatched. A loading/context failure must not
@@ -511,5 +514,5 @@ export function createBrowserPage(session, host) {
   }
   let actionQueue = Promise.resolve();
   const actSerial = input => { const result = actionQueue.then(() => act(input)); actionQueue = result.then(() => {}, () => {}); return result; };
-  return { refresh, observe, getNode, getText, act: actSerial, getResource, requireNode, withElement, command, enrich, metadata, invalidate, invalidateFrame, point };
+  return { forgetCaller, refresh, observe, getNode, getText, act: actSerial, getResource, requireNode, withElement, command, enrich, metadata, invalidate, invalidateFrame, point };
 }
