@@ -192,7 +192,8 @@ for (const name of launchNames) {
 }
 for (const name of ["site_get_images", "site_get_files"]) {
  const tool = tools.find(t => t.name === name);
- assert.ok(tool.inputSchema.required.includes("chatTabId"));
+ assert.ok(tool.inputSchema.properties.chatTabId);
+ assert.ok(!tool.inputSchema.required.includes("chatTabId"), "missing current context must be recoverable via the widget");
  assert.ok(tool.inputSchema.required.includes("tabId"));
  assert.ok(tool.outputSchema.properties.chatTabId);
  assert.ok(!tool.inputSchema.properties.sessionId);

@@ -121,7 +121,7 @@ Install Extension and Agent files from the same release. Their implementation ve
 
 After replacing Extension files:
 
-1. reload the unpacked extension in `chrome://extensions`;
+1. If updating a Git checkout rather than a platform release archive, run `npm.cmd ci --prefix extension` and `npm.cmd run build --prefix extension` on Windows (use `npm` elsewhere) from the repository root before reloading. Chrome executes `extension/dist/background.js`; updating source or the manifest alone does not update the running code. Then reload the unpacked extension in `chrome://extensions`;
 2. restart the Local Agent when Agent files changed;
 3. use ChatGPT's ResearchTube app management **Refresh** action so the current MCP tool schema is loaded;
 4. verify with `system_agent_status`.
