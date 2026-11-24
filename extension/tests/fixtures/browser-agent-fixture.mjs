@@ -38,7 +38,7 @@ export function fixture({multipleImages=false,nonImages=false,imageCount=1}={}){
  createChatTab:async(source,agent)=>{const tab={id:++nextTab,url:'https://chatgpt.com/',index:5,windowId:2,active:false};tabs.set(tab.id,tab);events.push(['createChat',source.id,agent.id]);return tab;},waitReady:async id=>events.push(['documentReady',id]),
  attach:async id=>events.push(['attach',id]),detach:async id=>events.push(['detach',id]),conversationPath:url=>url.match(/\/c\/[^/]+/)?.[0]||null,
  startChat:async(id,prompt)=>{events.push(['prompt',id,prompt]);tabs.get(id).url='https://chatgpt.com/c/study'+id;return '/c/study'+id;},
- groupTabs:async(ids,title)=>{const groupId=nextGroup++;for(const id of ids)tabs.get(id).groupId=groupId;events.push(['group',ids,title]);return groupId;}, queryTabs:async groupId=>[...tabs.values()].filter(tab=>tab.groupId===groupId),
+ groupTabs:async(ids,title)=>{const groupId=nextGroup++;for(const id of ids)tabs.get(id).groupId=groupId;events.push(['group',ids,title]);return groupId;}, queryTabs:async groupId=>[...tabs.values()].filter(tab=>tab.groupId===groupId),queryAllTabs:async()=>[...tabs.values()],
  updateStatus:async(ids,status)=>events.push(['toolbar',ids,structuredClone(status)]),resourceLimit:async()=>1024,resourceCountLimit:async()=>20,historyLimit:()=>2,schedule:work=>scheduled.push(work),log:(label,value)=>logs.push({label,value}),
  saveResource:async(taskId,bytes,mimeType,resourceId)=>{saved.push({taskId,bytes,mimeType,resourceId});await onSave?.();return {workspacePath:`study-this-site/${resourceId.replace(/^r_/,"res_")} [${taskId}].${Object.values(media).find(item=>item.mimeType===mimeType)?.ext || 'png'}`,mimeType,sizeBytes:bytes.length};},
  resolveFiles:async paths=>paths.map(path=>'/PRIVATE/'+path),

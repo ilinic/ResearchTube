@@ -1,6 +1,9 @@
 import { browserError } from './browser-tools.js';
 import { safePageUrl } from './browser-page.js';
 
+// A loose tab gets its own private scope, not a shared group of all loose tabs.
+export const tabScopeKey = tab => Number.isSafeInteger(tab.groupId) && tab.groupId >= 0 ? tab.groupId : -(tab.id + 2);
+const webTab = tab => /^https?:\/\//.test(tab.url || '');
 export const isChatTab = tab => /^https:\/\/chatgpt\.com(?:\/|$)/.test(tab.url || '');
 
 // Chrome membership defines a shared workspace; each saved ChatGPT tab can call tools and be a target.
@@ -19,7 +22,7 @@ export function createBrowserGroups(host) {
     return creating.get(groupId);
   }
   async function saveState(group) {
-    if (!group.connected) return;
+    if (!group.connected || group.groupId < 0) return;
     const record = { groupId: group.groupId, state: group.state };
     const signature = JSON.stringify(record);
     for (const tab of group.chatTabs) {
@@ -68,11 +71,14 @@ export function createBrowserGroups(host) {
   function acknowledge(group, chatTabId) { reportChanges(group, chatTabId, true).commit(); }
   async function refresh(group, {claimTabId = null, checkPending = () => {}} = {}) {
     const work = group.refreshing.catch(() => {}).then(async () => {
-      const liveTabs = (await host.queryTabs(group.groupId)).filter(tab => Number.isSafeInteger(tab.id));
+      const queried = group.groupId < 0
+        ? [await host.getTab(-group.groupId - 2).catch(() => null)].filter(Boolean)
+        : await host.queryTabs(group.groupId);
+      const liveTabs = queried.filter(tab => Number.isSafeInteger(tab.id) && tabScopeKey(tab) === group.groupId);
       const tabs = liveTabs.filter(tab => /^https?:\/\//.test(tab.url || ''));
       group.chatTabs = tabs.filter(isChatTab);
       if (!group.connected) {
-        const reads = await Promise.allSettled(group.chatTabs.map(tab => host.readOwner(tab.id)));
+        const reads = group.groupId < 0 ? [] : await Promise.allSettled(group.chatTabs.map(tab => host.readOwner(tab.id)));
         const records = reads.filter(result => result.status === 'fulfilled').map(result => result.value).filter(record => record?.groupId === group.groupId);
         if (records.length) {
           group.connected = true;
@@ -115,8 +121,7 @@ export function createBrowserGroups(host) {
   async function forChat(chatTabId, {allowStarting = false, claim = false, checkPending} = {}) {
     const tab = await host.getTab(chatTabId).catch(() => { throw browserError('TAB_CLOSED','The initiating ChatGPT tab is closed.'); });
     if (!isChatTab(tab)) throw browserError('BROWSER_INVALID','chatTabId must identify a ChatGPT tab.');
-    if (!Number.isSafeInteger(tab.groupId) || tab.groupId < 0) throw browserError('BROWSER_GROUP_NOT_FOUND','Place the initiating ChatGPT tab and the sites in one Chrome tab group.');
-    const group = await get(tab.groupId);
+    const group = await get(tabScopeKey(tab));
     await refresh(group, {claimTabId:claim ? chatTabId : null,checkPending});
     if (!group.connected) throw browserError('BROWSER_GROUP_NOT_CONNECTED','Connect this group with system_get_chat_context.');
     const member = group.members.get(chatTabId);
@@ -128,12 +133,37 @@ export function createBrowserGroups(host) {
   async function check(group, tabId, chatPath = null, {allowStopped = false} = {}) {
     if (!allowStopped && ['stopped','failed'].includes(group.state)) throw browserError(group.error?.code || 'BROWSER_SESSION_STOPPED',group.error?.message || 'Group automation stopped. Reconnect the grouped chat with system_get_chat_context.');
     const tab = await host.getTab(tabId).catch(() => {throw browserError('TAB_CLOSED','The selected tab closed; other tabs remain available.');});
-    if (tab.groupId !== group.groupId) throw browserError('TAB_LEFT_GROUP','The selected tab is no longer in this group.');
+    if (tabScopeKey(tab) !== group.groupId) throw browserError('TAB_LEFT_GROUP','The selected tab is no longer in this group.');
     if (chatPath && pathOf(tab) !== chatPath) throw browserError('BROWSER_CHAT_CHANGED','The initiating conversation changed. No replacement destination was selected.');
     if (!/^https?:\/\//.test(tab.url || '')) throw browserError('BROWSER_UNAVAILABLE','Only ordinary HTTP/HTTPS sites can be controlled.');
     return tab;
   }
+  async function targetGroup(tab) {
+    const group = await get(tabScopeKey(tab));
+    await refresh(group);
+    await check(group, tab.id);
+    if (group.state === 'starting') throw browserError('BROWSER_SESSION_NOT_READY','The selected group is still starting.');
+    return group;
+  }
+  // Metadata only; never attach, activate, or change other tabs during discovery.
+  async function inventory(group, offset = 0, limit = 50) {
+    const tabs = (await (host.queryAllTabs?.() ?? Promise.resolve([]))).filter(tab => Number.isSafeInteger(tab.id) && (tabScopeKey(tab) !== group.groupId || !webTab(tab)));
+    const windowId = tab => Number.isSafeInteger(tab.windowId) ? tab.windowId : -1;
+    const groupId = tab => Number.isSafeInteger(tab.groupId) && tab.groupId >= 0 ? tab.groupId : null;
+    tabs.sort((a,b) => windowId(a)-windowId(b) || (groupId(a) ?? Number.MAX_SAFE_INTEGER)-(groupId(b) ?? Number.MAX_SAFE_INTEGER) || (a.index ?? a.id)-(b.index ?? b.id) || a.id-b.id);
+    const names = new Map((await (host.queryTabGroups?.() ?? Promise.resolve([])).catch(() => [])).map(item => [item.id, String(item.title || '').slice(0,200)]));
+    const sections = new Map();
+    for (const tab of tabs.slice(offset,offset+limit)) {
+      const gid = groupId(tab), wid = windowId(tab), key = wid + ':' + gid;
+      if (!sections.has(key)) sections.set(key,{windowId:wid,groupId:gid,title:gid === null ? 'Ungrouped tabs' : names.get(gid) || 'Group ' + gid,tabs:[]});
+      const readable = webTab(tab);
+      sections.get(key).tabs.push({tabId:tab.id,role:isChatTab(tab)?'chatgpt':'site',title:readable?String(tab.title || '').slice(0,500):'Restricted browser tab',url:readable?safePageUrl(tab.url):'',access:readable?'read-only':'restricted'});
+    }
+    let hash = 2166136261;
+    for (const tab of tabs) for (const c of JSON.stringify([tab.id,windowId(tab),groupId(tab),webTab(tab)?tab.title:null,safePageUrl(tab.url),names.get(groupId(tab))])) hash = Math.imul(hash ^ c.charCodeAt(0),16777619);
+    return {revision:hash>>>0,totalTabs:tabs.length,nextOffset:offset+limit<tabs.length?offset+limit:null,sections:[...sections.values()]};
+  }
   async function changed() { await Promise.allSettled([...groups.values()].map(group => refresh(group))); }
   function documentChanged(tabId) { for (const group of groups.values()) group.marked.delete(tabId); }
-  return {get,forChat,refresh,check,project,reportChanges,acknowledge,saveState,documentChanged,changed,values:()=>groups.values()};
+  return {get,forChat,refresh,check,project,reportChanges,acknowledge,saveState,documentChanged,changed,targetGroup,inventory,values:()=>groups.values()};
 }

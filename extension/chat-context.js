@@ -78,14 +78,13 @@ export function createChatContext(host) {
         checkPending();
         const liveTab = await host.getTab(sender.tab.id);
         const grouped = Number.isSafeInteger(liveTab.groupId) && liveTab.groupId >= 0;
-        if (task.resumeGroup && !grouped) throw browserError("BROWSER_GROUP_NOT_FOUND", "Place this chat in a tab group before resuming.");
-        const context = grouped ? (task.resumeGroup ? await host.connect(sender.tab.id, checkPending) : await host.inspect(sender.tab.id)) : { chatTabId: sender.tab.id, group: null };
+        const context = task.resumeGroup ? await host.connect(sender.tab.id, checkPending) : grouped ? await host.inspect(sender.tab.id) : { chatTabId: sender.tab.id, group: null };
         checkPending();
-        task.target.groupId = context.group?.groupId ?? null;
+        task.target.groupId = grouped ? liveTab.groupId : null;
         await verify(task.target);
         expire(task);
         if (task.status !== "working") throw browserError("BROWSER_CANCELLED", "Chat binding ended during verification.");
-        task.chatTabId = context.chatTabId; task.group = context.group;
+        task.chatTabId = context.chatTabId; task.group = grouped ? context.group : null;
         task.status = "completed"; task.phase = "connected"; task.progressPercent = 100;
         return { ok: true, context: document(task) };
       } catch (error) {

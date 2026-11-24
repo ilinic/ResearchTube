@@ -2,7 +2,7 @@ import { browserError, validateBrowserInput } from "./browser-tools.js";
 import { createBrowserPage, inspectBrowserElement, safePageUrl } from "./browser-page.js";
 import { pruneCompletedTasks } from "./task-history.js";
 import { createBrowserDiagnostics } from "./browser-diagnostics.js";
-import { createBrowserGroups } from "./browser-groups.js";
+import { createBrowserGroups, tabScopeKey } from "./browser-groups.js";
 import { browserAttachmentError, isBrowserFrameUrlAllowed, withBrowserFrameTimeout } from "./browser-frame-policy.js";
 import { createTabAutomationQueue } from "./tab-automation.js";
 import { normalizeStartupPrompts, renderStartupPrompt } from "./startup-prompts.js";
@@ -148,20 +148,20 @@ export function createBrowserAgent(host) {
     return true;
   }
   function forgetCaller(group, tabId) {
-    for (const target of group.targets.values()) target.page.forgetCaller(tabId);
+    for (const target of targets.values()) target.page.forgetCaller(tabId);
   }
   function cancelForTab(group, tabId) {
-    for (const task of tasks.values()) if (task.groupId === group.groupId && (task.tabId === tabId || task.chatTabId === tabId)) cancelTask(task);
+    for (const task of tasks.values()) if ((task.caller.group === group || task.caller.targetGroup === group) && (task.tabId === tabId || task.chatTabId === tabId)) cancelTask(task);
   }
   function checkTask(task, session) {
     task.caller.cloudGuard?.assertLive?.();
-    if (task.cancelRequested || ["stopped", "failed"].includes(session.group.state) || session.error || targets.get(session.agentTabId) !== session)
+    if (task.cancelRequested || ["stopped", "failed"].includes(session.group.state) || ["stopped", "failed"].includes(task.caller.group.state) || session.error || targets.get(session.agentTabId) !== session)
       throw browserError("BROWSER_CANCELLED", "The task was cancelled or its selected participant stopped. Existing files and attachments were preserved.");
   }
   async function waitRunning(task, session) {
     checkTask(task, session);
     await task.caller.cloudGuard?.();
-    await groups.check(session.group, task.chatTabId, task.caller.chatPath);
+    await groups.check(task.caller.group, task.chatTabId, task.caller.chatPath);
     await check(session);
     if (session.group.state === "starting") throw browserError("BROWSER_SESSION_NOT_READY", "Wait for study initialization.");
     checkTask(task, session);
@@ -171,8 +171,10 @@ export function createBrowserAgent(host) {
     if (session.error) throw browserError(session.error.code, session.error.message);
     if (targets.get(session.agentTabId) !== session) throw browserError("TAB_LEFT_GROUP", "This page no longer belongs to the current group automation.");
     const tab = await groups.check(session.group, session.agentTabId);
-    if (mutation && session.operation) {
-      await groups.check(session.group, session.operation.chatTabId, session.operation.chatPath);
+    if (session.operation) {
+      await groups.check(session.operation.group, session.operation.chatTabId, session.operation.chatPath);
+      if (mutation && (session.operation.group !== session.group || session.group.groupId < 0 || session.operation.readOnly))
+        throw browserError("BROWSER_READ_ONLY", "Only tabs in the initiating chat's actual Chrome group may be controlled.");
     }
     if (mutation && session.group.state !== "running") throw browserError("BROWSER_SESSION_NOT_READY", "Wait for study initialization.");
     if (session.url !== tab.url) { session.url = tab.url; session.pageVersion = nextPageVersion(); session.revision++; session.page.invalidate(); }
@@ -184,9 +186,10 @@ export function createBrowserAgent(host) {
       checkEnabled(); await command(session.agentTabId, `${domain}.enable`, {}, childId); checkEnabled();
     }
     await command(session.agentTabId, "Target.setAutoAttach", AUTO_ATTACH, childId);
-    if (!childId) {
+    if (!childId && !session.operation?.readOnly) {
       await command(session.agentTabId, "Emulation.setFocusEmulationEnabled", { enabled: true });
       await command(session.agentTabId, "Page.setWebLifecycleState", { state: "active" });
+      session.controlReady = true;
     }
   }
   function targetFor(group, tab) {
@@ -197,7 +200,7 @@ export function createBrowserAgent(host) {
     target.trace = createBrowserDiagnostics({ enabled: group.options.detailedLogging, groupId: group.groupId, log, onError: details => host.diagnostic?.({ ...details, tool: target.operation?.tool, tabId: target.agentTabId, chatTabId: target.operation?.chatTabId }), now: host.monotonicNow || host.now });
     target.page = createBrowserPage(target, { command, check, trace: target.trace,
       onStep: timing => host.onStep?.({ ...timing, groupId: group.groupId, tabId: target.agentTabId }),
-      context: () => ({ chatTabId: target.operation?.chatTabId ?? target.agentTabId, group: groups.project(group, target.operation?.chatTabId ?? target.agentTabId) }) });
+      context: () => ({ chatTabId: target.operation?.chatTabId ?? target.agentTabId, group: groups.project(target.operation?.group ?? group, target.operation?.chatTabId ?? target.agentTabId) }) });
     group.targets.set(tab.id, target); targets.set(tab.id, target); return target;
   }
   async function ensureTarget(target, onDocument = null) {
@@ -210,6 +213,14 @@ export function createBrowserAgent(host) {
         if (target.error || targets.get(target.agentTabId) !== target) throw browserError("BROWSER_CANCELLED", "The target left during initialization.");
       }, target.trace); }
       catch (error) { await dropTarget(target.group, target.agentTabId, error.code || "BROWSER_UNAVAILABLE"); throw error; }
+    }
+    // A previous read-only attachment never grants permission to mutate.
+    // Enable normal in-group focus only for a subsequently validated local operation.
+    if (!target.operation?.readOnly && !target.controlReady) {
+      await check(target, true);
+      await command(target.agentTabId, "Emulation.setFocusEmulationEnabled", { enabled: true });
+      await command(target.agentTabId, "Page.setWebLifecycleState", { state: "active" });
+      target.controlReady = true;
     }
   }
   async function dropTarget(group, tabId, code = "TAB_LEFT_GROUP") {
@@ -224,7 +235,7 @@ export function createBrowserAgent(host) {
   }
   async function stopGroup(group, chatTabId) {
     group.state = "stopped"; group.phase = "stopped";
-    for (const task of tasks.values()) if (task.groupId === group.groupId) cancelTask(task);
+    for (const task of tasks.values()) if (task.caller.group === group || task.caller.targetGroup === group) cancelTask(task);
     for (const tabId of [...group.targets.keys()]) await dropTarget(group, tabId, "BROWSER_SESSION_STOPPED");
     await host.updateStatus?.([...group.members.keys()], { state: "stopped", phase: "stopped", statusMessage: "Group automation stopped.", error: null });
     await groups.saveState(group);
@@ -351,7 +362,7 @@ export function createBrowserAgent(host) {
     await page.requireNode(item.entry.id);
     let clip = null;
     try {
-      await page.command("DOM.scrollIntoViewIfNeeded", { backendNodeId: item.entry.backendNodeId }, target);
+      if (!task.caller.readOnly) await page.command("DOM.scrollIntoViewIfNeeded", { backendNodeId: item.entry.backendNodeId }, target);
       const model = (await page.command("DOM.getBoxModel", { backendNodeId: item.entry.backendNodeId }, target)).model;
       const quad = model.content;
       const bounds = { x: Math.min(quad[0], quad[2], quad[4], quad[6]), y: Math.min(quad[1], quad[3], quad[5], quad[7]), width: Math.max(quad[0], quad[2], quad[4], quad[6]) - Math.min(quad[0], quad[2], quad[4], quad[6]), height: Math.max(quad[1], quad[3], quad[5], quad[7]) - Math.min(quad[1], quad[3], quad[5], quad[7]) };
@@ -362,6 +373,7 @@ export function createBrowserAgent(host) {
         if (width > 0 && height > 0) clip = { x: x + viewport.pageX, y: y + viewport.pageY, width, height, scale: 1 };
       }
     } catch { /* Last resort is a normal viewport image, never a full page. */ }
+    if (task.caller.readOnly && !clip) throw browserError("BROWSER_RESOURCE_UNAVAILABLE", "The image is not visible and its original resource is unavailable. Read-only access never scrolls the external tab.");
     await waitRunning(task, session);
     const screenshot = await page.command("Page.captureScreenshot", { format: "png", captureBeyondViewport: false, ...(clip ? { clip } : {}) }, target);
     const bytes = bytesOf(screenshot.data);
@@ -421,7 +433,7 @@ export function createBrowserAgent(host) {
             for (const item of items) await verifyResource(item, session);
           },
           onPhase: async phase => { checkTask(task, session); progress(task, phase === "composerAccepted" ? "waitingToSend" : phase, phase === "composerAccepted" ? 80 : 70); },
-          onSendCommit: () => { checkTask(task, session); if (session.group.state !== "running") throw browserError("BROWSER_SESSION_NOT_READY", "The session is not ready to send."); task.sendCommitted = true; }
+          onSendCommit: () => { checkTask(task, session); if (session.group.state !== "running" || task.caller.group.state !== "running") throw browserError("BROWSER_SESSION_NOT_READY", "The session is not ready to send."); task.sendCommitted = true; }
         });
         task.submittedFiles = task.files.map(file => file.workspacePath); task.submittedAt = timestamp();
       }
@@ -451,18 +463,32 @@ export function createBrowserAgent(host) {
     const caller = { group, chatTabId: input.chatTabId, chatPath: member.chatPath, tool: name,
       action: name === "site_interact" ? input.steps.length === 1 ? input.steps[0].action : "sequence" : undefined, cloudGuard };
     if (["site_list_tabs", "site_session_status"].includes(name)) {
-      return { chatTabId: input.chatTabId, group: groups.project(group, input.chatTabId, input.offset, input.limit) };
+      return { chatTabId: input.chatTabId, group: groups.project(group, input.chatTabId, input.offset, input.limit),
+        ...(name === "site_list_tabs" && input.scope !== "group" ? { otherTabs: await groups.inventory(group, input.otherOffset ?? 0, input.limit ?? 50) } : {}) };
     }
     if (["site_files_status", "site_files_cancel"].includes(name)) {
       const task = tasks.get(input.taskId);
-      if (!task || task.groupId !== group.groupId) throw browserError("BROWSER_TASK_NOT_FOUND", "This task is not in your current group, or its history expired.");
+      if (!task || task.caller.group !== group) throw browserError("BROWSER_TASK_NOT_FOUND", "This task is not in your current group, or its history expired.");
       return name === "site_files_status" ? publicTask(task) : { cancelled: cancelTask(task), task: publicTask(task) };
     }
     if (name === "site_session_stop") return { chatTabId: input.chatTabId, group: await stopGroup(group, input.chatTabId) };
     await groups.check(group, input.chatTabId, caller.chatPath);
-    const tab = await groups.check(group, input.tabId);
-    const target = targetFor(group, tab);
+    const selected = await host.getTab(input.tabId).catch(() => { throw browserError("TAB_CLOSED", "The selected tab closed."); });
+    const external = tabScopeKey(selected) !== group.groupId;
+    if (name === "site_interact" && (external || group.groupId < 0))
+      throw browserError("BROWSER_READ_ONLY", "Tabs outside the initiating chat's actual Chrome group are read-only.");
+    const readTools = ["site_read","site_get_children","site_get_node","site_get_text","site_get_images","site_get_files"];
+    if (external && (input.scope !== "all" || !readTools.includes(name)))
+      throw browserError("TAB_LEFT_GROUP", "The selected tab is outside the current group. For read-only access use scope=all.");
+    const targetGroup = external ? await groups.targetGroup(selected) : group;
+    caller.targetGroup = targetGroup;
+    caller.readOnly = external || group.groupId < 0;
     const result = await queue(input.tabId, async () => {
+      await groups.check(group, input.chatTabId, caller.chatPath);
+      const live = await groups.check(targetGroup, input.tabId);
+      const previous = targets.get(input.tabId);
+      if (previous && previous.group !== targetGroup) await dropTarget(previous.group, input.tabId, "TAB_LEFT_GROUP");
+      const target = targetFor(targetGroup, live);
       target.operation = caller;
       try {
         await groups.check(group, input.chatTabId, caller.chatPath);

@@ -15,3 +15,5 @@ The current implementation and lifecycle are documented in [Browser Agent](BROWS
 - **Privacy:** keep CDP handles, signed resource URLs, credentials and physical file paths outside public results. Fixed Extension-owned page functions only; no public eval parameter or focus-based target selection.
 
 Validate mocked contracts and real Chrome/ChatGPT behavior separately. See [Development](../DEVELOPMENT.md) and [Tools](../TOOLS.md).
+
+- **Browser-wide access:** current group first; other Chrome windows/groups and loose tabs appear in an independently paginated `otherTabs` inventory. Explicit `scope: "all"` allows external reads and resource extraction only. Interaction is restricted to the initiating chat's actual Chrome group, with live checks before mutations. No external focus, scroll, or input.

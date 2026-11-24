@@ -18,7 +18,7 @@ function setup() {
   const context = createChatContext({
     extensionId: "extension", now: () => clock, id: () => `tsk_${String(++sequence).padStart(10, "0")}`, token: () => webcrypto.randomUUID(),
     getTab: f.host.getTab, queryTabs: async () => [...f.tabs.values()], conversationPath: f.host.conversationPath,
-    connect: (id, checkPending) => f.agent.connectGroup(id, checkPending), inspect: id => f.agent.execute("site_list_tabs", { chatTabId: id }), error: item => errors.push(item)
+    connect: (id, checkPending) => f.agent.connectGroup(id, checkPending), inspect: id => f.agent.execute("site_list_tabs", { chatTabId: id, scope:"group" }), error: item => errors.push(item)
   });
   const sender = () => ({ id: "extension", tab: { ...f.tabs.get(41) } });
   return { ...f, context, sender, errors, advance: value => clock += value };
@@ -30,9 +30,8 @@ assert.deepEqual(ready.group.tabs.map(tab=>tab.tabId),[41,42]);
 assert.ok(!f.events.some(event=>["attach","duplicate","prompt","createChat"].includes(event[0])));
 await f.agent.execute("site_session_stop",{chatTabId:41});
 assert.equal((await f.context.direct(41)).group.state,"running","explicit resume only");
-for(const kind of ["ungrouped","duplicate","closed","not-chat"]){
+for(const kind of ["duplicate","closed","not-chat"]){
  const test=setup();
- if(kind==="ungrouped")test.tabs.get(41).groupId=-1;
  if(kind==="duplicate")test.tabs.set(44,{id:44,groupId:80,url:"https://chatgpt.com/c/manual"});
  if(kind==="closed")test.tabs.delete(41);
  if(kind==="not-chat")test.tabs.get(41).url="https://example.test/";
@@ -57,6 +56,12 @@ assert.equal(second.context.group.tabs.filter(tab=>tab.role==="chatgpt").length,
 first.tabs.get(43).groupId=-1;
 const alone=await first.context.call({});
 assert.equal((await first.context.bind(first.context.metadata(alone.taskId),{id:"extension",tab:first.tabs.get(43)})).context.group,null);
+const looseStatus=await first.agent.execute("site_list_tabs",{chatTabId:43});
+assert.deepEqual(looseStatus.group.tabs.map(tab=>tab.tabId),[43]);
+await first.agent.execute("site_session_stop",{chatTabId:43});
+const resumeLoose=await first.context.call({resumeGroup:true});
+assert.equal((await first.context.bind(first.context.metadata(resumeLoose.taskId),{id:"extension",tab:first.tabs.get(43)})).context.status,"completed");
+assert.notEqual((await first.agent.execute("site_list_tabs",{chatTabId:43})).group.state,"stopped");
 const expiring=await first.context.call({});first.advance(120001);
 assert.equal((await first.context.call({taskId:expiring.taskId})).status,"failed");
 

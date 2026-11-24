@@ -273,7 +273,7 @@ export function createBrowserPage(session, host) {
     const objectId = resolved.object?.objectId;
     if (!objectId) throw browserError("STALE_NODE", "The element no longer exists.");
     try {
-      const result = await command("Runtime.callFunctionOn", { objectId, functionDeclaration: fn.toString(), arguments: args.map(value => ({ value })), returnByValue: true, awaitPromise: true, userGesture: true }, entry.target);
+      const result = await command("Runtime.callFunctionOn", { objectId, functionDeclaration: fn.toString(), arguments: args.map(value => ({ value })), returnByValue: true, awaitPromise: true, userGesture: session.operation?.tool === 'site_interact' && !session.operation.readOnly }, entry.target);
       if (result.exceptionDetails) throw browserError("BROWSER_UNAVAILABLE", "The page could not provide the requested DOM resource or operation.");
       return result.result?.value;
     } finally { await command("Runtime.releaseObject", { objectId }, entry.target).catch(() => {}); }

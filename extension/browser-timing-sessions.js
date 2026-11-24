@@ -27,7 +27,7 @@ export function createBrowserTimingSessions({
     if (!loading) loading = (async () => {
       const saved = await storage?.get?.(STORAGE_KEY);
       for (const entry of saved?.[STORAGE_KEY] || []) {
-        if (!safeInteger(entry.chatTabId) || !safeInteger(entry.groupId) || !Array.isArray(entry.events)) continue;
+        if (!safeInteger(entry.chatTabId) || !Number.isSafeInteger(entry.groupId) || !Array.isArray(entry.events)) continue;
         const events = entry.events.filter(event => event && ["tool", "gap", "timing"].includes(event.kind)).slice(-800);
         sessions.set(entry.chatTabId, { ...entry, events, pending: new Map() });
       }
@@ -53,7 +53,7 @@ export function createBrowserTimingSessions({
 
   async function start({ chatTabId, groupId, maxEvents = 600 }) {
     await load();
-    if (!safeInteger(chatTabId) || !safeInteger(groupId) || !Number.isSafeInteger(maxEvents) || maxEvents < 100 || maxEvents > 800) throw Error("Invalid timing capture arguments.");
+    if (!safeInteger(chatTabId) || !Number.isSafeInteger(groupId) || !Number.isSafeInteger(maxEvents) || maxEvents < 100 || maxEvents > 800) throw Error("Invalid timing capture arguments.");
     // One recorder per leading chat; a fresh start deliberately resets its old data.
     sessions.delete(chatTabId);
     while (sessions.size >= maxSessions) sessions.delete(sessions.keys().next().value);
@@ -96,7 +96,7 @@ export function createBrowserTimingSessions({
   }
 
   function timing(record) {
-    if (!record || !safeInteger(record.groupId) && !safeInteger(record.chatTabId)) return;
+    if (!record || !Number.isSafeInteger(record.groupId) && !safeInteger(record.chatTabId)) return;
     if (!loaded) {
       // A Cloudflare socket can deliver UTC stamps before the first Site tool
       // rehydrates the recorder after service-worker suspension.

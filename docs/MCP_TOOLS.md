@@ -212,3 +212,5 @@ These included examples show how ResearchTube can be extended with additional to
 **Ready to try it?** [Download ResearchTube](https://github.com/ilinic/ResearchTube/releases), then follow the setup guide inside the extension's Settings.
 
 [Back to ResearchTube](../README.md) · [User help](HELP.md)
+
+Browser-wide discovery lists the current group first, followed by other Chrome windows and groups. Read external websites and chats without controlling them; move a tab into the current group to enable interaction.

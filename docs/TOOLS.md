@@ -269,3 +269,7 @@ Help, Study this site and Describe this video explicitly clear restored text and
 Chat delivery verifies only the number of visible Composer attachments, with the shared configurable 15/2 retry defaults. File names and identities are not compared; same-count replacement is allowed. Text edits and added attachments do not stop task delivery. Cancellation, insufficient attachment count and target changes still prevent Send and preserve the remaining contents.
 
 Optional `tabId` on asynchronous launches carries the destination ChatGPT tab returned by the current-chat widget. Task IDs keep their existing format. Completion and the configurable 20-second Composer watchdog use the same guarded Send path; see [Task chat](features/TASK_CHAT.md).
+
+### Browser-wide read-only access
+
+`site_list_tabs` includes `otherTabs` after the current group, organized by window/group. Read external tabs using `scope: "all"` on read/resource tools; `site_interact` is group-only. Ungrouped chats can read. Restricted browser tabs are metadata-only. Use `scope: "group"` to list just the current group. The two lists have independent pagination.

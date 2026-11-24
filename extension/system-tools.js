@@ -10,7 +10,7 @@ export function systemToolDefinitions(widgetUri) {
   const contextResult = object({ taskId, status: { enum: ["working", "completed", "failed", "cancelled"] }, phase: text, progressPercent: { type: "number", minimum: 0, maximum: 100 }, pollIntervalMs: { type: "integer", minimum: 100 }, chatTabId: nullableId, group: { ...browserGroupSchema, type: ["object", "null"] }, error });
   return [{
     name: "system_get_chat_context", title: "Read or resume this tab group",
-    description: "Identify this exact ChatGPT tab with the existing compact widget. Call with no arguments; poll system_chat_context_status at pollIntervalMs until completed. Returns the current chatTabId and group (null outside groups). Use that ID for chat-targeted tools; refresh after browser restart or stale target. resumeGroup=true explicitly resumes a stopped group. No startup ID or active-tab guessing.",
+    description: "Identify this exact ChatGPT tab with the existing compact widget. Call with no arguments; poll system_chat_context_status at pollIntervalMs until completed. Returns the current chatTabId and group (null outside groups). Use that ID for chat-targeted tools; refresh after browser restart or stale target. resumeGroup=true explicitly resumes a stopped group or the current ungrouped read scope. No startup ID or active-tab guessing.",
     inputSchema: object({ resumeGroup: { type: "boolean", default: false }, chatTabId: id }, []),
     outputSchema: contextResult,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },

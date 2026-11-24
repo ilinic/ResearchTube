@@ -343,7 +343,7 @@ assert.equal((await groupWorker.receive({type:'researchtube_chat_target_bind',..
 const widgetStatus=await groupWorker.context.handleMcpRequest({id:13,method:'tools/call',params:{name:'system_chat_context_status',arguments:{taskId:widgetStart.result.structuredContent.taskId}}});
 assert.equal(widgetStatus.result.structuredContent.status,'completed');
 const noGroup=worker();const noGroupStart=await noGroup.context.handleMcpRequest({id:11,method:'tools/call',params:{name:'system_get_chat_context',arguments:{chatTabId:42}}});
-assert.equal(noGroupStart.result.structuredContent.status,'rejected');
+assert.equal(noGroupStart.result.structuredContent.status,'completed');
 const diagnosticResult=await noGroup.context.handleMcpRequest({id:12,method:'tools/call',params:{name:'system_get_diagnostics',arguments:{}}});
-assert.equal(noGroupStart.result.structuredContent.error.code,'BROWSER_GROUP_NOT_FOUND',JSON.stringify(noGroupStart.result.structuredContent));
+assert.deepEqual(JSON.parse(JSON.stringify(noGroupStart.result.structuredContent.group.tabs.map(tab=>tab.tabId))),[42]);
 console.log('Group context: legacy routing, widget discovery, preserved Composer and failure diagnostics passed');
