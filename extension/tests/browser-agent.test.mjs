@@ -279,7 +279,7 @@ console.log('Browser protected frame changes: ignored parents and retired descen
 const codex=fixture();
 codex.tabs.set(70,{id:70,groupId:-1,windowId:3,url:'https://chatgpt.com/c/standalone',title:'Standalone chat'});
 const localList=await codex.agent.executeLocal('site_list_tabs',{});
-assert.ok(localList.sections.some(section=>section.tabs.some(tab=>tab.tabId===70)));
+assert.ok(localList.tabs.some(tab=>tab.tabId===70));
 const localRead=await codex.agent.executeLocal('site_read',{tabId:70});
 assert.equal(localRead.tabId,70);assert.equal(localRead.chatTabId,undefined);
 assert.ok(localRead.nodes.length>0);
@@ -292,3 +292,23 @@ assert.equal((await codex.agent.executeLocal('site_files_status',{taskId:localTa
 assert.equal(codex.uploads.length,0);assert.equal(codex.saved.length,1);
 assert.ok(!codex.events.some(e=>['DOM.focus','DOM.scrollIntoViewIfNeeded','Input.dispatchKeyEvent','Input.dispatchMouseEvent','Emulation.setFocusEmulationEnabled','Page.setWebLifecycleState'].includes(e[0])));
 console.log('Local browser: no chat identity, read-only, Workspace-only resources');
+
+// Local reads do not claim or depend on actual Chrome groups.
+const independent=fixture();await independent.agent.start(10);
+await independent.run('site_session_stop');
+const localStopped=await independent.agent.executeLocal('site_read',{tabId:21});
+assert.equal(localStopped.tabId,21);
+assert.equal((await independent.run('site_session_status')).group.state,'stopped');
+const list=await independent.agent.executeLocal('site_list_tabs',{});
+assert.deepEqual(list.tabs.map(tab=>tab.tabId).sort((a,b)=>a-b),[10,21,22]);
+const node=localStopped.nodes.find(n=>n.role==='heading').nodeId;
+independent.tabs.get(21).groupId=-1;await independent.agent.onUpdated(21,{groupId:-1});
+assert.equal((await independent.agent.executeLocal('site_get_text',{tabId:21,nodeId:node})).tabId,21);
+const img=localStopped.nodes.find(n=>n.role==='image').resources[0].resourceId;
+const queuedLocal=await independent.agent.executeLocal('site_get_images',{tabId:21,resourceId:img});
+await independent.run('site_session_stop');await independent.scheduled.shift()();
+assert.equal((await independent.agent.executeLocal('site_files_status',{taskId:queuedLocal.taskId})).status,'completed');
+assert.equal(independent.uploads.length,0);
+independent.tabs.delete(21);await independent.agent.onRemoved(21);
+await assert.rejects(independent.agent.executeLocal('site_read',{tabId:21}),{code:'TAB_CLOSED'});
+console.log('Local tab reads: stopped groups and moves do not affect local observations');

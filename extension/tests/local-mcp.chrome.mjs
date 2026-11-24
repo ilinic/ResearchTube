@@ -100,6 +100,14 @@ try {
   await settings.evaluate(async port=>{await chrome.storage.local.set({agentPort:port});await chrome.alarms.create('local-mcp',{when:Date.now()+100});},port);
   for(let i=0;i<100;i++){if((await call('youtube_bridge_status')).connected)break;await settings.waitForTimeout(100);}
   assert.equal((await call('youtube_bridge_status')).connected,true,'native Extension WebSocket must pair with Agent');
+  const testPage=await browser.newPage();await testPage.goto('https://www.youtube.com/');
+  // Exercise local Site transport on an already-open ungrouped page before any ChatGPT automation.
+  const testTabs=await call('site_list_tabs');assert.ok(Array.isArray(testTabs.tabs),JSON.stringify(testTabs));
+  const testTab=testTabs.tabs.find(tab=>tab.url==='https://www.youtube.com/');assert.ok(testTab);
+  const siteRead=await call('site_read',{tabId:testTab.tabId});assert.ok(siteRead.nodes?.length,JSON.stringify(siteRead));
+  const groupId=await settings.evaluate(id=>chrome.tabs.group({tabIds:[id]}),testTab.tabId);assert.ok(groupId>=0);
+  assert.ok((await call('site_read',{tabId:testTab.tabId})).nodes?.length);
+  await testPage.close();
   await settings.bringToFront();
   const before=await settings.evaluate(()=>chrome.tabs.query({active:true,currentWindow:true}));
   assert.equal((await settings.evaluate(()=>chrome.tabs.query({url:'https://www.youtube.com/*'}))).length,0);

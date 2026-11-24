@@ -99,7 +99,8 @@ const SESSION_MESSAGES = {
 };
 
 export function createBrowserAgent(host) {
-  const tasks = new Map(), targets = new Map(), statuses = new Map();
+  const tasks = new Map(), targets = new Map(), localTargets = new Map(), statuses = new Map();
+  const targetMap = target => target.local ? localTargets : targets;
   const localQueue = createTabAutomationQueue();
   const queue = host.queue || localQueue.run;
   const clock = host.now || (() => Date.now());
@@ -121,14 +122,14 @@ export function createBrowserAgent(host) {
   });
   const command = async (tabId, method, params = {}, childSessionId = null) => {
     try {
-      const trace = targets.get(tabId)?.trace;
+      const trace = localTargets.get(tabId)?.operation ? localTargets.get(tabId).trace : (targets.get(tabId) || localTargets.get(tabId))?.trace;
       return await (trace ? trace.command(method, () => host.command(tabId, method, params, childSessionId)) : host.command(tabId, method, params, childSessionId));
     } catch { throw browserError("BROWSER_UNAVAILABLE", `Chrome could not complete ${method}. The page may be loading, closed or detached.`); }
   };
-  const publicTask = task => ({ ...Object.fromEntries(["taskId", "chatTabId", "tabId", "groupId", "kind", "resourceId", "resourceIds", "files", "status", "phase", "progressPercent", "pollIntervalMs", "createdAt", "updatedAt", "workspacePath", "mimeType", "extraction", "submittedFiles", "submittedAt", "error"].map(key => [key, structuredClone(task[key])])), group: groups.project(task.caller.group, task.chatTabId) });
+  const publicTask = task => ({ ...Object.fromEntries(["taskId", "chatTabId", "tabId", "groupId", "kind", "resourceId", "resourceIds", "files", "status", "phase", "progressPercent", "pollIntervalMs", "createdAt", "updatedAt", "workspacePath", "mimeType", "extraction", "submittedFiles", "submittedAt", "error"].map(key => [key, structuredClone(task[key])])), ...(task.caller.local ? {} : {group: groups.project(task.caller.group, task.chatTabId)}) });
   function newTask(caller, tabId, kind, resourceIds = [], resourceId = null) {
     let taskId; do { taskId = host.id?.() || randomId("tsk"); } while (tasks.has(taskId));
-    const task = { taskId, chatTabId: caller.chatTabId, tabId, groupId: caller.group.groupId, kind,
+    const task = { taskId, chatTabId: caller.chatTabId, tabId, groupId: caller.group?.groupId ?? null, kind,
       resourceId, resourceIds, files: [], status: "queued", phase: "queued", progressPercent: 0, pollIntervalMs: 1000,
       createdAt: timestamp(), updatedAt: timestamp(), workspacePath: null, mimeType: null, extraction: null,
       submittedFiles: [], submittedAt: null, error: null, cancelRequested: false, sendCommitted: false, caller };
@@ -155,7 +156,7 @@ export function createBrowserAgent(host) {
   }
   function checkTask(task, session) {
     task.caller.cloudGuard?.assertLive?.();
-    if (task.cancelRequested || ["stopped", "failed"].includes(session.group.state) || ["stopped", "failed"].includes(task.caller.group.state) || session.error || targets.get(session.agentTabId) !== session)
+    if (task.cancelRequested || (!task.caller.local && (["stopped", "failed"].includes(session.group.state) || ["stopped", "failed"].includes(task.caller.group.state))) || session.error || targetMap(session).get(session.agentTabId) !== session)
       throw browserError("BROWSER_CANCELLED", "The task was cancelled or its selected participant stopped. Existing files and attachments were preserved.");
   }
   async function waitRunning(task, session) {
@@ -163,20 +164,26 @@ export function createBrowserAgent(host) {
     await task.caller.cloudGuard?.();
     if (!task.caller.local) await groups.check(task.caller.group, task.chatTabId, task.caller.chatPath);
     await check(session);
-    if (session.group.state === "starting") throw browserError("BROWSER_SESSION_NOT_READY", "Wait for study initialization.");
+    if (!task.caller.local && session.group.state === "starting") throw browserError("BROWSER_SESSION_NOT_READY", "Wait for study initialization.");
     checkTask(task, session);
+  }
+  async function readTab(tabId) {
+    const tab = await host.getTab(tabId).catch(() => { throw browserError("TAB_CLOSED","The selected tab closed."); });
+    if (!/^https?:\/\//.test(tab.url || "")) throw browserError("BROWSER_UNAVAILABLE","Only ordinary HTTP/HTTPS pages can be read.");
+    return tab;
   }
   async function check(session, mutation = false) {
     await session.operation?.cloudGuard?.();
     if (session.error) throw browserError(session.error.code, session.error.message);
-    if (targets.get(session.agentTabId) !== session) throw browserError("TAB_LEFT_GROUP", "This page no longer belongs to the current group automation.");
-    const tab = await groups.check(session.group, session.agentTabId);
-    if (session.operation) {
+    if (targetMap(session).get(session.agentTabId) !== session) throw browserError(session.local ? "PAGE_CHANGED" : "TAB_LEFT_GROUP", "The selected observation is no longer available.");
+    if (session.local && mutation) throw browserError("BROWSER_READ_ONLY","Local MCP cannot control any tab.");
+    const tab = session.local ? await readTab(session.agentTabId) : await groups.check(session.group, session.agentTabId);
+    if (!session.local && session.operation) {
       if (!session.operation.local) await groups.check(session.operation.group, session.operation.chatTabId, session.operation.chatPath);
       if (mutation && (session.operation.group !== session.group || session.group.groupId < 0 || session.operation.readOnly))
         throw browserError("BROWSER_READ_ONLY", "Only tabs in the initiating chat's actual Chrome group may be controlled.");
     }
-    if (mutation && session.group.state !== "running") throw browserError("BROWSER_SESSION_NOT_READY", "Wait for study initialization.");
+    if (mutation && !session.local && session.group.state !== "running") throw browserError("BROWSER_SESSION_NOT_READY", "Wait for study initialization.");
     if (session.url !== tab.url) { session.url = tab.url; session.pageVersion = nextPageVersion(); session.revision++; session.page.invalidate(); }
     session.title = tab.title || "";
     return tab;
@@ -186,22 +193,25 @@ export function createBrowserAgent(host) {
       checkEnabled(); await command(session.agentTabId, `${domain}.enable`, {}, childId); checkEnabled();
     }
     await command(session.agentTabId, "Target.setAutoAttach", AUTO_ATTACH, childId);
-    if (!childId && !session.operation?.readOnly) {
+    if (!childId && !session.local && !session.operation?.readOnly) {
       await command(session.agentTabId, "Emulation.setFocusEmulationEnabled", { enabled: true });
       await command(session.agentTabId, "Page.setWebLifecycleState", { state: "active" });
       session.controlReady = true;
     }
   }
-  function targetFor(group, tab) {
-    let target = group.targets.get(tab.id);
+  function targetFor(group, tab, localOptions = null) {
+    const local = localOptions !== null;
+    let target = local ? localTargets.get(tab.id) : group.targets.get(tab.id);
     if (target) return target;
-    target = { group, agentTabId: tab.id, observation: group.options.observation, state: "running", url: tab.url, title: tab.title || "",
+    const options = local ? localOptions : group.options;
+    target = { group, local, agentTabId: tab.id, observation: options.observation, state: "running", url: tab.url, title: tab.title || "",
       pageVersion: nextPageVersion(), revision: 1, childSessions: new Map(), attached: false, error: null, operation: null, lastPageCallEnd: null };
-    target.trace = createBrowserDiagnostics({ enabled: group.options.detailedLogging, groupId: group.groupId, log, onError: details => host.diagnostic?.({ ...details, tool: target.operation?.tool, tabId: target.agentTabId, chatTabId: target.operation?.chatTabId }), now: host.monotonicNow || host.now });
+    target.trace = createBrowserDiagnostics({ enabled: options.detailedLogging, groupId: group?.groupId ?? null, log, onError: details => host.diagnostic?.({ ...details, tool: target.operation?.tool, tabId: target.agentTabId, chatTabId: target.operation?.chatTabId }), now: host.monotonicNow || host.now });
     target.page = createBrowserPage(target, { command, check, trace: target.trace,
-      onStep: timing => host.onStep?.({ ...timing, groupId: group.groupId, tabId: target.agentTabId }),
-      context: () => ({ chatTabId: target.operation?.chatTabId ?? target.agentTabId, group: groups.project(target.operation?.group ?? group, target.operation?.chatTabId ?? target.agentTabId) }) });
-    group.targets.set(tab.id, target); targets.set(tab.id, target); return target;
+      onStep: timing => { if (!local) host.onStep?.({ ...timing, groupId: group.groupId, tabId: target.agentTabId }); },
+      context: () => local ? {} : ({ chatTabId: target.operation?.chatTabId ?? target.agentTabId, group: groups.project(target.operation?.group ?? group, target.operation?.chatTabId ?? target.agentTabId) }) });
+    if (!local) group.targets.set(tab.id, target);
+    targetMap(target).set(tab.id, target); return target;
   }
   async function ensureTarget(target, onDocument = null) {
     await check(target);
@@ -209,19 +219,34 @@ export function createBrowserAgent(host) {
       try { await host.attach(target.agentTabId); }
       catch (error) { const failure = browserAttachmentError(error); target.trace.event("target.attachFailed", { tabId: target.agentTabId, code: failure.code }); throw failure; }
       target.attached = true;
-      try { await enableTarget(target); await onDocument?.(); await host.waitReady(target.agentTabId, () => {
-        if (target.error || targets.get(target.agentTabId) !== target) throw browserError("BROWSER_CANCELLED", "The target left during initialization.");
+      try {
+        const peer = (target.local ? targets : localTargets).get(target.agentTabId);
+        if (peer?.attached && peer.domainsReady && !peer.error) {
+          target.childSessions = new Map([...peer.childSessions].map(([id,child]) => [id,{...child}]));
+          target.domainsReady = true;
+        } else { await enableTarget(target); target.domainsReady = true; }
+        await onDocument?.(); await host.waitReady(target.agentTabId, () => {
+        if (target.error || targetMap(target).get(target.agentTabId) !== target) throw browserError("BROWSER_CANCELLED", "The target left during initialization.");
       }, target.trace); }
-      catch (error) { await dropTarget(target.group, target.agentTabId, error.code || "BROWSER_UNAVAILABLE"); throw error; }
+      catch (error) { if (target.local) await dropLocalTarget(target.agentTabId); else await dropTarget(target.group, target.agentTabId, error.code || "BROWSER_UNAVAILABLE"); throw error; }
     }
     // A previous read-only attachment never grants permission to mutate.
     // Enable normal in-group focus only for a subsequently validated local operation.
-    if (!target.operation?.readOnly && !target.controlReady) {
+    if (!target.local && !target.operation?.readOnly && !target.controlReady) {
       await check(target, true);
       await command(target.agentTabId, "Emulation.setFocusEmulationEnabled", { enabled: true });
       await command(target.agentTabId, "Page.setWebLifecycleState", { state: "active" });
       target.controlReady = true;
     }
+  }
+  async function dropLocalTarget(tabId) {
+    const target = localTargets.get(tabId);
+    if (!target) return;
+    localTargets.delete(tabId);
+    for (const task of tasks.values()) if (task.caller.local && task.tabId === tabId) cancelTask(task);
+    target.error = {code:"PAGE_CHANGED",message:"The local observation ended. Read the tab again."};
+    target.page.invalidate(); target.childSessions.clear();
+    if (target.attached) { target.attached = false; await (host.detachReadOnly || host.detach)(tabId).catch(() => {}); }
   }
   async function dropTarget(group, tabId, code = "TAB_LEFT_GROUP") {
     const target = group.targets.get(tabId);
@@ -229,7 +254,11 @@ export function createBrowserAgent(host) {
       target.error = { code, message: "Automation for this participant stopped; other group tabs remain available." };
       target.page.invalidate(); target.childSessions.clear();
       group.targets.delete(tabId); if (targets.get(tabId) === target) targets.delete(tabId);
-      if (target.attached) { target.attached = false; await host.detach(tabId).catch(() => {}); }
+      if (target.attached) {
+        target.attached = false;
+        if (target.controlReady && localTargets.get(tabId)?.attached) await host.command(tabId,"Emulation.setFocusEmulationEnabled",{enabled:false}).catch(() => {});
+        await host.detach(tabId).catch(() => {});
+      }
     }
     await host.updateStatus?.([tabId], { state: "stopped", phase: "stopped", statusMessage: "Participant automation stopped.", error: null });
   }
@@ -498,7 +527,15 @@ export function createBrowserAgent(host) {
   async function executeLocal(name, input) {
     if (Object.hasOwn(input,"chatTabId") || Object.hasOwn(input,"scope") || Object.hasOwn(input,"addToChat"))
       throw browserError("BROWSER_INVALID", "Local browser reads do not accept a chat identity or chat delivery.");
-    if (name === "site_list_tabs") return groups.inventory(null, input.offset ?? 0, input.limit ?? 50);
+    if (name === "site_list_tabs") {
+      const tabs = (await host.queryAllTabs()).filter(tab => Number.isSafeInteger(tab.id)).sort((a,b) => (a.windowId ?? -1)-(b.windowId ?? -1) || (a.index ?? a.id)-(b.index ?? b.id) || a.id-b.id).map(tab => {
+        const readable = /^https?:\/\//.test(tab.url || "");
+        return {tabId:tab.id,windowId:tab.windowId ?? -1,groupId:tab.groupId >= 0 ? tab.groupId : null,role:/^https:\/\/chatgpt\.com(?:\/|$)/.test(tab.url || "") ? "chatgpt":"site",title:readable?String(tab.title || "").slice(0,500):"Restricted browser tab",url:readable?safePageUrl(tab.url):"",access:readable?"read-only":"restricted"};
+      });
+      const offset=input.offset ?? 0, limit=input.limit ?? 200;
+      let hash=2166136261; for(const c of JSON.stringify(tabs)) hash=Math.imul(hash ^ c.charCodeAt(0),16777619);
+      return {revision:hash>>>0,totalTabs:tabs.length,nextOffset:offset+limit<tabs.length?offset+limit:null,tabs:tabs.slice(offset,offset+limit)};
+    }
     if (name === "site_files_status" || name === "site_files_cancel") {
       const task = tasks.get(input.taskId);
       if (!task?.caller.local) throw browserError("BROWSER_TASK_NOT_FOUND", "This local resource task expired or does not belong to the local MCP.");
@@ -512,19 +549,19 @@ export function createBrowserAgent(host) {
       throw browserError("BROWSER_INVALID", "Provide exactly one resourceId or a distinct resourceIds batch.");
     if (name === "site_read" && input.mode === "subtree" && !input.nodeId)
       throw browserError("BROWSER_INVALID", "subtree mode requires nodeId.");
-    const selected = await host.getTab(input.tabId).catch(() => { throw browserError("TAB_CLOSED", "The selected tab closed."); });
-    const targetGroup = await groups.targetGroup(selected);
-    const caller = { group:targetGroup, targetGroup, chatTabId:null, chatPath:null, local:true, readOnly:true, tool:name };
-    const result = await executeTarget(name, input, caller, targetGroup);
+    await readTab(input.tabId);
+    const caller = { group:null, targetGroup:null, chatTabId:null, chatPath:null, local:true, readOnly:true, tool:name };
+    const result = await executeTarget(name, input, caller, null);
     return localProjection({...result,tabId:input.tabId});
   }
   async function executeTarget(name, input, caller, targetGroup) {
     return queue(input.tabId, async () => {
       if (!caller.local) await groups.check(caller.group, input.chatTabId, caller.chatPath);
-      const live = await groups.check(targetGroup, input.tabId);
-      const previous = targets.get(input.tabId);
-      if (previous && previous.group !== targetGroup) await dropTarget(previous.group, input.tabId, "TAB_LEFT_GROUP");
-      const target = targetFor(targetGroup, live);
+      const live = caller.local ? await readTab(input.tabId) : await groups.check(targetGroup, input.tabId);
+      const previous = (caller.local ? localTargets : targets).get(input.tabId);
+      if (caller.local && previous?.error) await dropLocalTarget(input.tabId);
+      if (!caller.local && previous && previous.group !== targetGroup) await dropTarget(previous.group, input.tabId, "TAB_LEFT_GROUP");
+      const target = caller.local ? targetFor(null,live,await (host.studyOptions?.() || {detailedLogging:false})) : targetFor(targetGroup,live);
       target.operation = caller;
       try {
         if (!caller.local) await groups.check(caller.group, input.chatTabId, caller.chatPath);
@@ -559,7 +596,9 @@ export function createBrowserAgent(host) {
     for (const id of removed) { session.page.invalidateFrame(null, id); session.childSessions.delete(id); }
   }
   async function onEvent(source, method, params = {}) {
-    const session = targets.get(source.tabId);
+    await Promise.all([targets.get(source.tabId),localTargets.get(source.tabId)].filter(Boolean).map(session => onTargetEvent(session,source,method,params)));
+  }
+  async function onTargetEvent(session, source, method, params) {
     if (!session || session.error || !session.attached) return;
     if (source.sessionId && !session.childSessions.has(source.sessionId)) return;
     if (method === "Target.attachedToTarget" && params.targetInfo?.type === "iframe") {
@@ -570,7 +609,7 @@ export function createBrowserAgent(host) {
       session.childSessions.set(params.sessionId, child);
       try {
         await withBrowserFrameTimeout(() => enableTarget(session, params.sessionId, () => {
-          if (session.childSessions.get(params.sessionId) !== child || !session.attached || targets.get(session.agentTabId) !== session)
+          if (session.childSessions.get(params.sessionId) !== child || !session.attached || targetMap(session).get(session.agentTabId) !== session)
             throw browserError("BROWSER_FRAME_UNAVAILABLE", "The child frame left during initialization.");
         }), host.frameTimeoutMs);
         if (session.childSessions.get(params.sessionId) === child) child.ready = true;
@@ -606,6 +645,7 @@ export function createBrowserAgent(host) {
 
   }
   async function onRemoved(tabId) {
+    await dropLocalTarget(tabId);
     for (const group of groups.values()) if (group.members.has(tabId) || group.startup?.chatTabId === tabId) {
       cancelForTab(group, tabId);
       if (group.state === "starting" && tabId === group.startup?.chatTabId) await stopGroup(group, tabId);
@@ -615,6 +655,8 @@ export function createBrowserAgent(host) {
     await groups.changed();
   }
   async function onDetached(source, reason) {
+    const local = localTargets.get(source.tabId);
+    if (local) { local.attached=false; await dropLocalTarget(source.tabId); }
     const target = targets.get(source.tabId);
     if (!target?.attached) return;
     target.attached = false;
@@ -651,5 +693,5 @@ export function createBrowserAgent(host) {
     await Promise.allSettled(tabs.filter(tab => Number.isSafeInteger(tab.groupId) && tab.groupId >= 0 && host.conversationPath(tab.url) && !seen.has(tab.groupId) && seen.add(tab.groupId)).map(async tab => { const group = await groups.get(tab.groupId); await groups.refresh(group); }));
   }
   return { start, execute, executeLocal, connectGroup, recoverGroups, onEvent, onRemoved, onDetached, onUpdated, onCreated: groups.changed, onReplaced: groups.changed,
-    localStatus, ownsTab: id => [...groups.values()].some(group => !["stopped", "failed"].includes(group.state) && group.members.has(id)) };
+    localStatus, hasControlTarget: id => Boolean(targets.get(id)?.attached && targets.get(id)?.controlReady), ownsTab: id => [...groups.values()].some(group => !["stopped", "failed"].includes(group.state) && group.members.has(id)) };
 }

@@ -28,7 +28,7 @@ for (const tool of ["youtube_download_get_formats", "youtube_download_get_task",
 assert.match(background, /youtubeFormats: youtubeFormatsSchema/);
 assert.match(background, /youtube_download_get_formats\.downloadFormats/);
 assert.match(background, /afterEventId/);
-assert.match(background, /const REQUIRED_AGENT_INTERFACE_VERSION = 85;/);
+assert.match(background, /const REQUIRED_AGENT_INTERFACE_VERSION = 87;/);
 assert.match(background, /workspace_open_folder: \{ group: "workspace" \}/);
 assert.match(background, /"\/workspace\/open-folder"/, "folder opening must use the Local Agent");
 assert.doesNotMatch(background, /"openai\/outputTemplate": WORKSPACE_FOLDER/, "opening a folder needs no custom widget");

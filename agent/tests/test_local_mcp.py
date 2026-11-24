@@ -129,6 +129,21 @@ class LocalMcpTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(LocalError, "extension connection"):
             await pending
 
+    async def test_local_site_list_is_flat_and_independent(self):
+        reader, writer = await self.bridge()
+        self.assertEqual(await server_frame(reader), {"type": "pong"})
+        request = asyncio.create_task(self.rpc("site_list_tabs", {}))
+        command = await server_frame(reader)
+        self.assertEqual(command["name"], "site_list_tabs")
+        value = {"revision": 1, "totalTabs": 2, "nextOffset": None, "tabs": [
+            {"tabId": 5, "windowId": 1, "groupId": None, "role": "site", "title": "Site", "url": "https://example.test/", "access": "read-only"},
+            {"tabId": 6, "windowId": 1, "groupId": 3, "role": "chatgpt", "title": "Chat", "url": "https://chatgpt.com/c/test", "access": "read-only"}]}
+        await client_frame(writer, {"type": "response", "id": command["id"], "result": value})
+        self.assertEqual((await request)["result"]["structuredContent"], value)
+        result = await self.rpc("site_read", {"tabId": 6, "chatTabId": 5})
+        self.assertEqual(result["result"]["structuredContent"]["error"]["code"], "INVALID_ARGUMENT")
+        writer.close()
+
     async def test_wrong_pairing_token_cannot_connect(self):
         reader, _ = await self.bridge("x" * 43)
         self.assertEqual(await asyncio.wait_for(reader.read(), 2), b"")

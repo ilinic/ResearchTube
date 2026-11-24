@@ -101,7 +101,7 @@ globalThis.addEventListener?.("fetch", createMediaStreamHandler({
   fetchMedia: (url, options) => fetch(url, options),
   log: (stage, details = {}) => consoleAction(`[ResearchTube media stream ${EXTENSION_VERSION}]`, stage, details)
 }));
-const REQUIRED_AGENT_INTERFACE_VERSION = 86;
+const REQUIRED_AGENT_INTERFACE_VERSION = 87;
 // A UI resource URI is a cache key in MCP Apps. Increment it whenever the
 // rendered template changes so ChatGPT does not reuse a stale iframe bundle.
 const MEDIA_TO_CHAT_WIDGET_URI = "ui://researchtube/chat-target-v8.html";
@@ -1801,7 +1801,7 @@ const debuggerLeases = createDebuggerLeases({
 async function cdpAttach(tabId) { await debuggerLeases.attach(tabId); }
 async function cdpDetach(tabId) {
   await debuggerLeases.detach(tabId);
-  if (debuggerLeases.has(tabId)) {
+  if (debuggerLeases.has(tabId) && browserAgent.hasControlTarget(tabId)) {
     await chrome.debugger.sendCommand({ tabId }, "Emulation.setFocusEmulationEnabled", { enabled: true }).catch(() => {});
     await chrome.debugger.sendCommand({ tabId }, "Page.setWebLifecycleState", { state: "active" }).catch(() => {});
   }
@@ -3740,7 +3740,7 @@ const browserAgent = createBrowserAgent({
     browserBadgeTail = browserBadgeTail.catch(() => {}).then(() => Promise.allSettled(tabIds.map(tabId => paintBrowserAutomationBadge(tabId))));
     await browserBadgeTail;
   },
-  attach: cdpAttach, detach: cdpDetach,
+  attach: cdpAttach, detach: cdpDetach, detachReadOnly: tabId => debuggerLeases.detach(tabId),
   command: (tabId, method, params, sessionId) => chrome.debugger.sendCommand({ tabId, ...(sessionId ? { sessionId } : {}) }, method, params),
   conversationPath: chatConversationPath,
   startChat: (tabId, prompt, checkStarting, onPhase, trace) => {
