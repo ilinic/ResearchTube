@@ -94,7 +94,7 @@ class LocalMcpTests(unittest.IsolatedAsyncioTestCase):
         code, reply = await self.http(payload={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test", "version": "1"}}})
         self.assertEqual((code, reply["result"]["protocolVersion"]), (200, "2025-06-18"))
         _, reply = await self.http(payload={"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
-        self.assertEqual(len(reply["result"]["tools"]), 13)
+        self.assertEqual(len(reply["result"]["tools"]), 22)
         self.assertEqual(await self.http(payload={"jsonrpc": "2.0", "method": "notifications/initialized"}), (202, None))
         _, status = await self.http(payload={"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "youtube_bridge_status"}})
         self.assertFalse(status["result"]["structuredContent"]["connected"])

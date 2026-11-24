@@ -118,3 +118,7 @@ and the official JavaScript MCP client. It needs Playwright (or set
 YouTube pages are simulated, production origins are blocked, and the user's
 browser/profile is never used. Live signed-in YouTube verification remains a
 separate release acceptance step.
+
+## Read open Chrome tabs from Codex
+
+The same loopback MCP now includes nine Site tools: `site_list_tabs`, `site_read`, `site_get_children`, `site_get_node`, `site_get_text`, `site_get_images`, `site_get_files`, `site_files_status`, and `site_files_cancel`. No ChatGPT tab, YouTube login or cloud deployment is needed for Site reads. List all Chrome windows and groups with `site_list_tabs`, then pass the exact `tabId` to the read tools. There are no `chatTabId`, `scope` or `addToChat` arguments. Chrome-protected pages are metadata-only. All Site operations are read-only with respect to browser pages, including tabs in automation groups. Resource tasks save to Workspace, never submit a ChatGPT message. Stopped/initializing groups and browser-protected pages may refuse a read. Reload both matching Agent and Extension; restart Codex or refresh its MCP catalog.

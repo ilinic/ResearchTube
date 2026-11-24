@@ -26,14 +26,31 @@ except ImportError:
 
 MAX_MESSAGE = 2 * 1024 * 1024
 BASE_TOOLS = frozenset(("youtube_search", "youtube_get_video", "youtube_get_transcript", "youtube_get_comments", "youtube_get_comment_replies", "youtube_get_channel_videos", "youtube_get_channel_playlists", "youtube_get_playlist_videos"))
+BROWSER_TOOLS = frozenset(("site_list_tabs", "site_read", "site_get_children", "site_get_node", "site_get_text", "site_get_images", "site_get_files", "site_files_status", "site_files_cancel"))
 CATALOG = json.loads(CATALOG_JSON)
 DEFINITIONS = {tool["name"]: tool for tool in CATALOG}
 RECORD_SCHEMA = DEFINITIONS["youtube_dataset_read"]["outputSchema"]["properties"]["records"]["items"]
 ERROR_MESSAGES = {
     "YOUTUBE_LOGIN_REQUIRED": "Sign in to YouTube in the Chrome profile running ResearchTube, then retry.",
     "YOUTUBE_LOGIN_UNKNOWN": "YouTube login state is not ready. Let the page finish loading, then retry.",
-    "YOUTUBE_BRIDGE_OFFLINE": "The local YouTube extension connection is unavailable. Keep Chrome open and reload the updated extension.",
+    "YOUTUBE_BRIDGE_OFFLINE": "The local Chrome extension connection is unavailable. Keep Chrome open and reload the updated extension.",
     "YOUTUBE_BRIDGE_TIMEOUT": "The YouTube browser request timed out. Check Chrome and retry later.",
+    "BROWSER_INVALID": "Invalid browser arguments. Use exact tab and node/resource IDs.",
+    "BROWSER_UNAVAILABLE": "The browser page is unavailable or restricted by Chrome.",
+    "BROWSER_READ_ONLY": "Local MCP supports browser reads only.",
+    "BROWSER_SESSION_STOPPED": "The selected study group is stopped. Resume it explicitly in ResearchTube.",
+    "BROWSER_SESSION_NOT_READY": "The selected tab is still initializing.",
+    "BROWSER_TASK_NOT_FOUND": "The local browser resource task expired or does not belong to this MCP.",
+    "BROWSER_RESOURCE_UNAVAILABLE": "The original resource is unavailable without interacting with the page.",
+    "BROWSER_RESOURCE_TOO_LARGE": "The resource exceeds the configured local size limit.",
+    "BROWSER_RESOURCE_TYPE_MISMATCH": "The resource does not match the requested file type.",
+    "BROWSER_CANCELLED": "The browser task was cancelled.",
+    "TAB_CLOSED": "The selected tab closed. Refresh site_list_tabs.",
+    "TAB_LEFT_GROUP": "The selected tab moved. Read it again using site_read.",
+    "PAGE_CHANGED": "The document changed. Observe it again using site_read.",
+    "STALE_NODE": "The selected node changed. Observe it again using site_read.",
+    "DEBUGGER_DETACHED": "Chrome detached the page debugger. Refresh the tab list and retry.",
+    "BROWSER_DEBUGGER_RESTRICTED": "Chrome restricts debugger access to this page.",
     "MCP_TOOL_DISABLED": "This tool is disabled in ResearchTube Settings.",
     "YOUTUBE_REQUEST_FAILED": "YouTube could not complete the request. Check availability and retry delay.",
     "YOUTUBE_EXPORT_SESSION_LOST": "The browser collection session ended. Saved comments are preserved; start a new export.",
@@ -43,12 +60,14 @@ ERROR_MESSAGES = {
 
 class LocalError(Exception):
     def __init__(self, code, message=None):
-        super().__init__(message or ERROR_MESSAGES.get(code, "The local YouTube operation could not complete."))
+        super().__init__(message or ERROR_MESSAGES.get(code, "The local MCP operation could not complete."))
         self.code = code
 
 
 def normalized(schema, value, *, project=False):
     """Validate supported schema keywords; output projection drops unknown fields."""
+    if "oneOf" in schema and isinstance(value, dict) and sum(all(key in value for key in choice.get("required", [])) for choice in schema["oneOf"]) != 1:
+        raise LocalError("INVALID_ARGUMENT", "Provide exactly one supported resource selection.")
     if "anyOf" in schema:
         for choice in schema["anyOf"]:
             try:
@@ -294,7 +313,7 @@ class LocalMcpService:
         envelope = {"jsonrpc": "2.0", "id": identifier}
         if method == "initialize":
             requested = params.get("protocolVersion") if isinstance(params, dict) else None
-            return {**envelope, "result": {"protocolVersion": requested if requested in {"2025-03-26", "2025-06-18", "2025-11-25"} else "2025-06-18", "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": "researchtube-local-youtube", "version": self.agent.AGENT_VERSION}, "instructions": "YouTube research through the local Chrome extension. Productive browser calls require YouTube sign-in. Requests retain the established anonymous page-context transport without account cookies. Export large comment datasets and read them in bounded batches; use local yt-dlp/FFmpeg directly for media."}}
+            return {**envelope, "result": {"protocolVersion": requested if requested in {"2025-03-26", "2025-06-18", "2025-11-25"} else "2025-06-18", "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": "researchtube-local-youtube", "version": self.agent.AGENT_VERSION}, "instructions": "Read all open Chrome tabs with site_list_tabs and the site read/resource tools. No ChatGPT tab, YouTube sign-in, or cloud connection is required for Site reads; all tabs are read-only. Resources are saved to the local Workspace. YouTube research through the local Chrome extension. Productive browser calls require YouTube sign-in. Requests retain the established anonymous page-context transport without account cookies. Export large comment datasets and read them in bounded batches; use local yt-dlp/FFmpeg directly for media."}}
         if method == "ping":
             return {**envelope, "result": {}}
         if method == "tools/list":
@@ -321,10 +340,10 @@ class LocalMcpService:
             value = {"error": {"code": error.code, "message": str(error)}}
             return {**envelope, "result": {"content": [{"type": "text", "text": json.dumps(value)}], "structuredContent": value, "isError": False}}
         except Exception:
-            return {**envelope, "error": {"code": -32603, "message": "The local YouTube operation failed unexpectedly."}}
+            return {**envelope, "error": {"code": -32603, "message": "The local MCP operation failed unexpectedly."}}
 
     async def call(self, name, arguments):
-        if name in BASE_TOOLS:
+        if name in BASE_TOOLS or name in BROWSER_TOOLS:
             return await self.browser(name, arguments)
         if name == "youtube_bridge_status":
             return {"connected": self.writer is not None and not self.writer.is_closing(), "extensionVersion": self.extension_version, "interfaceVersion": self.agent.INTERFACE_VERSION, "authentication": "public-page-context"}

@@ -1,5 +1,5 @@
 import { createLocalMcpConnection } from "./local-mcp.js";
-import { LOCAL_YOUTUBE_TOOLS, localResearchDefinitions, projectCommentRecord, validateLocalArguments } from "./local-mcp-tools.js";
+import { LOCAL_YOUTUBE_TOOLS, LOCAL_BROWSER_TOOLS, localBrowserDefinitions, localResearchDefinitions, projectCommentRecord, validateLocalArguments } from "./local-mcp-tools.js";
 import { createBrowserOwner } from "./browser-owner.js";
 import { createCloudConnection } from "./cloud-connection.js";
 import { taskTabSchema, normalizeTaskTabId, createTaskCompletionDelivery, installComposerWatchdog } from "./task-chat.js";
@@ -101,7 +101,7 @@ globalThis.addEventListener?.("fetch", createMediaStreamHandler({
   fetchMedia: (url, options) => fetch(url, options),
   log: (stage, details = {}) => consoleAction(`[ResearchTube media stream ${EXTENSION_VERSION}]`, stage, details)
 }));
-const REQUIRED_AGENT_INTERFACE_VERSION = 85;
+const REQUIRED_AGENT_INTERFACE_VERSION = 86;
 // A UI resource URI is a cache key in MCP Apps. Increment it whenever the
 // rendered template changes so ChatGPT does not reuse a stale iframe bundle.
 const MEDIA_TO_CHAT_WIDGET_URI = "ui://researchtube/chat-target-v8.html";
@@ -7736,8 +7736,8 @@ const localMcpConnection = createLocalMcpConnection({
   port: async () => normalizeAgentPort((await getConfig()).agentPort),
   fetch: (url, options) => fetch(url, options), webSocket: url => new WebSocket(url),
   setInterval: (...args) => setInterval(...args), clearInterval: id => clearInterval(id),
-  enabledTools: async () => (await mcpToolSettingsCatalog()).filter(t => t.enabled && (LOCAL_YOUTUBE_TOOLS.includes(t.name) || localResearchDefinitions().some(d => d.name === t.name))).map(t => t.name),
-  dispatch: dispatchLocalYoutube
+  enabledTools: async () => (await mcpToolSettingsCatalog()).filter(t => t.enabled && (LOCAL_YOUTUBE_TOOLS.includes(t.name) || LOCAL_BROWSER_TOOLS.includes(t.name) || localResearchDefinitions().some(d => d.name === t.name))).map(t => t.name),
+  dispatch: dispatchLocalMcp
 });
 async function requireLocalYoutubeLogin() {
   const { tab } = await getOrCreateYouTubeTab();
@@ -7745,6 +7745,15 @@ async function requireLocalYoutubeLogin() {
   if (!result?.ok || typeof result.data?.signedIn !== "boolean") throw Object.assign(Error("YouTube login state unavailable"), { code: "YOUTUBE_LOGIN_UNKNOWN" });
   if (!result.data.signedIn) throw Object.assign(Error("Sign in to YouTube"), { code: "YOUTUBE_LOGIN_REQUIRED" });
   return tab.id;
+}
+async function dispatchLocalMcp(name, input) {
+  if (LOCAL_BROWSER_TOOLS.includes(name)) {
+    if (!await isMcpToolEnabled(name)) throw Object.assign(Error("Disabled local browser tool"),{code:"MCP_TOOL_DISABLED"});
+    const definition = localBrowserDefinitions().find(tool => tool.name === name);
+    if (!definition || !validateLocalArguments(definition.inputSchema,input)) throw Object.assign(Error("Invalid local browser arguments"),{code:"BROWSER_INVALID"});
+    return browserAgent.executeLocal(name,input);
+  }
+  return dispatchLocalYoutube(name,input);
 }
 async function dispatchLocalYoutube(name, input) {
   const fail = code => { throw Object.assign(Error(code), { code }); };

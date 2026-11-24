@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import vm from "node:vm";
 import { createLocalMcpConnection } from "../local-mcp.js";
-import { localResearchDefinitions, projectCommentRecord, validateLocalArguments } from "../local-mcp-tools.js";
+import { localBrowserDefinitions, localResearchDefinitions, projectCommentRecord, validateLocalArguments } from "../local-mcp-tools.js";
 
 const messages = [], calls = [];
 let socket;
@@ -60,3 +60,9 @@ const previous = creates;
 await assert.rejects(() => context.dispatchLocalYoutube("youtube_search", { query: "x" }), e => e.code === "MCP_TOOL_DISABLED");
 assert.equal(creates, previous);
 console.log("Local MCP transport, schema validation, projection, login and disabled-tool behavior: ok");
+
+const localBrowser=localBrowserDefinitions();
+assert.equal(localBrowser.length,9);
+for(const tool of localBrowser){assert.ok(!tool.inputSchema.properties.chatTabId);assert.ok(!tool.inputSchema.properties.addToChat);assert.ok(!tool.inputSchema.properties.scope);assert.notEqual(tool.name,'site_interact');}
+assert.equal(validateLocalArguments(localBrowser.find(t=>t.name==='site_read').inputSchema,{tabId:123}),true);
+assert.equal(validateLocalArguments(localBrowser.find(t=>t.name==='site_read').inputSchema,{tabId:123,chatTabId:456}),false);

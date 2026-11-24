@@ -274,3 +274,21 @@ await changedFrame.agent.onEvent({tabId:21},'Target.targetInfoChanged',{targetIn
 const afterRestricted=changedFrame.events.length;await changedFrame.run('site_read');
 assert.ok(!changedFrame.events.slice(afterRestricted).some(event=>['parent','nested'].includes(event[3])));
 console.log('Browser protected frame changes: ignored parents and retired descendants cannot be rediscovered through child sessions: ok');
+
+// Local MCP uses no ChatGPT tab and cannot control any page.
+const codex=fixture();
+codex.tabs.set(70,{id:70,groupId:-1,windowId:3,url:'https://chatgpt.com/c/standalone',title:'Standalone chat'});
+const localList=await codex.agent.executeLocal('site_list_tabs',{});
+assert.ok(localList.sections.some(section=>section.tabs.some(tab=>tab.tabId===70)));
+const localRead=await codex.agent.executeLocal('site_read',{tabId:70});
+assert.equal(localRead.tabId,70);assert.equal(localRead.chatTabId,undefined);
+assert.ok(localRead.nodes.length>0);
+await assert.rejects(codex.agent.executeLocal('site_interact',{tabId:70,steps:[{action:'key',key:'Enter'}]}),{code:'BROWSER_READ_ONLY'});
+const localImage=localRead.nodes.find(n=>n.role==='image').resources[0].resourceId;
+await assert.rejects(codex.agent.executeLocal('site_get_images',{tabId:70,resourceId:localImage,addToChat:true}),{code:'BROWSER_INVALID'});
+const localTask=await codex.agent.executeLocal('site_get_images',{tabId:70,resourceId:localImage});
+await codex.scheduled.shift()();
+assert.equal((await codex.agent.executeLocal('site_files_status',{taskId:localTask.taskId})).status,'completed');
+assert.equal(codex.uploads.length,0);assert.equal(codex.saved.length,1);
+assert.ok(!codex.events.some(e=>['DOM.focus','DOM.scrollIntoViewIfNeeded','Input.dispatchKeyEvent','Input.dispatchMouseEvent','Emulation.setFocusEmulationEnabled','Page.setWebLifecycleState'].includes(e[0])));
+console.log('Local browser: no chat identity, read-only, Workspace-only resources');

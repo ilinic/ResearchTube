@@ -161,7 +161,7 @@ export function createBrowserAgent(host) {
   async function waitRunning(task, session) {
     checkTask(task, session);
     await task.caller.cloudGuard?.();
-    await groups.check(task.caller.group, task.chatTabId, task.caller.chatPath);
+    if (!task.caller.local) await groups.check(task.caller.group, task.chatTabId, task.caller.chatPath);
     await check(session);
     if (session.group.state === "starting") throw browserError("BROWSER_SESSION_NOT_READY", "Wait for study initialization.");
     checkTask(task, session);
@@ -172,7 +172,7 @@ export function createBrowserAgent(host) {
     if (targets.get(session.agentTabId) !== session) throw browserError("TAB_LEFT_GROUP", "This page no longer belongs to the current group automation.");
     const tab = await groups.check(session.group, session.agentTabId);
     if (session.operation) {
-      await groups.check(session.operation.group, session.operation.chatTabId, session.operation.chatPath);
+      if (!session.operation.local) await groups.check(session.operation.group, session.operation.chatTabId, session.operation.chatPath);
       if (mutation && (session.operation.group !== session.group || session.group.groupId < 0 || session.operation.readOnly))
         throw browserError("BROWSER_READ_ONLY", "Only tabs in the initiating chat's actual Chrome group may be controlled.");
     }
@@ -442,7 +442,7 @@ export function createBrowserAgent(host) {
       if (!task.cancelRequested) { task.status = "failed"; task.error = { code: error.code || "BROWSER_RESOURCE_UNAVAILABLE", message: error.code ? error.message : "Browser resource extraction or delivery failed. Saved files and any Composer attachments were preserved." }; progress(task, "failed", task.progressPercent); }
     } finally {
       task.finishPhase?.({ outcome: task.status }); task.finishPhase = null;
-      await host.taskCompleted?.({ ...publicTask(task), tabId: task.chatTabId, suppressCompletionNotification: addToChat });
+      if (!task.caller.local) await host.taskCompleted?.({ ...publicTask(task), tabId: task.chatTabId, suppressCompletionNotification: addToChat });
       session.trace.event("resource.total", { taskId: task.taskId, elapsedMs: session.trace.now() - task.startedMonotonic, bytes: task.sizeBytes, extraction: task.extraction, outcome: task.status, code: task.error?.code });
       pruneCompletedTasks(tasks, host.historyLimit?.() || 2000);
     }
@@ -468,7 +468,7 @@ export function createBrowserAgent(host) {
     }
     if (["site_files_status", "site_files_cancel"].includes(name)) {
       const task = tasks.get(input.taskId);
-      if (!task || task.caller.group !== group) throw browserError("BROWSER_TASK_NOT_FOUND", "This task is not in your current group, or its history expired.");
+      if (!task || task.caller.local || task.caller.group !== group) throw browserError("BROWSER_TASK_NOT_FOUND", "This task is not in your current group, or its history expired.");
       return name === "site_files_status" ? publicTask(task) : { cancelled: cancelTask(task), task: publicTask(task) };
     }
     if (name === "site_session_stop") return { chatTabId: input.chatTabId, group: await stopGroup(group, input.chatTabId) };
@@ -483,15 +483,51 @@ export function createBrowserAgent(host) {
     const targetGroup = external ? await groups.targetGroup(selected) : group;
     caller.targetGroup = targetGroup;
     caller.readOnly = external || group.groupId < 0;
-    const result = await queue(input.tabId, async () => {
-      await groups.check(group, input.chatTabId, caller.chatPath);
+    const result = await executeTarget(name, input, caller, targetGroup);
+    if (Object.hasOwn(result, "taskId")) return result;
+    await groups.check(group, input.chatTabId, caller.chatPath);
+    await groups.refresh(group);
+    return { ...result, chatTabId: input.chatTabId, tabId: input.tabId, group: groups.project(group, input.chatTabId),
+      ...(result.observation ? { observation: { ...result.observation, chatTabId: input.chatTabId, group: groups.project(group, input.chatTabId) } } : {}) };
+  }
+  // The local client has no ChatGPT identity and no mutation or Composer path.
+  function localProjection(result) {
+    const { chatTabId, group, groupId, groupChanges, submittedFiles, submittedAt, ...value } = result;
+    return value;
+  }
+  async function executeLocal(name, input) {
+    if (Object.hasOwn(input,"chatTabId") || Object.hasOwn(input,"scope") || Object.hasOwn(input,"addToChat"))
+      throw browserError("BROWSER_INVALID", "Local browser reads do not accept a chat identity or chat delivery.");
+    if (name === "site_list_tabs") return groups.inventory(null, input.offset ?? 0, input.limit ?? 50);
+    if (name === "site_files_status" || name === "site_files_cancel") {
+      const task = tasks.get(input.taskId);
+      if (!task?.caller.local) throw browserError("BROWSER_TASK_NOT_FOUND", "This local resource task expired or does not belong to the local MCP.");
+      if (name === "site_files_cancel") return { cancelled: cancelTask(task), task: localProjection(publicTask(task)) };
+      return localProjection(publicTask(task));
+    }
+    if (!["site_read","site_get_children","site_get_node","site_get_text","site_get_images","site_get_files"].includes(name))
+      throw browserError("BROWSER_READ_ONLY", "Local MCP exposes only browser reads and local resource extraction.");
+    if (["site_get_images","site_get_files"].includes(name) &&
+        (Object.hasOwn(input,"resourceId") === Object.hasOwn(input,"resourceIds") || (input.resourceIds && new Set(input.resourceIds).size !== input.resourceIds.length)))
+      throw browserError("BROWSER_INVALID", "Provide exactly one resourceId or a distinct resourceIds batch.");
+    if (name === "site_read" && input.mode === "subtree" && !input.nodeId)
+      throw browserError("BROWSER_INVALID", "subtree mode requires nodeId.");
+    const selected = await host.getTab(input.tabId).catch(() => { throw browserError("TAB_CLOSED", "The selected tab closed."); });
+    const targetGroup = await groups.targetGroup(selected);
+    const caller = { group:targetGroup, targetGroup, chatTabId:null, chatPath:null, local:true, readOnly:true, tool:name };
+    const result = await executeTarget(name, input, caller, targetGroup);
+    return localProjection({...result,tabId:input.tabId});
+  }
+  async function executeTarget(name, input, caller, targetGroup) {
+    return queue(input.tabId, async () => {
+      if (!caller.local) await groups.check(caller.group, input.chatTabId, caller.chatPath);
       const live = await groups.check(targetGroup, input.tabId);
       const previous = targets.get(input.tabId);
       if (previous && previous.group !== targetGroup) await dropTarget(previous.group, input.tabId, "TAB_LEFT_GROUP");
       const target = targetFor(targetGroup, live);
       target.operation = caller;
       try {
-        await groups.check(group, input.chatTabId, caller.chatPath);
+        if (!caller.local) await groups.check(caller.group, input.chatTabId, caller.chatPath);
         await ensureTarget(target);
         return await target.trace.span(`tool.${name}`, async () => {
           if (name === "site_read") return target.page.observe(input);
@@ -509,18 +545,13 @@ export function createBrowserAgent(host) {
             task.trace = target.trace; task.startedMonotonic = task.trace.enabled ? task.trace.now() : 0;
             task.finishPhase = task.trace.begin("resource.queue", { taskId: task.taskId });
             const initial = publicTask(task);
-            host.schedule(() => runResource(task, target, items, input.addToChat !== false, name));
+            host.schedule(() => runResource(task, target, items, !caller.local && input.addToChat !== false, name));
             return initial;
           }
           throw browserError("BROWSER_INVALID", "Unknown site tool.");
         });
       } finally { target.operation = null; }
     });
-    if (Object.hasOwn(result, "taskId")) return result;
-    await groups.check(group, input.chatTabId, caller.chatPath);
-    await groups.refresh(group);
-    return { ...result, chatTabId: input.chatTabId, tabId: input.tabId, group: groups.project(group, input.chatTabId),
-      ...(result.observation ? { observation: { ...result.observation, chatTabId: input.chatTabId, group: groups.project(group, input.chatTabId) } } : {}) };
   }
   function discardChildSessions(session, childId) {
     const removed = new Set([childId]);
@@ -619,6 +650,6 @@ export function createBrowserAgent(host) {
     const seen = new Set();
     await Promise.allSettled(tabs.filter(tab => Number.isSafeInteger(tab.groupId) && tab.groupId >= 0 && host.conversationPath(tab.url) && !seen.has(tab.groupId) && seen.add(tab.groupId)).map(async tab => { const group = await groups.get(tab.groupId); await groups.refresh(group); }));
   }
-  return { start, execute, connectGroup, recoverGroups, onEvent, onRemoved, onDetached, onUpdated, onCreated: groups.changed, onReplaced: groups.changed,
+  return { start, execute, executeLocal, connectGroup, recoverGroups, onEvent, onRemoved, onDetached, onUpdated, onCreated: groups.changed, onReplaced: groups.changed,
     localStatus, ownsTab: id => [...groups.values()].some(group => !["stopped", "failed"].includes(group.state) && group.members.has(id)) };
 }

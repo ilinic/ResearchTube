@@ -147,7 +147,7 @@ export function createBrowserGroups(host) {
   }
   // Metadata only; never attach, activate, or change other tabs during discovery.
   async function inventory(group, offset = 0, limit = 50) {
-    const tabs = (await (host.queryAllTabs?.() ?? Promise.resolve([]))).filter(tab => Number.isSafeInteger(tab.id) && (tabScopeKey(tab) !== group.groupId || !webTab(tab)));
+    const tabs = (await (host.queryAllTabs?.() ?? Promise.resolve([]))).filter(tab => Number.isSafeInteger(tab.id) && (!group || tabScopeKey(tab) !== group.groupId || !webTab(tab)));
     const windowId = tab => Number.isSafeInteger(tab.windowId) ? tab.windowId : -1;
     const groupId = tab => Number.isSafeInteger(tab.groupId) && tab.groupId >= 0 ? tab.groupId : null;
     tabs.sort((a,b) => windowId(a)-windowId(b) || (groupId(a) ?? Number.MAX_SAFE_INTEGER)-(groupId(b) ?? Number.MAX_SAFE_INTEGER) || (a.index ?? a.id)-(b.index ?? b.id) || a.id-b.id);
