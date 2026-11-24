@@ -68,7 +68,8 @@ export function createBrowserGroups(host) {
   function acknowledge(group, chatTabId) { reportChanges(group, chatTabId, true).commit(); }
   async function refresh(group, {claimTabId = null, checkPending = () => {}} = {}) {
     const work = group.refreshing.catch(() => {}).then(async () => {
-      const tabs = (await host.queryTabs(group.groupId)).filter(tab => Number.isSafeInteger(tab.id) && /^https?:\/\//.test(tab.url || ''));
+      const liveTabs = (await host.queryTabs(group.groupId)).filter(tab => Number.isSafeInteger(tab.id));
+      const tabs = liveTabs.filter(tab => /^https?:\/\//.test(tab.url || ''));
       group.chatTabs = tabs.filter(isChatTab);
       if (!group.connected) {
         const reads = await Promise.allSettled(group.chatTabs.map(tab => host.readOwner(tab.id)));
@@ -89,8 +90,17 @@ export function createBrowserGroups(host) {
       group.members = next;
       for (const id of removed) { group.marked.delete(id); group.seen.delete(id); await host.removed(group,id,'TAB_LEFT_GROUP'); }
       for (const tab of changedChats) { group.seen.delete(tab.id); await host.conversationChanged(group,tab.id); }
-      if (group.state === 'starting' && group.startup && !isChatTab(next.get(group.startup.chatTabId) || {})) await host.startupLeft(group);
-      if (!next.size && !group.chatTabs.length) groups.delete(group.groupId);
+      if (group.state === 'starting' && group.startup) {
+        // Newly created background tabs can have an empty/about:blank URL until
+        // navigation commits. Only actual group departure/closure stops startup;
+        // startChat separately verifies the intended origin before typing.
+        const startupId = group.startup.chatTabId;
+        if (!liveTabs.some(tab => tab.id === startupId)) {
+          const live = await host.getTab(startupId).catch(() => null);
+          if (!live || live.groupId !== group.groupId) await host.startupLeft(group);
+        }
+      }
+      if (!liveTabs.length && group.state !== 'starting') groups.delete(group.groupId);
       if (added.length || removed.length || [...next.values()].some(tab => before.has(tab.id) && (before.get(tab.id).url !== tab.url || before.get(tab.id).title !== tab.title)) || group.revision === 0) {
         group.revision++;
         host.log?.('group changed',{groupId:group.groupId,revision:group.revision,addedTabIds:added,removedTabIds:removed});

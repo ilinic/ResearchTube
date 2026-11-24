@@ -9,16 +9,43 @@ const f=fixture();const started=await f.agent.start(10);
 assert.equal(started.chatTabId,22);assert.equal(started.group.groupId,100);
 assertSchema(definitions.find(t=>t.name==='site_list_tabs').outputSchema,{chatTabId:22,group:started.group});
 const prompt=f.events.find(e=>e[0]==='prompt')[2];
-assert.match(prompt,/initiating chatTabId/);assert.match(prompt,/chatTabId: 22/);
+assert.doesNotMatch(prompt,/chatTabId|chat_tab_id/);
 assert.equal(started.group.chatTabId,22);assert.equal(started.group.totalTabs,2);assert.equal(f.events.filter(e=>e[0]==='prompt').length,1);
 assert.doesNotMatch(prompt,/sessionId|bas_|site_get_images|site_get_files/);
-for(const tool of definitions){assert.ok(!tool.inputSchema.properties.sessionId);assert.ok(tool.inputSchema.required.includes('chatTabId'));}
+for(const tool of definitions){assert.ok(!tool.inputSchema.properties.sessionId);assert.ok(Object.hasOwn(tool.inputSchema.properties,'chatTabId'));assert.ok(!tool.inputSchema.required.includes('chatTabId'));}
 assert.deepEqual(f.events.find(e=>e[0]==='group'),['group',[21,22],'RT · Site']);
 assert.equal(f.tabs.get(10).groupId,undefined,'the original tab is not moved');
 assert.ok(!f.events.some(e=>e[0]==='Accessibility.getFullAXTree'),'startup does not pre-read the page');
 assert.ok(!f.events.some(e=>['Runtime.addBinding','Page.addScriptToEvaluateOnNewDocument'].includes(e[0])));
 assert.ok(f.events.findIndex(e=>e[0]==='Emulation.setFocusEmulationEnabled')<f.events.findIndex(e=>e[0]==='documentReady'));
 assert.equal(f.agent.localStatus(10),null);
+// Chrome can group a new inactive ChatGPT tab before its initial navigation commits.
+for (const initialUrl of ['', 'about:blank', undefined]) {
+ const loading=fixture();
+ const create=loading.host.createChatTab;
+ loading.host.createChatTab=async (...args)=>{
+   const tab=await create(...args);
+   tab.url=initialUrl;tab.pendingUrl='https://chatgpt.com/';tab.status='loading';
+   return tab;
+ };
+ const query=loading.host.queryTabs;
+ let first=true;
+ loading.host.queryTabs=async groupId=>{
+   const tabs=await query(groupId);
+   if(first){first=false;return tabs.filter(tab=>tab.id!==22);}
+   return tabs;
+ };
+ const startChat=loading.host.startChat;
+ loading.host.startChat=async(id,text,...rest)=>{
+   loading.tabs.get(id).url='https://chatgpt.com/';
+   await loading.agent.onUpdated(id,{url:'https://chatgpt.com/'});
+   return startChat(id,text,...rest);
+ };
+ const result=await loading.agent.start(10);
+ assert.equal(result.group.state,'running','pending chat navigation must not stop startup');
+ assert.equal(loading.events.filter(e=>e[0]==='prompt').length,1);
+ assert.equal(result.group.tabs.filter(tab=>tab.role==='chatgpt').length,1);
+}
 const read=await f.run('site_read');assert.equal(read.nodes.length,7);assert.equal(read.tabId,21);assert.equal(read.chatTabId,22);
 assert.equal(read.page.url,'https://site.test/article');assert.ok(!JSON.stringify(read).includes('PRIVATE'));
 const byRole=role=>read.nodes.find(node=>node.role===role);

@@ -549,7 +549,7 @@ export function createBrowserAgent(host) {
 
   }
   async function onRemoved(tabId) {
-    for (const group of groups.values()) if (group.members.has(tabId)) {
+    for (const group of groups.values()) if (group.members.has(tabId) || group.startup?.chatTabId === tabId) {
       cancelForTab(group, tabId);
       if (group.state === "starting" && tabId === group.startup?.chatTabId) await stopGroup(group, tabId);
       await dropTarget(group, tabId, "TAB_CLOSED");
