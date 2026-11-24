@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy --env production",
+    "deploy": "npm run generate && wrangler deploy --env production",
     "check": "node scripts/export-catalog.mjs --check && node --import tsx scripts/build-validators.ts --check && node --import tsx scripts/auth-schema.ts --check && tsc --noEmit",
     "test": "npm run build && vitest run",
     "test:chrome": "npm run build && node tests/chrome.integration.mjs",

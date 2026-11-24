@@ -75,7 +75,7 @@ const inactiveShare={...singleShare,state:'inactive',file:null,publicFileUrl:nul
 assert.equal(w.context.normalizeWorkspaceShareStatus(inactiveShare).state,'inactive');
 for(const name of BROWSER_TOOL_NAMES) {
  const tool=definitions.find(t=>t.name===name);assert.ok(tool,'generated bundle must expose '+name);
- assert.equal(tool.inputSchema.additionalProperties,false);assert.ok(tool.inputSchema.required.includes('chatTabId'));
+ assert.equal(tool.inputSchema.additionalProperties,false);assert.ok(Object.hasOwn(tool.inputSchema.properties,'chatTabId'));assert.ok(!tool.inputSchema.required.includes('chatTabId'),'missing caller must reach widget-context recovery');
  assert.equal(w.context.toolSettingsMetadata(name).group,'browser');
 }
 const browserCalls=[];
