@@ -53,7 +53,8 @@ test("MCP discovery uses canonical Extension tools; execution challenges missing
   for (const name of ["site_diagnostics_start", "site_diagnostics_report"]) {
     const diagnostic = listing.result.tools.find(tool => tool.name === name);
     expect(diagnostic).toBeDefined();
-    expect(diagnostic.inputSchema.required).toContain("chatTabId");
+    expect(diagnostic.inputSchema.required).not.toContain("chatTabId");
+    expect(diagnostic.inputSchema.properties).toHaveProperty("chatTabId");
     expect(diagnostic.inputSchema.additionalProperties).toBe(false);
   }
   const search = listing.result.tools.find(t => t.name === "youtube_search");

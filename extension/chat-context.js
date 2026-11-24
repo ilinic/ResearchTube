@@ -96,7 +96,7 @@ export function createChatContext(host) {
     return task.binding;
   }
   async function direct(chatTabId) {
-    if (!Number.isSafeInteger(chatTabId) || chatTabId < 0) throw browserError("INVALID_ARGUMENT", "Provide the exact chatTabId from the startup prompt.");
+    if (!Number.isSafeInteger(chatTabId) || chatTabId < 0) throw browserError("INVALID_ARGUMENT", "Use the current-chat widget to identify the live ChatGPT tab.");
     const tab = await host.getTab(chatTabId);
     const target = { tabId: chatTabId, chatPath: host.conversationPath(tab.url) };
     if (!target.chatPath) throw browserError("BROWSER_CONTEXT_REQUIRED", "The specified tab is not a saved ChatGPT conversation.");

@@ -13,7 +13,9 @@ Check that ResearchTube is ready before starting a task.
 | Tool | What you can do |
 | --- | --- |
 | **Get ResearchTube Local Agent status** | Check whether the Local Agent is connected and compatible, and see the startup checks for your Workspace, media tools and Chrome. |
-| **Connect this chat to its tab group** | Create a Chrome tab group yourself, add this chat and the sites, then ask ChatGPT to connect and research them. |
+| **Identify this chat** | Determine the live Chrome tab automatically, including its current group when applicable. |
+| **Check chat identification** | Read the result of the current-chat widget. |
+| **Cancel chat identification** | Cancel a pending identification without modifying any tabs. |
 | **Read recent ResearchTube errors** | Let ChatGPT inspect recent errors and warnings to explain failures and choose the next step. |
 
 ## Timers

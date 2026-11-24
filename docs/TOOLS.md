@@ -6,9 +6,9 @@ This is a behavioral index, not a duplicate of the JSON Schemas. Exact schemas a
 
 The public MCP URL is **https://rtube.win**, with OAuth and no `/mcp` suffix.
 Connect it in ChatGPT before installing the Extension or optional Agent.
-The server adds `system_connection_status` for optional, user-requested account and extension diagnostics. Productive calls go straight to the account's single active extension. Connecting a new installation disconnects the previous one. There are no per-chat connect/disconnect tools or connection widgets.
+The server adds `system_connection_status` for optional, user-requested account and extension diagnostics. Productive calls go straight to the account's single active extension. Connecting a new installation disconnects the previous one. Account connection needs no per-chat setup; the current-chat widget identifies a tab only when a tool needs its context.
 
-YouTube research and local reads need no chat target. Delivery uses explicit `tabId`; Site tools use `chatTabId`, from the startup prompt. The extension checks the exact live document inside execution. Missing or changed targets fail immediately without selecting another tab. There is no server-side transcript service.
+YouTube research and local reads need no chat target. Delivery uses explicit `tabId`; Site tools use `chatTabId`, returned by the current-chat widget. The extension checks the exact live document inside execution. Missing or changed targets fail immediately without selecting another tab. There is no server-side transcript service.
 See [Public connection](features/PUBLIC_CONNECTION.md).
 
 ## Local YouTube MCP
@@ -89,7 +89,9 @@ by each custom package group with its manifest `groupTitle`. See [Custom Tools](
 | Tool | Behavior |
 | --- | --- |
 | `system_agent_status` | Reports Extension and Agent versions and interface compatibility, plus the saved startup OS, Workspace/free-space, component and Chrome automation diagnostics. Pending background checks report `checking`; status calls never rerun them. Restart the Agent to refresh the snapshot. |
-| `system_get_chat_context` | Immediately reads or explicitly resumes the group identified by the supplied `chatTabId`. First productive Site calls identify an unambiguous group automatically. No connection widget or polling is required. Tabs and Composer contents are preserved. |
+| `system_get_chat_context` | Identifies the exact current ChatGPT tab using a compact widget; no startup ID is required. Optionally resume a stopped group with `resumeGroup: true`. |
+| `system_chat_context_status` | Polls the widget identification task and returns the live `chatTabId` and optional group. |
+| `system_chat_context_cancel` | Cancels pending identification without changing tabs or Composer contents. |
 | `system_get_diagnostics` | Reads recent sanitized errors and warnings, newest first: default 20, maximum 100. Optional exact tool, tab or task filters. Includes tool calls, browser failures/omissions and Extension failures; no raw website console or page/chat content. |
 
 ## Text to Speech
@@ -208,7 +210,7 @@ Built-in MCP descriptions are limited to 600 characters; detailed behavior is do
 
 ## Files in the current chat
 
-`media_view` accepts `files: [{"workspacePath": "reports/notes.txt"}]` and the exact ChatGPT `tabId` from the startup prompt. Direct relay execution pins that tab's live document immediately, without a connection widget. Missing targets fail before creating a task. Navigation, closure, duplicate conversations or disconnect stop delivery without selecting another chat. Task status confirms upload and Send. Delivery always appends to existing Composer text and attachments, then sends everything together. There is no Composer policy parameter. Existing drafts, new text edits and extra attachments do not block Send and are not cleared. Inspection, file acceptance and Send share the same visible draft editor; hidden legacy textareas are ignored. Attachment wrappers and nested previews count once. Acceptance requires at least the previous visible attachment count plus the requested new files; names and native FileList identities do not participate.
+`media_view` accepts `files: [{"workspacePath": "reports/notes.txt"}]` and the exact ChatGPT `tabId` returned by the current-chat widget. Direct relay execution pins that tab's live document immediately, without another widget when the current ID is known. Missing targets fail before creating a task; identify the current chat first. Navigation, closure, duplicate conversations or disconnect stop delivery without selecting another chat. Task status confirms upload and Send. Delivery always appends to existing Composer text and attachments, then sends everything together. There is no Composer policy parameter. Existing drafts, new text edits and extra attachments do not block Send and are not cleared. Inspection, file acceptance and Send share the same visible draft editor; hidden legacy textareas are ignored. Attachment wrappers and nested previews count once. Acceptance requires at least the previous visible attachment count plus the requested new files; names and native FileList identities do not participate.
 
 Before Send and while waiting for it, ResearchTube verifies the exact destination, cancellation and the minimum visible attachment count. Text edits and added attachments remain in the Composer and are sent with the task data. Removing files below the required count, changing the conversation or cancellation still prevents Send. Removal from the Composer does not delete Workspace files.
 
@@ -266,4 +268,4 @@ Help, Study this site and Describe this video explicitly clear restored text and
 
 Chat delivery verifies only the number of visible Composer attachments, with the shared configurable 15/2 retry defaults. File names and identities are not compared; same-count replacement is allowed. Text edits and added attachments do not stop task delivery. Cancellation, insufficient attachment count and target changes still prevent Send and preserve the remaining contents.
 
-Optional `tabId` on asynchronous launches carries the destination ChatGPT tab from the startup prompt. Task IDs keep their existing format. Completion and the configurable 20-second Composer watchdog use the same guarded Send path; see [Task chat](features/TASK_CHAT.md).
+Optional `tabId` on asynchronous launches carries the destination ChatGPT tab returned by the current-chat widget. Task IDs keep their existing format. Completion and the configurable 20-second Composer watchdog use the same guarded Send path; see [Task chat](features/TASK_CHAT.md).

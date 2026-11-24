@@ -2,8 +2,8 @@
 
 The current implementation and lifecycle are documented in [Browser Agent](BROWSER_AGENT.md). Code schemas in `extension/browser-tools.js` are authoritative.
 
-- **Launch:** Study this site duplicates the source, creates one ChatGPT tab and groups the new pair. The source remains in place. The prompt supplies the task/language and `chatTabId` only.
-- **Identity:** every call supplies the initiating `chatTabId`; page commands also supply an exact target `tabId`. Group membership is checked live. No public browser session token exists.
+- **Launch:** Study this site duplicates the source, creates one ChatGPT tab and groups the new pair. The source remains in place. The prompt supplies the task/language, never a required numeric tab ID.
+- **Identity:** the current-chat widget obtains the live initiating `chatTabId` on demand; Site calls use that ID; page commands also supply an exact target `tabId`. Group membership is checked live. No public browser session token exists.
 - **Session:** one in-memory group object contains all current HTTP/HTTPS tabs, independent page contexts and file tasks. Each saved ChatGPT tab is a possible caller and target; there is no owner. No Chrome Storage persistence is added.
 - **Scheduling:** a shared queue per physical tab serializes page actions and file delivery; different tabs can proceed independently. Resource extraction releases the source queue before waiting for its destination. Shared debugger leases preserve retained page connections.
 - **Discovery:** list all participants with pagination. New sites and chats join automatically. Closure/departure cancels only work involving that tab; the remaining group continues. A caller without other tabs sees idle.

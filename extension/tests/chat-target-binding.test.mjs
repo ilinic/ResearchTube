@@ -322,7 +322,7 @@ const legacySpeech=pageHarness({metadata:{'researchtube/artifactTask':{taskId:'t
 assert.equal(legacySpeech.status.textContent,'Synthesizing speech…');
 console.log('Artifact captions: operation-specific speech, no file claim or current-chat binding in speakers mode: ok');
 
-// Manual group inspection uses an explicit tab directly, without a widget.
+// Manual group inspection supports explicit legacy routing and widget discovery.
 const groupWorker=worker();
 groupWorker.tabs.get(42).groupId=7;
 groupWorker.tabs.set(51,{id:51,groupId:7,url:'https://forum.test/thread',title:'Forum'});
@@ -346,4 +346,4 @@ const noGroup=worker();const noGroupStart=await noGroup.context.handleMcpRequest
 assert.equal(noGroupStart.result.structuredContent.status,'rejected');
 const diagnosticResult=await noGroup.context.handleMcpRequest({id:12,method:'tools/call',params:{name:'system_get_diagnostics',arguments:{}}});
 assert.equal(noGroupStart.result.structuredContent.error.code,'BROWSER_GROUP_NOT_FOUND',JSON.stringify(noGroupStart.result.structuredContent));
-console.log('Direct group context: exact supplied tab, no widget, preserved Composer and failure diagnostics passed');
+console.log('Group context: legacy routing, widget discovery, preserved Composer and failure diagnostics passed');

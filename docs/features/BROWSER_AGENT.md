@@ -1,12 +1,12 @@
 # Browser Agent: group automation
 
-**Study this site** duplicates the site and opens an initial ChatGPT conversation in a blue `RT · …` Chrome group. The source stays in place. The prompt supplies the initiating `chatTabId`. Drag ordinary sites or additional ChatGPT chats into the group; remove, close or duplicate tabs during research. Each saved ChatGPT conversation can use Site tools independently. File results and continuations go to the initiating chat.
+**Study this site** duplicates the site and opens an initial ChatGPT conversation in a blue `RT · …` Chrome group. The source stays in place. The prompt contains no numeric tab identifier. Drag ordinary sites or additional ChatGPT chats into the group; remove, close or duplicate tabs during research. Each saved ChatGPT conversation can use Site tools independently. File results and continuations go to the initiating chat.
 
-Reload the Extension and refresh the MCP catalog after upgrading. Study this site supplies the exact chatTabId in its startup prompt. First productive Site calls identify the group automatically without a connection widget. Explicit `system_get_chat_context` with chatTabId reads or resumes a stopped group immediately.
+Reload the Extension and refresh the MCP catalog after upgrading. Call `system_get_chat_context` without arguments when the live initiating chat is unknown; poll `system_chat_context_status` for its current ID. `resumeGroup: true` explicitly resumes a stopped group.
 
 ## Manually created groups
 
-A manually created group needs an exact initiating `chatTabId`. The first Site call from any saved ChatGPT conversation in that group can connect it. Unknown IDs are never guessed from focus; use Study this site to create a study with a supplied ID. A moved, closed, duplicate or changed initiating conversation fails closed for its own work. Stop is preserved until explicit resume; cancelled tasks are never restarted.
+A manually created group needs an exact initiating `chatTabId`. The first Site call from any saved ChatGPT conversation in that group can connect it. Unknown IDs are never guessed from focus; the widget works for any saved chat, including manually grouped chats. A moved, closed, duplicate or changed initiating conversation fails closed for its own work. Stop is preserved until explicit resume; cancelled tasks are never restarted.
 
 ## Prompt templates
 
@@ -46,7 +46,7 @@ A small group-state marker in the Extension's isolated page world survives servi
 
 `tab-automation.js` supplies a shared queue per physical tab. Work in different tabs can proceed independently. Page input, Composer messages and file delivery in one tab are serialized. Resource extraction releases its source queue before waiting for the receiving chat, preventing cross-chat delivery deadlocks. Temporary file/Composer operations borrow debugger leases and cannot detach a retained page connection.
 
-`site_files_status` and `site_files_cancel` operate on tasks in the caller's current group. Each task retains its original initiating conversation and destination. History remains worker-local. `site_session_status` and `site_session_stop` are available to any grouped saved chat; Stop cancels group page/file work and preserves tabs, files and drafts. Explicit `system_get_chat_context` reconnection from any grouped saved chat resumes it; status reads and worker recovery do not undo Stop.
+`site_files_status` and `site_files_cancel` operate on tasks in the caller's current group. Each task retains its original initiating conversation and destination. History remains worker-local. `site_session_status` and `site_session_stop` are available to any grouped saved chat; Stop cancels group page/file work and preserves tabs, files and drafts. Explicit `system_get_chat_context` with `resumeGroup: true` from any grouped saved chat resumes it; status reads and worker recovery do not undo Stop.
 
 ## Observation and navigation
 
