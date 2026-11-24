@@ -16,6 +16,8 @@ assert.match(DEFAULT_STARTUP_PROMPTS.describeThisVideoPrompt, /^@ResearchTube \[
 assert.doesNotMatch(DEFAULT_STARTUP_PROMPTS.describeThisVideoPrompt, /storyboards|visual maps|visuals/i, 'video startup does not request visual downloads');
 assert.doesNotMatch(config.describeThisVideoPrompt1.value, /storyboards|visual maps/, 'the saved original video prompt is unchanged');
 assert.deepEqual(normalizeStartupPrompts(), DEFAULT_STARTUP_PROMPTS);
+assert.doesNotMatch(DEFAULT_STARTUP_PROMPTS.studyThisSitePrompt,/chat_tab_id/);
+assert.doesNotMatch(DEFAULT_STARTUP_PROMPTS.describeThisVideoPrompt,/chat_tab_id/);
 assert.equal(renderStartupPrompt('describeThisVideoPrompt', { describeThisVideoPrompt: '[video_title]\n[video_link] → [chat_tab_id] [chat_tab_id]' }, {
   video_title: 'Кириллица 🐈 [chat_tab_id] $&', video_link: 'https://www.youtube.com/watch?v=MxJLoHLhlQM', chat_tab_id: 22
 }), 'Кириллица 🐈 [chat_tab_id] $&\nhttps://www.youtube.com/watch?v=MxJLoHLhlQM → 22 22', 'substituted values are literal and never expanded again');

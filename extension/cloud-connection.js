@@ -130,7 +130,7 @@ export function createCloudConnection(host) {
           openedAt = lastPong = now(); attempts = 0; nextRetryAt = 0;
           ws.send("direct-tools-v1");
           heartbeat = host.setInterval(() => {
-            if (socket !== ws) return;
+            if (socket !== ws || ws.readyState !== 1) return;
             if (now() - lastPong > 60000 || now() - openedAt > 55 * 60000 && !pending.size) { ws.close(); return; }
             try { ws.send("ping"); } catch { ws.close(); }
           }, 20000);
@@ -204,8 +204,8 @@ export function createCloudConnection(host) {
       if (!await host.accepts(name, args)) throw fail("INVALID_ARGUMENT", "Arguments do not match an available tool.");
       if (socket !== ws || requestGeneration !== generation || ws.readyState !== 1) throw fail("EXTENSION_OFFLINE", "The extension connection ended.");
       const tabId = args.chatTabId ?? (!SOURCE_TABS.has(name) ? args.tabId : undefined);
-      if ((args.addToChat === true || name === "media_view" || name === "system_get_chat_context") && tabId === undefined)
-        throw fail("BROWSER_CONTEXT_REQUIRED", "Provide the exact ChatGPT tabId from the startup prompt. No other tab was selected.");
+      if ((args.addToChat === true || name === "media_view") && tabId === undefined)
+        throw fail("BROWSER_CONTEXT_REQUIRED", "Identify this chat using system_get_chat_context; use the returned chatTabId. No other tab was selected.");
       let target = null;
       if (tabId !== undefined) {
         if (!Number.isSafeInteger(tabId) || tabId < 0) throw fail("INVALID_ARGUMENT", "The ChatGPT tabId must be a nonnegative integer.");
@@ -226,7 +226,7 @@ export function createCloudConnection(host) {
       response = result?.error ? { error: { code: -32603, message: "The extension could not complete this request." } } : { result: result.result };
     } catch (error) {
       response = error?.code && /^[A-Z][A-Z0-9_]{0,63}$/.test(error.code)
-        ? { result: { isError: true, content: [{ type: "text", text: "The requested operation could not run." }], structuredContent: { error: { code: error.code, message: error.code === "BROWSER_CONTEXT_REQUIRED" ? "Provide the exact ChatGPT tabId from the startup prompt. No other tab was selected." : "The requested tool or exact browser target is unavailable. No alternate tab was selected." } } } }
+        ? { result: { isError: true, content: [{ type: "text", text: "The requested operation could not run." }], structuredContent: { error: { code: error.code, message: error.code === "BROWSER_CONTEXT_REQUIRED" ? "Identify this chat using system_get_chat_context; use the returned chatTabId. No other tab was selected." : "The requested tool or exact browser target is unavailable. No alternate tab was selected." } } } }
         : { error: { code: -32000, message: "The extension could not complete this request." } };
     }
     finally { requests.delete(message.requestId); pending.delete(message.requestId); }

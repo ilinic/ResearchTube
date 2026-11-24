@@ -7,12 +7,24 @@ const nullableId = { type: ["integer", "null"], minimum: 0 };
 const taskId = { type: "string", pattern: "^tsk_[A-Za-z0-9_-]{10}$" };
 const error = { ...object({ code: text, message: text }), type: ["object", "null"] };
 export function systemToolDefinitions(widgetUri) {
+  const contextResult = object({ taskId, status: { enum: ["working", "completed", "failed", "cancelled"] }, phase: text, progressPercent: { type: "number", minimum: 0, maximum: 100 }, pollIntervalMs: { type: "integer", minimum: 100 }, chatTabId: nullableId, group: { ...browserGroupSchema, type: ["object", "null"] }, error });
   return [{
     name: "system_get_chat_context", title: "Read or resume this tab group",
-    description: "Read or explicitly resume the tab group for the exact chatTabId from the startup prompt. Returns the initiating chat and all live group tabs, including other ChatGPT chats, immediately. First productive Site calls identify their group automatically; no setup widget or polling is needed. Never guess a chatTabId.",
-    inputSchema: object({ chatTabId: id }),
-    outputSchema: object({ taskId, status: { enum: ["working", "completed", "failed", "cancelled"] }, phase: text, progressPercent: { type: "number", minimum: 0, maximum: 100 }, pollIntervalMs: { type: "integer", minimum: 100 }, chatTabId: nullableId, group: { ...browserGroupSchema, type: ["object", "null"] }, error }),
-    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true }
+    description: "Identify this exact ChatGPT tab with the existing compact widget. Call with no arguments; poll system_chat_context_status at pollIntervalMs until completed. Returns the current chatTabId and group (null outside groups). Use that ID for chat-targeted tools; refresh after browser restart or stale target. resumeGroup=true explicitly resumes a stopped group. No startup ID or active-tab guessing.",
+    inputSchema: object({ resumeGroup: { type: "boolean", default: false }, chatTabId: id }, []),
+    outputSchema: contextResult,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    _meta: { ui: { resourceUri: widgetUri }, "openai/outputTemplate": widgetUri, "openai/toolInvocation/invoking": "Identifying this chat…", "openai/toolInvocation/invoked": "Check chat context." }
+  }, {
+    name: "system_chat_context_status", title: "Read current-chat identification",
+    description: "Poll the widget task by taskId at pollIntervalMs. Completed returns the exact current chatTabId. If the widget has not mounted, finish the response so it can mount; do not guess a tab.",
+    inputSchema: object({ taskId }), outputSchema: contextResult,
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false }
+  }, {
+    name: "system_chat_context_cancel", title: "Cancel chat identification",
+    description: "Cancel a pending current-chat widget task without changing any tab or Composer.",
+    inputSchema: object({ taskId }), outputSchema: contextResult,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false }
   }, {
     name: "system_get_diagnostics", title: "Read recent ResearchTube errors",
     description: "Read recent ResearchTube errors and warnings, newest first. Default 20, maximum 100; optionally filter by tool, tabId or taskId. Includes tool names, stages, codes and timings without page/chat contents or credentials. Does not read website consoles or OpenAI blocks that never reached ResearchTube.",
@@ -29,6 +41,6 @@ export function validateSystemInput(name, value = {}) {
     const field = rule.properties[key];
     if (!field || field.type === "boolean" && typeof item !== "boolean" || field.type === "string" && (typeof item !== "string" || field.pattern && !new RegExp(field.pattern).test(item)) || field.type === "integer" && (!Number.isSafeInteger(item) || item < field.minimum || field.maximum != null && item > field.maximum)) invalid();
   }
-  if (name === "system_get_chat_context" && !Number.isSafeInteger(value.chatTabId)) invalid();
+  for (const key of rule.required) if (!Object.hasOwn(value, key)) invalid();
   return { ...value };
 }

@@ -1,7 +1,7 @@
 // Defaults cover missing settings or an unavailable optional Agent.
 export const DEFAULT_STARTUP_PROMPTS = Object.freeze({
-  studyThisSitePrompt: "@ResearchTube Study the text and images of the sites in my tab group and explain in my language. Use site_list_tabs to find the current tabs (including other ChatGPT chats); download and inspect relevant images. Users may add or remove tabs during research: check groupChanges and refresh the tab list when needed. Your initiating chatTabId: [chat_tab_id].",
-  describeThisVideoPrompt: "@ResearchTube [video_link] [video_title]\nStudy this video and explain it in my language. Use tabId: [chat_tab_id] for async tasks."
+  studyThisSitePrompt: "@ResearchTube Study the text and images of the sites in my tab group and explain in my language. Use site_list_tabs to find the current tabs (including other ChatGPT chats); download and inspect relevant images. Users may add or remove tabs during research: check groupChanges and refresh the tab list when needed.",
+  describeThisVideoPrompt: "@ResearchTube [video_link] [video_title]\nStudy this video and explain it in my language."
 });
 const PLACEHOLDERS = Object.freeze({
   studyThisSitePrompt: ["chat_tab_id", "site_tab_id", "site_title", "site_link", "group_id"],
@@ -24,7 +24,7 @@ export function normalizeStartupPrompts(value = {}) {
     for (const match of template.matchAll(/\[([a-z][a-z0-9_]*)\]/g)) {
       if (!PLACEHOLDERS[key].includes(match[1])) throw invalid(`${key} contains an unknown placeholder: [${match[1]}].`);
     }
-    result[key] = template;
+    result[key] = template.replace(/ (?:Your (?:leading|initiating) chatTabId:|Use (?:chatTabId:|tabId:)) \[chat_tab_id\](?: for async tasks)?\.$/, "");
   }
   return result;
 }

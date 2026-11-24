@@ -59,7 +59,7 @@ body{display:flex;align-items:center;gap:8px;padding:0 8px;box-sizing:border-box
       startPolling();
     }
     for(const key of handles) taskHandles.add(key);
-    if(incoming.binding) metadata=incoming.binding;
+    if(incoming.binding) { metadata=incoming.binding; if(metadata.mode==='group' && !bound && !stopped) deadline=Math.max(deadline,Date.now()+120_000); }
     if(incoming.context) {
       if(incoming.context.status==='working' && (bound || stopped)) return true;
       status.textContent='Connecting tab group…';
@@ -97,7 +97,7 @@ body{display:flex;align-items:center;gap:8px;padding:0 8px;box-sizing:border-box
     if(value.ok) {
       if(metadata.mode==='group') {
         const group=value.context?.group;
-        if(value.context?.status!=='completed' || !Number.isSafeInteger(value.context?.chatTabId) || !group) return;
+        if(value.context?.status!=='completed' || !Number.isSafeInteger(value.context?.chatTabId)) return;
         showGroup(group);
       }
       bound=true;finish();
@@ -111,7 +111,7 @@ body{display:flex;align-items:center;gap:8px;padding:0 8px;box-sizing:border-box
     }
   }
   function showGroup(group) {
-    if(!group || !Array.isArray(group.tabs)) {status.textContent='Group connected.';return;}
+    if(!group || !Array.isArray(group.tabs)) {status.textContent='Chat identified.';return;}
     const sites=group.tabs.filter(tab=>tab.role==='site').length;
     status.textContent=group.nextOffset!==null?`Group connected · ${group.totalTabs} tabs`:`Group connected · ${sites} sites, ${group.tabs.length-sites} chats`;
   }

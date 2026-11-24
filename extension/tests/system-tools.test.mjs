@@ -39,7 +39,26 @@ for(const kind of ["ungrouped","duplicate","closed","not-chat"]){
  await assert.rejects(test.context.direct(41),undefined,kind);
 }
 await assert.rejects(f.context.direct(undefined));
-assert.equal(definitions[0]._meta,undefined);
+assert.ok(definitions[0]._meta.ui.resourceUri);
+const first=setup();
+const pending=await first.context.call({});
+assert.equal(pending.status,"working");
+const meta=first.context.metadata(pending.taskId);
+assert.equal(meta.mode,"group");
+await assert.rejects(first.context.bind({...meta,bindingToken:"wrong"},first.sender()));
+const identified=await first.context.bind(meta,first.sender());
+assert.equal(identified.context.chatTabId,41);
+assert.equal((await first.context.call({taskId:pending.taskId})).status,"completed");
+first.tabs.set(43,{id:43,groupId:80,url:"https://chatgpt.com/c/second",title:"Second chat"});
+const next=await first.context.call({});
+const second=await first.context.bind(first.context.metadata(next.taskId),{id:"extension",tab:first.tabs.get(43)});
+assert.equal(second.context.chatTabId,43);
+assert.equal(second.context.group.tabs.filter(tab=>tab.role==="chatgpt").length,2);
+first.tabs.get(43).groupId=-1;
+const alone=await first.context.call({});
+assert.equal((await first.context.bind(first.context.metadata(alone.taskId),{id:"extension",tab:first.tabs.get(43)})).context.group,null);
+const expiring=await first.context.call({});first.advance(120001);
+assert.equal((await first.context.call({taskId:expiring.taskId})).status,"failed");
 
 let stored = [], writes = 0;
 const options = { version: "fixture", capacity: 25, read: async () => stored, write: async value => { stored = structuredClone(value); writes++; } };
@@ -69,6 +88,7 @@ assert.equal(failures.length, 2); assert.doesNotMatch(JSON.stringify(failures), 
 for (const value of [{ limit: 0 }, { limit: 101 }, { limit: true }, { tabId: -1 }, { taskId: "bad" }, { url: "https://test" }]) assert.throws(() => validateSystemInput("system_get_diagnostics", value));
 assert.throws(() => validateSystemInput("system_get_chat_context", { cancel: true }));
 assert.deepEqual(validateSystemInput("system_get_chat_context", { chatTabId: 41 }), { chatTabId: 41 });
-assert.throws(() => validateSystemInput("system_get_chat_context", {}));
+assert.deepEqual(validateSystemInput("system_get_chat_context", {}), {});
+assert.throws(() => validateSystemInput("system_chat_context_status", {}));
 
 console.log("System tools: direct exact targets, manual groups, explicit resume and bounded sanitized diagnostics passed");

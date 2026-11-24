@@ -97,9 +97,13 @@ for(const change of ['duplicate','navigate']){
  assert.ok(target);await f.connection.tabChanged(7);await assert.rejects(f.connection.verifyTarget(target));
  assert.equal(f.invalidated.length,1);
 }
-for(const [name,args] of [['media_view',{files:[{workspacePath:'a.png'}]}],['media_clip',{workspacePath:'a.mp4',addToChat:true}],['system_get_chat_context',{}]]){
+for(const [name,args] of [['media_view',{files:[{workspacePath:'a.png'}]}],['media_clip',{workspacePath:'a.mp4',addToChat:true}]]){
  const f=fixture(),ws=await f.online();await f.receive(ws,request(name,args));
  assert.equal(f.dispatches.length,0);assert.equal(JSON.parse(ws.sent.at(-1)).result.structuredContent.error.code,'BROWSER_CONTEXT_REQUIRED');
+}
+{
+ const f=fixture(),ws=await f.online();await f.receive(ws,request('system_get_chat_context',{}));
+ assert.equal(f.dispatches.length,1,'widget identification requires no prior chat tab ID');
 }
 {
  const f=fixture(),ws=await f.online();f.host.accepts=()=>false;

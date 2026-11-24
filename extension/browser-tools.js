@@ -5,7 +5,7 @@ const integer = { type: "integer" };
 const nullableString = { type: ["string", "null"] };
 const object = (properties, required = Object.keys(properties)) => ({ type: "object", additionalProperties: false, properties, required });
 const tabId = { type: "integer", minimum: 0, description: "Exact target tabId from site_list_tabs. Must share the initiating ChatGPT tab's group." };
-const chatTabId = { type: "integer", minimum: 0, description: "The initiating chatTabId from the startup prompt or system_get_chat_context. Each saved ChatGPT tab in the group can use Site tools independently." };
+const chatTabId = { type: "integer", minimum: 0, description: "The initiating chatTabId obtained from the current system_get_chat_context widget. If unknown, omit and identify this chat; never use an old startup ID." };
 const nodeId = { type: "string", pattern: "^n_[0-9]+_[0-9]+_[0-9]+$", description: "Addressable node from the latest observation of this exact tab. Navigation invalidates old nodes." };
 const taskId = { type: "string", pattern: "^tsk_[A-Za-z0-9_-]{10}$" };
 const error = { anyOf: [object({ code: string, message: string }), { type: "null" }] };
@@ -29,7 +29,7 @@ const budget = { maxNodes: { type: "integer", minimum: 1, maximum: 1000, descrip
 const actionProperties = { action: { enum: ["click", "type", "key", "scroll", "hover", "select"] }, nodeId, text: { type: "string", maxLength: 100000 }, key: { type: "string", maxLength: 60 }, direction: { enum: ["up", "down", "left", "right"] }, amount: { type: "number", minimum: 1, maximum: 10000 }, value: string };
 const actionStep = object(actionProperties, ["action"]);
 export function browserToolDefinitions() {
-  const define = (name, title, description, properties, required, outputSchema, annotations = read, target = true) => ({ name, title, description, inputSchema: object({ chatTabId, ...(target ? { tabId } : {}), ...properties }, ["chatTabId", ...(target ? ["tabId"] : []), ...required]), outputSchema, annotations });
+  const define = (name, title, description, properties, required, outputSchema, annotations = read, target = true) => ({ name, title, description, inputSchema: object({ chatTabId, ...(target ? { tabId } : {}), ...properties }, [...(target ? ["tabId"] : []), ...required]), outputSchema, annotations });
   const download = (name, title, description, kinds) => define(name, title, description, {
     resourceId: { type: "string", pattern: "^r_[0-9]+_[0-9]+_[0-9]+$", description: `One current ${kinds} ID observed in this exact tab. Provide this or resourceIds, never both. URLs are not accepted.` },
     resourceIds: { type: "array", minItems: 1, uniqueItems: true, description: `Ordered batch of distinct current ${kinds} IDs from the same target tab. Provide this or resourceId, never both. All are saved before delivery.`, items: { type: "string", pattern: "^r_[0-9]+_[0-9]+_[0-9]+$" } },
@@ -70,6 +70,7 @@ export function validateBrowserInput(name, input) {
   if (!definition || !input || typeof input !== "object" || Array.isArray(input)) throw browserError("BROWSER_INVALID", "A site tool requires an argument object.");
   for (const key of Object.keys(input)) if (!Object.hasOwn(definition.inputSchema.properties, key)) throw browserError("BROWSER_INVALID", `Unknown site parameter: ${key}.`);
   for (const key of definition.inputSchema.required) if (!Object.hasOwn(input, key)) throw browserError("BROWSER_INVALID", `${key} is required.`);
+  if (!Object.hasOwn(input, "chatTabId")) throw browserError("BROWSER_CONTEXT_REQUIRED", "Identify this chat with system_get_chat_context (no arguments); use its returned chatTabId.");
   for (const [key, value] of Object.entries(input)) {
     const rule = definition.inputSchema.properties[key];
     if (rule.enum && !rule.enum.includes(value) || rule.type === "string" && (typeof value !== "string" || rule.pattern && !new RegExp(rule.pattern).test(value) || rule.maxLength && value.length > rule.maxLength || rule.minLength && value.length < rule.minLength) || rule.type === "boolean" && typeof value !== "boolean" || ["integer", "number"].includes(rule.type) && (typeof value !== "number" || !Number.isFinite(value) || rule.type === "integer" && !Number.isSafeInteger(value) || rule.minimum != null && value < rule.minimum || rule.maximum != null && value > rule.maximum)) throw browserError("BROWSER_INVALID", `${key} is outside the documented site-tool contract.`);

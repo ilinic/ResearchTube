@@ -179,6 +179,7 @@ assert.equal(await waitForBrowserConversation(chatHost,22),saved);assert.equal(t
 assert.equal(browserStudyGroupTitle({title:'Marketplace - Insulation | Facebook',url:'https://facebook.com/item'}),'RT · Insulation');
 assert.equal(Array.from(browserStudyGroupTitle({title:'😀'.repeat(30)})).length,25);
 for(const input of [{sessionId:'bas_abcdefghij'},{chatTabId:22,tabId:21,depth:21},{chatTabId:22,tabId:21,mode:'subtree'}])assert.throws(()=>validateBrowserInput('site_read',input),{code:'BROWSER_INVALID'});
+assert.throws(()=>validateBrowserInput('site_list_tabs',{}),{code:'BROWSER_CONTEXT_REQUIRED'});
 console.log('Browser groups: multiple callers, dynamic sites, strict schemas, resource delivery, closure, movement, worker recovery and cancellation: ok');
 
 // Protected OOP targets never receive domain-enable or tree-read commands.
