@@ -209,7 +209,7 @@ def restore_console():
     user.ShowWindow(kernel.GetConsoleWindow(), 5)
 
 
-def run_tray(serve, installation: Path, workspace, version: str) -> int:
+def run_tray(serve, installation: Path, workspace, version: str, scheduled_create=None) -> int:
     """Tk stays on the main thread; pystray's Windows loop owns a second thread."""
     if sys.platform != "win32":
         raise OSError("Tray mode is currently supported on Windows. Use --console on this platform.")
@@ -272,6 +272,7 @@ def run_tray(serve, installation: Path, workspace, version: str) -> int:
         pystray.MenuItem(lambda _: f"Agent: {worker.state}", None, enabled=False),
         pystray.MenuItem("Open log", lambda *_: enqueue("show"), default=True),
         pystray.MenuItem("Open Workspace", lambda *_: enqueue("workspace")),
+        pystray.MenuItem("Create scheduled group", lambda *_: enqueue("scheduled"), enabled=lambda _: worker.state == "Running" and scheduled_create is not None),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("Exit", lambda *_: enqueue("exit")),
     ))
@@ -321,6 +322,11 @@ def run_tray(serve, installation: Path, workspace, version: str) -> int:
                 except OSError as error:
                     print(f"Could not open Workspace: {error}", file=sys.stderr)
                     root.deiconify()
+            elif command == "scheduled" and scheduled_create and worker.loop and worker.state == "Running":
+                try:
+                    asyncio.run_coroutine_threadsafe(scheduled_create(), worker.loop)
+                except RuntimeError:
+                    print("Scheduled group unavailable: Agent is stopping.", file=sys.stderr)
             elif command in {"exit", "tray_failed"}:
                 closing = True
                 worker.stop()

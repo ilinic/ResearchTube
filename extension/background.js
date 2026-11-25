@@ -103,7 +103,7 @@ globalThis.addEventListener?.("fetch", createMediaStreamHandler({
   fetchMedia: (url, options) => fetch(url, options),
   log: (stage, details = {}) => consoleAction(`[ResearchTube media stream ${EXTENSION_VERSION}]`, stage, details)
 }));
-const REQUIRED_AGENT_INTERFACE_VERSION = 88;
+const REQUIRED_AGENT_INTERFACE_VERSION = 89;
 // A UI resource URI is a cache key in MCP Apps. Increment it whenever the
 // rendered template changes so ChatGPT does not reuse a stale iframe bundle.
 const MEDIA_TO_CHAT_WIDGET_URI = "ui://researchtube/chat-target-v8.html";
@@ -3395,13 +3395,13 @@ async function updateComposerWatchdog(tabId, action, preserve = false) {
       else state?.suppress();
     }, args: [action, preserve] });
 }
-async function sendComposerWhenReady(tabId, { completionText = null, revision = null, chatPath = null, beforeSend = null, onSendCommit = null, cloudTarget = null } = {}) {
+async function sendComposerWhenReady(tabId, { completionText = null, revision = null, chatPath = null, beforeSend = null, onSendCommit = null, cloudTarget = null, scheduled = false, beforeInsert = null } = {}) {
   if (cloudTarget) {
     const previous = beforeSend;
     beforeSend = async () => { await cloudConnection.verifyTarget(cloudTarget); await previous?.(); };
   }
   return withChatFileAutomation(async () => {
-    let attached = false, committed = false, inserted = false;
+    let attached = false, committed = false, inserted = false, held = false;
     try {
       const tab = await chrome.tabs.get(tabId);
       if (!/^https:\/\/chatgpt\.com(?:\/|$)/.test(tab.url || "")) return { sent: false, reason: "notChatGPT" };
@@ -3419,6 +3419,8 @@ async function sendComposerWhenReady(tabId, { completionText = null, revision = 
       if ([...mediaToChatTasks.values()].some(task => task.target?.tabId === tabId && ["queued", "working"].includes(task.status)))
         return { sent: false, reason: "fileTaskOwnsComposer" };
       const nonempty = Boolean(initial.text.trim() || initial.attachments);
+      if (scheduled && (nonempty || initial.blocked)) return {sent:false,reason:"draftOrBlocked"};
+      if (scheduled) { await updateComposerWatchdog(tabId,"hold"); held=true; }
       if (!completionText && nonempty && initial.stableMs < (await composerAutoSendTimeout()) * 1000)
         return { sent: false, reason: "draftStillChanging" };
       if (!completionText && !nonempty) return { sent: false, reason: "empty" };
@@ -3429,6 +3431,7 @@ async function sendComposerWhenReady(tabId, { completionText = null, revision = 
       let live = await readWatchedComposer(tabId);
       if (!live?.found || !live.idle || !completionText && (live.revision !== initial.revision || live.blocked)) return { sent: false, reason: "changed", inserted, committed };
       await beforeSend?.();
+      if (scheduled && (live.text.trim() || live.attachments || live.revision !== initial.revision)) return {sent:false,reason:"draftChanged"};
       expected = live.text;
       if (completionText) {
         // Append with real editor input. Never clear/replace the existing draft.
@@ -3443,6 +3446,11 @@ async function sendComposerWhenReady(tabId, { completionText = null, revision = 
         })))?.value;
         if (!positioned) return { sent: false, reason: "composerUnavailable" };
         await beforeSend?.();
+        if (scheduled) {
+          await beforeInsert?.();
+          const latest=await readWatchedComposer(tabId);
+          if (!latest?.found || !latest.idle || latest.text.trim() || latest.attachments || latest.revision!==initial.revision) return {sent:false,reason:"draftChanged"};
+        }
         await cdpCommand(tabId, "Input.insertText", { text: suffix });
         inserted = true;
         expected += suffix;
@@ -3451,16 +3459,31 @@ async function sendComposerWhenReady(tabId, { completionText = null, revision = 
       const normalize = text => String(text).normalize("NFKC").replace(/[\u200b-\u200d\ufeff]/g, "").replace(/\s+/g, " ").trim();
       if (!live?.found || !live.idle || completionText && !normalize(live.text).includes(normalize(completionText)) || !completionText && (normalize(live.text) !== normalize(expected) || live.attachments !== initial.attachments))
         return { sent: false, reason: "changed", inserted, committed };
+      if (scheduled && (normalize(live.text)!==normalize(completionText) || live.attachments)) return {sent:false,reason:"draftChanged",inserted,committed};
       const baseline = await cdpReadMediaSubmissionState(tabId);
       const beforeClick = async () => {
         await beforeSend?.();
         const target = await chrome.tabs.get(tabId);
         if (expectedChatPath ? chatConversationPath(target.url) !== expectedChatPath : target.url !== originalUrl) throw localAgentError("BROWSER_CHAT_CHANGED", "The destination conversation changed before Send.");
         const current = await readWatchedComposer(tabId);
+        if (scheduled && (normalize(current?.text)!==normalize(completionText) || current?.attachments)) throw localAgentError("MEDIA_TO_CHAT_INVALID","Scheduled Composer changed.");
         if (!/^https:\/\/chatgpt\.com(?:\/|$)/.test(target.url || "") || !current?.found || !current.idle || completionText && !normalize(current.text).includes(normalize(completionText)) || !completionText && (current.blocked ||
           normalize(current.text) !== normalize(expected) || current.attachments !== initial.attachments))
           throw localAgentError("MEDIA_TO_CHAT_INVALID", "The Composer changed before automatic Send.");
       };
+      if (scheduled) {
+        await cdpDispatchEnabledSend(tabId, 30_000, beforeClick, () => { committed=true; onSendCommit?.(); });
+        if (!committed) return {sent:false,reason:"sendUnavailable",inserted,committed};
+        for (let i=0;i<20;i++) {
+          const state=await cdpReadMediaSubmissionState(tabId);
+          if (state.chatPath===expectedChatPath && (state.userCount>baseline.userCount || state.lastUserId && state.lastUserId!==baseline.lastUserId)) {
+            await updateComposerWatchdog(tabId,"suppress");
+            return {sent:true};
+          }
+          await sleep(500);
+        }
+        return {sent:false,reason:"sendUnconfirmed",inserted,committed};
+      }
       await cdpClickEnabledSendButton(tabId, 30_000, beforeClick, () => { committed = true; onSendCommit?.(); });
       const after = await cdpReadMediaSubmissionState(tabId);
       const acknowledged = after.userCount > baseline.userCount || after.lastUserId && after.lastUserId !== baseline.lastUserId || after.generating ||
@@ -3476,6 +3499,7 @@ async function sendComposerWhenReady(tabId, { completionText = null, revision = 
       return { sent: false, reason: error.code || "CHAT_UNAVAILABLE", committed, inserted };
     } finally {
       if (inserted && !committed) await updateComposerWatchdog(tabId, "suppress").catch(() => {});
+      if (held) await updateComposerWatchdog(tabId,"release",true).catch(() => {});
       if (attached) {
         await cdpCommand(tabId, "Emulation.setFocusEmulationEnabled", { enabled: false }).catch(() => {});
         await cdpDetach(tabId);
@@ -6298,7 +6322,14 @@ async function readMcpResource(id, uri) {
   }
 }
 
+let activeScheduledMcpCalls=0;
 async function handleMcpRequest(request) {
+  const active=request?.method==="tools/call";
+  if(active) activeScheduledMcpCalls++;
+  try { return await handleMcpRequestInner(request); }
+  finally { if(active) activeScheduledMcpCalls--; }
+}
+async function handleMcpRequestInner(request) {
   if (request?.method === "initialize") {
     return {
       jsonrpc: "2.0", id: request.id,
@@ -7731,10 +7762,10 @@ async function callSharedMemory(name,args) {
   const port=normalizeAgentPort((await getConfig()).agentPort);
   await requireCompatibleAgent(port);
   const base=`http://127.0.0.1:${port}/internal/local-mcp/`;
-  const bootstrap=await fetch(base+"bootstrap",{method:"POST",headers:{"Content-Type":"application/json","X-ResearchTube-Extension":chrome.runtime.id},body:"{}"});
+  const bootstrap=await fetch(base+"bootstrap",{method:"POST",signal:AbortSignal.timeout(5000),headers:{"Content-Type":"application/json","X-ResearchTube-Extension":chrome.runtime.id},body:"{}"});
   if(!bootstrap.ok) throw localAgentError("AGENT_UNAVAILABLE","Local memory authorization failed.");
   const {token}=await bootstrap.json();
-  const reply=await fetch(base+"memory",{method:"POST",headers:{"Content-Type":"application/json","X-ResearchTube-Token":token},body:JSON.stringify({name,arguments:args})});
+  const reply=await fetch(base+"memory",{method:"POST",signal:AbortSignal.timeout(20000),headers:{"Content-Type":"application/json","X-ResearchTube-Token":token},body:JSON.stringify({name,arguments:args})});
   const value=await reply.json();
   if(!reply.ok) throw localAgentError(value.error?.code || "WORKSPACE_MEMORY_ERROR",value.error?.message || "Local memory request failed.");
   return value;
@@ -7746,7 +7777,92 @@ async function requireLocalYoutubeLogin() {
   if (!result.data.signedIn) throw Object.assign(Error("Sign in to YouTube"), { code: "YOUTUBE_LOGIN_REQUIRED" });
   return tab.id;
 }
+// Private Agent bridge commands. Not published as MCP tools.
+const SCHEDULED_CONTINUATION="Continue the next iteration of your assigned task. Use the shared workspace and database to maintain continuity and coordinate with other agents.";
+let scheduledTickRunning=false, scheduledCreateRunning=false;
+async function findScheduledGroup(name) {
+  if (typeof name!=="string" || !name.trim()) throw localAgentError("INVALID_ARGUMENT","Invalid scheduled group name.");
+  const matches=(await chrome.tabGroups.query({})).filter(g=>g.title===name);
+  return matches;
+}
+async function createScheduledGroup(name) {
+  if(scheduledCreateRunning) return {status:"busy"};
+  scheduledCreateRunning=true;
+  try {
+    const matches=await findScheduledGroup(name);
+    if(matches.length) return {status:matches.length===1?"exists":"ambiguousGroup"};
+    const windows=await chrome.windows.getAll({windowTypes:["normal"]});
+    if(!windows.length) return {status:"noChromeWindow"};
+    const tab=await chrome.tabs.create({windowId:windows[0].id,url:EXTERNAL_URLS.chatgptNewChat,active:true});
+    const groupId=await chrome.tabs.group({tabIds:[tab.id]});
+    await chrome.tabGroups.update(groupId,{title:name,color:"blue",collapsed:false});
+    return {status:"created",groupId,tabId:tab.id};
+  } finally {scheduledCreateRunning=false;}
+}
+async function scheduledPending(tabId) {
+  await Promise.all([ensureMediaToChatLoaded(),ensureLibraryStoreLoaded(),artifactTaskManager.ensure(),taskCompletionDelivery.ensure()]);
+  const active=task=>!["completed","failed","cancelled"].includes(task.status);
+  return activeScheduledMcpCalls>0 || browserAgent.hasPendingChat(tabId) || artifactTaskManager.hasPendingChat(tabId) || taskCompletionDelivery.hasPendingChat(tabId)
+    || [...mediaToChatTasks.values()].some(t=>active(t)&&(t.target?.tabId===tabId || t.tabId===tabId || !t.target))
+    || [...libraryStoreTasks.values()].some(t=>active(t)&&(t.tabId===tabId || t.tabId==null));
+}
+// Require a visible, completed assistant response, not merely absence of Stop.
+// Modal/confirmation/error states and ambiguous Composer structures fail closed.
+async function scheduledChatState(tabId) {
+  const result=await chrome.scripting.executeScript({target:{tabId},world:"ISOLATED",func:()=>{
+    const visible=e=>Boolean(e&&e.getClientRects().length&&getComputedStyle(e).visibility!=="hidden");
+    const matches=selector=>[...document.querySelectorAll(selector)].some(visible);
+    const messages=[...document.querySelectorAll('[data-message-author-role="user"],[data-message-author-role="assistant"]')];
+    const last=messages.at(-1);
+    const blocked=matches('button[data-testid="stop-button"], button[aria-label="Stop generating"], button[aria-label="Stop streaming"], [role="dialog"], [aria-modal="true"], [aria-busy="true"], [role="alert"], [data-testid*="confirm"], [data-testid*="error"], input[type="password"]');
+    const composer=document.querySelector('#prompt-textarea');
+    return {ready:!blocked&&document.readyState==="complete"&&messages.some(m=>m.getAttribute("data-message-author-role")==="user")&&last?.getAttribute("data-message-author-role")==="assistant"&&Boolean(last.innerText?.trim())&&visible(composer)&&composer.getAttribute("aria-disabled")!=="true",userCount:messages.filter(m=>m.getAttribute("data-message-author-role")==="user").length,lastUserId:messages.filter(m=>m.getAttribute("data-message-author-role")==="user").at(-1)?.getAttribute("data-message-id")||null};
+  }});
+  return result[0]?.result;
+}
+async function tickScheduledGroup(input) {
+  if(scheduledTickRunning || !Number.isFinite(input.expiresAt) || Date.now()>input.expiresAt) return {status:"busyOrExpired"};
+  scheduledTickRunning=true;
+  try {
+    const matches=await findScheduledGroup(input.groupName);
+    if(matches.length!==1) return {status:matches.length?"ambiguousGroup":"noGroup"};
+    const groupId=matches[0].id;
+    const tabs=(await chrome.tabs.query({groupId})).filter(t=>chatConversationPath(t.url));
+    const results=await Promise.all(tabs.map(async tab=>{
+      const tabId=tab.id, path=chatConversationPath(tab.url), key="researchtubeScheduledUncertain:"+tabId+":"+path;
+      try {
+        const verify=async()=>{
+          const live=await chrome.tabs.get(tabId);
+          const groups=await findScheduledGroup(input.groupName);
+          if(Date.now()>input.expiresAt||groups.length!==1||groups[0].id!==groupId||live.groupId!==groupId||chatConversationPath(live.url)!==path||live.pendingUrl) throw localAgentError("BROWSER_TARGET_CHANGED","Scheduled chat left group or changed.");
+          if(await scheduledPending(tabId)) throw localAgentError("BROWSER_BUSY","Pending MCP work.");
+          if(!(await scheduledChatState(tabId))?.ready) throw localAgentError("BROWSER_BUSY","Chat is not confidently idle.");
+        };
+        await verify();
+        const state=await scheduledChatState(tabId);
+        const uncertain=(await chrome.storage.session.get(key))[key];
+        if(uncertain) {
+          if(state.userCount<=uncertain.userCount && (!state.lastUserId||state.lastUserId===uncertain.lastUserId)) return {tabId,status:"skipped",reason:"previousSendUnconfirmed"};
+          await chrome.storage.session.remove(key);
+        }
+        let reserved=false;
+        const result=await sendComposerWhenReady(tabId,{completionText:SCHEDULED_CONTINUATION,chatPath:path,scheduled:true,beforeSend:verify,beforeInsert:async()=>{
+          const current=await scheduledChatState(tabId);
+          if(!current?.ready) throw localAgentError("BROWSER_BUSY","Chat changed before insertion.");
+          await chrome.storage.session.set({[key]:{userCount:current.userCount,lastUserId:current.lastUserId}});
+          reserved=true;
+        }});
+        if(result.sent || reserved && !result.inserted && !result.committed) await chrome.storage.session.remove(key);
+        return {tabId,status:result.sent?"sent":"skipped",reason:result.reason||null};
+      } catch(error) {return {tabId,status:"skipped",reason:error.code||"CHAT_UNAVAILABLE"};}
+    }));
+    consoleAction("[ResearchTube scheduled] Tick",{groupId,results});
+    return {status:"checked",results};
+  } finally {scheduledTickRunning=false;}
+}
 async function dispatchLocalMcp(name, input) {
+  if (name==="__scheduled_create") return createScheduledGroup(input.groupName);
+  if (name==="__scheduled_tick") return tickScheduledGroup(input);
   if (LOCAL_BROWSER_TOOLS.includes(name)) {
     if (!await isMcpToolEnabled(name)) throw Object.assign(Error("Disabled local browser tool"),{code:"MCP_TOOL_DISABLED"});
     const definition = localBrowserDefinitions().find(tool => tool.name === name);

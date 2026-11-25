@@ -77,7 +77,7 @@ _FUNCTIONS = set("""abs avg changes char coalesce concat concat_ws count date da
 hex ifnull iif instr julianday last_insert_rowid length like likelihood likely lower ltrim max min nullif
 octet_length printf quote random randomblob replace round rtrim sign soundex strftime substr substring
 sum time timediff total total_changes trim typeof unicode unixepoch unlikely unhex upper zeroblob
-sqlite_version sqlite_source_id sqlite_compileoption_get sqlite_compileoption_used
+sqlite_version sqlite_source_id sqlite_compileoption_get sqlite_compileoption_used sqlite_rename_table sqlite_rename_test sqlite_rename_column sqlite_drop_column sqlite_rename_quotefix
 row_number rank dense_rank percent_rank cume_dist ntile lag lead first_value last_value nth_value
 json json_array json_array_length json_error_position json_extract json_insert json_object json_patch
 json_quote json_remove json_replace json_set json_type json_valid json_group_array json_group_object
@@ -87,6 +87,8 @@ sin cos tan asin acos atan atan2 sinh cosh tanh asinh acosh atanh degrees radian
 
 
 def authorize(action, a, b, database, source):
+    if database == "temp" and a == "sqlite_temp_master" and action in (sqlite3.SQLITE_READ, sqlite3.SQLITE_UPDATE):
+        return sqlite3.SQLITE_OK
     if database not in (None, "main"):
         return sqlite3.SQLITE_DENY
     if action == sqlite3.SQLITE_PRAGMA:

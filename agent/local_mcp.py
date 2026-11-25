@@ -36,6 +36,8 @@ ERROR_MESSAGES = {
     "YOUTUBE_LOGIN_UNKNOWN": "YouTube login state is not ready. Let the page finish loading, then retry.",
     "YOUTUBE_BRIDGE_OFFLINE": "The local Chrome extension connection is unavailable. Keep Chrome open and reload the updated extension.",
     "YOUTUBE_BRIDGE_TIMEOUT": "The YouTube browser request timed out. Check Chrome and retry later.",
+    "GROUP_TAB_LIMIT_REACHED": "Group tab limit reached. Pass tabId of an existing site tab instead.",
+    "BROWSER_BUSY": "The selected tab is busy.",
     "BROWSER_INVALID": "Invalid browser arguments. Use exact tab and node/resource IDs.",
     "BROWSER_UNAVAILABLE": "The browser page is unavailable or restricted by Chrome.",
     "BROWSER_READ_ONLY": "Codex can interact only with tabs in its own RT · Codex group. Use site_open.",

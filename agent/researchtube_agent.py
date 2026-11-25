@@ -48,8 +48,8 @@ except ImportError:
     from task_history import TaskHistory
     from browser_resources import save_browser_resource
 
-AGENT_VERSION = "2.8.5"
-INTERFACE_VERSION = 88
+AGENT_VERSION = "2.8.6"
+INTERFACE_VERSION = 89
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
 MAX_GOOGLE_TRANSLATE_AUDIO_BYTES = 16 * 1024 * 1024
@@ -272,7 +272,7 @@ def read_agent_config() -> dict[str, Any]:
 def configured_scheduled_tasks() -> dict[str, Any]:
     config = read_agent_config()
     result = {"maxTabsPerGroup": config.get("maxTabsPerGroup", 20),
-              "scheduledTasksEnabled": config.get("scheduledTasksEnabled", False),
+              "scheduledTasksEnabled": config.get("scheduledTasksEnabled", True),
               "scheduledTasksGroupName": config.get("scheduledTasksGroupName", "scheduled"),
               "scheduledTasksIntervalSeconds": config.get("scheduledTasksIntervalSeconds", 300)}
     for name in ("maxTabsPerGroup", "scheduledTasksIntervalSeconds"):
@@ -6473,12 +6473,46 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             pass
 
 
+async def scheduled_create_group():
+    settings = configured_scheduled_tasks()
+    try:
+        result = await LOCAL_MCP.browser("__scheduled_create", {"groupName": settings["scheduledTasksGroupName"]})
+        log(f"Scheduled group: {result.get('status', 'unknown')}")
+    except Exception as error:
+        log(f"Scheduled group not created: {getattr(error, 'code', type(error).__name__)}", error=True)
+
+
+async def scheduled_loop(settings):
+    if not settings["scheduledTasksEnabled"]:
+        log("Scheduled activation disabled.")
+        return
+    interval = settings["scheduledTasksIntervalSeconds"]
+    log(f"Scheduled activation interval: {interval}s; group: {settings['scheduledTasksGroupName']}")
+    try:
+        while True:
+            await asyncio.sleep(interval)
+            if LOCAL_MCP.writer is None or LOCAL_MCP.writer.is_closing():
+                continue
+            try:
+                result = await LOCAL_MCP.browser("__scheduled_tick", {
+                    "groupName": settings["scheduledTasksGroupName"],
+                    "expiresAt": int(time.time() * 1000) + 60000
+                })
+                if result.get("status") != "noGroup":
+                    log("Scheduled tick: " + json.dumps(result, ensure_ascii=False))
+            except Exception as error:
+                log(f"Scheduled tick skipped: {getattr(error, 'code', type(error).__name__)}")
+    finally:
+        log("Scheduled activation stopped.")
+
+
 async def serve(port: int, on_started: Callable[[], None] | None = None) -> None:
     global WORKSPACE_PATH, STARTUP_PROMPTS
     STARTUP_PROMPTS = configured_startup_prompts()
     # Freeze the root for this run: live edits must not redirect active tasks,
     # media viewers or shares into a different directory mid-operation.
     WORKSPACE_PATH = startup_workspace_path()
+    scheduled_settings = configured_scheduled_tasks()
     await asyncio.to_thread(scheduled_memory.initialize, memory_path)
     initial_health = initialize_health_snapshot()
     server = await asyncio.start_server(handle_client, host="127.0.0.1", port=port)
@@ -6486,12 +6520,14 @@ async def serve(port: int, on_started: Callable[[], None] | None = None) -> None
     if on_started is not None:
         on_started()
     diagnostics = asyncio.create_task(collect_startup_health(initial_health), name="startup-health")
+    scheduled = asyncio.create_task(scheduled_loop(scheduled_settings), name="scheduled-activation")
     try:
         async with server:
             await server.serve_forever()
     finally:
         diagnostics.cancel()
-        await asyncio.gather(diagnostics, return_exceptions=True)
+        scheduled.cancel()
+        await asyncio.gather(diagnostics, scheduled, return_exceptions=True)
         async with PUBLIC_SHARE_LOCK:
             await stop_public_share_unlocked()
         await LOCAL_MCP.shutdown()
@@ -6552,7 +6588,7 @@ def main(argv=None) -> int:
             return 0
         if tray:
             return run_tray(lambda ready: run_server(port, on_started=ready), ROOT,
-                            lambda: WORKSPACE_PATH, AGENT_VERSION)
+                            lambda: WORKSPACE_PATH, AGENT_VERSION, scheduled_create=scheduled_create_group)
         clear_console()
         # PyInstaller hides its owned console early; --console explicitly restores it.
         if getattr(sys, "frozen", False) and sys.platform == "win32":

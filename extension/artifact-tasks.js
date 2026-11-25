@@ -205,6 +205,7 @@ export function createArtifactTaskManager(host) {
   }
   return {
     ensure,advance,
+    hasPendingChat: id=>[...tasks.values()].some(t=>!terminal(t.status)&&(t.tabId===id||t.chat?.tabId===id||t.tabId==null&&t.addToChat)),
     async start(tool,input,options) {
       await ensure();
       const createdAt=now();let taskId;

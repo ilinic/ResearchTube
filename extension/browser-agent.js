@@ -125,6 +125,7 @@ export function createBrowserAgent(host) {
       const tab = await host.getTab(input.tabId).catch(()=>{throw browserError("TAB_CLOSED","The selected tab closed.");});
       if (protectedChat(tab)) throw browserError("BROWSER_READ_ONLY","site_open cannot navigate an existing ChatGPT tab.");
       await verify(tab);
+      if (!/^https?:\/\//.test(tab.url || "") && tab.url!=="about:blank") throw browserError("BROWSER_READ_ONLY","Choose an ordinary site tab.");
       if (new URL(tab.pendingUrl || tab.url).href === url) return "reused";
       if (tab.pendingUrl) throw browserError("BROWSER_BUSY","The selected tab is already navigating.");
       for (const task of tasks.values()) if (task.tabId===tab.id && !TERMINAL.has(task.status))
@@ -936,6 +937,6 @@ export function createBrowserAgent(host) {
     const seen = new Set();
     await Promise.allSettled(tabs.filter(tab => Number.isSafeInteger(tab.groupId) && tab.groupId >= 0 && host.conversationPath(tab.url) && !seen.has(tab.groupId) && seen.add(tab.groupId)).map(async tab => { const group = await groups.get(tab.groupId); await groups.refresh(group); }));
   }
-  return { start, execute, executeLocal, connectGroup, recoverGroups, onEvent, onRemoved, onDetached, onUpdated, onCreated: groups.changed, onReplaced: groups.changed,
+  return { start, execute, executeLocal, connectGroup, recoverGroups, hasPendingChat:id=>[...tasks.values()].some(t=>!TERMINAL.has(t.status)&&t.chatTabId===id), onEvent, onRemoved, onDetached, onUpdated, onCreated: groups.changed, onReplaced: groups.changed,
     localStatus, hasControlTarget: id => Boolean(targets.get(id)?.attached && targets.get(id)?.controlReady), ownsTab: id => [...groups.values()].some(group => !["stopped", "failed"].includes(group.state) && group.members.has(id)) };
 }

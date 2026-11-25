@@ -278,3 +278,7 @@ Optional `tabId` on asynchronous launches carries the destination ChatGPT tab re
 ### Shared scheduled memory
 
 `db_sql({sql})` executes a bounded atomic SQLite script on `scheduled/database.sqlite`, returning ordered result sets. The Agent owns the transaction; omit BEGIN/COMMIT. BLOBs are `base64:` strings; unsafe file operations are denied. `workspace_read_text({workspacePath})` and `workspace_write_text({workspacePath,text})` read/atomically replace UTF-8 files up to 32 KiB. Coordinate concurrent updates via SQLite or distinct files. These tools are also available in local MCP.
+
+### Scheduled ChatGPT tasks
+
+Use the Agent tray menu **Create scheduled group** to create one Chrome group and a new empty ChatGPT tab in an existing window. Give the chat its task and send it yourself. Add/remove chats with normal Chrome grouping. The Agent checks the exact configured group name every 300 seconds by default; missing Chrome/group is a no-op. Duplicate groups are skipped. Group presence is the normal on/off switch; `scheduledTasksEnabled=false` is an optional global opt-out (restart Agent). The tick never creates tabs, interrupts generation or overwrites a draft. Pending work and uncertain sends are skipped. Only confirmed sends count as iterations. The shared memory persists after closing the group.

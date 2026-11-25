@@ -11,6 +11,7 @@ export function createTaskCompletionDelivery(host) {
   // Used for Agent-owned timers and Custom Tools only. Other managers already
   // own their task records and invoke completed directly.
   let records = [], loaded = false, loading = null, ticking = false, writing = Promise.resolve();
+  const delivering=new Map();
   const terminal = task => ["completed", "failed", "cancelled"].includes(task.status);
   const save = () => {
     const done = records.filter(terminal);
@@ -36,9 +37,10 @@ export function createTaskCompletionDelivery(host) {
     // Mark before awaited I/O, including immediate completion at task launch.
     // Busy/missing tabs consume the notification: there is no pending wake-up.
     task.chatCompletionHandled = true;
-    await persist();
-    try { await host.send(task.tabId, { completionText: "ResearchTube task " + task.taskId + " completed.", ...(task.cloudTarget ? { cloudTarget: task.cloudTarget } : {}) }); }
+    delivering.set(task.taskId,task.tabId);
+    try { await persist(); await host.send(task.tabId, { completionText: "ResearchTube task " + task.taskId + " completed.", ...(task.cloudTarget ? { cloudTarget: task.cloudTarget } : {}) }); }
     catch (error) { host.log?.("Task completion notification stopped", { taskId: task.taskId, code: error.code || "CHAT_UNAVAILABLE" }); }
+    finally { delivering.delete(task.taskId); }
   }
   async function register(task, kind, tabId, cloudTarget = null) {
     await ensure();
@@ -82,7 +84,7 @@ export function createTaskCompletionDelivery(host) {
       if (records.some(task => !terminal(task))) host.schedule(1000);
     } finally { ticking = false; }
   }
-  return { ensure, completed, register, observe, tick };
+  return { ensure, completed, register, observe, tick, hasPendingChat: id=>[...delivering.values()].includes(id)||records.some(t=>t.tabId===id&&(!terminal(t)||t.status==="completed"&&!t.chatCompletionHandled)) };
 }
 
 // Installed only in a ChatGPT tab explicitly used by ResearchTube. Readiness
