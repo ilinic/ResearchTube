@@ -259,18 +259,22 @@ if(process.env.RESEARCHTUBE_LIVE_RESULTS) {
 }
 console.log('Shipped MCP artifact contracts: 12 producers, canonical paths, async crop, current-tab binding, delay/cancel, missing tab and batch limits verified.');
 
-// Exercise the generated toolbar implementation: no global badge writes, and
-// recording remains the stronger indicator on a Browser Agent tab.
+// Automation no longer owns any per-tab toolbar indicator. Only the one-time
+// migration clears obsolete badges; global recording indicators still work.
+assert.equal(typeof w.context.paintBrowserAutomationBadge,'undefined');
+assert.equal(typeof w.context.browserAutomationBadges,'undefined');
 const badgeCalls=[];
-w.context.chrome.action={setBadgeBackgroundColor:async v=>badgeCalls.push(['color',v]),setBadgeText:async v=>badgeCalls.push(['text',v]),setBadgeTextColor:async v=>badgeCalls.push(['textColor',v]),setTitle:async v=>badgeCalls.push(['title',v])};
-w.context.browserAutomationBadges.set(42,{state:'running',statusMessage:'Studying this page'});
-await w.context.paintBrowserAutomationBadge(42);
-assert.ok(badgeCalls.every(([,v])=>v.tabId===42));assert.equal(badgeCalls.find(([k])=>k==='text')[1].text,'AUTO');assert.equal(badgeCalls.find(([k])=>k==='color')[1].color,'#0057ff');
+w.context.chrome.tabs.query=async()=>[{id:42},{id:43},{id:44},{id:45}];
+w.context.chrome.action={getBadgeText:async({tabId})=>({42:'AUTO',43:'ERR',44:'MIC',45:''})[tabId],setBadgeBackgroundColor:async v=>badgeCalls.push(['color',v]),setBadgeText:async v=>badgeCalls.push(['text',v]),setBadgeTextColor:async v=>badgeCalls.push(['textColor',v]),setTitle:async v=>badgeCalls.push(['title',v])};
+await w.context.clearLegacyBrowserBadges();
+assert.deepEqual(badgeCalls.filter(([k])=>k==='text').map(([,v])=>[v.tabId,v.text]).sort((a,b)=>a[0]-b[0]),[[42,null],[43,null]]);
+assert.ok(badgeCalls.every(([,v])=>[42,43].includes(v.tabId)));
 badgeCalls.length=0;w.context.cameraRecordingBadgeKind='audio';w.context.cameraRecordingBadgeVisible=true;
-await w.context.paintBrowserAutomationBadge(42);assert.equal(badgeCalls.find(([k])=>k==='text')[1].text,'MIC');
-badgeCalls.length=0;w.context.cameraRecordingBadgeKind=null;w.context.browserAutomationBadges.delete(42);
-await w.context.paintBrowserAutomationBadge(42);assert.equal(badgeCalls.find(([k])=>k==='text')[1].text,null,'Stop restores the global toolbar badge');
-console.log('Browser toolbar: tab-specific AUTO, recording priority and Stop reset: ok');
+await w.context.paintCameraRecordingBadge();
+assert.equal(badgeCalls.find(([k])=>k==='text')[1].text,'MIC');
+assert.ok(badgeCalls.every(([,v])=>v.tabId===undefined));
+w.context.cameraRecordingBadgeKind=null;
+console.log('Browser toolbar: obsolete AUTO/ERR cleared; no per-tab automation badge; global recording remains: ok');
 
 // The old grouping flag is ignored; group membership is required.
 for(const value of [true,false]) {

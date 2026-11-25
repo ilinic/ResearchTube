@@ -145,10 +145,6 @@ const SEARCH_DIAGNOSTIC_MAX_ENTRIES = 250;
 const SEARCH_DIAGNOSTIC_MAX_QUERY_LENGTH = 360;
 const COMMAND_DIAGNOSTIC_MAX_ENTRIES = 300;
 const DESCRIBE_VIDEO_DUPLICATE_WINDOW_MS = 8_000;
-const browserAutomationBadges = new Map();
-const browserAutomationToolbarTabs = new Set();
-let actionBadgeAppearance = { text: "", color: [0, 0, 0, 0], title: "ResearchTube" };
-let browserBadgeTail = Promise.resolve();
 let cameraRecordingBadgeKind = null;
 let cameraRecordingBadgeTaskId = null;
 let cameraRecordingBadgeVisible = false;
@@ -3579,6 +3575,7 @@ async function executeArtifactStart(id, tool, args) {
 chrome.runtime.onInstalled.addListener(({ reason }) => {
   // Do not overwrite chrome.storage.local here. Reloading or updating an
   // unpacked extension fires onInstalled; preserve user preferences.
+  void clearLegacyBrowserBadges();
   void bootstrapConnection();
   void ensureLibraryStoreLoaded().then(drainLibraryStoreQueue);
   void ensureMediaToChatLoaded().then(drainMediaToChatQueue);
@@ -3736,16 +3733,6 @@ const browserAgent = createBrowserAgent({
     await logBrowserTabState(trace, tabId, "agent.documentReady");
     return result;
   },
-  updateStatus: async (tabIds, status) => {
-    for (const tabId of tabIds) {
-      browserAutomationToolbarTabs.add(tabId);
-      if (status.state === "stopped") browserAutomationBadges.delete(tabId);
-      else browserAutomationBadges.set(tabId, status);
-    }
-    // Serialize toolbar writes so Stop cannot be overwritten by an older paint.
-    browserBadgeTail = browserBadgeTail.catch(() => {}).then(() => Promise.allSettled(tabIds.map(tabId => paintBrowserAutomationBadge(tabId))));
-    await browserBadgeTail;
-  },
   attach: cdpAttach, detach: cdpDetach, detachReadOnly: tabId => debuggerLeases.detach(tabId),
   command: (tabId, method, params, sessionId) => chrome.debugger.sendCommand({ tabId, ...(sessionId ? { sessionId } : {}) }, method, params),
   conversationPath: chatConversationPath,
@@ -3879,7 +3866,7 @@ chrome.runtime.onMessageExternal?.addListener((message, sender, sendResponse) =>
 // Alarms revive the account connection; chat targets are checked inside tool execution.
 chrome.debugger?.onEvent?.addListener((source, method, params) => { void browserAgent.onEvent(source, method, params).catch(error => consoleAction(`[ResearchTube Browser] ${error.code || "BROWSER_UNAVAILABLE"}`)); });
 chrome.debugger?.onDetach?.addListener((source, reason) => { debuggerLeases.lost(source.tabId); void browserAgent.onDetached(source, reason).catch(() => {}); });
-chrome.tabs?.onRemoved?.addListener(tabId => { void cloudConnection.tabChanged(tabId); void browserAgent.onRemoved(tabId).catch(() => {}).finally(() => { browserAutomationBadges.delete(tabId); browserAutomationToolbarTabs.delete(tabId); }); });
+chrome.tabs?.onRemoved?.addListener(tabId => { void cloudConnection.tabChanged(tabId); void browserAgent.onRemoved(tabId).catch(() => {}); });
 chrome.tabs?.onUpdated?.addListener((tabId, change) => { if (change.status === "loading" || Object.hasOwn(change, "url")) void cloudConnection.tabChanged(tabId); void browserAgent.onUpdated(tabId, change).catch(() => {}); });
 chrome.tabs?.onCreated?.addListener(() => { void browserAgent.onCreated().catch(() => {}); });
 chrome.tabs?.onReplaced?.addListener(() => { void browserAgent.onReplaced().catch(() => {}); });
@@ -6124,30 +6111,19 @@ async function copyCaptureFramePath(path) {
   return { path: logicalPath, action: "copiedPath" };
 }
 
-async function paintBrowserAutomationBadge(tabId) {
-  const session = browserAutomationBadges.get(tabId);
-  let appearance = actionBadgeAppearance;
-  if (cameraRecordingBadgeKind) {
-    const video = cameraRecordingBadgeKind === "video";
-    appearance = { text: cameraRecordingBadgeVisible ? (video ? "CAM" : "MIC") : "", color: video ? "#b42318" : "#7a3e9d", textColor: "#ffffff", title: video ? "ResearchTube: camera video recording" : "ResearchTube: camera audio recording" };
-  } else if (session && !appearance.connectionError) {
-    appearance = {
-      starting: { text: "AUTO", color: "#0057ff" },
-      running: { text: "AUTO", color: "#0057ff" },
-      failed: { text: "ERR", color: "#cf222e" }
-    }[session.state] || appearance;
-    appearance = { ...appearance, textColor: "#ffffff", title: `ResearchTube: ${session.error?.message || session.statusMessage}` };
-  }
+// One-time migration on install/update: clear only old per-tab automation
+// overrides; global connection and recording indicators remain untouched.
+async function clearLegacyBrowserBadges() {
   try {
-    await chrome.action.setBadgeBackgroundColor({ tabId, color: appearance.color });
-    await chrome.action.setBadgeText({ tabId, text: session || cameraRecordingBadgeKind ? appearance.text : null });
-    if (appearance.textColor && chrome.action.setBadgeTextColor) await chrome.action.setBadgeTextColor({ tabId, color: appearance.textColor });
-    await chrome.action.setTitle({ tabId, title: appearance.title });
-  } catch { /* Closed tabs have no toolbar state to update. */ }
-}
-async function repaintBrowserAutomationBadges() {
-  browserBadgeTail = browserBadgeTail.catch(() => {}).then(() => Promise.all([...browserAutomationToolbarTabs].map(tabId => paintBrowserAutomationBadge(tabId))));
-  await browserBadgeTail;
+    const tabs = await chrome.tabs.query({});
+    await Promise.allSettled(tabs.filter(tab => Number.isInteger(tab.id)).map(async tab => {
+      const text = await chrome.action.getBadgeText({tabId:tab.id});
+      if (text === "AUTO" || text === "ERR") {
+        await chrome.action.setBadgeText({tabId:tab.id,text:null});
+        await chrome.action.setTitle({tabId:tab.id,title:"ResearchTube"});
+      }
+    }));
+  } catch { /* A missing toolbar API or closed browser is harmless. */ }
 }
 
 async function setActionBadge(state) {
@@ -6164,13 +6140,11 @@ async function setActionBadge(state) {
     "connection-error": { connectionError: true, text: "×", color: "#cf222e", textColor: "#ffffff", title: "ResearchTube: connection needs attention" },
     "connection-replaced": { connectionError: true, text: "×", color: "#cf222e", textColor: "#ffffff", title: "ResearchTube: disconnected — another extension connected" }
   }[state] ?? { text: "", color: [0, 0, 0, 0], title: "ResearchTube" };
-  actionBadgeAppearance = appearance;
   try {
     await chrome.action.setBadgeBackgroundColor({ color: appearance.color });
     await chrome.action.setBadgeText({ text: appearance.text });
     if (appearance.textColor && typeof chrome.action.setBadgeTextColor === "function") await chrome.action.setBadgeTextColor({ color: appearance.textColor });
     await chrome.action.setTitle({ title: appearance.title });
-    await repaintBrowserAutomationBadges();
   } catch (error) {
     // The extension remains functional even if Chrome is restarting or the
     // toolbar action is temporarily unavailable.
@@ -6188,7 +6162,6 @@ async function paintCameraRecordingBadge() {
     if (typeof chrome.action.setBadgeTextColor === "function") await chrome.action.setBadgeTextColor({ color: "#ffffff" });
     await chrome.action.setBadgeText({ text: cameraRecordingBadgeVisible ? (isVideo ? "CAM" : "MIC") : "" });
     await chrome.action.setTitle({ title: isVideo ? "ResearchTube: camera video recording" : "ResearchTube: camera audio recording" });
-    await repaintBrowserAutomationBadges();
   } catch (error) {
     consoleAction("ResearchTube camera recording badge update failed:", error);
   }

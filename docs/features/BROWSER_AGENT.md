@@ -78,7 +78,7 @@ Finish the current assistant response for automatic attachment/Send. Source navi
 
 The controlled copy enables focus/lifecycle emulation before waiting for a usable document body and interactive/complete readyState. Startup does not wait for every image/ad or require an initial full AX read. Document and Composer waits are bounded at two minutes. ChatGPT's temporary `local-chatgpt:` conversation is never bound; startup waits for its saved address. Delayed URL-event snapshots are reconciled against the live tab.
 
-AUTO appears on group participants and ERR on a failed page/startup. The popup has no session panel or Stop button; status/Stop are MCP tools. Original pages receive no injected overlays. Automation does not steal focus. Camera/microphone recording indicators take precedence.
+Browser automation does not set a per-tab toolbar badge or title. The obsolete AUTO/ERR indicators are removed; status and errors remain available through MCP status and diagnostics tools. The popup has no session panel or Stop button. Original pages receive no injected overlays. Automation does not steal focus. Global connection and camera/microphone recording indicators remain unchanged.
 
 `browserStudyDetailedLogging` controls optional bounded timing diagnostics for new groups. `[ResearchTube Browser]` console entries use UTC timestamps, group/tab/task IDs and allowlisted timings/counts, not page content or signed URLs. Unexpected debugger loss fails the affected page only; move that page out of the group and back to reconnect. Other participants remain available.
 
