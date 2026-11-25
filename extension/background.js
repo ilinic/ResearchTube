@@ -3395,7 +3395,7 @@ async function updateComposerWatchdog(tabId, action, preserve = false) {
       else state?.suppress();
     }, args: [action, preserve] });
 }
-async function sendComposerWhenReady(tabId, { completionText = null, revision = null, chatPath = null, beforeSend = null, onSendCommit = null, cloudTarget = null, scheduled = false, beforeInsert = null } = {}) {
+async function sendComposerWhenReady(tabId, { completionText = null, revision = null, chatPath = null, beforeSend = null, onSendCommit = null, cloudTarget = null, scheduled = false, beforeInsert = null, beforeDispatch = null } = {}) {
   if (cloudTarget) {
     const previous = beforeSend;
     beforeSend = async () => { await cloudConnection.verifyTarget(cloudTarget); await previous?.(); };
@@ -3419,9 +3419,13 @@ async function sendComposerWhenReady(tabId, { completionText = null, revision = 
       if ([...mediaToChatTasks.values()].some(task => task.target?.tabId === tabId && ["queued", "working"].includes(task.status)))
         return { sent: false, reason: "fileTaskOwnsComposer" };
       const nonempty = Boolean(initial.text.trim() || initial.attachments);
-      if (scheduled && (nonempty || initial.blocked)) return {sent:false,reason:"draftOrBlocked"};
+      // Scheduled group membership explicitly opts into sending a text draft as-is.
+      // Do not add the continuation to it or consume pending attachments.
+      const scheduledDraft = scheduled && Boolean(initial.text.trim());
+      if (scheduled && initial.attachments) return {sent:false,reason:"SCHEDULED_ATTACHMENTS_PRESENT"};
+      if (scheduledDraft) completionText = null;
       if (scheduled) { await updateComposerWatchdog(tabId,"hold"); held=true; }
-      if (!completionText && nonempty && initial.stableMs < (await composerAutoSendTimeout()) * 1000)
+      if (!scheduled && !completionText && nonempty && initial.stableMs < (await composerAutoSendTimeout()) * 1000)
         return { sent: false, reason: "draftStillChanging" };
       if (!completionText && !nonempty) return { sent: false, reason: "empty" };
       await cdpAttach(tabId); attached = true;
@@ -3429,10 +3433,16 @@ async function sendComposerWhenReady(tabId, { completionText = null, revision = 
       await cdpCommand(tabId, "Runtime.enable");
       let expected = initial.text;
       let live = await readWatchedComposer(tabId);
-      if (!live?.found || !live.idle || !completionText && (live.revision !== initial.revision || live.blocked)) return { sent: false, reason: "changed", inserted, committed };
+      if (!live?.found || !live.idle || !scheduled && !completionText && (live.revision !== initial.revision || live.blocked)) return { sent: false, reason: "changed", inserted, committed };
       await beforeSend?.();
-      if (scheduled && (live.text.trim() || live.attachments || live.revision !== initial.revision)) return {sent:false,reason:"draftChanged"};
+      if (scheduled && (live.text !== initial.text || live.attachments || live.revision !== initial.revision)) return {sent:false,reason:"SCHEDULED_DRAFT_CHANGED"};
       expected = live.text;
+      if (scheduledDraft) {
+        await beforeInsert?.();
+        const latest = await readWatchedComposer(tabId);
+        if (!latest?.found || !latest.idle || latest.text !== expected || latest.attachments || latest.revision !== initial.revision)
+          return {sent:false,reason:"SCHEDULED_DRAFT_CHANGED"};
+      }
       if (completionText) {
         // Append with real editor input. Never clear/replace the existing draft.
         const suffix = (expected.trim() ? "\n\n" : "") + completionText;
@@ -3459,17 +3469,18 @@ async function sendComposerWhenReady(tabId, { completionText = null, revision = 
       const normalize = text => String(text).normalize("NFKC").replace(/[\u200b-\u200d\ufeff]/g, "").replace(/\s+/g, " ").trim();
       if (!live?.found || !live.idle || completionText && !normalize(live.text).includes(normalize(completionText)) || !completionText && (normalize(live.text) !== normalize(expected) || live.attachments !== initial.attachments))
         return { sent: false, reason: "changed", inserted, committed };
-      if (scheduled && (normalize(live.text)!==normalize(completionText) || live.attachments)) return {sent:false,reason:"draftChanged",inserted,committed};
+      if (scheduled && (normalize(live.text)!==normalize(scheduledDraft ? expected : completionText) || live.attachments)) return {sent:false,reason:"SCHEDULED_DRAFT_CHANGED",inserted,committed};
       const baseline = await cdpReadMediaSubmissionState(tabId);
       const beforeClick = async () => {
         await beforeSend?.();
         const target = await chrome.tabs.get(tabId);
         if (expectedChatPath ? chatConversationPath(target.url) !== expectedChatPath : target.url !== originalUrl) throw localAgentError("BROWSER_CHAT_CHANGED", "The destination conversation changed before Send.");
         const current = await readWatchedComposer(tabId);
-        if (scheduled && (normalize(current?.text)!==normalize(completionText) || current?.attachments)) throw localAgentError("MEDIA_TO_CHAT_INVALID","Scheduled Composer changed.");
-        if (!/^https:\/\/chatgpt\.com(?:\/|$)/.test(target.url || "") || !current?.found || !current.idle || completionText && !normalize(current.text).includes(normalize(completionText)) || !completionText && (current.blocked ||
+        if (scheduled && (normalize(current?.text)!==normalize(scheduledDraft ? expected : completionText) || current?.attachments || scheduledDraft && current.revision!==initial.revision)) throw localAgentError("SCHEDULED_DRAFT_CHANGED","Scheduled Composer changed.");
+        if (!/^https:\/\/chatgpt\.com(?:\/|$)/.test(target.url || "") || !current?.found || !current.idle || completionText && !normalize(current.text).includes(normalize(completionText)) || !completionText && (!scheduled && current.blocked ||
           normalize(current.text) !== normalize(expected) || current.attachments !== initial.attachments))
           throw localAgentError("MEDIA_TO_CHAT_INVALID", "The Composer changed before automatic Send.");
+        if (scheduled) await beforeDispatch?.();
       };
       if (scheduled) {
         await cdpDispatchEnabledSend(tabId, 30_000, beforeClick, () => { committed=true; onSendCommit?.(); });
@@ -3478,7 +3489,7 @@ async function sendComposerWhenReady(tabId, { completionText = null, revision = 
           const state=await cdpReadMediaSubmissionState(tabId);
           if (state.chatPath===expectedChatPath && (state.userCount>baseline.userCount || state.lastUserId && state.lastUserId!==baseline.lastUserId)) {
             await updateComposerWatchdog(tabId,"suppress");
-            return {sent:true};
+            return {sent:true,source:scheduledDraft?"draft":"continuation"};
           }
           await sleep(500);
         }
@@ -7807,23 +7818,49 @@ async function createScheduledGroup(name) {
 async function scheduledPending(tabId) {
   await Promise.all([ensureMediaToChatLoaded(),ensureLibraryStoreLoaded(),artifactTaskManager.ensure(),taskCompletionDelivery.ensure()]);
   const active=task=>!["completed","failed","cancelled"].includes(task.status);
-  return activeScheduledMcpCalls.has(null) || activeScheduledMcpCalls.has(tabId) || browserAgent.hasPendingChat(tabId) || artifactTaskManager.hasPendingChat(tabId) || taskCompletionDelivery.hasPendingChat(tabId)
-    || [...mediaToChatTasks.values()].some(t=>active(t)&&(t.target?.tabId===tabId || t.tabId===tabId || !t.target))
-    || [...libraryStoreTasks.values()].some(t=>active(t)&&(t.tabId===tabId || t.tabId==null));
+  if (activeScheduledMcpCalls.has(tabId)) return "MCP_CALL_RUNNING";
+  if (browserAgent.hasPendingChat(tabId)) return "BROWSER_TASK_RUNNING";
+  if (artifactTaskManager.hasPendingChat(tabId)) return "ARTIFACT_TASK_RUNNING";
+  if (taskCompletionDelivery.hasPendingChat(tabId)) return "TASK_COMPLETION_PENDING";
+  if ([...mediaToChatTasks.values()].some(t=>active(t)&&(t.target?.tabId===tabId || t.tabId===tabId))) return "MEDIA_DELIVERY_PENDING";
+  if ([...libraryStoreTasks.values()].some(t=>active(t)&&t.tabId===tabId)) return "LIBRARY_DELIVERY_PENDING";
+  // Unknown ownership is not evidence of a busy specific chat; keep the
+  // conservative guard but make this distinct from actual chat activity.
+  if (activeScheduledMcpCalls.has(null)) return "MCP_CALL_UNBOUND";
+  if ([...mediaToChatTasks.values()].some(t=>active(t)&&!t.target&&t.tabId==null)) return "MEDIA_DELIVERY_UNBOUND";
+  if ([...libraryStoreTasks.values()].some(t=>active(t)&&t.tabId==null)) return "LIBRARY_DELIVERY_UNBOUND";
+  return null;
 }
 // Require a visible, completed assistant response, not merely absence of Stop.
 // Modal/confirmation/error states and ambiguous Composer structures fail closed.
 async function scheduledChatState(tabId) {
   const result=await chrome.scripting.executeScript({target:{tabId},world:"ISOLATED",func:()=>{
-    const visible=e=>Boolean(e&&e.getClientRects().length&&getComputedStyle(e).visibility!=="hidden");
-    const matches=selector=>[...document.querySelectorAll(selector)].some(visible);
-    const messages=[...document.querySelectorAll('[data-message-author-role="user"],[data-message-author-role="assistant"]')];
+    const visible=e=>Boolean(e&&e.getClientRects().length&&getComputedStyle(e).visibility!=="hidden"&&getComputedStyle(e).display!=="none");
+    const matches=(selector,root=document)=>[...root.querySelectorAll(selector)].some(visible);
+    const main=document.querySelector("main")||document;
+    const messages=[...main.querySelectorAll('[data-message-author-role="user"],[data-message-author-role="assistant"]')];
+    const users=messages.filter(m=>m.getAttribute("data-message-author-role")==="user");
     const last=messages.at(-1);
-    const blocked=matches('button[data-testid="stop-button"], button[aria-label="Stop generating"], button[aria-label="Stop streaming"], [role="dialog"], [aria-modal="true"], [aria-busy="true"], [data-testid*="confirm"], [data-testid*="error"], input[type="password"]') || [...document.querySelectorAll('[role="alert"]')].some(e=>visible(e)&&Boolean(e.innerText?.trim()));
-    const composer=document.querySelector('#prompt-textarea');
-    return {ready:!blocked&&document.readyState==="complete"&&messages.some(m=>m.getAttribute("data-message-author-role")==="user")&&last?.getAttribute("data-message-author-role")==="assistant"&&Boolean(last.innerText?.trim())&&visible(composer)&&composer.getAttribute("aria-disabled")!=="true",userCount:messages.filter(m=>m.getAttribute("data-message-author-role")==="user").length,lastUserId:messages.filter(m=>m.getAttribute("data-message-author-role")==="user").at(-1)?.getAttribute("data-message-id")||null};
+    const composer=[...document.querySelectorAll('#prompt-textarea')].find(visible);
+    const form=composer?.closest('form')||composer?.closest('[data-composer-body]');
+    let reason=null;
+    if (document.readyState!=="complete") reason="CHAT_LOADING";
+    else if(matches('button[data-testid="stop-button"], button[aria-label="Stop generating"], button[aria-label="Stop streaming"]')) reason="CHAT_GENERATING";
+    else if(matches('[role="dialog"], [aria-modal="true"]')) reason="CHAT_DIALOG_OPEN";
+    else if(matches('input[type="password"]')) reason="CHAT_AUTH_REQUIRED";
+    else if(!users.length) reason="CHAT_NO_USER_MESSAGE";
+    else if(last?.getAttribute("data-message-author-role")!=="assistant") reason="CHAT_AWAITING_RESPONSE";
+    else if(!last.innerText?.trim()) reason="CHAT_RESPONSE_EMPTY";
+    else if(!composer||composer.disabled||composer.getAttribute("aria-disabled")==="true") reason="CHAT_COMPOSER_UNAVAILABLE";
+    // Historical tool widgets and messages may keep aria-busy/error markers.
+    // Do not interpret those as generation of the current chat.
+    else if(form&&(form.getAttribute("aria-busy")==="true"||matches('[aria-busy="true"]',form))) reason="CHAT_COMPOSER_BUSY";
+    else if(last.getAttribute("aria-busy")==="true") reason="CHAT_RESPONSE_BUSY";
+    else if([...document.querySelectorAll('[role="alert"]')].some(e=>visible(e)&&Boolean(e.innerText?.trim())&&!e.closest('[data-message-author-role]'))) reason="CHAT_ALERT_VISIBLE";
+    else if(matches('[data-testid*="confirm"]',last)||matches('[data-testid*="error"]',last)) reason="CHAT_RESPONSE_ACTION_REQUIRED";
+    return {ready:reason===null,reason,userCount:users.length,lastUserId:users.at(-1)?.getAttribute("data-message-id")||null};
   }});
-  return result[0]?.result;
+  return result[0]?.result||{ready:false,reason:"CHAT_STATE_UNAVAILABLE"};
 }
 async function tickScheduledGroup(input) {
   if(scheduledTickRunning || !Number.isFinite(input.expiresAt) || Date.now()>input.expiresAt) return {status:"busyOrExpired"};
@@ -7840,25 +7877,32 @@ async function tickScheduledGroup(input) {
           const live=await chrome.tabs.get(tabId);
           const groups=await findScheduledGroup(input.groupName);
           if(Date.now()>input.expiresAt||groups.length!==1||groups[0].id!==groupId||live.groupId!==groupId||chatConversationPath(live.url)!==path||live.pendingUrl) throw localAgentError("BROWSER_TARGET_CHANGED","Scheduled chat left group or changed.");
-          if(await scheduledPending(tabId)) throw localAgentError("BROWSER_BUSY","Pending MCP work.");
-          if(!(await scheduledChatState(tabId))?.ready) throw localAgentError("BROWSER_BUSY","Chat is not confidently idle.");
+          const pending=await scheduledPending(tabId);
+          if(pending) throw localAgentError(pending,"Pending work.");
+          const state=await scheduledChatState(tabId);
+          if(!state.ready) throw localAgentError(state.reason,"Chat is not confidently idle.");
+          return state;
         };
-        await verify();
-        const state=await scheduledChatState(tabId);
+        const state=await verify();
         const uncertain=(await chrome.storage.session.get(key))[key];
         if(uncertain) {
-          if(state.userCount<=uncertain.userCount && (!state.lastUserId||state.lastUserId===uncertain.lastUserId)) return {tabId,status:"skipped",reason:"previousSendUnconfirmed"};
+          if(uncertain.phase!=="prepared"&&state.userCount<=uncertain.userCount && (!state.lastUserId||state.lastUserId===uncertain.lastUserId)) return {tabId,status:"skipped",reason:"PREVIOUS_SEND_UNCONFIRMED",ageMs:uncertain.at?Date.now()-uncertain.at:null};
           await chrome.storage.session.remove(key);
         }
-        let reserved=false;
+        let reservation=null;
         const result=await sendComposerWhenReady(tabId,{completionText:SCHEDULED_CONTINUATION,chatPath:path,scheduled:true,beforeSend:verify,beforeInsert:async()=>{
-          const current=await scheduledChatState(tabId);
-          if(!current?.ready) throw localAgentError("BROWSER_BUSY","Chat changed before insertion.");
-          await chrome.storage.session.set({[key]:{userCount:current.userCount,lastUserId:current.lastUserId}});
-          reserved=true;
+          const current=await verify();
+          reservation={userCount:current.userCount,lastUserId:current.lastUserId,phase:"prepared",at:Date.now()};
+          await chrome.storage.session.set({[key]:reservation});
+        },beforeDispatch:async()=>{
+          if(!reservation) throw localAgentError("SCHEDULED_RESERVATION_MISSING","Scheduled Send has no reservation.");
+          reservation={...reservation,phase:"dispatching"};
+          await chrome.storage.session.set({[key]:reservation});
         }});
-        if(result.sent || reserved && !result.inserted && !result.committed) await chrome.storage.session.remove(key);
-        return {tabId,status:result.sent?"sent":"skipped",reason:result.reason||null};
+        // A known pre-click failure can safely retry the existing draft.
+        // An unconfirmed committed click must never be blindly replayed.
+        if(result.sent || reservation && !result.committed) await chrome.storage.session.remove(key);
+        return {tabId,status:result.sent?"sent":"skipped",reason:result.reason||null,...(result.source?{source:result.source}:{})};
       } catch(error) {return {tabId,status:"skipped",reason:error.code||"CHAT_UNAVAILABLE"};}
     }));
     consoleAction("[ResearchTube scheduled] Tick",{groupId,results});
