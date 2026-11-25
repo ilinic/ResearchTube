@@ -216,6 +216,41 @@ media.set("upload",{status:"working",target:{tabId:42}});
 assert.equal(await pending(42),"MEDIA_DELIVERY_PENDING"); media.clear();
 library.set("store",{status:"working",tabId:null}); assert.equal(await pending(42),"LIBRARY_DELIVERY_UNBOUND"); library.clear();
 
+// Scheduled readiness relies on live idle controls, even for interrupted turns.
+{
+ const stateSource=extract(source,"scheduledChatState");
+ const makeElement=(attrs={},text="")=>({innerText:text,tagName:"DIV",disabled:false,getClientRects:()=>[{}],
+  getAttribute:k=>attrs[k]??null,querySelectorAll:()=>[],closest:()=>null,matches:()=>false});
+ let stopped=false, dialog=false, busy=false, draft="", sendReady=false, voiceReady=true, lastRole="assistant", lastText="";
+ const composer=makeElement({contenteditable:"true"}); composer.matches=()=>true;
+ const form=makeElement(); composer.closest=()=>form;
+ const user=makeElement({"data-message-author-role":"user","data-message-id":"u1"},"previous question");
+ const last=makeElement(); last.getAttribute=k=>k==="data-message-author-role"?lastRole:null;
+ const button=makeElement(); button.tagName="BUTTON";
+ const main={querySelectorAll:()=>lastRole==="user"?[user]:[user,last]};
+ form.querySelectorAll=selector=>selector.includes("submit")?(sendReady?[button]:[]):selector.includes("voice-mode")?(voiceReady?[button]:[]):selector.includes("aria-busy")&&busy?[button]:[];
+ const doc={readyState:"complete",querySelector:()=>main,querySelectorAll:selector=>{
+  if(selector.includes("contenteditable")){composer.innerText=draft;last.innerText=lastText;return [composer];}
+  if(selector.includes("stop-button"))return stopped?[button]:[];
+  if(selector.includes("dialog"))return dialog?[button]:[];
+  return [];
+ }};
+ const readState=new Function("deps","with(deps){return ("+stateSource+");}")({
+  chrome:{scripting:{executeScript:async({func})=>[{result:func()}]}},document:doc,
+  getComputedStyle:()=>({visibility:"visible",display:"block"})
+ });
+ const checkState=async(expected)=>{const state=await readState(42);assert.equal(state.reason,expected);assert.equal(state.ready,expected===null);};
+ await checkState(null);
+ lastRole="user";await checkState(null);
+ draft="my draft";sendReady=true;voiceReady=false;await checkState(null);
+ stopped=true;await checkState("CHAT_GENERATING");stopped=false;
+ dialog=true;await checkState("CHAT_DIALOG_OPEN");dialog=false;
+ busy=true;await checkState("CHAT_COMPOSER_BUSY");busy=false;
+ sendReady=false;await checkState("CHAT_IDLE_UNCONFIRMED");
+ lastRole="assistant";lastText="finished";await checkState("CHAT_DRAFT_SEND_DISABLED");
+ draft="";await checkState(null);
+}
+
 // Check the shipped worker's public schemas and every asynchronous producer.
 const event = { addListener() {} };
 const chrome = { runtime: { getManifest: () => ({ version: "9.8.7" }), id: "fixture", getURL: p => p, onInstalled: event, onStartup: event, onMessage: event },
