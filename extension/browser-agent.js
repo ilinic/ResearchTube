@@ -479,6 +479,7 @@ export function createBrowserAgent(host) {
   async function execute(name, argumentsValue, cloudGuard = null) {
     await cloudGuard?.();
     const input = validateBrowserInput(name, argumentsValue);
+    if (name === "site_open") return openSite(input,cloudGuard);
     const { group, member } = await groups.forChat(input.chatTabId, { claim: true });
     const result = await executeInGroup(name, input, group, member, cloudGuard);
     await groups.check(group, input.chatTabId, member.chatPath, { allowStopped: true });
@@ -487,6 +488,98 @@ export function createBrowserAgent(host) {
     const response = { ...result, ...(changes.groupChanges ? { groupChanges: changes.groupChanges } : {}) };
     changes.commit();
     return response;
+  }
+  // One entry point from an existing saved chat. Grouping is infrastructure,
+  // not a separate operation exposed to the model.
+  async function openSite(input, cloudGuard) {
+    const url = new URL(input.url).href;
+    const result = await queue(input.chatTabId, async () => {
+      await cloudGuard?.();
+      let {group,member} = await groups.forChat(input.chatTabId,{claim:true});
+      const chatPath = member.chatPath;
+      const verify = async () => {
+        await cloudGuard?.();
+        const tab = await groups.check(group,input.chatTabId,chatPath);
+        if (group.state !== "running") throw browserError("BROWSER_SESSION_NOT_READY","The current group is not running. Resume explicitly if stopped.");
+        return tab;
+      };
+      let chat = await verify();
+      if (group.groupId < 0) {
+        if (chat.pinned) throw browserError("BROWSER_INVALID","Unpin the initiating ChatGPT tab before opening a research group.");
+        // Revalidate before changing membership; do not select a different chat.
+        chat = await verify();
+        const groupId = await host.groupTabs([input.chatTabId],browserStudyGroupTitle({url}));
+        if (!Number.isSafeInteger(groupId) || groupId < 0) throw browserError("BROWSER_GROUP_NOT_FOUND","Chrome did not create the research group.");
+        group = await groups.get(groupId);
+        await groups.refresh(group,{claimTabId:input.chatTabId});
+        chat = await verify();
+      }
+      const response = (status,tabId,error=null) => ({chatTabId:input.chatTabId,tabId,group:groups.project(group,input.chatTabId),status,url:safePageUrl(url),error,observation:null});
+      if (input.reuseExisting !== false) {
+        // Compare full URLs (including query/hash) privately, not sanitized
+        // display URLs. Never reuse the caller or a tab in another group.
+        for (const candidate of await host.queryTabs(group.groupId)) {
+          if (candidate.id === input.chatTabId) continue;
+          let match = false;
+          try { match = new URL(candidate.pendingUrl || candidate.url).href === url; } catch {}
+          if (!match) continue;
+          await verify();
+          try {
+            const live = await host.getTab(candidate.id);
+            if (live.groupId !== group.groupId || new URL(live.pendingUrl || live.url).href !== url) continue;
+            await groups.refresh(group);
+            await verify();
+            groups.acknowledge(group,input.chatTabId);
+            return response("reused",candidate.id);
+          } catch(error) {
+            if (error.code) throw error;
+          }
+        }
+      }
+      let created = null;
+      try {
+        chat = await verify();
+        // Create a blank inactive tab and group it before navigating. No
+        // external tab is moved, navigated, activated or closed.
+        created = await host.createSiteTab(chat.windowId);
+        await verify();
+        const isBlank = tab => ["","about:blank"].includes(tab.url || "") && (!tab.pendingUrl || tab.pendingUrl === "about:blank");
+        const blank = await host.getTab(created.id);
+        if (blank.windowId !== chat.windowId || (blank.groupId >= 0 && blank.groupId !== group.groupId) || !isBlank(blank))
+          throw browserError("BROWSER_TARGET_CHANGED","The new blank tab changed; it was left untouched.");
+        if (blank.groupId !== group.groupId) await host.addSiteTab(created.id,group.groupId);
+        await verify();
+        const live = await host.getTab(created.id);
+        if (live.groupId !== group.groupId || !isBlank(live))
+          throw browserError("BROWSER_TARGET_CHANGED","The new tab moved or navigated; it was left untouched.");
+        await host.navigateSiteTab(created.id,url);
+        await groups.refresh(group);
+        await verify();
+        groups.acknowledge(group,input.chatTabId);
+        return response("opening",created.id);
+      } catch(error) {
+        // Preserve any created tab and its exact ID so the client can inspect
+        // partial results instead of retrying and creating duplicates.
+        return response("failed",created?.id ?? null,{code:error.code || "BROWSER_UNAVAILABLE",message:error.code ? error.message : "Chrome could not complete the open. Inspect the tab ID before retrying."});
+      }
+    });
+    // Only pre-read already loaded pages. Do not hold the chat queue while
+    // reading another tab, or block opening on a slow site's initial load.
+    if (result.status !== "failed") {
+      try {
+        const tab = await host.getTab(result.tabId);
+        if (tab.status === "complete" && !tab.pendingUrl && tab.groupId === result.group.groupId && /^https?:\/\//.test(tab.url || "")) {
+          await cloudGuard?.();
+          const {group,member} = await groups.forChat(input.chatTabId,{claim:true});
+          if (group.groupId === result.group.groupId) {
+            const observed = await executeInGroup("site_read",{chatTabId:input.chatTabId,tabId:result.tabId,mode:"outline"},group,member,cloudGuard);
+            result.observation = observed;
+            result.group = observed.group;
+          }
+        }
+      } catch { /* Opening succeeded; site_read can be retried independently. */ }
+    }
+    return result;
   }
   async function executeInGroup(name, input, group, member, cloudGuard) {
     const caller = { group, chatTabId: input.chatTabId, chatPath: member.chatPath, tool: name,

@@ -240,6 +240,7 @@ Start **Study this site** from the popup to create a site copy and initial ChatG
 
 | Tool | Behavior |
 | --- | --- |
+| `site_open` | Open a website from an existing saved ChatGPT conversation; automatically create/reuse its group, reuse exact in-group URL matches unless `reuseExisting: false`, otherwise open an inactive tab. Returns `tabId` and an optional initial outline. |
 | `site_list_tabs` | Discover all group tabs, including ChatGPT, titles, safe URLs, IDs and state; paginate large groups with offset/limit. |
 | `site_read` | Bounded full-depth AX/DOM content and resource references from the exact target; optional outline/subtree and pagination. |
 | `site_get_children` | Expand current children with depth and pagination. |

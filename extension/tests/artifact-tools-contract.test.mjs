@@ -86,7 +86,7 @@ assert.equal((await w.call('site_session_status',{chatTabId:22,tabId:81})).resul
 assert.equal(browserCalls.length,1);
 
 // The complete renamed public catalog dispatches through the shipped worker.
-assert.equal(BROWSER_TOOL_NAMES.length,14);
+assert.equal(BROWSER_TOOL_NAMES.length,15);
 assert.ok(definitions.every(tool=>!tool.name.startsWith('browser_')));
 for(const name of BROWSER_TOOL_NAMES) {
  const properties=definitions.find(tool=>tool.name===name).inputSchema.properties;
@@ -97,6 +97,7 @@ for(const name of BROWSER_TOOL_NAMES) {
  if(properties.taskId) args.taskId='tsk_abcdefghij';
  if(properties.action) args.action='click';
  if(properties.resourceId) args.resourceId='r_21_1_1';
+ if(name==='site_open') args.url='https://example.test/';
  const response=await w.call(name,args);
  if(name==='site_diagnostics_start') {
   assert.equal(response.result.structuredContent.recording,true);

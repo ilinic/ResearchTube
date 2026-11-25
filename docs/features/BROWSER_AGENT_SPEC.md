@@ -17,3 +17,5 @@ The current implementation and lifecycle are documented in [Browser Agent](BROWS
 Validate mocked contracts and real Chrome/ChatGPT behavior separately. See [Development](../DEVELOPMENT.md) and [Tools](../TOOLS.md).
 
 - **Browser-wide access:** current group first; other Chrome windows/groups and loose tabs appear in an independently paginated `otherTabs` inventory. Explicit `scope: "all"` allows external reads and resource extraction only. Interaction is restricted to the initiating chat's actual Chrome group, with live checks before mutations. No external focus, scroll, or input.
+
+- Chat-initiated study uses `site_open` as its single entry point. It identifies the current saved chat using the existing widget, creates or reuses its Chrome group and opens/reuses an HTTP/HTTPS tab inside it. It never moves external tabs. All subsequent Site tools retain the same live group permission checks and per-caller observation state.
