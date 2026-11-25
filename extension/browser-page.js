@@ -87,7 +87,11 @@ export function createBrowserPage(session, host) {
   const reportedForCaller = () => reportedByCaller.get(callerKey()) || { version: null, nodes: new Map(), resources: new Set() };
   const forgetCaller = tabId => reportedByCaller.delete(tabId);
   const command = (method, params = {}, target = {}) => {
-    const work = () => host.command(session.agentTabId, method, params, target.sessionId);
+    const work = async () => {
+      if (session.local && (/^Input\./.test(method) || ["DOM.focus","DOM.scrollIntoViewIfNeeded"].includes(method) || method === "Runtime.callFunctionOn" && params.userGesture))
+        await host.check(session,true);
+      return host.command(session.agentTabId, method, params, target.sessionId);
+    };
     const child = target.sessionId || target.frameId && target.frameId !== session.mainFrameId;
     return child && ["DOM.resolveNode", "DOM.describeNode", "DOM.getBoxModel", "Accessibility.getPartialAXTree", "Runtime.callFunctionOn", "Runtime.getProperties"].includes(method)
       ? withBrowserFrameTimeout(work, host.frameTimeoutMs) : work();

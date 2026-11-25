@@ -101,7 +101,7 @@ globalThis.addEventListener?.("fetch", createMediaStreamHandler({
   fetchMedia: (url, options) => fetch(url, options),
   log: (stage, details = {}) => consoleAction(`[ResearchTube media stream ${EXTENSION_VERSION}]`, stage, details)
 }));
-const REQUIRED_AGENT_INTERFACE_VERSION = 87;
+const REQUIRED_AGENT_INTERFACE_VERSION = 88;
 // A UI resource URI is a cache key in MCP Apps. Increment it whenever the
 // rendered template changes so ChatGPT does not reuse a stale iframe bundle.
 const MEDIA_TO_CHAT_WIDGET_URI = "ui://researchtube/chat-target-v8.html";
@@ -3716,7 +3716,10 @@ const browserAgent = createBrowserAgent({
     await chrome.tabGroups.update(groupId, { title, color: "blue", collapsed: false });
     return groupId;
   },
-  createSiteTab: windowId => chrome.tabs.create({windowId,url:"about:blank",active:false}),
+  readCodexGroup: async () => (await chrome.storage.session.get("researchtubeCodexGroupId")).researchtubeCodexGroupId ?? null,
+  writeCodexGroup: id => chrome.storage.session.set({researchtubeCodexGroupId:id}),
+  codexWindow: async () => (await chrome.windows.getLastFocused({windowTypes:["normal"]})).id,
+  createSiteTab: windowId => chrome.tabs.create({...(windowId == null ? {} : {windowId}),url:"about:blank",active:false}),
   addSiteTab: (tabId,groupId) => chrome.tabs.group({tabIds:[tabId],groupId}),
   navigateSiteTab: (tabId,url) => chrome.tabs.update(tabId,{url}),
   getTab: tabId => chrome.tabs.get(tabId),

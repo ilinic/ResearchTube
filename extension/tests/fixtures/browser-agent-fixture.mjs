@@ -31,8 +31,8 @@ export function fixture({multipleImages=false,nonImages=false,imageCount=1}={}){
  };
  const tabs=new Map([[10,{id:10,url:'https://site.test/article?token=PRIVATE',title:'Site',active:true,index:3,windowId:2}]]);
  const events=[],scheduled=[],uploads=[],saved=[],logs=[],domValues=new Map();let closed=false,failOriginal=false,tooLarge=false,onAttach=null,onSave=null;
- const ownerMarkers=new Map();
- const host={readOwner:async id=>structuredClone(ownerMarkers.get(id) || null),writeOwner:async(id,record)=>{if(!tabs.has(id))throw Error('closed');ownerMarkers.set(id,structuredClone(record));},
+ const ownerMarkers=new Map();let codexGroupId=null;
+ const host={readCodexGroup:async()=>codexGroupId,writeCodexGroup:async id=>{codexGroupId=id;},codexWindow:async()=>2,readOwner:async id=>structuredClone(ownerMarkers.get(id) || null),writeOwner:async(id,record)=>{if(!tabs.has(id))throw Error('closed');ownerMarkers.set(id,structuredClone(record));},
  now:()=>clock,sleep:async()=>{clock+=500;await new Promise(resolve=>setImmediate(resolve));},getTab:async id=>{if(!tabs.has(id))throw Error('closed');return tabs.get(id);},
  duplicateTab:async id=>{const tab={...tabs.get(id),id:++nextTab,active:false,index:4};tabs.set(tab.id,tab);events.push(['duplicate',id]);return tab;},restoreSource:async id=>events.push(['restore',id]),
  createChatTab:async(source,agent)=>{const tab={id:++nextTab,url:'https://chatgpt.com/',index:5,windowId:2,active:false};tabs.set(tab.id,tab);events.push(['createChat',source.id,agent.id]);return tab;},waitReady:async id=>events.push(['documentReady',id]),

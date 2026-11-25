@@ -26,7 +26,7 @@ except ImportError:
 
 MAX_MESSAGE = 2 * 1024 * 1024
 BASE_TOOLS = frozenset(("youtube_search", "youtube_get_video", "youtube_get_transcript", "youtube_get_comments", "youtube_get_comment_replies", "youtube_get_channel_videos", "youtube_get_channel_playlists", "youtube_get_playlist_videos"))
-BROWSER_TOOLS = frozenset(("site_list_tabs", "site_read", "site_get_children", "site_get_node", "site_get_text", "site_get_images", "site_get_files", "site_files_status", "site_files_cancel"))
+BROWSER_TOOLS = frozenset(("site_open", "site_interact", "site_list_tabs", "site_read", "site_get_children", "site_get_node", "site_get_text", "site_get_images", "site_get_files", "site_files_status", "site_files_cancel"))
 CATALOG = json.loads(CATALOG_JSON)
 DEFINITIONS = {tool["name"]: tool for tool in CATALOG}
 RECORD_SCHEMA = DEFINITIONS["youtube_dataset_read"]["outputSchema"]["properties"]["records"]["items"]
@@ -37,7 +37,9 @@ ERROR_MESSAGES = {
     "YOUTUBE_BRIDGE_TIMEOUT": "The YouTube browser request timed out. Check Chrome and retry later.",
     "BROWSER_INVALID": "Invalid browser arguments. Use exact tab and node/resource IDs.",
     "BROWSER_UNAVAILABLE": "The browser page is unavailable or restricted by Chrome.",
-    "BROWSER_READ_ONLY": "Local MCP supports browser reads only.",
+    "BROWSER_READ_ONLY": "Codex can interact only with tabs in its own RT · Codex group. Use site_open.",
+    "BROWSER_TARGET_CHANGED": "The selected tab or Codex group changed. Inspect existing tabs before retrying.",
+    "BROWSER_GROUP_NOT_FOUND": "Chrome could not create the Codex research group.",
     "BROWSER_SESSION_STOPPED": "The selected study group is stopped. Resume it explicitly in ResearchTube.",
     "BROWSER_SESSION_NOT_READY": "The selected tab is still initializing.",
     "BROWSER_TASK_NOT_FOUND": "The local browser resource task expired or does not belong to this MCP.",
@@ -313,7 +315,7 @@ class LocalMcpService:
         envelope = {"jsonrpc": "2.0", "id": identifier}
         if method == "initialize":
             requested = params.get("protocolVersion") if isinstance(params, dict) else None
-            return {**envelope, "result": {"protocolVersion": requested if requested in {"2025-03-26", "2025-06-18", "2025-11-25"} else "2025-06-18", "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": "researchtube-local-youtube", "version": self.agent.AGENT_VERSION}, "instructions": "Read all open Chrome tabs with site_list_tabs (flat list) and the site read/resource tools. Groups and ChatGPT automation state never gate local reads. No ChatGPT tab, YouTube sign-in, or cloud connection is required for Site reads; all tabs are read-only. Resources are saved to the local Workspace. YouTube research through the local Chrome extension. Productive browser calls require YouTube sign-in. Requests retain the established anonymous page-context transport without account cookies. Export large comment datasets and read them in bounded batches; use local yt-dlp/FFmpeg directly for media."}}
+            return {**envelope, "result": {"protocolVersion": requested if requested in {"2025-03-26", "2025-06-18", "2025-11-25"} else "2025-06-18", "capabilities": {"tools": {"listChanged": False}}, "serverInfo": {"name": "researchtube-local-youtube", "version": self.agent.AGENT_VERSION}, "instructions": "Use site_open to open a website in the dedicated RT · Codex Chrome group, then site_read and site_interact to research or operate it. site_list_tabs lists every open tab and its access (read-write, read-only or restricted). Only Codex group tabs can be controlled; other tabs can be read independent of ChatGPT groups. No ChatGPT tab, YouTube sign-in, or cloud connection is required for Site tools. Resources are saved to the local Workspace. YouTube research through the local Chrome extension. Productive browser calls require YouTube sign-in. Requests retain the established anonymous page-context transport without account cookies. Export large comment datasets and read them in bounded batches; use local yt-dlp/FFmpeg directly for media."}}
         if method == "ping":
             return {**envelope, "result": {}}
         if method == "tools/list":

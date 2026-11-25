@@ -335,7 +335,7 @@ const duplicate=await selfStudy.run('site_open',{chatTabId:70,url:'https://examp
 assert.notEqual(duplicate.tabId,firstOpen.tabId);
 assert.equal(selfStudy.events.filter(e=>e[0]==='group').length,1);
 assert.ok(!selfStudy.events.some(e=>['duplicate','createChat','prompt'].includes(e[0])));
-await assert.rejects(selfStudy.agent.executeLocal('site_open',{url:'https://example.test/'}),{code:'BROWSER_READ_ONLY'});
+// Local site_open is tested separately below; it never reuses this ChatGPT group.
 await assert.rejects(selfStudy.run('site_interact',{chatTabId:70,tabId:80,steps:[{action:'key',key:'Enter'}]}),{code:'BROWSER_READ_ONLY'});
 await selfStudy.run('site_session_stop',{chatTabId:70});
 await assert.rejects(selfStudy.run('site_open',{chatTabId:70,url:'https://example.test/stopped'}),{code:'BROWSER_SESSION_STOPPED'});
@@ -347,3 +347,27 @@ const popupStudy=fixture();await popupStudy.agent.start(10);
 const popupOpen=await popupStudy.run('site_open',{url:'https://example.test/extra'});
 assert.equal(popupOpen.group.groupId,100);assert.equal(popupStudy.events.filter(e=>e[0]==='group').length,1);
 console.log('site_open: automatic groups, exact reuse, external read-only, Stop and partial failure');
+
+// Codex owns a separate browser-session group, not an arbitrary group by title.
+const localStudy=fixture();await localStudy.agent.start(10);
+const codexOpen=await localStudy.agent.executeLocal('site_open',{url:'https://example.test/codex'});
+assert.equal(codexOpen.status,'opening');assert.notEqual(codexOpen.groupId,100);
+assert.equal(localStudy.tabs.get(codexOpen.tabId).groupId,codexOpen.groupId);
+assert.equal(localStudy.tabs.get(codexOpen.tabId).active,false);
+const codexList=await localStudy.agent.executeLocal('site_list_tabs',{});
+assert.equal(codexList.tabs.find(t=>t.tabId===codexOpen.tabId).access,'read-write');
+assert.equal(codexList.tabs.find(t=>t.tabId===21).access,'read-only');
+const codexRead=await localStudy.agent.executeLocal('site_read',{tabId:codexOpen.tabId});
+const codexClick=await localStudy.agent.executeLocal('site_interact',{tabId:codexOpen.tabId,steps:[{action:'click',nodeId:codexRead.nodes.find(n=>n.role==='button').nodeId}]});
+assert.equal(codexClick.completedSteps,1,JSON.stringify(codexClick));
+await assert.rejects(localStudy.agent.executeLocal('site_interact',{tabId:21,steps:[{action:'key',key:'Enter'}]}),{code:'BROWSER_READ_ONLY'});
+const codexAgain=await localStudy.agent.executeLocal('site_open',{url:'https://example.test/codex'});
+assert.equal(codexAgain.tabId,codexOpen.tabId);assert.equal(codexAgain.status,'reused');
+const codexOther=await localStudy.agent.executeLocal('site_open',{url:'https://example.test/other'});
+assert.equal(codexOther.groupId,codexOpen.groupId);
+const afterRestart=createBrowserAgent(localStudy.host);
+assert.equal((await afterRestart.executeLocal('site_list_tabs',{})).tabs.find(t=>t.tabId===codexOther.tabId).access,'read-write');
+localStudy.tabs.get(codexOpen.tabId).groupId=-1;
+await assert.rejects(localStudy.agent.executeLocal('site_interact',{tabId:codexOpen.tabId,steps:[{action:'key',key:'Enter'}]}),{code:'BROWSER_READ_ONLY'});
+assert.equal((await localStudy.agent.executeLocal('site_read',{tabId:codexOpen.tabId})).tabId,codexOpen.tabId);
+console.log('Codex own group, local interaction, reuse and live permission checks: ok');

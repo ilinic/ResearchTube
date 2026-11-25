@@ -103,6 +103,24 @@ export function createBrowserAgent(host) {
   const targetMap = target => target.local ? localTargets : targets;
   const localQueue = createTabAutomationQueue();
   const queue = host.queue || localQueue.run;
+  const codexQueue = createTabAutomationQueue();
+  // Chrome group IDs are browser-session scoped; never infer ownership from title.
+  let codexGroupId = null;
+  async function codexGroup() {
+    const id = host.readCodexGroup ? await host.readCodexGroup() : codexGroupId;
+    if (!Number.isSafeInteger(id) || id < 0) return null;
+    const tabs = (await host.queryTabs(id)).filter(tab => tab.groupId === id);
+    return tabs.length ? {id,tabs} : null;
+  }
+  async function rememberCodexGroup(id) {
+    await host.writeCodexGroup?.(id);
+    codexGroupId = id;
+  }
+  async function assertCodexControl(tab) {
+    const own = await codexGroup();
+    if (!own || tab.groupId !== own.id || !own.tabs.some(item => item.id === tab.id))
+      throw browserError("BROWSER_READ_ONLY","Codex may control only tabs in its own RT · Codex group. Use site_open to open a controllable tab.");
+  }
   const clock = host.now || (() => Date.now());
   const timestamp = () => new Date(clock()).toISOString();
   const log = (label, value = {}) => host.log?.(label, value);
@@ -176,8 +194,11 @@ export function createBrowserAgent(host) {
     await session.operation?.cloudGuard?.();
     if (session.error) throw browserError(session.error.code, session.error.message);
     if (targetMap(session).get(session.agentTabId) !== session) throw browserError(session.local ? "PAGE_CHANGED" : "TAB_LEFT_GROUP", "The selected observation is no longer available.");
-    if (session.local && mutation) throw browserError("BROWSER_READ_ONLY","Local MCP cannot control any tab.");
     const tab = session.local ? await readTab(session.agentTabId) : await groups.check(session.group, session.agentTabId);
+    if (session.local && mutation) {
+      if (session.operation?.tool !== "site_interact" || session.operation.readOnly) throw browserError("BROWSER_READ_ONLY","Local browser reads cannot mutate a page.");
+      await assertCodexControl(tab);
+    }
     if (!session.local && session.operation) {
       if (!session.operation.local) await groups.check(session.operation.group, session.operation.chatTabId, session.operation.chatPath);
       if (mutation && (session.operation.group !== session.group || session.group.groupId < 0 || session.operation.readOnly))
@@ -617,13 +638,68 @@ export function createBrowserAgent(host) {
     const { chatTabId, group, groupId, groupChanges, submittedFiles, submittedAt, ...value } = result;
     return value;
   }
+  async function openLocalSite(input) {
+    const url = new URL(input.url).href;
+    const result = await codexQueue.run("open",async () => {
+      let own = await codexGroup(), created = null;
+      const result = (status,tabId,error=null) => ({tabId,groupId:own?.id ?? null,status,url:safePageUrl(url),error,observation:null});
+      try {
+        if (own && input.reuseExisting !== false) {
+          for (const candidate of own.tabs) {
+            let match = false;
+            try { match = new URL(candidate.pendingUrl || candidate.url).href === url; } catch {}
+            if (!match) continue;
+            const live = await host.getTab(candidate.id).catch(()=>null);
+            if (live && live.groupId === own.id && (live.pendingUrl || live.url) && new URL(live.pendingUrl || live.url).href === url) {
+              await assertCodexControl(live);
+              return result("reused",live.id);
+            }
+          }
+        }
+        const windowId = own?.tabs[0]?.windowId ?? await host.codexWindow?.();
+        created = await host.createSiteTab(windowId);
+        const blank = tab => ["","about:blank"].includes(tab.url || "") && (!tab.pendingUrl || tab.pendingUrl === "about:blank");
+        const live = await host.getTab(created.id);
+        if (!blank(live) || (windowId != null && live.windowId !== windowId) || (live.groupId >= 0 && live.groupId !== own?.id))
+          throw browserError("BROWSER_TARGET_CHANGED","The new blank tab changed; it was left untouched.");
+        if (own) {
+          const current = await codexGroup();
+          if (current?.id !== own.id) throw browserError("BROWSER_TARGET_CHANGED","The Codex group disappeared. Inspect the created tab before retrying.");
+          if (live.groupId !== own.id) await host.addSiteTab(created.id,own.id);
+        } else {
+          const id = await host.groupTabs([created.id],"RT · Codex");
+          if (!Number.isSafeInteger(id) || id < 0) throw browserError("BROWSER_GROUP_NOT_FOUND","Chrome did not create the Codex group.");
+          own = {id,tabs:[live]};
+          await rememberCodexGroup(id);
+        }
+        const grouped = await host.getTab(created.id);
+        await assertCodexControl(grouped);
+        if (!blank(grouped)) throw browserError("BROWSER_TARGET_CHANGED","The new tab navigated before opening; it was left untouched.");
+        await host.navigateSiteTab(created.id,url);
+        return result("opening",created.id);
+      } catch(error) {
+        return result("failed",created?.id ?? null,{code:error.code || "BROWSER_UNAVAILABLE",message:error.code ? error.message : "Chrome could not complete the open. Inspect the tab ID before retrying."});
+      }
+    });
+    if (result.status !== "failed") {
+      try {
+        const tab = await host.getTab(result.tabId);
+        if (tab.status === "complete" && !tab.pendingUrl && tab.groupId === result.groupId && /^https?:\/\//.test(tab.url || ""))
+          result.observation = await executeLocal("site_read",{tabId:tab.id,mode:"outline"});
+      } catch { /* The tab is open; read independently after loading. */ }
+    }
+    return result;
+  }
   async function executeLocal(name, input) {
     if (Object.hasOwn(input,"chatTabId") || Object.hasOwn(input,"scope") || Object.hasOwn(input,"addToChat"))
       throw browserError("BROWSER_INVALID", "Local browser reads do not accept a chat identity or chat delivery.");
+    if (name === "site_open" || name === "site_interact") validateBrowserInput(name,{...input,chatTabId:0});
+    if (name === "site_open") return openLocalSite(input);
     if (name === "site_list_tabs") {
+      const own = await codexGroup();
       const tabs = (await host.queryAllTabs()).filter(tab => Number.isSafeInteger(tab.id)).sort((a,b) => (a.windowId ?? -1)-(b.windowId ?? -1) || (a.index ?? a.id)-(b.index ?? b.id) || a.id-b.id).map(tab => {
         const readable = /^https?:\/\//.test(tab.url || "");
-        return {tabId:tab.id,windowId:tab.windowId ?? -1,groupId:tab.groupId >= 0 ? tab.groupId : null,role:/^https:\/\/chatgpt\.com(?:\/|$)/.test(tab.url || "") ? "chatgpt":"site",title:readable?String(tab.title || "").slice(0,500):"Restricted browser tab",url:readable?safePageUrl(tab.url):"",access:readable?"read-only":"restricted"};
+        return {tabId:tab.id,windowId:tab.windowId ?? -1,groupId:tab.groupId >= 0 ? tab.groupId : null,role:/^https:\/\/chatgpt\.com(?:\/|$)/.test(tab.url || "") ? "chatgpt":"site",title:readable?String(tab.title || "").slice(0,500):"Restricted browser tab",url:readable?safePageUrl(tab.url):"",access:readable?(own && tab.groupId===own.id?"read-write":"read-only"):"restricted"};
       });
       const offset=input.offset ?? 0, limit=input.limit ?? 200;
       let hash=2166136261; for(const c of JSON.stringify(tabs)) hash=Math.imul(hash ^ c.charCodeAt(0),16777619);
@@ -635,15 +711,16 @@ export function createBrowserAgent(host) {
       if (name === "site_files_cancel") return { cancelled: cancelTask(task), task: localProjection(publicTask(task)) };
       return localProjection(publicTask(task));
     }
-    if (!["site_read","site_get_children","site_get_node","site_get_text","site_get_images","site_get_files"].includes(name))
-      throw browserError("BROWSER_READ_ONLY", "Local MCP exposes only browser reads and local resource extraction.");
+    if (!["site_read","site_get_children","site_get_node","site_get_text","site_get_images","site_get_files","site_interact"].includes(name))
+      throw browserError("BROWSER_READ_ONLY", "Local MCP exposes only its documented Site tools.");
     if (["site_get_images","site_get_files"].includes(name) &&
         (Object.hasOwn(input,"resourceId") === Object.hasOwn(input,"resourceIds") || (input.resourceIds && new Set(input.resourceIds).size !== input.resourceIds.length)))
       throw browserError("BROWSER_INVALID", "Provide exactly one resourceId or a distinct resourceIds batch.");
     if (name === "site_read" && input.mode === "subtree" && !input.nodeId)
       throw browserError("BROWSER_INVALID", "subtree mode requires nodeId.");
-    await readTab(input.tabId);
-    const caller = { group:null, targetGroup:null, chatTabId:null, chatPath:null, local:true, readOnly:true, tool:name };
+    const live = await readTab(input.tabId);
+    if (name === "site_interact") await assertCodexControl(live);
+    const caller = { group:null, targetGroup:null, chatTabId:null, chatPath:null, local:true, readOnly:name !== "site_interact", tool:name };
     const result = await executeTarget(name, input, caller, null);
     return localProjection({...result,tabId:input.tabId});
   }
@@ -651,6 +728,7 @@ export function createBrowserAgent(host) {
     return queue(input.tabId, async () => {
       if (!caller.local) await groups.check(caller.group, input.chatTabId, caller.chatPath);
       const live = caller.local ? await readTab(input.tabId) : await groups.check(targetGroup, input.tabId);
+      if (caller.local && !caller.readOnly) await assertCodexControl(live);
       const previous = (caller.local ? localTargets : targets).get(input.tabId);
       if (caller.local && previous?.error) await dropLocalTarget(input.tabId);
       if (!caller.local && previous && previous.group !== targetGroup) await dropTarget(previous.group, input.tabId, "TAB_LEFT_GROUP");
@@ -659,6 +737,11 @@ export function createBrowserAgent(host) {
       try {
         if (!caller.local) await groups.check(caller.group, input.chatTabId, caller.chatPath);
         await ensureTarget(target);
+        if (caller.local && !caller.readOnly) {
+          await check(target,true);
+          await command(target.agentTabId,"Emulation.setFocusEmulationEnabled",{enabled:true});
+          target.localFocus = true;
+        }
         return await target.trace.span(`tool.${name}`, async () => {
           if (name === "site_read") return target.page.observe(input);
           if (name === "site_get_children") return target.page.observe({ ...input, mode: "subtree", depth: input.depth ?? 1 });
@@ -680,7 +763,14 @@ export function createBrowserAgent(host) {
           }
           throw browserError("BROWSER_INVALID", "Unknown site tool.");
         });
-      } finally { target.operation = null; }
+      } finally {
+        if (target.localFocus) {
+          target.localFocus = false;
+          if (!targets.get(target.agentTabId)?.controlReady)
+            await host.command(target.agentTabId,"Emulation.setFocusEmulationEnabled",{enabled:false}).catch(()=>{});
+        }
+        target.operation = null;
+      }
     });
   }
   function discardChildSessions(session, childId) {
