@@ -62,6 +62,7 @@ class DesktopTests(unittest.TestCase):
     def test_tray_show_close_reopen_and_exit_with_threaded_server(self):
         # Exercise the host lifecycle without claiming native Windows GUI coverage.
         ready, cleaned = threading.Event(), threading.Event()
+        scheduled_called = threading.Event()
         roots, icons, texts, buttons = [], [], [], {}
 
         class Value:
@@ -121,6 +122,8 @@ class DesktopTests(unittest.TestCase):
                         self.callbacks.remove(callback)
                         callback()
                     if phase == 0 and not self.hidden:
+                        self_test.assertTrue(icons[0].scheduled_enabled, 'Running must refresh scheduled menu')
+                        icons[0].choose('Create scheduled group')
                         self_test.assertIn('Live log after startup', texts[0].text)
                         texts[0].selection = 'log after startup'
                         buttons['Copy log'].command()
@@ -135,6 +138,7 @@ class DesktopTests(unittest.TestCase):
                         icons[0].choose('Open log')
                         phase = 1
                     elif phase == 1 and not self.hidden:
+                        self_test.assertTrue(scheduled_called.wait(2))
                         self_test.assertIn('While hidden', texts[0].text)
                         icons[0].choose('Exit')
                         phase = 2
@@ -142,14 +146,20 @@ class DesktopTests(unittest.TestCase):
                 self_test.assertTrue(self.destroyed)
 
         class MenuItem:
-            def __init__(self, text, action, **kwargs): self.text, self.action = text, action
+            def __init__(self, text, action, **kwargs):
+                self.text, self.action = text, action
+                self.enabled = kwargs.get("enabled", True)
         class Menu(tuple):
             SEPARATOR = object()
             def __new__(cls, *items): return super().__new__(cls, items)
         class Icon:
             def __init__(self, _name, _image, _title, menu):
                 self.menu, self.stopped = menu, threading.Event()
+                self.scheduled_enabled = False
                 icons.append(self)
+            def update_menu(self):
+                item = next(item for item in self.menu if getattr(item, "text", None) == "Create scheduled group")
+                self.scheduled_enabled = item.enabled(item)
             def run(self, setup):
                 setup(self)
                 self.stopped.wait(5)
@@ -165,6 +175,9 @@ class DesktopTests(unittest.TestCase):
             finally:
                 cleaned.set()
 
+        async def scheduled_create():
+            scheduled_called.set()
+
         self_test = self
         image = Mock()
         image.__enter__ = Mock(return_value=image)
@@ -178,9 +191,21 @@ class DesktopTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as folder, patch.dict(sys.modules, modules), \
              patch.object(sys, 'platform', 'win32'):
-            self.assertEqual(desktop.run_tray(serve, Path(folder), lambda: Path(folder), 'test'), 0)
+            self.assertEqual(desktop.run_tray(serve, Path(folder), lambda: Path(folder), 'test', scheduled_create=scheduled_create), 0)
         self.assertTrue(cleaned.is_set())
         self.assertTrue(icons[0].stopped.is_set())
+
+    def test_scheduled_database_initialization_failure_is_nonfatal(self):
+        with patch.object(agent.scheduled_memory, "initialize", side_effect=OSError("unavailable")) as initialize, \
+             patch.object(agent, "log") as log:
+            asyncio.run(agent.initialize_scheduled_memory())
+            initialize.assert_called_once_with(agent.memory_path)
+            log.assert_called_once()
+            self.assertIn("Agent will continue", log.call_args.args[0])
+            self.assertTrue(log.call_args.kwargs["error"])
+        with patch.object(agent.scheduled_memory, "initialize") as initialize:
+            asyncio.run(agent.initialize_scheduled_memory())
+            initialize.assert_called_once_with(agent.memory_path)
 
     def test_server_survives_without_log_window_and_exit_awaits_cleanup(self):
         ready, cleaned = threading.Event(), threading.Event()
