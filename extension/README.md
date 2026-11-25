@@ -25,3 +25,5 @@ Load this exact `extension/` directory with Chrome's **Load unpacked** action.
 Membership in the configured scheduled group opts the chat into periodic sends. A ready text draft is sent as-is; an empty Composer receives the continuation prompt. Pending attachments, active generation, dialogs, active deliveries and unconfirmed sends remain protected. Logs distinguish pending MCP, browser, artifact, delivery and chat UI states; no draft content is logged. An unconfirmed committed Send is not blindly repeated. A known pre-dispatch failure can retry the draft at the next tick.
 
 An interrupted or empty assistant response is not itself a blocker when the live Composer has a ready Send or Voice control and no active generation. Ready text drafts have priority over the default continuation. Actual active deliveries, unsafe UI states and uncertain committed sends still prevent automatic Send.
+
+Scheduled readiness does not require old user messages in the DOM (history can be virtualized). It uses the existing conversation URL, live Composer and generation controls; Send confirmation can also use a cleared Composer with a generation or Send-control transition.

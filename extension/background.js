@@ -3487,7 +3487,14 @@ async function sendComposerWhenReady(tabId, { completionText = null, revision = 
         if (!committed) return {sent:false,reason:"sendUnavailable",inserted,committed};
         for (let i=0;i<20;i++) {
           const state=await cdpReadMediaSubmissionState(tabId);
-          if (state.chatPath===expectedChatPath && (state.userCount>baseline.userCount || state.lastUserId && state.lastUserId!==baseline.lastUserId)) {
+          // A virtualized conversation may not expose message IDs at all.
+          // A cleared Composer together with a generation start or Send
+          // control transition is independent evidence of acceptance.
+          const composerAccepted=state.found && state.textEmpty && state.attachments===0 && !baseline.textEmpty &&
+            (!baseline.generating && state.generating ||
+             baseline.sendPresent && !baseline.sendDisabled && baseline.sendAriaDisabled!=="true" &&
+             (!state.sendPresent || state.sendDisabled || state.sendAriaDisabled==="true"));
+          if (state.chatPath===expectedChatPath && (state.userCount>baseline.userCount || state.lastUserId && state.lastUserId!==baseline.lastUserId || composerAccepted)) {
             await updateComposerWatchdog(tabId,"suppress");
             return {sent:true,source:scheduledDraft?"draft":"continuation"};
           }
@@ -7838,8 +7845,9 @@ async function scheduledChatState(tabId) {
   const result=await chrome.scripting.executeScript({target:{tabId},world:"ISOLATED",func:()=>{
     const visible=e=>Boolean(e&&e.getClientRects().length&&getComputedStyle(e).visibility!=="hidden"&&getComputedStyle(e).display!=="none");
     const matches=(selector,root=document)=>[...root.querySelectorAll(selector)].some(visible);
-    const main=document.querySelector("main")||document;
-    const messages=[...main.querySelectorAll('[data-message-author-role="user"],[data-message-author-role="assistant"]')];
+    // History may be virtualized, absent, or outside <main>. It is only
+    // supplementary evidence, never a prerequisite for waking a known chat.
+    const messages=[...document.querySelectorAll('[data-message-author-role="user"],[data-message-author-role="assistant"]')];
     const users=messages.filter(m=>m.getAttribute("data-message-author-role")==="user");
     const last=messages.at(-1);
     const candidates=[...document.querySelectorAll('[contenteditable="true"][role="textbox"], #prompt-textarea, textarea')].filter(e=>visible(e)&&!e.disabled&&e.getAttribute("aria-disabled")!=="true"&&(e.getAttribute("contenteditable")==="true"||e.tagName==="TEXTAREA"));
@@ -7848,7 +7856,8 @@ async function scheduledChatState(tabId) {
     const composer=live.length===1?live[0]:null;
     const form=composer?.closest('[data-composer-body]')||composer?.closest('form');
     const enabled=e=>visible(e)&&!e.disabled&&e.getAttribute("aria-disabled")!=="true";
-    const send=form&&[...form.querySelectorAll('button[type="submit"], button[data-testid="send-button"]')].some(enabled);
+    const sendControls=form?[...form.querySelectorAll('button[type="submit"], button[data-testid="send-button"]')].filter(visible):[];
+    const send=sendControls.some(enabled);
     const idleVoice=form&&[...form.querySelectorAll('button[data-testid="voice-mode-button"], button[aria-label="Start Voice"], button[aria-label="Start voice mode"], button[aria-label="Start Voice Mode"]')].some(enabled);
     const draft=Boolean(String(composer?.value??composer?.innerText??composer?.textContent??"").trim());
     const completed=last?.getAttribute("data-message-author-role")==="assistant"&&Boolean(last.innerText?.trim());
@@ -7857,14 +7866,13 @@ async function scheduledChatState(tabId) {
     else if(matches('button[data-testid="stop-button"], button[aria-label="Stop generating"], button[aria-label="Stop streaming"]')) reason="CHAT_GENERATING";
     else if(matches('[role="dialog"], [aria-modal="true"]')) reason="CHAT_DIALOG_OPEN";
     else if(matches('input[type="password"]')) reason="CHAT_AUTH_REQUIRED";
-    else if(!users.length) reason="CHAT_NO_USER_MESSAGE";
     else if(!composer||!form) reason="CHAT_COMPOSER_UNAVAILABLE";
     else if(form.getAttribute("aria-busy")==="true"||matches('[aria-busy="true"]',form)) reason="CHAT_COMPOSER_BUSY";
     else if(last?.getAttribute("aria-busy")==="true") reason="CHAT_RESPONSE_BUSY";
     else if([...document.querySelectorAll('[role="alert"]')].some(e=>visible(e)&&Boolean(e.innerText?.trim())&&!e.closest('[data-message-author-role]'))) reason="CHAT_ALERT_VISIBLE";
     // A ready Send or Voice control is positive evidence of an idle Composer
     // even if the last turn was stopped before the assistant produced text.
-    else if(!completed&&!send&&!idleVoice) reason="CHAT_IDLE_UNCONFIRMED";
+    else if(!completed&&!send&&!idleVoice&&!( !draft && sendControls.length)) reason="CHAT_IDLE_UNCONFIRMED";
     else if(draft&&!send) reason="CHAT_DRAFT_SEND_DISABLED";
     return {ready:reason===null,reason,userCount:users.length,lastUserId:users.at(-1)?.getAttribute("data-message-id")||null};
   }});

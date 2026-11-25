@@ -229,7 +229,9 @@ library.set("store",{status:"working",tabId:null}); assert.equal(await pending(4
  const button=makeElement(); button.tagName="BUTTON";
  const main={querySelectorAll:()=>lastRole==="user"?[user]:[user,last]};
  form.querySelectorAll=selector=>selector.includes("submit")?(sendReady?[button]:[]):selector.includes("voice-mode")?(voiceReady?[button]:[]):selector.includes("aria-busy")&&busy?[button]:[];
+ let historyVisible=true;
  const doc={readyState:"complete",querySelector:()=>main,querySelectorAll:selector=>{
+  if(selector.includes("data-message-author-role"))return historyVisible?main.querySelectorAll():[];
   if(selector.includes("contenteditable")){composer.innerText=draft;last.innerText=lastText;return [composer];}
   if(selector.includes("stop-button"))return stopped?[button]:[];
   if(selector.includes("dialog"))return dialog?[button]:[];
@@ -249,6 +251,11 @@ library.set("store",{status:"working",tabId:null}); assert.equal(await pending(4
  sendReady=false;await checkState("CHAT_IDLE_UNCONFIRMED");
  lastRole="assistant";lastText="finished";await checkState("CHAT_DRAFT_SEND_DISABLED");
  draft="";await checkState(null);
+ historyVisible=false; voiceReady=true;
+ await checkState(null); // existing conversation with virtualized history
+ draft="user draft"; sendReady=true; voiceReady=false;
+ await checkState(null);
+ stopped=true;await checkState("CHAT_GENERATING");stopped=false;
 }
 
 // Check the shipped worker's public schemas and every asynchronous producer.
