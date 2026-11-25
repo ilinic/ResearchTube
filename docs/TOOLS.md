@@ -277,7 +277,7 @@ Optional `tabId` on asynchronous launches carries the destination ChatGPT tab re
 
 ### Shared scheduled memory
 
-`db_sql({sql})` executes a bounded atomic SQLite script on `scheduled/database.sqlite`, returning ordered result sets. The Agent owns the transaction; omit BEGIN/COMMIT. BLOBs are `base64:` strings; unsafe file operations are denied. `workspace_read_text({workspacePath})` and `workspace_write_text({workspacePath,text})` read/atomically replace UTF-8 files up to 32 KiB. Coordinate concurrent updates via SQLite or distinct files. These tools are also available in local MCP.
+`db_sql` (`{sql}`) executes a bounded atomic SQLite script on `scheduled/database.sqlite`, returning ordered result sets. The Agent owns the transaction; omit BEGIN/COMMIT. BLOBs are `base64:` strings; unsafe file operations are denied. `workspace_read_text` (`{workspacePath}`) and `workspace_write_text` (`{workspacePath,text}`) read/atomically replace UTF-8 files up to 32 KiB. Coordinate concurrent updates via SQLite or distinct files. These tools are also available in local MCP.
 
 ### Scheduled ChatGPT tasks
 

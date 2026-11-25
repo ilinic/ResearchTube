@@ -22,6 +22,7 @@ class SharedMemoryTest(unittest.TestCase):
                         "PRAGMA writable_schema=ON", "SELECT load_extension('x')", "BEGIN"):
                 with self.assertRaises(memory.MemoryOperationError):
                     memory.db_sql(resolve, sql)
+            self.assertTrue(memory.db_sql(resolve, "ALTER TABLE t ADD COLUMN y INTEGER; UPDATE t SET y=1 RETURNING y;")["success"])
             self.assertTrue(memory.db_sql(resolve, "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x<300) SELECT x FROM c")["truncated"])
             memory.write_text(resolve, "scheduled/notes.md", "Привет")
             self.assertEqual(memory.read_text(resolve, "scheduled/notes.md")["text"], "Привет")

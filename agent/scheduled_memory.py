@@ -45,6 +45,8 @@ def connect(resolve):
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute("PRAGMA trusted_schema=OFF")
         connection.execute("PRAGMA temp_store=MEMORY")
+        # Bound database growth from untrusted agent-generated SQL.
+        connection.execute("PRAGMA max_page_count=262144")
         if connection.execute("PRAGMA journal_mode=WAL").fetchone()[0].lower() != "wal":
             fail("DB_SQL_ERROR", "Could not enable WAL.")
         connection.enable_load_extension(False)

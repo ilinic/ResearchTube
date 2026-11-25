@@ -623,7 +623,7 @@ export function createBrowserAgent(host) {
         const blank = await host.getTab(created.id);
         if (blank.windowId !== chat.windowId || (blank.groupId >= 0 && blank.groupId !== group.groupId) || !isBlank(blank))
           throw browserError("BROWSER_TARGET_CHANGED","The new blank tab changed; it was left untouched.");
-        if (blank.groupId !== group.groupId) await host.addSiteTab(created.id,group.groupId);
+        if (blank.groupId !== group.groupId) { await checkTabCapacity(group.groupId); await host.addSiteTab(created.id,group.groupId); }
         await verify();
         const live = await host.getTab(created.id);
         if (live.groupId !== group.groupId || !isBlank(live))
@@ -727,7 +727,7 @@ export function createBrowserAgent(host) {
         if (own) {
           const current = await codexGroup();
           if (current?.id !== own.id) throw browserError("BROWSER_TARGET_CHANGED","The Codex group disappeared. Inspect the created tab before retrying.");
-          if (live.groupId !== own.id) await host.addSiteTab(created.id,own.id);
+          if (live.groupId !== own.id) { await checkTabCapacity(own.id); await host.addSiteTab(created.id,own.id); }
         } else {
           const id = await host.groupTabs([created.id],"RT · Codex");
           if (!Number.isSafeInteger(id) || id < 0) throw browserError("BROWSER_GROUP_NOT_FOUND","Chrome did not create the Codex group.");

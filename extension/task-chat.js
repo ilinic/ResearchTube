@@ -98,7 +98,7 @@ export function installComposerWatchdog(seconds, inspect, readOnly = false) {
     const { composer, root } = resolveChatComposer();
     const inspected = inspect();
     const text = composer ? String(composer.value ?? composer.innerText ?? composer.textContent ?? "") : "";
-    const attachments = Math.max(inspected.attachments?.length || 0, inspected.previewCount || 0);
+    const attachments = Math.max(inspected.attachments?.length || 0, inspected.selectedFiles?.length || 0, inspected.previewCount || 0);
     const next = JSON.stringify([Boolean(composer), text, attachments]);
     if (next !== key) { key = next; revision++; changedAt = performance.now(); }
     if (!text.trim() && !attachments) suppressed = false;

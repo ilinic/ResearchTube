@@ -6322,12 +6322,17 @@ async function readMcpResource(id, uri) {
   }
 }
 
-let activeScheduledMcpCalls=0;
+const activeScheduledMcpCalls=new Map();
 async function handleMcpRequest(request) {
   const active=request?.method==="tools/call";
-  if(active) activeScheduledMcpCalls++;
+  const args=request?.params?.arguments;
+  const caller=active?(cloudConnection.targetForRequest(request.id)?.tabId ?? args?.chatTabId ?? null):null;
+  if(active) activeScheduledMcpCalls.set(caller,(activeScheduledMcpCalls.get(caller)||0)+1);
   try { return await handleMcpRequestInner(request); }
-  finally { if(active) activeScheduledMcpCalls--; }
+  finally { if(active) {
+    const count=(activeScheduledMcpCalls.get(caller)||1)-1;
+    if(count)activeScheduledMcpCalls.set(caller,count);else activeScheduledMcpCalls.delete(caller);
+  } }
 }
 async function handleMcpRequestInner(request) {
   if (request?.method === "initialize") {
@@ -7802,7 +7807,7 @@ async function createScheduledGroup(name) {
 async function scheduledPending(tabId) {
   await Promise.all([ensureMediaToChatLoaded(),ensureLibraryStoreLoaded(),artifactTaskManager.ensure(),taskCompletionDelivery.ensure()]);
   const active=task=>!["completed","failed","cancelled"].includes(task.status);
-  return activeScheduledMcpCalls>0 || browserAgent.hasPendingChat(tabId) || artifactTaskManager.hasPendingChat(tabId) || taskCompletionDelivery.hasPendingChat(tabId)
+  return activeScheduledMcpCalls.has(null) || activeScheduledMcpCalls.has(tabId) || browserAgent.hasPendingChat(tabId) || artifactTaskManager.hasPendingChat(tabId) || taskCompletionDelivery.hasPendingChat(tabId)
     || [...mediaToChatTasks.values()].some(t=>active(t)&&(t.target?.tabId===tabId || t.tabId===tabId || !t.target))
     || [...libraryStoreTasks.values()].some(t=>active(t)&&(t.tabId===tabId || t.tabId==null));
 }
@@ -7814,7 +7819,7 @@ async function scheduledChatState(tabId) {
     const matches=selector=>[...document.querySelectorAll(selector)].some(visible);
     const messages=[...document.querySelectorAll('[data-message-author-role="user"],[data-message-author-role="assistant"]')];
     const last=messages.at(-1);
-    const blocked=matches('button[data-testid="stop-button"], button[aria-label="Stop generating"], button[aria-label="Stop streaming"], [role="dialog"], [aria-modal="true"], [aria-busy="true"], [role="alert"], [data-testid*="confirm"], [data-testid*="error"], input[type="password"]');
+    const blocked=matches('button[data-testid="stop-button"], button[aria-label="Stop generating"], button[aria-label="Stop streaming"], [role="dialog"], [aria-modal="true"], [aria-busy="true"], [data-testid*="confirm"], [data-testid*="error"], input[type="password"]') || [...document.querySelectorAll('[role="alert"]')].some(e=>visible(e)&&Boolean(e.innerText?.trim()));
     const composer=document.querySelector('#prompt-textarea');
     return {ready:!blocked&&document.readyState==="complete"&&messages.some(m=>m.getAttribute("data-message-author-role")==="user")&&last?.getAttribute("data-message-author-role")==="assistant"&&Boolean(last.innerText?.trim())&&visible(composer)&&composer.getAttribute("aria-disabled")!=="true",userCount:messages.filter(m=>m.getAttribute("data-message-author-role")==="user").length,lastUserId:messages.filter(m=>m.getAttribute("data-message-author-role")==="user").at(-1)?.getAttribute("data-message-id")||null};
   }});

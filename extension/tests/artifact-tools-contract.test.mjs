@@ -353,3 +353,30 @@ for(const value of [null,[],{maxNodes:true},{maxChars:999},{maxNodes:1001}]) {
  await assert.rejects(w.context.configuredBrowserStudyOptions(),e=>e.code==='AGENT_INVALID_RESPONSE');
 }
 console.log('Browser observation setting: shipped worker reads strict optional node/character ceilings: ok');
+
+const scheduledWorker=worker();
+const scheduledTabs=scheduledWorker.tabs;
+scheduledTabs.get(42).groupId=3;scheduledTabs.get(81).groupId=3;
+scheduledTabs.set(99,{id:99,groupId:3,url:'https://chatgpt.com/'});
+scheduledTabs.set(100,{id:100,groupId:3,url:'https://example.test/'});
+let groups=[],created=[],sent=[],pending=new Set(),ready=new Set([42,81]);
+const sw=scheduledWorker.context;
+sw.chrome.tabGroups={query:async()=>groups,update:async(id,options)=>{groups.push({id,title:options.title});}};
+sw.chrome.windows={getAll:async()=>[{id:1}]};
+sw.chrome.tabs.query=async({groupId}={})=>[...scheduledTabs.values()].filter(tab=>groupId==null||tab.groupId===groupId);
+sw.chrome.tabs.create=async args=>{const tab={id:110+created.length,url:args.url};created.push(tab);scheduledTabs.set(tab.id,tab);return tab;};
+sw.chrome.tabs.group=async({tabIds})=>{for(const id of tabIds)scheduledTabs.get(id).groupId=4;return 4;};
+const state={};
+sw.chrome.storage.session={get:async key=>({[key]:state[key]}),set:async values=>Object.assign(state,values),remove:async key=>delete state[key]};
+sw.scheduledPending=async id=>pending.has(id);
+sw.scheduledChatState=async id=>({ready:ready.has(id),userCount:1,lastUserId:'user1'});
+sw.sendComposerWhenReady=async(id,options)=>{await options.beforeSend();await options.beforeInsert();sent.push(id);return {sent:true};};
+const tickArgs={groupName:'scheduled',expiresAt:Date.now()+60000};
+assert.equal((await sw.tickScheduledGroup(tickArgs)).status,'noGroup');assert.equal(sent.length,0);
+assert.equal((await sw.createScheduledGroup('scheduled')).status,'created');assert.equal(created.length,1);assert.equal(created[0].url,'https://chatgpt.com/');
+assert.equal((await sw.createScheduledGroup('scheduled')).status,'exists');assert.equal(created.length,1);
+groups=[{id:3,title:'scheduled'}];pending.add(81);
+await sw.tickScheduledGroup(tickArgs);assert.deepEqual(sent,[42]);
+pending.clear();ready.delete(42);await sw.tickScheduledGroup(tickArgs);assert.deepEqual(sent,[42,81]);
+groups.push({id:4,title:'scheduled'});assert.equal((await sw.tickScheduledGroup(tickArgs)).status,'ambiguousGroup');assert.deepEqual(sent,[42,81]);
+console.log('Scheduled activation: group absence, creation, duplicate names, busy and independent chats');
