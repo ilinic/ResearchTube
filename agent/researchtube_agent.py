@@ -48,7 +48,7 @@ except ImportError:
     from task_history import TaskHistory
     from browser_resources import save_browser_resource
 
-AGENT_VERSION = "2.8.7"
+AGENT_VERSION = "2.8.8"
 INTERFACE_VERSION = 89
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
@@ -274,7 +274,7 @@ def configured_scheduled_tasks() -> dict[str, Any]:
     result = {"maxTabsPerGroup": config.get("maxTabsPerGroup", 20),
               "scheduledTasksEnabled": config.get("scheduledTasksEnabled", True),
               "scheduledTasksGroupName": config.get("scheduledTasksGroupName", "scheduled"),
-              "scheduledTasksIntervalSeconds": config.get("scheduledTasksIntervalSeconds", 300)}
+              "scheduledTasksIntervalSeconds": config.get("scheduledTasksIntervalSeconds", 60)}
     for name in ("maxTabsPerGroup", "scheduledTasksIntervalSeconds"):
         if type(result[name]) is not int or result[name] < 1:
             raise AgentApiError("CONFIG_INVALID", f"{name} must be a positive integer.")

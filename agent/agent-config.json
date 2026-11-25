@@ -2,7 +2,7 @@
   "maxTabsPerGroup": {"value": 20, "comment": "Maximum total Chrome tabs in a ResearchTube group, including AI chats. Existing tabs are never closed."},
   "scheduledTasksEnabled": {"value": true, "comment": "Allow periodic continuation only in the existing scheduled group. Set false for a global opt-out. No group means no activation. Restart Agent after changing."},
   "scheduledTasksGroupName": {"value": "scheduled", "comment": "Exact Chrome group name; duplicate names skip the tick."},
-  "scheduledTasksIntervalSeconds": {"value": 300, "comment": "Positive integer seconds between activation checks. Restart Agent after changing."},
+  "scheduledTasksIntervalSeconds": {"value": 60, "comment": "Positive integer seconds between activation checks. Restart Agent after changing."},
   "port": {
     "value": 17843,
     "comment": "Loopback HTTP port for the Local Agent (1–65535). Match the port in Extension Settings. Restart the Agent after changing it."

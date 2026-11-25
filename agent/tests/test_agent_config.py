@@ -23,6 +23,14 @@ class AgentConfigTests(unittest.TestCase):
     def write(self, document):
         self.path.write_text(json.dumps(document), encoding='utf-8')
 
+    def test_scheduled_interval_default_and_explicit_override(self):
+        self.assertEqual(self.original['scheduledTasksIntervalSeconds']['value'], 60)
+        self.assertEqual(agent.configured_scheduled_tasks()['scheduledTasksIntervalSeconds'], 60)
+        self.write({})
+        self.assertEqual(agent.configured_scheduled_tasks()['scheduledTasksIntervalSeconds'], 60)
+        self.write({'scheduledTasksIntervalSeconds': {'value': 300}})
+        self.assertEqual(agent.configured_scheduled_tasks()['scheduledTasksIntervalSeconds'], 300)
+
     def test_values_are_unwrapped_without_comments_in_runtime_result(self):
         self.original['port']['value'] = 18999
         self.original['newToolsEnabledByDefault']['value'] = False
