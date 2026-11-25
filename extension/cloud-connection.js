@@ -7,7 +7,7 @@ const DISABLED_KEY = "researchtubeCloudDisabled";
 const SIGN_IN_KEY = "researchtubeCloudSignInRequired";
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 const SECRET = /^[a-f0-9-]{72}$/;
-const SOURCE_TABS = new Set(["site_read", "site_get_children", "site_get_node", "site_get_text", "site_interact", "site_get_images", "site_get_files", "system_get_diagnostics"]);
+const SOURCE_TABS = new Set(["site_open","site_read", "site_get_children", "site_get_node", "site_get_text", "site_interact", "site_get_images", "site_get_files", "system_get_diagnostics"]);
 const fail = (code, message) => Object.assign(new Error(message), { code });
 export function cloudConversation(value) {
   try {

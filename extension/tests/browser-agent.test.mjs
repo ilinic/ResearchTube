@@ -371,3 +371,14 @@ localStudy.tabs.get(codexOpen.tabId).groupId=-1;
 await assert.rejects(localStudy.agent.executeLocal('site_interact',{tabId:codexOpen.tabId,steps:[{action:'key',key:'Enter'}]}),{code:'BROWSER_READ_ONLY'});
 assert.equal((await localStudy.agent.executeLocal('site_read',{tabId:codexOpen.tabId})).tabId,codexOpen.tabId);
 console.log('Codex own group, local interaction, reuse and live permission checks: ok');
+
+// Explicit navigation wins over URL reuse and never creates a fallback.
+const capped=fixture();capped.host.maxTabsPerGroup=async()=>3;await capped.agent.start(10);
+const aOpen=await capped.run('site_open',{url:'https://example.test/a'});
+assert.equal(aOpen.status,'opening');
+const over=await capped.run('site_open',{url:'https://example.test/b'});assert.equal(over.error.code,'GROUP_TAB_LIMIT_REACHED');
+const nav=await capped.run('site_open',{url:'https://example.test/b',tabId:aOpen.tabId});assert.equal(nav.tabId,aOpen.tabId);assert.equal(nav.status,'opening');
+await assert.rejects(capped.run('site_open',{url:'https://example.test/',tabId:10}),{code:'BROWSER_READ_ONLY'});
+await assert.rejects(capped.run('site_open',{url:'https://example.test/',tabId:22}),{code:'BROWSER_READ_ONLY'});
+const same=await capped.run('site_open',{url:'https://example.test/b'});assert.equal(same.status,'reused');
+assert.equal(capped.tabs.size,4);

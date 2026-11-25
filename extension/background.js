@@ -3707,6 +3707,7 @@ const browserAgent = createBrowserAgent({
   queryTabs: groupId => chrome.tabs.query({ groupId }),
   queryAllTabs: () => chrome.tabs.query({}), queryTabGroups: () => chrome.tabGroups.query({}),
   studyOptions: configuredBrowserStudyOptions,
+  maxTabsPerGroup: async () => { try { const d=await agentJsonRequest("/internal/tool-limits"); return d.maxTabsPerGroup ?? 20; } catch(error) { if(error.code==="CONFIG_INVALID") throw error; return 20; } },
   promptTemplates: configuredStartupPrompts,
   groupTabs: async (tabIds, title) => {
     const groupId = await chrome.tabs.group({ tabIds });

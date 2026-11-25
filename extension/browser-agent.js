@@ -104,6 +104,42 @@ export function createBrowserAgent(host) {
   const localQueue = createTabAutomationQueue();
   const queue = host.queue || localQueue.run;
   const codexQueue = createTabAutomationQueue();
+  // One creation lock for all research groups, including Codex. Count the
+  // actual Chrome membership (including chats and non-web tabs).
+  const groupCreationQueue = createTabAutomationQueue();
+  async function checkTabCapacity(groupId, additional = 1) {
+    const limit = await (host.maxTabsPerGroup?.() ?? 20);
+    if (!Number.isSafeInteger(limit) || limit < 1) throw browserError("BROWSER_INVALID","Invalid maxTabsPerGroup.");
+    const count = groupId == null ? 0 : (await host.queryTabs(groupId)).length;
+    if (count + additional > limit) {
+      log("group tab limit",{groupId,limit,count});
+      throw browserError("GROUP_TAB_LIMIT_REACHED",`Group has ${count} tabs; maximum ${limit}. Pass tabId of an existing site tab to navigate it, or remove a tab manually.`);
+    }
+  }
+  function protectedChat(tab) {
+    return [tab.url,tab.pendingUrl].some(value=>{try{return new URL(value).hostname==="chatgpt.com" || new URL(value).hostname==="chat.openai.com";}catch{return false;}});
+  }
+  async function navigateExisting(input,url,verify) {
+    return queue(input.tabId,async()=>{
+      await verify();
+      const tab = await host.getTab(input.tabId).catch(()=>{throw browserError("TAB_CLOSED","The selected tab closed.");});
+      if (protectedChat(tab)) throw browserError("BROWSER_READ_ONLY","site_open cannot navigate an existing ChatGPT tab.");
+      await verify(tab);
+      if (new URL(tab.pendingUrl || tab.url).href === url) return "reused";
+      if (tab.pendingUrl) throw browserError("BROWSER_BUSY","The selected tab is already navigating.");
+      for (const task of tasks.values()) if (task.tabId===tab.id && !TERMINAL.has(task.status))
+        throw browserError("BROWSER_BUSY","The selected tab has an active resource task.");
+      // Revalidate exact live membership and caller just before navigation.
+      const live = await host.getTab(input.tabId);
+      if (live.url !== tab.url || live.pendingUrl || protectedChat(live)) throw browserError("PAGE_CHANGED","The selected tab changed.");
+      await verify(live);
+      for (const session of [targets.get(tab.id),localTargets.get(tab.id)].filter(Boolean)) {
+        session.pageVersion=nextPageVersion();session.revision++;session.page.invalidate();
+      }
+      await host.navigateSiteTab(tab.id,url);
+      return "opening";
+    });
+  }
   // Chrome group IDs are browser-session scoped; never infer ownership from title.
   let codexGroupId = null;
   async function codexGroup() {
@@ -299,6 +335,7 @@ export function createBrowserAgent(host) {
       host.studyOptions ? host.studyOptions() : { detailedLogging: false },
       host.promptTemplates ? host.promptTemplates().then(normalizeStartupPrompts) : normalizeStartupPrompts()
     ]);
+    await checkTabCapacity(null,2);
     const trace = createBrowserDiagnostics({ enabled: options.detailedLogging, log, now: host.monotonicNow || host.now });
     let group = null, agent = null, chat = null, stopped = false, phase = "duplicating";
     const checkStarting = () => {
@@ -514,7 +551,22 @@ export function createBrowserAgent(host) {
   // not a separate operation exposed to the model.
   async function openSite(input, cloudGuard) {
     const url = new URL(input.url).href;
-    const result = await queue(input.chatTabId, async () => {
+    // Explicit navigation never creates a group or a fallback tab.
+    if (input.tabId !== undefined) {
+      const {group,member}=await groups.forChat(input.chatTabId,{claim:true});
+      if (input.tabId===input.chatTabId || group.groupId<0) throw browserError("BROWSER_READ_ONLY","Choose a site tab in the current real group.");
+      const verify=async(tab)=>{
+        await cloudGuard?.();
+        await groups.check(group,input.chatTabId,member.chatPath);
+        if (group.state!=="running") throw browserError("BROWSER_SESSION_NOT_READY","Group is not running.");
+        if (tab && tab.groupId!==group.groupId) throw browserError("BROWSER_READ_ONLY","External tabs cannot be navigated.");
+      };
+      const status=await navigateExisting(input,url,verify);
+      await groups.refresh(group);
+      const changes=groups.reportChanges(group,input.chatTabId);changes.commit();
+      return {chatTabId:input.chatTabId,tabId:input.tabId,group:groups.project(group,input.chatTabId),status,url:safePageUrl(url),error:null,observation:null,...(changes.groupChanges?{groupChanges:changes.groupChanges}:{})};
+    }
+    const result = await groupCreationQueue.run("create",()=>queue(input.chatTabId, async () => {
       await cloudGuard?.();
       let {group,member} = await groups.forChat(input.chatTabId,{claim:true});
       const chatPath = member.chatPath;
@@ -526,6 +578,7 @@ export function createBrowserAgent(host) {
       };
       let chat = await verify();
       if (group.groupId < 0) {
+        await checkTabCapacity(null,2);
         if (chat.pinned) throw browserError("BROWSER_INVALID","Unpin the initiating ChatGPT tab before opening a research group.");
         // Revalidate before changing membership; do not select a different chat.
         chat = await verify();
@@ -560,6 +613,7 @@ export function createBrowserAgent(host) {
       let created = null;
       try {
         chat = await verify();
+        await checkTabCapacity(group.groupId);
         // Create a blank inactive tab and group it before navigating. No
         // external tab is moved, navigated, activated or closed.
         created = await host.createSiteTab(chat.windowId);
@@ -583,7 +637,7 @@ export function createBrowserAgent(host) {
         // partial results instead of retrying and creating duplicates.
         return response("failed",created?.id ?? null,{code:error.code || "BROWSER_UNAVAILABLE",message:error.code ? error.message : "Chrome could not complete the open. Inspect the tab ID before retrying."});
       }
-    });
+    }));
     // Only pre-read already loaded pages. Do not hold the chat queue while
     // reading another tab, or block opening on a slow site's initial load.
     if (result.status !== "failed") {
@@ -640,7 +694,13 @@ export function createBrowserAgent(host) {
   }
   async function openLocalSite(input) {
     const url = new URL(input.url).href;
-    const result = await codexQueue.run("open",async () => {
+    if (input.tabId !== undefined) {
+      const own=await codexGroup();
+      if (!own) throw browserError("BROWSER_READ_ONLY","No Codex group exists.");
+      const status=await navigateExisting(input,url,async(tab)=>{if(tab) await assertCodexControl(tab);});
+      return {tabId:input.tabId,groupId:own.id,status,url:safePageUrl(url),error:null,observation:null};
+    }
+    const result = await groupCreationQueue.run("create",()=>codexQueue.run("open",async () => {
       let own = await codexGroup(), created = null;
       const result = (status,tabId,error=null) => ({tabId,groupId:own?.id ?? null,status,url:safePageUrl(url),error,observation:null});
       try {
@@ -656,6 +716,7 @@ export function createBrowserAgent(host) {
             }
           }
         }
+        await checkTabCapacity(own?.id ?? null);
         const windowId = own?.tabs[0]?.windowId ?? await host.codexWindow?.();
         created = await host.createSiteTab(windowId);
         const blank = tab => ["","about:blank"].includes(tab.url || "") && (!tab.pendingUrl || tab.pendingUrl === "about:blank");
@@ -680,7 +741,7 @@ export function createBrowserAgent(host) {
       } catch(error) {
         return result("failed",created?.id ?? null,{code:error.code || "BROWSER_UNAVAILABLE",message:error.code ? error.message : "Chrome could not complete the open. Inspect the tab ID before retrying."});
       }
-    });
+    }));
     if (result.status !== "failed") {
       try {
         const tab = await host.getTab(result.tabId);

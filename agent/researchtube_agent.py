@@ -269,6 +269,22 @@ def read_agent_config() -> dict[str, Any]:
     return result
 
 
+def configured_scheduled_tasks() -> dict[str, Any]:
+    config = read_agent_config()
+    result = {"maxTabsPerGroup": config.get("maxTabsPerGroup", 20),
+              "scheduledTasksEnabled": config.get("scheduledTasksEnabled", False),
+              "scheduledTasksGroupName": config.get("scheduledTasksGroupName", "scheduled"),
+              "scheduledTasksIntervalSeconds": config.get("scheduledTasksIntervalSeconds", 300)}
+    for name in ("maxTabsPerGroup", "scheduledTasksIntervalSeconds"):
+        if type(result[name]) is not int or result[name] < 1:
+            raise AgentApiError("CONFIG_INVALID", f"{name} must be a positive integer.")
+    if type(result["scheduledTasksEnabled"]) is not bool:
+        raise AgentApiError("CONFIG_INVALID", "scheduledTasksEnabled must be a boolean.")
+    if not isinstance(result["scheduledTasksGroupName"], str) or not result["scheduledTasksGroupName"].strip():
+        raise AgentApiError("CONFIG_INVALID", "scheduledTasksGroupName must be nonempty text.")
+    return result
+
+
 def configured_port() -> int:
     try:
         port = read_agent_config().get("port")
@@ -6228,7 +6244,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
         elif method == "GET" and path == "/internal/prompt-templates":
             response_status, response_body = "200 OK", STARTUP_PROMPTS
         elif method == "GET" and path == "/internal/tool-limits":
-            response_status, response_body = "200 OK", {"limits": configured_tool_limits(), "newToolsEnabledByDefault": configured_new_tools_default(), "mediaWidgetHandshakeTimeoutSeconds": configured_media_widget_handshake_timeout(), "browserStudyGroupTabs": configured_browser_study_group_tabs(), "browserStudyDetailedLogging": configured_browser_study_detailed_logging(), "browserStudyObservation": configured_browser_study_observation(), "composerMediaRetry": configured_composer_media_retry(), "composerAutoSendTimeoutSeconds": configured_composer_auto_send_timeout()}
+            response_status, response_body = "200 OK", {"limits": configured_tool_limits(), "newToolsEnabledByDefault": configured_new_tools_default(), "mediaWidgetHandshakeTimeoutSeconds": configured_media_widget_handshake_timeout(), "browserStudyGroupTabs": configured_browser_study_group_tabs(), "browserStudyDetailedLogging": configured_browser_study_detailed_logging(), "browserStudyObservation": configured_browser_study_observation(), "composerMediaRetry": configured_composer_media_retry(), "composerAutoSendTimeoutSeconds": configured_composer_auto_send_timeout(), "maxTabsPerGroup": configured_scheduled_tasks()["maxTabsPerGroup"]}
         elif method == "GET" and path == "/custom-tools":
             response_status, response_body = "200 OK", CUSTOM_TOOLS.catalog()
         elif method == "POST" and path == "/custom-tools/call":
