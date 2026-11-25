@@ -48,7 +48,7 @@ except ImportError:
     from task_history import TaskHistory
     from browser_resources import save_browser_resource
 
-AGENT_VERSION = "2.8.6"
+AGENT_VERSION = "2.8.7"
 INTERFACE_VERSION = 89
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
@@ -6506,6 +6506,15 @@ async def scheduled_loop(settings):
         log("Scheduled activation stopped.")
 
 
+async def initialize_scheduled_memory() -> None:
+    try:
+        await asyncio.to_thread(scheduled_memory.initialize, memory_path)
+    except Exception as error:
+        # Shared memory is optional: preserve the database and keep unrelated
+        # Agent tools available. Each db_sql call opens its own connection.
+        log(f"Scheduled database initialization failed ({type(error).__name__}); Agent will continue. db_sql will retry on demand.", error=True)
+
+
 async def serve(port: int, on_started: Callable[[], None] | None = None) -> None:
     global WORKSPACE_PATH, STARTUP_PROMPTS
     STARTUP_PROMPTS = configured_startup_prompts()
@@ -6513,7 +6522,7 @@ async def serve(port: int, on_started: Callable[[], None] | None = None) -> None
     # media viewers or shares into a different directory mid-operation.
     WORKSPACE_PATH = startup_workspace_path()
     scheduled_settings = configured_scheduled_tasks()
-    await asyncio.to_thread(scheduled_memory.initialize, memory_path)
+    await initialize_scheduled_memory()
     initial_health = initialize_health_snapshot()
     server = await asyncio.start_server(handle_client, host="127.0.0.1", port=port)
     log_startup_health(initial_health, port)
