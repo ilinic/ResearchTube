@@ -7831,8 +7831,9 @@ async function scheduledPending(tabId) {
   if ([...libraryStoreTasks.values()].some(t=>active(t)&&t.tabId==null)) return "LIBRARY_DELIVERY_UNBOUND";
   return null;
 }
-// Require a visible, completed assistant response, not merely absence of Stop.
-// Modal/confirmation/error states and ambiguous Composer structures fail closed.
+// Scheduled readiness is based on the live Composer and generation controls.
+// A cancelled, interrupted or empty assistant response does not by itself
+// prevent continuing an existing conversation. Actual dialogs still fail closed.
 async function scheduledChatState(tabId) {
   const result=await chrome.scripting.executeScript({target:{tabId},world:"ISOLATED",func:()=>{
     const visible=e=>Boolean(e&&e.getClientRects().length&&getComputedStyle(e).visibility!=="hidden"&&getComputedStyle(e).display!=="none");
@@ -7841,23 +7842,30 @@ async function scheduledChatState(tabId) {
     const messages=[...main.querySelectorAll('[data-message-author-role="user"],[data-message-author-role="assistant"]')];
     const users=messages.filter(m=>m.getAttribute("data-message-author-role")==="user");
     const last=messages.at(-1);
-    const composer=[...document.querySelectorAll('#prompt-textarea')].find(visible);
-    const form=composer?.closest('form')||composer?.closest('[data-composer-body]');
+    const candidates=[...document.querySelectorAll('[contenteditable="true"][role="textbox"], #prompt-textarea, textarea')].filter(e=>visible(e)&&!e.disabled&&e.getAttribute("aria-disabled")!=="true"&&(e.getAttribute("contenteditable")==="true"||e.tagName==="TEXTAREA"));
+    const rich=candidates.filter(e=>e.matches('[data-composer-markdown], .ProseMirror'));
+    const live=rich.length?rich:candidates;
+    const composer=live.length===1?live[0]:null;
+    const form=composer?.closest('[data-composer-body]')||composer?.closest('form');
+    const enabled=e=>visible(e)&&!e.disabled&&e.getAttribute("aria-disabled")!=="true";
+    const send=form&&[...form.querySelectorAll('button[type="submit"], button[data-testid="send-button"]')].some(enabled);
+    const idleVoice=form&&[...form.querySelectorAll('button[data-testid="voice-mode-button"], button[aria-label="Start Voice"], button[aria-label="Start voice mode"], button[aria-label="Start Voice Mode"]')].some(enabled);
+    const draft=Boolean(String(composer?.value??composer?.innerText??composer?.textContent??"").trim());
+    const completed=last?.getAttribute("data-message-author-role")==="assistant"&&Boolean(last.innerText?.trim());
     let reason=null;
     if (document.readyState!=="complete") reason="CHAT_LOADING";
     else if(matches('button[data-testid="stop-button"], button[aria-label="Stop generating"], button[aria-label="Stop streaming"]')) reason="CHAT_GENERATING";
     else if(matches('[role="dialog"], [aria-modal="true"]')) reason="CHAT_DIALOG_OPEN";
     else if(matches('input[type="password"]')) reason="CHAT_AUTH_REQUIRED";
     else if(!users.length) reason="CHAT_NO_USER_MESSAGE";
-    else if(last?.getAttribute("data-message-author-role")!=="assistant") reason="CHAT_AWAITING_RESPONSE";
-    else if(!last.innerText?.trim()) reason="CHAT_RESPONSE_EMPTY";
-    else if(!composer||composer.disabled||composer.getAttribute("aria-disabled")==="true") reason="CHAT_COMPOSER_UNAVAILABLE";
-    // Historical tool widgets and messages may keep aria-busy/error markers.
-    // Do not interpret those as generation of the current chat.
-    else if(form&&(form.getAttribute("aria-busy")==="true"||matches('[aria-busy="true"]',form))) reason="CHAT_COMPOSER_BUSY";
-    else if(last.getAttribute("aria-busy")==="true") reason="CHAT_RESPONSE_BUSY";
+    else if(!composer||!form) reason="CHAT_COMPOSER_UNAVAILABLE";
+    else if(form.getAttribute("aria-busy")==="true"||matches('[aria-busy="true"]',form)) reason="CHAT_COMPOSER_BUSY";
+    else if(last?.getAttribute("aria-busy")==="true") reason="CHAT_RESPONSE_BUSY";
     else if([...document.querySelectorAll('[role="alert"]')].some(e=>visible(e)&&Boolean(e.innerText?.trim())&&!e.closest('[data-message-author-role]'))) reason="CHAT_ALERT_VISIBLE";
-    else if(matches('[data-testid*="confirm"]',last)||matches('[data-testid*="error"]',last)) reason="CHAT_RESPONSE_ACTION_REQUIRED";
+    // A ready Send or Voice control is positive evidence of an idle Composer
+    // even if the last turn was stopped before the assistant produced text.
+    else if(!completed&&!send&&!idleVoice) reason="CHAT_IDLE_UNCONFIRMED";
+    else if(draft&&!send) reason="CHAT_DRAFT_SEND_DISABLED";
     return {ready:reason===null,reason,userCount:users.length,lastUserId:users.at(-1)?.getAttribute("data-message-id")||null};
   }});
   return result[0]?.result||{ready:false,reason:"CHAT_STATE_UNAVAILABLE"};
