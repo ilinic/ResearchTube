@@ -338,6 +338,7 @@ def run_tray(serve, installation: Path, workspace, version: str, scheduled_creat
             last_state = worker.state
             status.set(f"Agent: {last_state}")
             icon.title = f"ResearchTube Agent {version} — {last_state}"
+            icon.update_menu()
         if worker.state == "Failed" and not failed_shown:
             root.deiconify()
             failed_shown = True
