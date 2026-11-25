@@ -119,7 +119,7 @@ const reset = () => {
   submitted = false; committed = false; suppressed = 0; inserted = "";
 };
 const mediaTasks = new Map();
-const ui = () => ({ userCount: submitted ? 1 : 0, lastUserId: submitted ? "message" : null, generating: submitted,
+const ui = () => ({ chatPath: "/c/test", userCount: submitted ? 1 : 0, lastUserId: submitted ? "message" : null, generating: submitted,
   sendPresent: true, sendDisabled: submitted, textEmpty: !state.text, attachments: state.attachments });
 let ack = true, url = "https://chatgpt.com/c/test";
 const sendComposer = new Function("deps", "with(deps) { return (" + senderSource + "); }")({
@@ -134,6 +134,8 @@ const sendComposer = new Function("deps", "with(deps) { return (" + senderSource
   chatComposerPageExpression: () => "", cdpEvaluate: async () => ({ value: true }),
   cdpReadMediaSubmissionState: async () => ui(),
   cdpClickEnabledSendButton: async (_id, _timeout, check, commit) => { await check(); commit(); committed = true; if (ack) { state.text = ""; state.attachments = 0; submitted = true; } },
+  cdpDispatchEnabledSend: async (_id, _timeout, check, commit) => { await check(); commit(); committed = true; if (ack) { state.text = ""; state.attachments = 0; submitted = true; } },
+  sleep: async () => {},
   updateComposerWatchdog: async () => { suppressed++; },
   localAgentError: (code, message) => Object.assign(new Error(message), { code }), consoleAction: () => {}
 });
@@ -171,6 +173,48 @@ reset(); ack = false;
 assert.equal((await sendComposer(42, { completionText: "done" })).sent, false);
 assert.equal(committed, true); assert.equal(suppressed, 1, "an uncertain committed click must not be replayed");
 ack = true;
+
+// Scheduled sends a ready existing text draft unchanged, including a draft
+// suppressed by an earlier watchdog release. It does not send attachments.
+let reservations=0, dispatches=0;
+const scheduledOptions={completionText:"continue",chatPath:"/c/test",scheduled:true,
+  beforeInsert:async()=>{reservations++;}, beforeDispatch:async()=>{dispatches++;}};
+reset(); state.text="existing user draft"; state.stableMs=0; state.blocked=true;
+assert.deepEqual(await sendComposer(42,scheduledOptions),{sent:true,source:"draft"});
+assert.equal(inserted,""); assert.equal(reservations,1); assert.equal(dispatches,1);
+reset();
+assert.deepEqual(await sendComposer(42,scheduledOptions),{sent:true,source:"continuation"});
+assert.equal(inserted,"continue");
+reset(); state.text="draft with attachment"; state.attachments=1;
+assert.equal((await sendComposer(42,scheduledOptions)).reason,"SCHEDULED_ATTACHMENTS_PRESENT");
+assert.equal(committed,false); assert.equal(state.text,"draft with attachment");
+reset(); state.text="editing";
+assert.equal((await sendComposer(42,{...scheduledOptions,beforeInsert:async()=>{state.text+=" changed";state.revision++;}})).reason,"SCHEDULED_DRAFT_CHANGED");
+assert.equal(committed,false);
+reset(); state.text="unconfirmed"; ack=false;
+const unconfirmed=await sendComposer(42,scheduledOptions);
+assert.equal(unconfirmed.reason,"sendUnconfirmed"); assert.equal(unconfirmed.committed,true);
+ack=true;
+
+// Pending work diagnostics distinguish the target chat from unbound work.
+const calls=new Map(), media=new Map(), library=new Map();
+let browserPending=false, artifactPending=false, deliveryPending=false;
+const pending=new Function("deps","with(deps){return ("+extract(source,"scheduledPending")+");}")({
+  ensureMediaToChatLoaded:async()=>{},ensureLibraryStoreLoaded:async()=>{},mediaToChatTasks:media,libraryStoreTasks:library,
+  activeScheduledMcpCalls:calls,browserAgent:{hasPendingChat:()=>browserPending},
+  artifactTaskManager:{ensure:async()=>{},hasPendingChat:()=>artifactPending},
+  taskCompletionDelivery:{ensure:async()=>{},hasPendingChat:()=>deliveryPending}
+});
+assert.equal(await pending(42),null);
+calls.set(81,1); assert.equal(await pending(42),null); calls.clear();
+calls.set(42,1); assert.equal(await pending(42),"MCP_CALL_RUNNING"); calls.clear();
+calls.set(null,1); assert.equal(await pending(42),"MCP_CALL_UNBOUND"); calls.clear();
+browserPending=true; assert.equal(await pending(42),"BROWSER_TASK_RUNNING"); browserPending=false;
+artifactPending=true; assert.equal(await pending(42),"ARTIFACT_TASK_RUNNING"); artifactPending=false;
+deliveryPending=true; assert.equal(await pending(42),"TASK_COMPLETION_PENDING"); deliveryPending=false;
+media.set("upload",{status:"working",target:{tabId:42}});
+assert.equal(await pending(42),"MEDIA_DELIVERY_PENDING"); media.clear();
+library.set("store",{status:"working",tabId:null}); assert.equal(await pending(42),"LIBRARY_DELIVERY_UNBOUND"); library.clear();
 
 // Check the shipped worker's public schemas and every asynchronous producer.
 const event = { addListener() {} };
