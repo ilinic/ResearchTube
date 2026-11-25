@@ -1,3 +1,4 @@
+import { MEMORY_TOOL_NAMES, memoryToolDefinitions } from "./scheduled-memory-tools.js";
 import { createLocalMcpConnection } from "./local-mcp.js";
 import { LOCAL_YOUTUBE_TOOLS, LOCAL_BROWSER_TOOLS, localBrowserDefinitions, localResearchDefinitions, projectCommentRecord, validateLocalArguments } from "./local-mcp-tools.js";
 import { createBrowserOwner } from "./browser-owner.js";
@@ -64,6 +65,7 @@ const MCP_TOOL_SETTINGS = Object.freeze({
   system_get_chat_context: { group: "system" }, system_chat_context_status: { group: "system" }, system_chat_context_cancel: { group: "system" }, system_get_diagnostics: { group: "system" },
   timer_start: { group: "timers" }, timer_status: { group: "timers" }, timer_cancel: { group: "timers" },
   system_speech_list_voices: { group: "speech" }, system_speech_speak: { group: "speech" }, system_speech_status: { group: "speech" }, system_speech_cancel: { group: "speech" },
+  db_sql: { group: "workspace" }, workspace_read_text: { group: "workspace" }, workspace_write_text: { group: "workspace" },
   workspace_list: { group: "workspace" }, workspace_stat: { group: "workspace" }, workspace_open_folder: { group: "workspace" }, workspace_mkdir: { group: "workspace" }, workspace_move: { group: "workspace" }, workspace_delete: { group: "workspace" },
   media_probe: { group: "media" }, media_clip: { group: "media" }, media_clip_get_task: { group: "media" }, media_clip_cancel_task: { group: "media" }, media_capture_frame: { group: "media" }, media_capture_frame_get_task: { group: "media" }, media_capture_frame_task_diagnostics: { group: "media" }, media_capture_frame_cancel_task: { group: "media" }, media_capture_screen: { group: "media" }, media_image_crop: { group: "media" }, media_show: { group: "media" }, media_image_inspect: { group: "media" },
   visual_map_create: { group: "visualMaps" }, visual_map_get_task: { group: "visualMaps" }, visual_map_cancel_task: { group: "visualMaps" },
@@ -1615,7 +1617,7 @@ function toolDefinitions() {
       outputSchema: customToolCancelSchema
     }
   ];
-  return taskContextDefinitions([...artifactToolDefinitions(definitions, mediaToChatTaskSchema, MEDIA_TO_CHAT_WIDGET_URI, localAgentReadAnnotations, localWorkspaceWriteAnnotations), ...browserToolDefinitions(), ...customLifecycleDefinitions, ...CUSTOM_MCP_TOOLS]);
+  return taskContextDefinitions([...artifactToolDefinitions(definitions, mediaToChatTaskSchema, MEDIA_TO_CHAT_WIDGET_URI, localAgentReadAnnotations, localWorkspaceWriteAnnotations), ...browserToolDefinitions(), ...memoryToolDefinitions(), ...customLifecycleDefinitions, ...CUSTOM_MCP_TOOLS]);
 }
 
 function isPrivateMcpTool(tool) {
@@ -6348,6 +6350,11 @@ async function handleMcpRequest(request) {
     let args;
     try { args = publicWorkspaceArguments(name, request.params.arguments ?? {}, toolDefinitions()); }
     catch (error) { return toolError(request.id, error); }
+    if (MEMORY_TOOL_NAMES.includes(name)) {
+      const definition=memoryToolDefinitions().find(t=>t.name===name);
+      if (!validateLocalArguments(definition.inputSchema,args)) return toolError(request.id,localAgentError("INVALID_ARGUMENT","Invalid memory arguments."));
+      return executeToolCall(request.id,name,args,()=>callSharedMemory(name,args));
+    }
     if (ARTIFACT_TOOLS.includes(name)) return executeArtifactStart(request.id, name, args);
     if (BROWSER_TOOL_NAMES.includes(name)) {
       const target = cloudConnection.targetForRequest(request.id);
@@ -6816,6 +6823,7 @@ async function executeToolCall(id, tool, input, work, operation = null) {
 }
 
 function summarizeCommandInput(tool, input) {
+  if (MEMORY_TOOL_NAMES.includes(tool)) return {bytes:new TextEncoder().encode(input.sql ?? input.text ?? "").byteLength};
   if (TIMER_TOOL_NAMES.includes(tool)) return { taskId: input.taskId ?? null, duration: input.duration ?? null, unit: input.unit ?? null, until: input.until ?? null, clockSource: input.clockSource ?? "system", timeZone: input.timeZone ?? null };
   if (tool === "media_clip") return { workspacePath: typeof input.path === "string" ? input.path : null, outputFormat: input.outputFormat ?? null, segmentCount: Array.isArray(input.segments) ? input.segments.length : null, outputWorkspaceDirectory: typeof input.outputDir === "string" ? input.outputDir : "clips" };
   if (tool === "media_clip_get_task" || tool === "media_clip_cancel_task") return { taskId: typeof input.taskId === "string" ? input.taskId : null };
@@ -7716,9 +7724,21 @@ const localMcpConnection = createLocalMcpConnection({
   port: async () => normalizeAgentPort((await getConfig()).agentPort),
   fetch: (url, options) => fetch(url, options), webSocket: url => new WebSocket(url),
   setInterval: (...args) => setInterval(...args), clearInterval: id => clearInterval(id),
-  enabledTools: async () => (await mcpToolSettingsCatalog()).filter(t => t.enabled && (LOCAL_YOUTUBE_TOOLS.includes(t.name) || LOCAL_BROWSER_TOOLS.includes(t.name) || localResearchDefinitions().some(d => d.name === t.name))).map(t => t.name),
+  enabledTools: async () => (await mcpToolSettingsCatalog()).filter(t => t.enabled && (LOCAL_YOUTUBE_TOOLS.includes(t.name) || LOCAL_BROWSER_TOOLS.includes(t.name) || MEMORY_TOOL_NAMES.includes(t.name) || localResearchDefinitions().some(d => d.name === t.name))).map(t => t.name),
   dispatch: dispatchLocalMcp
 });
+async function callSharedMemory(name,args) {
+  const port=normalizeAgentPort((await getConfig()).agentPort);
+  await requireCompatibleAgent(port);
+  const base=`http://127.0.0.1:${port}/internal/local-mcp/`;
+  const bootstrap=await fetch(base+"bootstrap",{method:"POST",headers:{"Content-Type":"application/json","X-ResearchTube-Extension":chrome.runtime.id},body:"{}"});
+  if(!bootstrap.ok) throw localAgentError("AGENT_UNAVAILABLE","Local memory authorization failed.");
+  const {token}=await bootstrap.json();
+  const reply=await fetch(base+"memory",{method:"POST",headers:{"Content-Type":"application/json","X-ResearchTube-Token":token},body:JSON.stringify({name,arguments:args})});
+  const value=await reply.json();
+  if(!reply.ok) throw localAgentError(value.error?.code || "WORKSPACE_MEMORY_ERROR",value.error?.message || "Local memory request failed.");
+  return value;
+}
 async function requireLocalYoutubeLogin() {
   const { tab } = await getOrCreateYouTubeTab();
   const result = await sendYouTubePageTool(tab.id, { type: "youtube-ui-tool", action: "account-state", args: {} });

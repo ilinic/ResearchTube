@@ -1109,6 +1109,26 @@ class WorkspacePathResolver:
         return relative
 
 
+try:
+    from . import scheduled_memory
+except ImportError:
+    import scheduled_memory
+
+
+def memory_path(logical):
+    return WorkspacePathResolver().resolve_destination(logical, field_name="workspacePath", error_code="WORKSPACE_PATH_INVALID").physical_path
+
+
+async def memory_tool_call(name, arguments):
+    try:
+        return await asyncio.to_thread(scheduled_memory.call, memory_path, name, arguments)
+    except scheduled_memory.MemoryOperationError as error:
+        log(f"Shared memory operation {name}: {error.code}", error=True)
+        raise AgentApiError(error.code, str(error)) from error
+    except (OSError, UnicodeError, ValueError) as error:
+        raise AgentApiError("WORKSPACE_MEMORY_ERROR", "Shared memory I/O failed.") from error
+
+
 def resolve_output_directory(value: Any) -> tuple[Path, str]:
     resolver = WorkspacePathResolver()
     resolved = resolver.resolve_destination(
@@ -6459,6 +6479,7 @@ async def serve(port: int, on_started: Callable[[], None] | None = None) -> None
     # Freeze the root for this run: live edits must not redirect active tasks,
     # media viewers or shares into a different directory mid-operation.
     WORKSPACE_PATH = startup_workspace_path()
+    await asyncio.to_thread(scheduled_memory.initialize, memory_path)
     initial_health = initialize_health_snapshot()
     server = await asyncio.start_server(handle_client, host="127.0.0.1", port=port)
     log_startup_health(initial_health, port)

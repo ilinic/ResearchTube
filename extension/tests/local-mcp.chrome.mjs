@@ -28,7 +28,7 @@ try {
   const endpoint=`http://127.0.0.1:${port}/mcp`;
   client=new Client({name:'local-youtube-integration',version:'1'});
   await client.connect(new StreamableHTTPClientTransport(new URL(endpoint)));
-  assert.equal((await client.listTools()).tools.length,24);
+  assert.equal((await client.listTools()).tools.length,27);
   const call=async(name,args={})=>(await client.callTool({name,arguments:args})).structuredContent;
   assert.equal((await call('youtube_bridge_status')).connected,false);
   // Put the simulated provider listener before the real MAIN bridge so its

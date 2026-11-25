@@ -274,3 +274,7 @@ Optional `tabId` on asynchronous launches carries the destination ChatGPT tab re
 ### Browser-wide read-only access
 
 `site_list_tabs` includes `otherTabs` after the current group, organized by window/group. Read external tabs using `scope: "all"` on read/resource tools; `site_interact` is group-only. Ungrouped chats can read. Restricted browser tabs are metadata-only. Use `scope: "group"` to list just the current group. The two lists have independent pagination.
+
+### Shared scheduled memory
+
+`db_sql({sql})` executes a bounded atomic SQLite script on `scheduled/database.sqlite`, returning ordered result sets. The Agent owns the transaction; omit BEGIN/COMMIT. BLOBs are `base64:` strings; unsafe file operations are denied. `workspace_read_text({workspacePath})` and `workspace_write_text({workspacePath,text})` read/atomically replace UTF-8 files up to 32 KiB. Coordinate concurrent updates via SQLite or distinct files. These tools are also available in local MCP.

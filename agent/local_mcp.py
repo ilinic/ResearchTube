@@ -26,6 +26,7 @@ except ImportError:
 
 MAX_MESSAGE = 2 * 1024 * 1024
 BASE_TOOLS = frozenset(("youtube_search", "youtube_get_video", "youtube_get_transcript", "youtube_get_comments", "youtube_get_comment_replies", "youtube_get_channel_videos", "youtube_get_channel_playlists", "youtube_get_playlist_videos"))
+MEMORY_TOOLS = frozenset(("db_sql", "workspace_read_text", "workspace_write_text"))
 BROWSER_TOOLS = frozenset(("site_open", "site_interact", "site_list_tabs", "site_read", "site_get_children", "site_get_node", "site_get_text", "site_get_images", "site_get_files", "site_files_status", "site_files_cancel"))
 CATALOG = json.loads(CATALOG_JSON)
 DEFINITIONS = {tool["name"]: tool for tool in CATALOG}
@@ -217,6 +218,19 @@ class LocalMcpService:
                 writer.write(response("403 Forbidden"))
             else:
                 writer.write(response("200 OK", {"token": self.token, "interfaceVersion": self.agent.INTERFACE_VERSION}))
+        elif path == "/internal/local-mcp/memory":
+            origin = headers.get("origin")
+            if method != "POST" or origin != f"chrome-extension://{EXTENSION_ID}" or not secrets.compare_digest(headers.get("x-researchtube-token", ""), self.token):
+                writer.write(response("403 Forbidden"))
+            else:
+                try:
+                    payload = json.loads(body)
+                    if not isinstance(payload, dict) or payload.get("name") not in MEMORY_TOOLS or set(payload) != {"name", "arguments"}:
+                        raise LocalError("INVALID_ARGUMENT")
+                    value = await self.agent.memory_tool_call(payload["name"], payload["arguments"])
+                    writer.write(response("200 OK", value))
+                except Exception as error:
+                    writer.write(response("400 Bad Request", {"error": {"code": getattr(error, "code", "INVALID_ARGUMENT"), "message": str(error) if hasattr(error, "code") else "Memory request failed."}}))
         elif path == "/internal/local-mcp/bridge":
             await self.attach(method, headers, reader, writer)
             return
@@ -345,6 +359,11 @@ class LocalMcpService:
             return {**envelope, "error": {"code": -32603, "message": "The local MCP operation failed unexpectedly."}}
 
     async def call(self, name, arguments):
+        if name in MEMORY_TOOLS:
+            try:
+                return await self.agent.memory_tool_call(name, arguments)
+            except Exception as error:
+                raise LocalError(getattr(error, "code", "WORKSPACE_MEMORY_ERROR"), str(error)) from error
         if name in BASE_TOOLS or name in BROWSER_TOOLS:
             return await self.browser(name, arguments)
         if name == "youtube_bridge_status":
