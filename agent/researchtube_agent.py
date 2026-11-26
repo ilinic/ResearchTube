@@ -48,8 +48,8 @@ except ImportError:
     from task_history import TaskHistory
     from browser_resources import save_browser_resource
 
-AGENT_VERSION = "2.8.12"
-INTERFACE_VERSION = 91
+AGENT_VERSION = "2.8.13"
+INTERFACE_VERSION = 92
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
 MAX_GOOGLE_TRANSLATE_AUDIO_BYTES = 16 * 1024 * 1024
@@ -1124,6 +1124,10 @@ def memory_path(logical):
 
 SQL_QUEUE = None
 READ_QUEUE = None
+SHARED_MEMORY_PATH = None
+SHARED_WRITE_QUEUE = None
+SHARED_READ_QUEUE = None
+SHARED_WAKE = None
 
 
 async def memory_tool_call(name, arguments):
@@ -1135,6 +1139,8 @@ async def memory_tool_call(name, arguments):
             value = await asyncio.to_thread(reliability.TRACE.query, arguments)
         elif name == "system_export_trace":
             value = await asyncio.to_thread(reliability.TRACE.export, memory_path("scheduled/reliability-trace.jsonl"), arguments)
+        elif name in ("memory_append","memory_read"):
+            value=await shared_memory_tool(name,arguments)
         elif name == "db_query":
             if READ_QUEUE is None:
                 READ_QUEUE=scheduled_memory.ReadQueue()
@@ -6554,13 +6560,48 @@ async def scheduled_loop(settings):
         log("Scheduled activation stopped.")
 
 
-async def outbox_loop():
-    # One consumer, all calls through the same FIFO. Idle waits prevent polling
-    # storms; persistent pending state survives process termination.
+async def shared_memory_tool(name,arguments):
+    if SHARED_MEMORY_PATH is None:
+        raise AgentApiError("MEMORY_UNAVAILABLE","Shared memory is not initialized.")
+    if name=="memory_read":
+        return await SHARED_READ_QUEUE.run(SHARED_MEMORY_PATH,arguments,"memory_read")
+    args=dict(arguments)
+    args.setdefault("operation_id","sm."+secrets.token_hex(16))
+    key=args["operation_id"]
+    try:
+        await SHARED_WRITE_QUEUE.run(SHARED_MEMORY_PATH,args,"__memory_submit")
+    except scheduled_memory.MemoryOperationError as error:
+        if error.executionState=="unknown":
+            SHARED_WAKE.set()
+            return {"state":"unknown","operation_id":key}
+        raise
+    SHARED_WAKE.set()
+    deadline=time.monotonic()+6
     while True:
         try:
-            worked = await SQL_QUEUE.run(memory_path, {}, "__outbox_process")
-            await asyncio.sleep(.1 if worked else 5)
+            state=await SHARED_READ_QUEUE.run(SHARED_MEMORY_PATH,{"operation_id":key},"__memory_status")
+        except (scheduled_memory.MemoryOperationError,OSError):
+            return {"state":"unknown","operation_id":key}
+        if state["state"] not in ("pending","unknown") or time.monotonic()>=deadline:
+            return state
+        await asyncio.sleep(.25)
+
+
+async def outbox_loop(queue,resolve,wake=None):
+    # Same consumer implementation for independent databases.
+    while True:
+        try:
+            worked=await queue.run(resolve,{},"__outbox_process")
+            if worked:
+                await asyncio.sleep(.1)
+            elif wake is None:
+                await asyncio.sleep(5)
+            else:
+                try:
+                    await asyncio.wait_for(wake.wait(),5)
+                except asyncio.TimeoutError:
+                    pass
+                wake.clear()
         except Exception as error:
             reliability.emit("OUTBOX_WORKER_FAILED",level="ERROR",code=getattr(error,"code","DB_OUTBOX_ERROR"),exceptionType=type(error).__name__)
             await asyncio.sleep(15)
@@ -6578,6 +6619,7 @@ async def initialize_scheduled_memory() -> None:
 
 async def serve(port: int, on_started: Callable[[], None] | None = None) -> None:
     global WORKSPACE_PATH, STARTUP_PROMPTS, SQL_QUEUE, READ_QUEUE
+    global SHARED_MEMORY_PATH, SHARED_WRITE_QUEUE, SHARED_READ_QUEUE, SHARED_WAKE
     STARTUP_PROMPTS = configured_startup_prompts()
     # Freeze the root for this run: live edits must not redirect active tasks,
     # media viewers or shares into a different directory mid-operation.
@@ -6610,6 +6652,15 @@ async def serve(port: int, on_started: Callable[[], None] | None = None) -> None
     except Exception:
         log("Reliability diagnostic writer unavailable; continuing in memory.", error=True)
     await initialize_scheduled_memory()
+    SHARED_MEMORY_PATH=scheduled_memory.SharedMemoryPath(ROOT/"shared-memory",WORKSPACE_PATH)
+    SHARED_WRITE_QUEUE=scheduled_memory.SqlQueue(queue_capacity)
+    SHARED_READ_QUEUE=scheduled_memory.ReadQueue(readers)
+    SHARED_WAKE=asyncio.Event()
+    try:
+        await asyncio.to_thread(scheduled_memory.initialize,SHARED_MEMORY_PATH)
+    except Exception as error:
+        reliability.emit("SHARED_MEMORY_INITIALIZE_FAILED",level="ERROR",exceptionType=type(error).__name__)
+        log("Shared memory initialization failed; other Agent tools remain available.",error=True)
     initial_health = initialize_health_snapshot()
     server = await asyncio.start_server(handle_client, host="127.0.0.1", port=port)
     log_startup_health(initial_health, port)
@@ -6617,7 +6668,8 @@ async def serve(port: int, on_started: Callable[[], None] | None = None) -> None
         on_started()
     diagnostics = asyncio.create_task(collect_startup_health(initial_health), name="startup-health")
     scheduled = asyncio.create_task(scheduled_loop(scheduled_settings), name="scheduled-activation")
-    outbox = asyncio.create_task(outbox_loop(), name="sql-outbox")
+    outbox = asyncio.create_task(outbox_loop(SQL_QUEUE,memory_path), name="sql-outbox")
+    shared_outbox=asyncio.create_task(outbox_loop(SHARED_WRITE_QUEUE,SHARED_MEMORY_PATH,SHARED_WAKE),name="shared-memory-outbox")
     try:
         async with server:
             await server.serve_forever()
@@ -6625,7 +6677,8 @@ async def serve(port: int, on_started: Callable[[], None] | None = None) -> None
         diagnostics.cancel()
         scheduled.cancel()
         outbox.cancel()
-        await asyncio.gather(diagnostics, scheduled, outbox, return_exceptions=True)
+        shared_outbox.cancel()
+        await asyncio.gather(diagnostics, scheduled, outbox, shared_outbox, return_exceptions=True)
         async with PUBLIC_SHARE_LOCK:
             await stop_public_share_unlocked()
         await LOCAL_MCP.shutdown()

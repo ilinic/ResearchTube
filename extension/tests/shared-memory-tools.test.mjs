@@ -1,0 +1,14 @@
+import assert from "node:assert/strict";
+import {MEMORY_TOOL_NAMES,memoryToolDefinitions} from "../scheduled-memory-tools.js";
+const defs=memoryToolDefinitions();
+const append=defs.find(x=>x.name==="memory_append"),read=defs.find(x=>x.name==="memory_read");
+assert.ok(MEMORY_TOOL_NAMES.includes(append.name)&&MEMORY_TOOL_NAMES.includes(read.name));
+assert.deepEqual(append.inputSchema.required,["content"]);
+assert.equal(append.inputSchema.additionalProperties,false);
+assert.equal(append.annotations.readOnlyHint,false);
+assert.equal(append.inputSchema.properties.content.maxLength,16384);
+assert.equal(read.annotations.readOnlyHint,true);
+assert.deepEqual(read.inputSchema.required,[]);
+assert.equal(read.inputSchema.properties.limit.maximum,100);
+assert.ok(read.outputSchema.properties.next_before_id);
+console.log("Cross-chat memory tool contract: ok");

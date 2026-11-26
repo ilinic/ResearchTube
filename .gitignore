@@ -12,3 +12,6 @@ agent/workspace/demo/*
 
 # Local desktop diagnostics
 agent/logs/
+
+# Private cross-chat journal, never commit user content
+agent/shared-memory/

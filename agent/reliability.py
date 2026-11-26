@@ -16,7 +16,7 @@ import uuid
 
 REQUEST = ContextVar("reliability_request", default=None)
 TOKEN = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
-TEXT_FIELDS = frozenset(("requestId", "tool", "component", "event", "level", "instanceId", "version", "code", "sqliteName", "stage", "method", "status", "executionState", "exceptionType", "schedulerTickId", "taskId"))
+TEXT_FIELDS = frozenset(("requestId", "tool", "component", "event", "level", "instanceId", "version", "code", "sqliteName", "stage", "method", "status", "executionState", "exceptionType", "schedulerTickId", "taskId", "operationId"))
 NUM_FIELDS = frozenset(("attempt", "tabId", "chatTabId", "groupId", "durationMs", "monoMs", "atMs", "bytes", "statementCount", "statementIndex", "rowsAffected", "sqliteCode", "httpStatus", "queueDepth"))
 INSTANCE = uuid.uuid4().hex
 

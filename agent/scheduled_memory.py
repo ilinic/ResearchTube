@@ -13,6 +13,8 @@ import sqlite3
 import tempfile
 import threading
 import time
+import uuid
+from pathlib import Path
 
 try:
     from .reliability import emit
@@ -31,6 +33,35 @@ _OPERATION = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 _DEDUP_TABLE = "_rt_internal_operations"
 _DEDUP_LIMIT = 64 * 1024 * 1024
 _DEDUP_COUNT = 100000
+MEMORY_PREFIX = "-- RT_SHARED_MEMORY_V1\n"
+MEMORY_CONTENT_BYTES = 16 * 1024
+MEMORY_RESPONSE_BYTES = 128 * 1024
+
+
+class SharedMemoryPath:
+    """Private file namespace; reuse the same connection and outbox code."""
+    def __init__(self, root, workspace):
+        self.root=Path(root)
+        self.workspace=Path(workspace)
+        self.lock=threading.Lock()
+
+    def __call__(self, logical):
+        root=self.root.resolve()
+        workspace=self.workspace.resolve()
+        if self.root.is_symlink() or getattr(self.root,"is_junction",lambda:False)() or root==workspace or workspace in root.parents or root in workspace.parents:
+            fail("MEMORY_PATH_INVALID","Shared memory must be a private directory outside Workspace.")
+        if logical=="scheduled":
+            return root
+        if logical not in (DB_FILE,DB_FILE+"-wal",DB_FILE+"-shm",DB_FILE+"-journal"):
+            fail("MEMORY_PATH_INVALID","Invalid shared database path.")
+        path=root/logical.split("/")[-1]
+        if path.is_symlink() or getattr(path,"is_junction",lambda:False)():
+            fail("MEMORY_PATH_INVALID","Shared memory files cannot be redirects.")
+        return path
+
+
+def db_lock(resolve):
+    return resolve.lock if isinstance(resolve,SharedMemoryPath) else _DB_LOCK
 
 
 class SqlQueue:
@@ -42,7 +73,7 @@ class SqlQueue:
         self.depth = 0
 
     async def run(self, resolve, arguments, name):
-        if name not in ("db_outbox_submit","db_outbox_status","db_outbox_list","db_outbox_ack","__outbox_process"):
+        if name not in ("db_outbox_submit","db_outbox_status","db_outbox_list","db_outbox_ack","__outbox_process","__memory_submit"):
             fail("INVALID_ARGUMENT","Only outbox operations enter the write queue.")
         if self.depth >= self.capacity:
             fail("DB_QUEUE_FULL", "SQL queue is full; no SQL executed.")
@@ -80,7 +111,9 @@ class ReadQueue:
         self.capacity=capacity
         self.depth=0
 
-    async def run(self, resolve, arguments):
+    async def run(self, resolve, arguments, name="db_query"):
+        if name not in ("db_query","memory_read","__memory_status"):
+            fail("INVALID_ARGUMENT","Invalid read operation.")
         if self.depth>=self.capacity:
             fail("DB_READ_QUEUE_FULL","Read queue full; retry later.")
         self.depth+=1
@@ -90,7 +123,7 @@ class ReadQueue:
             except asyncio.TimeoutError:
                 fail("DB_READ_QUEUE_TIMEOUT","Read queue deadline reached.")
             try:
-                task=asyncio.create_task(asyncio.to_thread(call,resolve,"db_query",arguments))
+                task=asyncio.create_task(asyncio.to_thread(call,resolve,name,arguments))
                 try:
                     return await asyncio.shield(task)
                 except asyncio.CancelledError:
@@ -160,11 +193,25 @@ def ensure_dedup(connection):
     connection.execute("CREATE TABLE IF NOT EXISTS _rt_internal_outbox (operation_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, sql TEXT NOT NULL, created_at INTEGER NOT NULL, state TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL DEFAULT 0, code TEXT)")
 
 
+def ensure_shared_memory(connection):
+    connection.execute("""CREATE TABLE IF NOT EXISTS shared_memory (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+        topic TEXT NOT NULL DEFAULT '',
+        source_chat TEXT,
+        content TEXT NOT NULL,
+        operation_id TEXT NOT NULL UNIQUE
+    )""")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_shared_memory_topic_id ON shared_memory(topic,id)")
+
+
 def initialize(resolve):
-    with _DB_LOCK:
+    with db_lock(resolve):
         con = connect(resolve)
         try:
             ensure_dedup(con)
+            if isinstance(resolve,SharedMemoryPath):
+                ensure_shared_memory(con)
         finally:
             con.close()
 
@@ -296,14 +343,15 @@ def db_query(resolve,sql):
 
 
 def _execute_write(resolve, sql, operation_id):
-    parts = statements(sql)
+    memory = decode_memory(sql) if isinstance(resolve,SharedMemoryPath) else None
+    parts = [] if memory is not None else statements(sql)
     operation_key(operation_id)
     # Direct Python callers and the Agent's FIFO queue share this guard.
-    with _DB_LOCK:
+    with db_lock(resolve):
         deadline = time.monotonic() + 8
         for attempt in range(1, 5):
             try:
-                return _transaction(resolve, sql, parts, operation_id, deadline, attempt)
+                return _transaction(resolve, sql, parts, operation_id, deadline, attempt, memory)
             except MemoryOperationError as error:
                 if error.code not in ("DB_BUSY", "DB_LOCKED") or error.executionState not in ("not_started", "rolled_back"):
                     raise
@@ -318,7 +366,7 @@ def _execute_write(resolve, sql, operation_id):
                 emit("RETRY_STARTED", attempt=attempt+1)
 
 
-def _transaction(resolve, sql, parts, operation_id, deadline, attempt):
+def _transaction(resolve, sql, parts, operation_id, deadline, attempt, memory=None):
     connection = None
     index = None
     stage = "connect"
@@ -350,6 +398,15 @@ def _transaction(resolve, sql, parts, operation_id, deadline, attempt):
             count, size = connection.execute("SELECT count(*),coalesce(sum(length(CAST(result AS BLOB))+length(operation_id)+length(fingerprint)+128),0) FROM _rt_internal_operations").fetchone()
             if count >= _DEDUP_COUNT or size + MAX_RESPONSE_BYTES + 1024 > _DEDUP_LIMIT:
                 fail("DB_DEDUP_FULL", "Operation ledger is full; no SQL executed. Do not remove keys without reconciliation.")
+        if memory is not None:
+            ensure_shared_memory(connection)
+            topic,source,content=memory
+            before=connection.total_changes
+            connection.execute("INSERT INTO shared_memory(topic,source_chat,content,operation_id) VALUES (?,?,?,?) ON CONFLICT(operation_id) DO NOTHING",(topic,source,content,operation_id))
+            row=connection.execute("SELECT id,created_at,topic,source_chat,content FROM shared_memory WHERE operation_id=?",(operation_id,)).fetchone()
+            if not row or tuple(row[2:])!=(topic,source,content):
+                fail("DB_OPERATION_CONFLICT","Operation key already belongs to different memory data.")
+            results.append({"columns":["id","created_at"],"rows":[list(row[:2])],"rowsAffected":connection.total_changes-before,"truncated":False})
         connection.set_authorizer(authorize)
         for index, statement in enumerate(parts):
             statement_started = time.monotonic()
@@ -388,7 +445,10 @@ def _transaction(resolve, sql, parts, operation_id, deadline, attempt):
             connection.execute("INSERT INTO _rt_internal_operations VALUES (?,?,?,?)", (operation_id, fingerprint, encoded, int(time.time())))
         stage = "commit"
         if operation_id is not None:
-            connection.execute("UPDATE _rt_internal_outbox SET state=\'committed\',code=NULL WHERE operation_id=?", (operation_id,))
+            if memory is not None:
+                connection.execute("DELETE FROM _rt_internal_outbox WHERE operation_id=?", (operation_id,))
+            else:
+                connection.execute("UPDATE _rt_internal_outbox SET state=\'committed\',code=NULL WHERE operation_id=?", (operation_id,))
         connection.execute("COMMIT")
         stage = "committed"
         emit("SQL_COMMITTED", attempt=attempt, executionState="committed", statementCount=len(parts), rowsAffected=sum(r["rowsAffected"] for r in results), durationMs=(time.monotonic()-started)*1000)
@@ -487,12 +547,14 @@ def operation_key(value):
 def _outbox_transaction(resolve, work):
     # One owner for all internal database operations. Never hold the lock over
     # browser/network work. The outbox is in the same DB, not in the trace.
-    with _DB_LOCK:
+    with db_lock(resolve):
         con = None
         try:
             con = connect(resolve)
             con.execute("BEGIN IMMEDIATE")
             ensure_dedup(con)
+            if isinstance(resolve,SharedMemoryPath):
+                ensure_shared_memory(con)
             result = work(con)
             con.commit()
             return result
@@ -525,7 +587,10 @@ def _outbox_state(con,key):
 
 def outbox_submit(resolve,key,sql):
     key=operation_key(key)
-    statements(sql)  # Validate size and statement count before durable admission.
+    if isinstance(resolve,SharedMemoryPath):
+        decode_memory(sql)
+    else:
+        statements(sql)  # Validate size and statement count before durable admission.
     digest=hashlib.sha256(sql.encode("utf-8")).hexdigest()
     def submit(con):
         for table in ("_rt_internal_operations","_rt_internal_outbox"):
@@ -605,19 +670,155 @@ def outbox_process_one(resolve):
     job=outbox_claim(resolve)
     if job is None:
         return False
-    emit("OUTBOX_PROCESSING",attempt=job["attempts"])
+    emit("OUTBOX_PROCESSING",attempt=job["attempts"],operationId=job["operationId"],tool="memory_append" if isinstance(resolve,SharedMemoryPath) else "db_outbox_submit")
     try:
         _execute_write(resolve,job["sql"],job["operationId"])
-        emit("OUTBOX_COMMITTED",executionState="committed")
+        emit("OUTBOX_COMMITTED",executionState="committed",operationId=job["operationId"],tool="memory_append" if isinstance(resolve,SharedMemoryPath) else "db_outbox_submit")
     except (MemoryOperationError,OSError) as error:
         value=outbox_failure(resolve,job,error)
-        emit("OUTBOX_FAILED",level="ERROR",code=value["code"],status=value["state"])
+        emit("OUTBOX_FAILED",level="ERROR",code=value["code"],status=value["state"],operationId=job["operationId"],tool="memory_append" if isinstance(resolve,SharedMemoryPath) else "db_outbox_submit")
     return True
+
+
+def memory_topic(value):
+    if not isinstance(value,str) or len(value)>80:
+        fail("MEMORY_INVALID","Topic must be at most 80 characters.")
+    return value.strip().translate(str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ","abcdefghijklmnopqrstuvwxyz"))
+
+
+def memory_payload(arguments):
+    if not isinstance(arguments,dict) or set(arguments)-{"content","topic","source_chat","operation_id"}:
+        fail("MEMORY_INVALID","Invalid memory arguments.")
+    content=arguments.get("content")
+    if not isinstance(content,str) or not content.strip():
+        fail("MEMORY_INVALID","Provide nonempty content.")
+    topic=memory_topic(arguments.get("topic",""))
+    source=arguments.get("source_chat")
+    if source is not None and (not isinstance(source,str) or not source.strip() or len(source)>1024):
+        fail("MEMORY_INVALID","source_chat must be a nonempty URL or ID up to 1024 characters.")
+    try:
+        if len(content.encode("utf-8"))>MEMORY_CONTENT_BYTES:
+            fail("MEMORY_TOO_LARGE","Content exceeds 16 KiB UTF-8. Split the entry; nothing was truncated.")
+        fields=[base64.b64encode(v.encode("utf-8")).decode("ascii") if v is not None else None for v in (topic,source,content)]
+        payload=MEMORY_PREFIX+json.dumps(fields,separators=(",",":"))
+        if len(payload.encode("utf-8"))>MAX_SQL_BYTES:
+            fail("MEMORY_TOO_LARGE","Memory payload exceeds the outbox limit.")
+    except UnicodeError:
+        fail("MEMORY_INVALID","Content and metadata must be valid UTF-8.")
+    return payload
+
+
+def decode_memory(payload):
+    try:
+        if not isinstance(payload,str) or not payload.startswith(MEMORY_PREFIX) or len(payload.encode("utf-8"))>MAX_SQL_BYTES:
+            raise ValueError()
+        fields=json.loads(payload[len(MEMORY_PREFIX):])
+        if not isinstance(fields,list) or len(fields)!=3:
+            raise ValueError()
+        topic,source,content=[base64.b64decode(v,validate=True).decode("utf-8") if v is not None else None for v in fields]
+        if memory_payload({"topic":topic,"source_chat":source,"content":content})!=payload:
+            raise ValueError()
+        return topic,source,content
+    except (ValueError,TypeError,UnicodeError,MemoryOperationError):
+        fail("MEMORY_INVALID","Invalid internal memory payload.")
+
+
+def memory_submit(resolve,arguments):
+    payload=memory_payload(arguments)
+    key=operation_key(arguments.get("operation_id","sm."+uuid.uuid4().hex))
+    state=outbox_submit(resolve,key,payload)
+    emit("MEMORY_ACCEPTED",tool="memory_append",operationId=key,status=state["state"],bytes=len(arguments["content"].encode("utf-8")))
+    return {"state":state["state"],"operation_id":key}
+
+
+def memory_status(resolve,key):
+    key=operation_key(key)
+    con=None
+    try:
+        con=connect(resolve,read_only=True)
+        con.execute("BEGIN")
+        row=con.execute("SELECT id,created_at FROM shared_memory WHERE operation_id=?",(key,)).fetchone()
+        if row:
+            return {"state":"committed","operation_id":key,"id":row[0],"created_at":row[1]}
+        state=_outbox_state(con,key)
+        if state["state"]=="committed":
+            fail("DB_OPERATION_CONFLICT","Operation key has no matching memory entry.")
+        value={"state":"pending" if state["state"] in ("pending","processing") else state["state"],"operation_id":key}
+        if state["code"]:
+            value["code"]=state["code"]
+        return value
+    except sqlite3.Error as error:
+        raise MemoryOperationError("MEMORY_READ_FAILED","Memory status could not be verified.","unknown",getattr(error,"sqlite_errorcode",None),getattr(error,"sqlite_errorname",None)) from error
+    finally:
+        if con is not None:
+            con.close()
+
+
+def memory_read(resolve,arguments):
+    if not isinstance(arguments,dict) or set(arguments)-{"after_id","limit","topic","before_id"}:
+        fail("MEMORY_INVALID","Invalid memory read arguments.")
+    limit=arguments.get("limit",20)
+    after=arguments.get("after_id")
+    before=arguments.get("before_id")
+    if type(limit) is not int or not 1<=limit<=100:
+        fail("MEMORY_INVALID","limit must be 1–100.")
+    for name,value in (("after_id",after),("before_id",before)):
+        if name in arguments and (type(value) is not int or not 0<=value<=9007199254740991):
+            fail("MEMORY_INVALID","Cursor must be a nonnegative safe integer.")
+    if after is not None and before is not None:
+        fail("MEMORY_INVALID","Choose after_id or before_id, not both.")
+    clauses,params=[],[]
+    for value,comparison in ((after,">"),(before,"<")):
+        if value is not None:
+            clauses.append("id "+comparison+" ?");params.append(value)
+    if "topic" in arguments:
+        clauses.append("topic = ?");params.append(memory_topic(arguments["topic"]))
+    where=" WHERE "+" AND ".join(clauses) if clauses else ""
+    order="ASC" if after is not None else "DESC"
+    con=None
+    items=[]
+    used=256
+    more=False
+    try:
+        con=connect(resolve,read_only=True)
+        deadline=time.monotonic()+8
+        con.set_progress_handler(lambda:int(time.monotonic()>=deadline),1000)
+        cursor=con.execute("SELECT id,created_at,topic,source_chat,content FROM shared_memory"+where+" ORDER BY id "+order+" LIMIT ?",(*params,limit+1))
+        for row in cursor:
+            item=dict(zip(("id","created_at","topic","source_chat","content"),row))
+            # Count escaped JSON conservatively for all transports.
+            size=len(json.dumps(item,ensure_ascii=True).encode("utf-8"))+1
+            if len(items)>=limit or used+size>MEMORY_RESPONSE_BYTES:
+                if not items:
+                    fail("MEMORY_TOO_LARGE","A stored entry exceeds the response budget.")
+                more=True
+                break
+            items.append(item);used+=size
+        if order=="DESC":
+            items.reverse()
+        return {"items":items,"next_after_id":items[-1]["id"] if items else after,"next_before_id":items[0]["id"] if items and more and order=="DESC" else None,"has_more":more}
+    except sqlite3.Error as error:
+        raise MemoryOperationError("MEMORY_READ_FAILED","Shared memory read failed.","not_started",getattr(error,"sqlite_errorcode",None),getattr(error,"sqlite_errorname",None)) from error
+    finally:
+        if con is not None:
+            con.close()
 
 
 def call(resolve, name, arguments):
     if not isinstance(arguments, dict):
         fail("INVALID_ARGUMENT", "Expected tool argument object.")
+    private=isinstance(resolve,SharedMemoryPath)
+    if private:
+        if name=="__memory_submit":
+            return memory_submit(resolve,arguments)
+        if name=="__memory_status" and set(arguments)=={"operation_id"}:
+            return memory_status(resolve,arguments["operation_id"])
+        if name=="memory_read":
+            return memory_read(resolve,arguments)
+        if name!="__outbox_process":
+            fail("INVALID_ARGUMENT","Only shared memory tools can access this database.")
+    elif name in ("__memory_submit","__memory_status","memory_read"):
+        fail("INVALID_ARGUMENT","Shared memory requires its own database.")
     if name == "__outbox_process" and not arguments:
         return outbox_process_one(resolve)
     if name == "db_outbox_submit" and set(arguments)=={"operationId","sql"}:
