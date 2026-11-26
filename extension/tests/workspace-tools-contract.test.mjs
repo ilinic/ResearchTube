@@ -28,7 +28,10 @@ for (const tool of ["youtube_download_get_formats", "youtube_download_get_task",
 assert.match(background, /youtubeFormats: youtubeFormatsSchema/);
 assert.match(background, /youtube_download_get_formats\.downloadFormats/);
 assert.match(background, /afterEventId/);
-assert.match(background, /const REQUIRED_AGENT_INTERFACE_VERSION = 89;/);
+const agentSource = await readFile(new URL("../../agent/researchtube_agent.py", import.meta.url), "utf8");
+const currentInterface = agentSource.match(/^INTERFACE_VERSION = (\d+)$/m)?.[1];
+assert.ok(currentInterface);
+assert.match(background, new RegExp(`const REQUIRED_AGENT_INTERFACE_VERSION = ${currentInterface};`));
 assert.match(background, /workspace_open_folder: \{ group: "workspace" \}/);
 assert.match(background, /"\/workspace\/open-folder"/, "folder opening must use the Local Agent");
 assert.doesNotMatch(background, /"openai\/outputTemplate": WORKSPACE_FOLDER/, "opening a folder needs no custom widget");

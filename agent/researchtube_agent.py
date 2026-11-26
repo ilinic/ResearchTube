@@ -48,7 +48,7 @@ except ImportError:
     from task_history import TaskHistory
     from browser_resources import save_browser_resource
 
-AGENT_VERSION = "2.8.14"
+AGENT_VERSION = "2.8.15"
 INTERFACE_VERSION = 92
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
@@ -6531,36 +6531,12 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
 
 
 async def scheduled_create_group():
-    settings = configured_scheduled_tasks()
+    # Tray shortcut only. Scheduling itself belongs to the extension.
     try:
-        result = await LOCAL_MCP.browser("__scheduled_create", {"groupName": settings["scheduledTasksGroupName"]})
+        result = await LOCAL_MCP.browser("__scheduled_create", {})
         log(f"Scheduled group: {result.get('status', 'unknown')}")
     except Exception as error:
         log(f"Scheduled group not created: {getattr(error, 'code', type(error).__name__)}", error=True)
-
-
-async def scheduled_loop(settings):
-    if not settings["scheduledTasksEnabled"]:
-        log("Scheduled activation disabled.")
-        return
-    interval = settings["scheduledTasksIntervalSeconds"]
-    log(f"Scheduled activation interval: {interval}s; group: {settings['scheduledTasksGroupName']}")
-    try:
-        while True:
-            await asyncio.sleep(interval)
-            if LOCAL_MCP.writer is None or LOCAL_MCP.writer.is_closing():
-                continue
-            try:
-                result = await LOCAL_MCP.browser("__scheduled_tick", {
-                    "groupName": settings["scheduledTasksGroupName"],
-                    "expiresAt": int(time.time() * 1000) + 60000
-                })
-                if result.get("status") != "noGroup":
-                    log("Scheduled tick: " + json.dumps(result, ensure_ascii=False))
-            except Exception as error:
-                log(f"Scheduled tick skipped: {getattr(error, 'code', type(error).__name__)}")
-    finally:
-        log("Scheduled activation stopped.")
 
 
 async def shared_memory_tool(name,arguments):
@@ -6627,7 +6603,6 @@ async def serve(port: int, on_started: Callable[[], None] | None = None) -> None
     # Freeze the root for this run: live edits must not redirect active tasks,
     # media viewers or shares into a different directory mid-operation.
     WORKSPACE_PATH = startup_workspace_path()
-    scheduled_settings = configured_scheduled_tasks()
     queue_capacity = read_agent_config().get("sqlQueueCapacity", 4096)
     if type(queue_capacity) is not int or not 1 <= queue_capacity <= 16384:
         queue_capacity = 4096
@@ -6662,16 +6637,14 @@ async def serve(port: int, on_started: Callable[[], None] | None = None) -> None
     if on_started is not None:
         on_started()
     diagnostics = asyncio.create_task(collect_startup_health(initial_health), name="startup-health")
-    scheduled = asyncio.create_task(scheduled_loop(scheduled_settings), name="scheduled-activation")
     outbox = asyncio.create_task(outbox_loop(SQL_QUEUE,memory_path,OUTBOX_WAKE), name="sql-outbox")
     try:
         async with server:
             await server.serve_forever()
     finally:
         diagnostics.cancel()
-        scheduled.cancel()
         outbox.cancel()
-        await asyncio.gather(diagnostics, scheduled, outbox, return_exceptions=True)
+        await asyncio.gather(diagnostics, outbox, return_exceptions=True)
         async with PUBLIC_SHARE_LOCK:
             await stop_public_share_unlocked()
         await LOCAL_MCP.shutdown()

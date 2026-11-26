@@ -3646,6 +3646,7 @@ chrome.runtime.onStartup.addListener(() => {
 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === SCHEDULER_ALARM) startScheduledWatchdog();
   if (alarm.name === "local-mcp") { void localMcpConnection.start(); void reliabilityTrace.flush(); }
   if (alarm.name === "public-relay") void cloudConnection.ensureAccount();
   if (alarm.name === "background-task-completions") void taskCompletionDelivery.tick();
@@ -3925,6 +3926,11 @@ chrome.tabs?.onCreated?.addListener(() => { void browserAgent.onCreated().catch(
 chrome.tabs?.onReplaced?.addListener(() => { void browserAgent.onReplaced().catch(() => {}); });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === "create-scheduled-group") {
+    if (sender?.id !== chrome.runtime.id || sender.tab || sender.url !== chrome.runtime.getURL("popup.html")) {sendResponse({status:"forbidden"});return false;}
+    createScheduledGroup().then(sendResponse).catch(error=>sendResponse({status:"error",code:error?.code||"SCHEDULED_CREATE_FAILED"}));
+    return true;
+  }
   if (message?.type === "google-profile-status") {
     if (sender?.id !== chrome.runtime.id || sender.url !== chrome.runtime.getURL("popup.html")) { sendResponse({ state: "unknown" }); return false; }
     getGoogleProfileStatus().then(sendResponse); return true;
@@ -7872,24 +7878,34 @@ async function requireLocalYoutubeLogin() {
 }
 // Private Agent bridge commands. Not published as MCP tools.
 const SCHEDULED_CONTINUATION="Continue the next iteration of your assigned task. Use the shared workspace and database to maintain continuity and coordinate with other agents. Use db_query for reads and db_outbox_submit/status/ack for every database change; preserve operationId across retries. Follow the current tool catalog over obsolete SQL instructions.";
-let scheduledTickRunning=false, scheduledCreateRunning=false;
-async function findScheduledGroup(name) {
-  if (typeof name!=="string" || !name.trim()) throw localAgentError("INVALID_ARGUMENT","Invalid scheduled group name.");
-  const matches=(await chrome.tabGroups.query({})).filter(g=>g.title===name);
-  return matches;
+const SCHEDULER_INTERVAL_MS=3000;
+const SCHEDULER_ALARM="scheduled-watchdog";
+const SCHEDULED_GROUP_COUNTER="researchtubeScheduledGroupCounter";
+const scheduledActiveTabs=new Set();
+let scheduledScanRunning=false, scheduledCreateRunning=false, scheduledTimer=null, connectionWatchdogRunning=false;
+function scheduledGroupNumber(title) {
+  const match=/^Scheduled ([1-9][0-9]*)$/i.exec(title||"");
+  const number=match?Number(match[1]):0;
+  return Number.isSafeInteger(number)?number:0;
 }
-async function createScheduledGroup(name) {
+function isScheduledGroup(title) { return /^scheduled$/i.test(title||"") || scheduledGroupNumber(title)>0; }
+async function createScheduledGroup() {
   if(scheduledCreateRunning) return {status:"busy"};
   scheduledCreateRunning=true;
   try {
-    const matches=await findScheduledGroup(name);
-    if(matches.length) return {status:matches.length===1?"exists":"ambiguousGroup"};
+    const groups=await chrome.tabGroups.query({});
+    const stored=(await chrome.storage.local.get({[SCHEDULED_GROUP_COUNTER]:0}))[SCHEDULED_GROUP_COUNTER];
+    const number=groups.reduce((max,g)=>Math.max(max,scheduledGroupNumber(g.title)),Number.isSafeInteger(stored)&&stored>=0?stored:0)+1;
+    if(!Number.isSafeInteger(number)) throw localAgentError("SCHEDULED_GROUP_LIMIT","Scheduled group number is too large.");
     const windows=await chrome.windows.getAll({windowTypes:["normal"]});
-    if(!windows.length) return {status:"noChromeWindow"};
-    const tab=await chrome.tabs.create({windowId:windows[0].id,url:EXTERNAL_URLS.chatgptNewChat,active:true});
+    const target=windows.find(w=>w.focused)||windows[0];
+    if(!target) return {status:"noChromeWindow"};
+    await chrome.storage.local.set({[SCHEDULED_GROUP_COUNTER]:number});
+    const name=`Scheduled ${number}`;
+    const tab=await chrome.tabs.create({windowId:target.id,url:EXTERNAL_URLS.chatgptNewChat,active:true});
     const groupId=await chrome.tabs.group({tabIds:[tab.id]});
     await chrome.tabGroups.update(groupId,{title:name,color:"blue",collapsed:false});
-    return {status:"created",groupId,tabId:tab.id};
+    return {status:"created",groupId,tabId:tab.id,name};
   } finally {scheduledCreateRunning=false;}
 }
 async function scheduledPending(tabId) {
@@ -7948,59 +7964,79 @@ async function scheduledChatState(tabId) {
   }});
   return result[0]?.result||{ready:false,reason:"CHAT_STATE_UNAVAILABLE"};
 }
-async function tickScheduledGroup(input,requestId=null) {
-  const tickId=requestId||crypto.randomUUID();
-  reliabilityTrace.add("SCHEDULER_TICK_STARTED",{schedulerTickId:tickId,requestId:tickId});
-  if(scheduledTickRunning || !Number.isFinite(input.expiresAt) || Date.now()>input.expiresAt){reliabilityTrace.add("SCHEDULER_TICK_FINISHED",{schedulerTickId:tickId,status:"busyOrExpired"});return {status:"busyOrExpired"};}
-  scheduledTickRunning=true;
+async function runScheduledTab(tab,groupId) {
+  const expiresAt=Date.now()+60000;
+  const tabId=tab.id, path=chatConversationPath(tab.url), key="researchtubeScheduledUncertain:"+tabId+":"+path;
   try {
-    const matches=await findScheduledGroup(input.groupName);
-    if(matches.length!==1){reliabilityTrace.add("SCHEDULER_GROUP_SKIP",{schedulerTickId:tickId,status:matches.length?"ambiguousGroup":"noGroup"});return {status:matches.length?"ambiguousGroup":"noGroup"};}
-    const groupId=matches[0].id;
-    const tabs=(await chrome.tabs.query({groupId})).filter(t=>chatConversationPath(t.url));
-    const results=await Promise.all(tabs.map(async tab=>{
-      const tabId=tab.id, path=chatConversationPath(tab.url), key="researchtubeScheduledUncertain:"+tabId+":"+path;
-      try {
-        const verify=async()=>{
-          const live=await chrome.tabs.get(tabId);
-          const groups=await findScheduledGroup(input.groupName);
-          if(Date.now()>input.expiresAt||groups.length!==1||groups[0].id!==groupId||live.groupId!==groupId||chatConversationPath(live.url)!==path||live.pendingUrl) throw localAgentError("BROWSER_TARGET_CHANGED","Scheduled chat left group or changed.");
-          const pending=await scheduledPending(tabId);
-          if(pending) throw localAgentError(pending,"Pending work.");
-          const state=await scheduledChatState(tabId);
-          if(!state.ready) throw localAgentError(state.reason,"Chat is not confidently idle.");
-          return state;
-        };
-        const state=await verify();
-        const uncertain=(await chrome.storage.session.get(key))[key];
-        if(uncertain) {
-          if(uncertain.phase!=="prepared"&&state.userCount<=uncertain.userCount && (!state.lastUserId||state.lastUserId===uncertain.lastUserId)) return {tabId,status:"skipped",reason:"PREVIOUS_SEND_UNCONFIRMED",ageMs:uncertain.at?Date.now()-uncertain.at:null};
-          await chrome.storage.session.remove(key);
+    const verify=async()=>{
+      const live=await chrome.tabs.get(tabId);
+      const group=await chrome.tabGroups.get(groupId);
+      if(Date.now()>expiresAt||!isScheduledGroup(group.title)||live.groupId!==groupId||chatConversationPath(live.url)!==path||live.pendingUrl) throw localAgentError("BROWSER_TARGET_CHANGED","Scheduled chat left group or changed.");
+      const pending=await scheduledPending(tabId);
+      if(pending) throw localAgentError(pending,"Pending work.");
+      const state=await scheduledChatState(tabId);
+      if(!state.ready) throw localAgentError(state.reason,"Chat is not confidently idle.");
+      return state;
+    };
+    const state=await verify();
+    const uncertain=(await chrome.storage.session.get(key))[key];
+    if(uncertain) {
+      if(uncertain.phase!=="prepared"&&state.userCount<=uncertain.userCount && (!state.lastUserId||state.lastUserId===uncertain.lastUserId)) return {tabId,status:"skipped",reason:"PREVIOUS_SEND_UNCONFIRMED",ageMs:uncertain.at?Date.now()-uncertain.at:null};
+      await chrome.storage.session.remove(key);
+    }
+    let reservation=null;
+    const result=await sendComposerWhenReady(tabId,{completionText:SCHEDULED_CONTINUATION,chatPath:path,scheduled:true,beforeSend:verify,beforeInsert:async()=>{
+      const current=await verify();
+      reservation={userCount:current.userCount,lastUserId:current.lastUserId,phase:"prepared",at:Date.now()};
+      await chrome.storage.session.set({[key]:reservation});
+    },beforeDispatch:async()=>{
+      if(!reservation) throw localAgentError("SCHEDULED_RESERVATION_MISSING","Scheduled Send has no reservation.");
+      reservation={...reservation,phase:"dispatching"};
+      await chrome.storage.session.set({[key]:reservation});
+    }});
+    // A known pre-click failure can safely retry the existing draft.
+    // An unconfirmed committed click must never be blindly replayed.
+    if(result.sent || reservation && !result.committed) await chrome.storage.session.remove(key);
+    return {tabId,status:result.sent?"sent":"skipped",reason:result.reason||null,...(result.source?{source:result.source}:{})};
+  } catch(error) {return {tabId,status:"skipped",reason:error.code||"CHAT_UNAVAILABLE"};}
+}
+async function scheduledWatchdogTick() {
+  if (!connectionWatchdogRunning) {
+    connectionWatchdogRunning=true;
+    void Promise.allSettled([cloudConnection.maintain(),localMcpConnection.maintain()]).finally(()=>{connectionWatchdogRunning=false;});
+  }
+  if(scheduledScanRunning) return;
+  scheduledScanRunning=true;
+  try {
+    const groups=(await chrome.tabGroups.query({})).filter(g=>isScheduledGroup(g.title));
+    if(!groups.length)return;
+    const ids=new Set(groups.map(g=>g.id));
+    const tabs=(await chrome.tabs.query({})).filter(t=>ids.has(t.groupId)&&Number.isInteger(t.id)&&chatConversationPath(t.url));
+    for(const tab of tabs) {
+      if(scheduledActiveTabs.has(tab.id))continue;
+      scheduledActiveTabs.add(tab.id);
+      const tickId=crypto.randomUUID();
+      void runScheduledTab(tab,tab.groupId).then(result=>{
+        if(result.status==="sent"||!["CHAT_GENERATING","CHAT_LOADING","CHAT_COMPOSER_BUSY","MCP_CALL_RUNNING"].includes(result.reason)) {
+          reliabilityTrace.add("SCHEDULER_TAB_DECISION",{schedulerTickId:tickId,groupId:tab.groupId,tabId:tab.id,status:result.status,code:result.reason});
+          if(result.status==="sent")consoleAction("[ResearchTube scheduled] Sent",{groupId:tab.groupId,...result});
         }
-        let reservation=null;
-        const result=await sendComposerWhenReady(tabId,{completionText:SCHEDULED_CONTINUATION,chatPath:path,scheduled:true,beforeSend:verify,beforeInsert:async()=>{
-          const current=await verify();
-          reservation={userCount:current.userCount,lastUserId:current.lastUserId,phase:"prepared",at:Date.now()};
-          await chrome.storage.session.set({[key]:reservation});
-        },beforeDispatch:async()=>{
-          if(!reservation) throw localAgentError("SCHEDULED_RESERVATION_MISSING","Scheduled Send has no reservation.");
-          reservation={...reservation,phase:"dispatching"};
-          await chrome.storage.session.set({[key]:reservation});
-        }});
-        // A known pre-click failure can safely retry the existing draft.
-        // An unconfirmed committed click must never be blindly replayed.
-        if(result.sent || reservation && !result.committed) await chrome.storage.session.remove(key);
-        return {tabId,status:result.sent?"sent":"skipped",reason:result.reason||null,...(result.source?{source:result.source}:{})};
-      } catch(error) {return {tabId,status:"skipped",reason:error.code||"CHAT_UNAVAILABLE"};}
-    }));
-    for(const result of results)reliabilityTrace.add("SCHEDULER_TAB_DECISION",{schedulerTickId:tickId,requestId:tickId,groupId,tabId:result.tabId,status:result.status,code:result.reason});
-    consoleAction("[ResearchTube scheduled] Tick",{groupId,results});
-    return {status:"checked",results};
-  } finally {scheduledTickRunning=false;reliabilityTrace.add("SCHEDULER_TICK_FINISHED",{schedulerTickId:tickId,requestId:tickId});}
+      }).catch(error=>consoleAction("[ResearchTube scheduled] Check failed",error?.code||error?.name)).finally(()=>scheduledActiveTabs.delete(tab.id));
+    }
+  } finally {scheduledScanRunning=false;}
+}
+function startScheduledWatchdog() {
+  // The catalog exporter imports the background bundle in a browserless VM.
+  if(!chrome.tabGroups?.query || !chrome.alarms?.create || typeof setInterval!=="function")return;
+  if(scheduledTimer===null) scheduledTimer=setInterval(()=>{void scheduledWatchdogTick().catch(()=>{});},SCHEDULER_INTERVAL_MS);
+  void scheduledWatchdogTick().catch(()=>{});
+  // Do not recreate the alarm on each alarm event.
+  void chrome.alarms.get(SCHEDULER_ALARM).then(alarm=>{if(!alarm)return chrome.alarms.create(SCHEDULER_ALARM,{periodInMinutes:.5});}).catch(()=>{});
 }
 async function dispatchLocalMcp(name, input, requestId = null) {
-  if (name==="__scheduled_create") return createScheduledGroup(input.groupName);
-  if (name==="__scheduled_tick") return tickScheduledGroup(input,requestId);
+  if (name==="__scheduled_create") return createScheduledGroup();
+  // Ignore obsolete Agent timer commands, including during staggered upgrades.
+  if (name==="__scheduled_tick") return {status:"extensionOwned"};
   if (LOCAL_BROWSER_TOOLS.includes(name)) {
     if (!await isMcpToolEnabled(name)) throw Object.assign(Error("Disabled local browser tool"),{code:"MCP_TOOL_DISABLED"});
     const definition = localBrowserDefinitions().find(tool => tool.name === name);
@@ -8034,3 +8070,6 @@ async function dispatchLocalYoutube(name, input) {
   if (!result || response.result.isError || result.status === "rejected") fail(result?.error?.code || "YOUTUBE_REQUEST_FAILED");
   return result;
 }
+
+// Run on every worker activation, not only installation or Chrome startup.
+startScheduledWatchdog();

@@ -105,6 +105,16 @@ $("describe-video").addEventListener("click", async () => {
   } }).catch((error) => console.info("[ResearchTube] Describe this video request failed", error));
   window.close();
 });
+$("create-scheduled-group")?.addEventListener("click", async () => {
+  const button=$("create-scheduled-group");button.disabled=true;
+  try {
+    const result=await call({type:"create-scheduled-group"});
+    if(result?.status==="created"){window.close();return;}
+    $("describe-video-status").hidden=false;
+    $("describe-video-status").textContent="Could not create a scheduled group: "+(result?.code||result?.status||"unknown");
+  } catch { $("describe-video-status").hidden=false;$("describe-video-status").textContent="Could not create a scheduled group."; }
+  finally {button.disabled=false;}
+});
 $("settings").addEventListener("click", () => chrome.runtime.openOptionsPage());
 $("help").addEventListener("click", () => {
   // The worker owns startup after this popup closes, including with no Agent

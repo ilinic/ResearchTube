@@ -25,7 +25,6 @@ export class PublicError extends Error {
   constructor(readonly code: string, message: string, readonly status = 400) { super(message); }
 }
 export const MAX_BYTES = 1024 * 1024;
-export const SOCKET_TTL = 60 * 60 * 1000;
 
 export function json(value: unknown, status = 200, headers?: HeadersInit): Response {
   return Response.json(value, { status, headers: { "Cache-Control": "no-store", ...headers } });

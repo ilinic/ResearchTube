@@ -33,12 +33,12 @@ test("site requests receive correlated UTC relay stamps without page contents", 
   expect(JSON.stringify(timing)).not.toContain("SECRET");
   expect((await (await pending).json()).result.content[0].text).toBe("ok");
 });
-test("offline and old extensions fail immediately without a queued request", async () => {
+test("unpaired extension fails immediately; old protocol times out without dispatch", async () => {
   const empty = await doRoom(mf,randomUUID());
   expect((await (await roomPost(empty,"/dispatch",request())).json()).error.code).toBe("EXTENSION_OFFLINE");
   const {stub} = await setup(false);
   expect((await (await roomPost(stub,"/dispatch",request())).json()).error.code).toBe("EXTENSION_UPDATE_REQUIRED");
-});
+}, 20000);
 test("unknown or extra arguments cannot enter the relay", async () => {
   const {stub} = await setup();
   for (const body of [request("constructor",{}),request("youtube_get_video",{videoId:"x",tabId:9}),request("timer_start",{durationSeconds:1,unknown:true})])
@@ -58,7 +58,7 @@ test("heartbeat survives hibernation state and same-installation reconnect rejec
   const pong = new Promise(resolve=>socket.addEventListener("message",event=>resolve(event.data),{once:true}));socket.send("ping");expect(await pong).toBe("pong");
   const incoming = message(socket), pending = roomPost(stub,"/dispatch",request());await incoming;
   const next = await socketFor(stub,installationId);sockets.push(next.socket);
-  expect((await (await pending).json()).error.code).toBe("EXTENSION_OFFLINE");
+  expect((await (await pending).json()).error.code).toBe("BROWSER_OUTCOME_UNKNOWN");
   expect((await (await roomPost(stub,"/status",{})).json()).extensionConnected).toBe(true);
   const rejected = await stub.fetch("https://room.internal/connect",{headers:{Upgrade:"websocket","X-Installation-Id":randomUUID()}});
   expect(rejected.status).toBe(401);
@@ -87,8 +87,24 @@ test("revocation fails in-flight work and leaves the account offline", async () 
   const {stub,socket,installationId} = await setup();
   const incoming = message(socket), pending = roomPost(stub,"/dispatch",request());await incoming;
   await roomPost(stub,"/revoke",{installationId});
-  expect((await (await pending).json()).error.code).toBe("EXTENSION_OFFLINE");
+  expect((await (await pending).json()).error.code).toBe("BROWSER_OUTCOME_UNKNOWN");
   expect((await (await roomPost(stub,"/status",{})).json()).extensionConnected).toBe(false);
   const stale = await stub.fetch("https://room.internal/connect", {headers:{Upgrade:"websocket","X-Installation-Id":installationId}});
   expect(stale.status).toBe(401,"late reconnect cannot revive a revoked installation");
 });
+
+test("a request waits for same-installation reconnect before forwarding exactly once", async () => {
+  const {stub,socket,installationId}=await setup();
+  socket.close();
+  const pending=roomPost(stub,"/dispatch",request());
+  await new Promise(resolve=>setTimeout(resolve,500));
+  const next=await socketFor(stub,installationId);sockets.push(next.socket);
+  const commandPromise=new Promise(resolve=>next.socket.addEventListener("message",event=>{
+    if(event.data!=="direct-tools-ready")resolve(JSON.parse(event.data));
+  }));
+  next.socket.send("direct-tools-v1");
+  const command=await commandPromise;
+  expect(command).toMatchObject({type:"request",installationId});
+  next.socket.send(JSON.stringify({type:"response",requestId:command.requestId,result:{content:[{type:"text",text:"recovered"}]}}));
+  expect((await (await pending).json()).result.content[0].text).toBe("recovered");
+},20000);

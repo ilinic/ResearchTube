@@ -1,11 +1,11 @@
 import { DurableObject } from "cloudflare:workers";
 import { z } from "zod";
 import validateArguments from "./validators.js";
-import { SOCKET_TTL, MAX_BYTES, PublicError, errorResponse, json, readJson, type Env } from "./types";
+import { MAX_BYTES, PublicError, errorResponse, json, readJson, type Env } from "./types";
 
 type ToolCallRequest = { jsonrpc: "2.0"; method: "tools/call"; params: { name: string; arguments: Record<string, unknown> } };
 
-interface SocketIdentity { installationId: string; connectionId?: string; expiresAt: number; directTools?: boolean }
+interface SocketIdentity { installationId: string; connectionId?: string; directTools?: boolean }
 interface Pending {
   socket: WebSocket;
   resolve: (value: Record<string, unknown>) => void;
@@ -18,6 +18,7 @@ interface Pending {
 // focus guesses, queued execution or automatic replay after an unknown outcome.
 export class BrowserRoom extends DurableObject<Env> {
   private pending = new Map<string, Pending>();
+  private reconnectWaiters = 0;
   async fetch(request: Request): Promise<Response> {
     try {
       const path = new URL(request.url).pathname;
@@ -52,7 +53,7 @@ export class BrowserRoom extends DurableObject<Env> {
           const pair = new WebSocketPair();
           const connectionId = crypto.randomUUID();
           this.ctx.acceptWebSocket(pair[1], [installationId, connectionId]);
-          pair[1].serializeAttachment({ installationId, connectionId, expiresAt: Date.now() + SOCKET_TTL } satisfies SocketIdentity);
+          pair[1].serializeAttachment({ installationId, connectionId } satisfies SocketIdentity);
           await this.ctx.storage.put("active-connection", connectionId);
           return new Response(null, { status: 101, webSocket: pair[0] });
         });
@@ -79,8 +80,7 @@ export class BrowserRoom extends DurableObject<Env> {
         const name = body.request.params.name;
         if (!Object.hasOwn(validateArguments, name) || name === "system_connection_status" || !(validateArguments as Record<string, any>)[name](body.request.params.arguments))
           throw new PublicError("INVALID_ARGUMENT", "Arguments do not match an available tool.");
-        const socket = await this.activeSocket();
-        if (!socket) throw new PublicError("EXTENSION_OFFLINE", "Open Chrome with the connected ResearchTube extension.", 409);
+        const socket = await this.waitForSocket();
         return json(await this.dispatch(socket, body.request, body.workerReceivedAtMs, Date.now(), body.requestId));
       }
       return new Response(null, { status: 404 });
@@ -104,11 +104,30 @@ export class BrowserRoom extends DurableObject<Env> {
     const socket = this.ctx.getWebSockets(connectionId).find(ws => {
       const value = ws.deserializeAttachment() as SocketIdentity;
       return value?.connectionId === connectionId && value.installationId === active &&
-        value.expiresAt > Date.now() && ws.readyState === 1;
+        ws.readyState === 1;
     });
     if (requireDirect && socket && !(socket.deserializeAttachment() as SocketIdentity).directTools)
       throw new PublicError("EXTENSION_UPDATE_REQUIRED", "Update the ResearchTube extension to run tools directly.", 409);
     return socket;
+  }
+  // Wait only before forwarding; never replay a request after it may have run.
+  private async waitForSocket(): Promise<WebSocket> {
+    const installation = await this.ctx.storage.get<string>("active-installation");
+    if (!installation || installation.startsWith("revoked:")) throw new PublicError("EXTENSION_OFFLINE", "Open Chrome with the connected ResearchTube extension.", 409);
+    if (this.reconnectWaiters >= 100) throw new PublicError("BROWSER_BUSY", "Too many requests are waiting for reconnect.", 429);
+    this.reconnectWaiters++;
+    try {
+      const deadline=Date.now()+12000;
+      do {
+        if(await this.ctx.storage.get<string>("active-installation")!==installation) throw new PublicError("EXTENSION_REPLACED", "The authorized extension changed before dispatch.",409);
+        const socket=await this.activeSocket(false);
+        if(socket && (socket.deserializeAttachment() as SocketIdentity).directTools && (socket.deserializeAttachment() as SocketIdentity).installationId===installation) return socket;
+        if(Date.now()>=deadline) break;
+        await new Promise<void>(resolve=>setTimeout(resolve,250));
+      } while(true);
+      if(await this.activeSocket(false)) throw new PublicError("EXTENSION_UPDATE_REQUIRED", "The extension did not complete its protocol handshake.",409);
+      throw new PublicError("EXTENSION_OFFLINE", "Extension reconnect timed out; no tool was dispatched. Retry after Chrome reconnects.",503);
+    } finally {this.reconnectWaiters--;}
   }
   private dispatch(socket: WebSocket, request: ToolCallRequest, workerReceivedAtMs: number, roomReceivedAtMs: number, requestId: string = crypto.randomUUID()): Promise<Record<string, unknown>> {
     if (this.pending.size >= 100) throw new PublicError("BROWSER_BUSY", "Too many requests are running.", 429);
@@ -124,12 +143,12 @@ export class BrowserRoom extends DurableObject<Env> {
         ...(chatTabId !== undefined ? { chatTabId } : {}) });
       try { socket.send(JSON.stringify({ type: "request", requestId, installationId: (socket.deserializeAttachment() as SocketIdentity).installationId, request,
         timing: { workerReceivedAtMs, roomReceivedAtMs, roomForwardedAtMs: Date.now() } })); }
-      catch { clearTimeout(timer); this.pending.delete(requestId); reject(new PublicError("EXTENSION_OFFLINE", "The extension disconnected. The request was not retried.", 409)); }
+      catch { clearTimeout(timer); this.pending.delete(requestId); reject(new PublicError("BROWSER_OUTCOME_UNKNOWN", "The extension disconnected during dispatch. Reconcile before retrying.", 409)); }
     });
   }
   async webSocketMessage(socket: WebSocket, data: string | ArrayBuffer) {
     const identity = socket.deserializeAttachment() as SocketIdentity;
-    if (!identity || identity.expiresAt <= Date.now()) { this.rejectSocket(socket, "EXTENSION_OFFLINE", "The extension session expired."); socket.close(1008, "Expired"); return; }
+    if (!identity?.connectionId) { this.rejectSocket(socket, "BROWSER_OUTCOME_UNKNOWN", "The extension session is invalid."); socket.close(1008, "Invalid session"); return; }
     if (data === "direct-tools-v1") {
       socket.serializeAttachment({ ...identity, directTools: true }); socket.send("direct-tools-ready"); return;
     }
@@ -152,7 +171,7 @@ export class BrowserRoom extends DurableObject<Env> {
   }
   private rejectSocket(socket: WebSocket, code: string, message: string) {
     for (const [id, pending] of this.pending) if (pending.socket === socket) {
-      clearTimeout(pending.timer); this.pending.delete(id); pending.reject(new PublicError(code, message, 409));
+      clearTimeout(pending.timer); this.pending.delete(id); pending.reject(new PublicError(["EXTENSION_OFFLINE","EXTENSION_REPLACED"].includes(code)?"BROWSER_OUTCOME_UNKNOWN":code, ["EXTENSION_OFFLINE","EXTENSION_REPLACED"].includes(code)?"Connection ended after dispatch; reconcile before retrying.":message, 409));
     }
   }
   webSocketClose(socket: WebSocket) { this.rejectSocket(socket, "EXTENSION_OFFLINE", "The extension disconnected. The operation was not retried."); }

@@ -180,3 +180,13 @@ assert.equal(id,'jnnhjpkdhmghpbgfcalbhmkagdeelgnp');
 assert.deepEqual(manifest.externally_connectable.matches,['https://rtube.win/*']);
 assert.ok(!manifest.content_scripts.some(script=>script.js.includes('chatgpt-cloud-bridge.js')));
 console.log('Direct account connection: no chat widget, first productive call, exact local documents, replay rejection, replacement, status and enrollment passed');
+
+// A healthy socket is not intentionally recycled at 55 minutes.
+{
+ const f=fixture(),ws=await f.online();
+ const beat=[...f.intervals.values()][0].fn;
+ for(let i=0;i<370;i++){f.advance(10000);await f.receive(ws,'pong');beat();}
+ assert.equal(ws.readyState,1);
+ assert.equal((await f.connection.status()).state,'ready');
+ assert.equal(f.sockets.length,1);
+}

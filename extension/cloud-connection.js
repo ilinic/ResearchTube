@@ -22,7 +22,7 @@ export function cloudDocumentSnapshot() { return { url: location.href }; }
 export function createCloudConnection(host) {
   const base = host.origin || CLOUD_ORIGIN;
   let socket = null, opening = null, retryTimer = null, heartbeat = null, generation = 0, attempts = 0, nextRetryAt = 0;
-  let openedAt = 0, lastPong = 0, state = "not-configured", errorCode = null;
+  let lastPong = 0, state = "not-configured", errorCode = null;
   const bindings = new Map(), requests = new Map(), pending = new Set(), seen = new Set();
   let automatic = null, accountOpening = null, accountRetryAt = 0;
   const now = () => host.now?.() ?? Date.now();
@@ -99,7 +99,7 @@ export function createCloudConnection(host) {
   }
   function retry() {
     if (retryTimer !== null) return;
-    const delay = Math.min(60000, 5000 * 2 ** Math.min(attempts++, 4)) + Math.floor((host.random?.() ?? Math.random()) * 1000);
+    const delay = Math.min(10000, 500 * 2 ** Math.min(attempts++, 5)) + Math.floor((host.random?.() ?? Math.random()) * 1000);
     nextRetryAt = now() + delay;
     retryTimer = host.setTimeout(() => { retryTimer = null; void ensureAccount(); }, delay);
   }
@@ -128,13 +128,13 @@ export function createCloudConnection(host) {
         const openingTimeout = host.setTimeout(() => { if (socket === ws && !announced) ws.close(); }, 15000);
         ws.onopen = () => {
           if (socket !== ws || revision !== generation) { ws.close(); return; }
-          openedAt = lastPong = now(); attempts = 0; nextRetryAt = 0;
+          lastPong = now(); attempts = 0; nextRetryAt = 0;
           ws.send("direct-tools-v1");
           heartbeat = host.setInterval(() => {
             if (socket !== ws || ws.readyState !== 1) return;
-            if (now() - lastPong > 60000 || now() - openedAt > 55 * 60000 && !pending.size) { ws.close(); return; }
+            if (now() - lastPong > 30000) { ws.close(); return; }
             try { ws.send("ping"); } catch { ws.close(); }
-          }, 20000);
+          }, 10000);
         };
         ws.onmessage = event => {
           if (socket !== ws || revision !== generation) return;
@@ -198,7 +198,11 @@ export function createCloudConnection(host) {
     record("extension.received", Date.now());
     if (seen.has(message.requestId)) return;
     seen.add(message.requestId);
-    if (seen.size > 4096 || pending.size >= 100) { ws.close(); return; }
+    // Bound duplicate history without periodically tearing down a healthy socket.
+    if (seen.size > 8192) for (const id of seen) {if(!pending.has(id)){seen.delete(id);break;}}
+    if (pending.size >= 100) {
+      ws.send(JSON.stringify({type:"response",requestId:message.requestId,error:{code:-32000,message:"Extension request capacity reached."}}));return;
+    }
     pending.add(message.requestId);
     let response;
     try {
@@ -362,6 +366,11 @@ export function createCloudConnection(host) {
     }
   }
   async function suspend() { generation++; stopSocket(); if (retryTimer !== null) host.clearTimeout(retryTimer); retryTimer = null; nextRetryAt = 0; }
-  return { start, ensureAccount, status, external, beginEnrollment, disconnect, suspend, tabChanged, verifyTarget,
+  async function maintain() {
+    if (socket || opening || retryTimer !== null || now() < nextRetryAt) return;
+    if(state==="error" && ["EXTENSION_REPLACED","EXTENSION_AUTHENTICATION_REQUIRED","EXTENSION_UPDATE_REQUIRED","BROWSER_SIGN_IN_REQUIRED"].includes(errorCode)) return;
+    return ensureAccount();
+  }
+  return { start, ensureAccount, maintain, status, external, beginEnrollment, disconnect, suspend, tabChanged, verifyTarget,
     targetForRequest: id => requests.get(id) || null, assertLive: live };
 }

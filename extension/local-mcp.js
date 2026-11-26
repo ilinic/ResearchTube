@@ -3,7 +3,7 @@ export function createLocalMcpConnection(host) {
   let socket = null, opening = null, heartbeat = null, handshake = null, generation = 0;
   let lastPong = 0, retryTimer=null, attempts=0;
   const diagnostic=(event,fields={})=>{try{host.diagnostic?.(event,fields);}catch{}};
-  const retry=()=>{if(retryTimer!==null)return;const delay=Math.min(60000,2000*2**Math.min(attempts++,5));retryTimer=setTimeout(()=>{retryTimer=null;void start();},delay);};
+  const retry=()=>{if(retryTimer!==null)return;const delay=Math.min(10000,500*2**Math.min(attempts++,5));retryTimer=setTimeout(()=>{retryTimer=null;void start();},delay);};
   const pending = new Set();
   let tail = Promise.resolve();
   const close = () => { clearTimeout(retryTimer);retryTimer=null;generation++; if (heartbeat) host.clearInterval(heartbeat); clearTimeout(handshake); heartbeat = handshake = null; const old = socket; socket = null; pending.clear(); old?.close(); };
@@ -54,5 +54,6 @@ export function createLocalMcpConnection(host) {
     })().catch(error => {if(revision===generation){diagnostic("LOCAL_BRIDGE_CONNECT_FAILED",{level:"WARN",exceptionType:error?.name});retry();}}).finally(() => { opening = null; });
     return opening;
   }
-  return { start, close };
+  async function maintain() { if(retryTimer===null && !socket && !opening) return start(); }
+  return { start, close, maintain };
 }
