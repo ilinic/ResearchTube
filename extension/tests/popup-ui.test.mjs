@@ -12,6 +12,9 @@ const [html, script, css, background] = await Promise.all([
 assert.match(html, /Turn YouTube into Answers/);
 assert.match(html, /id="describe-video" hidden>Describe this video/);
 assert.match(html, /Study this site/);
+assert.match(html, /<label class="scheduled-option"><input id="create-scheduled-group" type="checkbox" autocomplete="off"> Create Scheduled Group<\/label>/);
+assert.doesNotMatch(html, /<button id="create-scheduled-group"/);
+assert.match(css, /\.scheduled-option\{[^}]*color:var\(--muted\)[^}]*font-weight:400/);
 assert.match(script, /type: "study-site", tabId: tab.id/);
 assert.match(html, /<nav><button id="settings"[^>]*>Settings<\/button><button id="help" class="link">Help<\/button><button id="support"[^>]*><span class="support-heart" aria-hidden="true">♥<\/span> Support<\/button><\/nav>/, "Help must appear between Settings and Support on the same row with the same link style");
 assert.match(html, /<dt>Extension<\/dt><dd id="extension-status">/);
@@ -148,7 +151,7 @@ for (const [url, video] of actionCases) {
         sendMessage(message) {
           sent.push(message);
           // Keep status pending: contextual actions must not depend on it.
-          return message.type === "status" ? new Promise(() => {}) : Promise.resolve({ ok: true });
+          return message.type === "status" ? new Promise(() => {}) : Promise.resolve(message.type === "create-scheduled-group" ? { status: "created" } : { ok: true });
         },
       },
     },
@@ -164,6 +167,22 @@ for (const [url, video] of actionCases) {
   assert.equal(action.type, video ? "describe-youtube-video" : "study-site", url);
   if (video) assert.equal(action.tab.url, url);
   else assert.equal(action.tabId, tab.id);
+  const option = getControl("create-scheduled-group");
+  assert.equal(option.checked, false, "unchecked at popup opening");
+  const beforeToggle = sent.length;
+  option.checked = true;
+  option.listeners.change();
+  assert.equal(sent.length, beforeToggle, "checking alone must not create a group");
+  assert.equal(getControl("describe-video").hidden, true);
+  assert.equal(getControl("chatgpt").hidden, false);
+  option.checked = false;
+  option.listeners.change();
+  assert.equal(getControl("describe-video").hidden, !video);
+  assert.equal(getControl("chatgpt").hidden, video);
+  option.checked = true;
+  option.listeners.change();
+  await getControl("chatgpt").listeners.click();
+  assert.deepEqual(JSON.parse(JSON.stringify(sent.at(-1))), {type:"create-scheduled-group"}, "scheduled mode must not send the study-site or video command");
   getControl("help").listeners.click();
   assert.deepEqual(JSON.parse(JSON.stringify(sent.at(-1))), { type: "open-help" }, "Help sends no source page, task/session or configuration data");
 }
