@@ -24,16 +24,19 @@ async def phase(root,seconds,clients,enabled):
     resolve=lambda logical:root/"workspace"/logical
     resolve("scheduled").mkdir(parents=True)
     memory.initialize(resolve)
-    memory.db_sql(resolve,"CREATE TABLE records(id TEXT PRIMARY KEY)")
+    memory.outbox_submit(resolve,"setup","CREATE TABLE records(id TEXT PRIMARY KEY)")
+    memory.outbox_process_one(resolve)
+    memory.outbox_ack(resolve,"setup")
     trace=reliability.Trace()
     trace.start(root/"trace")
     queue=memory.SqlQueue()
+    reads=memory.ReadQueue()
     latencies=[]
     expected=set()
     errors=[]
     end=time.monotonic()+seconds
     def emit(event,**fields):
-        if enabled:trace.add({"component":"agent","tool":"db_sql","event":event,**fields})
+        if enabled:trace.add({"component":"agent","tool":"database","event":event,**fields})
     async def client(index):
         number=0
         while time.monotonic()<end:
@@ -43,11 +46,21 @@ async def phase(root,seconds,clients,enabled):
             started=time.monotonic()
             try:
                 args={"sql":sql,"operationId":key}
-                await queue.run(resolve,args)
+                await queue.run(resolve,args,"db_outbox_submit")
+                while True:
+                    state=await queue.run(resolve,{"operationId":key},"db_outbox_status")
+                    if state["state"]=="committed":
+                        break
+                    if state["state"]=="failed_permanent":
+                        raise RuntimeError("outbox failed")
+                    await queue.run(resolve,{},"__outbox_process")
                 expected.add(key)
                 # Simulate lost response after COMMIT by reissuing exact key.
-                if number%10==0:await queue.run(resolve,args)
-                if number%5==0:await queue.run(resolve,{"sql":"SELECT count(*) FROM records"})
+                if number%10==0:
+                    duplicate=await queue.run(resolve,args,"db_outbox_submit")
+                    if duplicate["state"]!="committed":raise AssertionError("dedup failed")
+                await queue.run(resolve,{"operationId":key},"db_outbox_ack")
+                if number%5==0:await reads.run(resolve,{"sql":"SELECT count(*) FROM records"})
             except Exception as error:
                 errors.append(getattr(error,"code",type(error).__name__))
             latencies.append((time.monotonic()-started)*1000)
@@ -56,7 +69,7 @@ async def phase(root,seconds,clients,enabled):
     try:
         with patch.object(memory,"emit",emit):
             await asyncio.gather(*(client(i) for i in range(clients)))
-        count=memory.db_sql(resolve,"SELECT count(*) FROM records")["results"][0]["rows"][0][0]
+        count=memory.db_query(resolve,"SELECT count(*) FROM records")["results"][0]["rows"][0][0]
         if count!=len(expected) or errors:raise AssertionError({"expected":len(expected),"actual":count,"errors":errors[:10]})
         current,peak=tracemalloc.get_traced_memory()
     finally:

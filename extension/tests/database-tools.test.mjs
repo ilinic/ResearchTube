@@ -1,0 +1,16 @@
+import assert from "node:assert/strict";
+import {memoryToolDefinitions,MEMORY_TOOL_NAMES} from "../scheduled-memory-tools.js";
+const names=MEMORY_TOOL_NAMES.filter(n=>n.startsWith("db_")).sort();
+assert.deepEqual(names,["db_outbox_ack","db_outbox_list","db_outbox_status","db_outbox_submit","db_query"]);
+const defs=memoryToolDefinitions();
+assert.equal(defs.some(t=>t.name==="db_sql"),false);
+const query=defs.find(t=>t.name==="db_query");
+assert.equal(query.annotations.readOnlyHint,true);
+assert.equal(query.annotations.destructiveHint,false);
+assert.deepEqual(Object.keys(query.inputSchema.properties),["sql"]);
+assert.equal(query.inputSchema.additionalProperties,false);
+assert.deepEqual(query.inputSchema.required,["sql"]);
+const submit=defs.find(t=>t.name==="db_outbox_submit");
+assert.equal(submit.annotations.readOnlyHint,false);
+assert.deepEqual(submit.inputSchema.required,["operationId","sql"]);
+console.log("Database API separation: ok");

@@ -48,8 +48,8 @@ except ImportError:
     from task_history import TaskHistory
     from browser_resources import save_browser_resource
 
-AGENT_VERSION = "2.8.11"
-INTERFACE_VERSION = 90
+AGENT_VERSION = "2.8.12"
+INTERFACE_VERSION = 91
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
 MAX_GOOGLE_TRANSLATE_AUDIO_BYTES = 16 * 1024 * 1024
@@ -1059,7 +1059,7 @@ class WorkspacePathResolver:
     def resolve_destination(self, value: Any, *, field_name: str, error_code: str, allow_root: bool = False, allow_database: bool = False) -> ResolvedWorkspacePath:
         parts, logical_path = self.logical_parts(value, field_name=field_name, error_code=error_code, allow_root=allow_root)
         if not allow_database and logical_path.lower().startswith("scheduled/database.sqlite"):
-            raise AgentApiError(error_code, "Live research database files are reserved for db_sql and the outbox.")
+            raise AgentApiError(error_code, "Live research database files are reserved for db_query and the outbox.")
         candidate = self.root.joinpath(*parts)
         # Do not let built-in tools traverse a symbolic link or Windows
         # junction even when its current target happens to be inside workspace.
@@ -1123,10 +1123,11 @@ def memory_path(logical):
 
 
 SQL_QUEUE = None
+READ_QUEUE = None
 
 
 async def memory_tool_call(name, arguments):
-    global SQL_QUEUE
+    global SQL_QUEUE, READ_QUEUE
     started = time.monotonic()
     reliability.emit("AGENT_TOOL_STARTED", tool=name,version=AGENT_VERSION)
     try:
@@ -1134,7 +1135,11 @@ async def memory_tool_call(name, arguments):
             value = await asyncio.to_thread(reliability.TRACE.query, arguments)
         elif name == "system_export_trace":
             value = await asyncio.to_thread(reliability.TRACE.export, memory_path("scheduled/reliability-trace.jsonl"), arguments)
-        elif name == "db_sql" or name.startswith("db_outbox_"):
+        elif name == "db_query":
+            if READ_QUEUE is None:
+                READ_QUEUE=scheduled_memory.ReadQueue()
+            value=await READ_QUEUE.run(memory_path,arguments)
+        elif name.startswith("db_outbox_"):
             if SQL_QUEUE is None:
                 SQL_QUEUE = scheduled_memory.SqlQueue()
             value = await SQL_QUEUE.run(memory_path, arguments, name)
@@ -6566,13 +6571,13 @@ async def initialize_scheduled_memory() -> None:
         await asyncio.to_thread(scheduled_memory.initialize, memory_path)
     except Exception as error:
         # Shared memory is optional: preserve the database and keep unrelated
-        # Agent tools available. Each db_sql call opens its own connection.
+        # Agent tools available. Database operations open their own connections.
         reliability.emit("SQL_INITIALIZE_FAILED", level="ERROR", exceptionType=type(error).__name__)
-        log(f"Scheduled database initialization failed ({type(error).__name__}); Agent will continue. db_sql will retry on demand.", error=True)
+        log(f"Scheduled database initialization failed ({type(error).__name__}); Agent will continue. Outbox and query tools will retry opening the database on demand.", error=True)
 
 
 async def serve(port: int, on_started: Callable[[], None] | None = None) -> None:
-    global WORKSPACE_PATH, STARTUP_PROMPTS, SQL_QUEUE
+    global WORKSPACE_PATH, STARTUP_PROMPTS, SQL_QUEUE, READ_QUEUE
     STARTUP_PROMPTS = configured_startup_prompts()
     # Freeze the root for this run: live edits must not redirect active tasks,
     # media viewers or shares into a different directory mid-operation.
@@ -6582,6 +6587,10 @@ async def serve(port: int, on_started: Callable[[], None] | None = None) -> None
     if type(queue_capacity) is not int or not 1 <= queue_capacity <= 16384:
         queue_capacity = 4096
     SQL_QUEUE = scheduled_memory.SqlQueue(queue_capacity)
+    readers=read_agent_config().get("sqlReadConcurrency",8)
+    if type(readers) is not int or not 1<=readers<=16:
+        readers=8
+    READ_QUEUE=scheduled_memory.ReadQueue(readers)
     try:
         config=read_agent_config()
         # Reserve 8 MiB for one 4 MiB export plus its atomic replacement.

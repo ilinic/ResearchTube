@@ -41,7 +41,9 @@ class SqlQueue:
         self.lock = asyncio.Lock()
         self.depth = 0
 
-    async def run(self, resolve, arguments, name="db_sql"):
+    async def run(self, resolve, arguments, name):
+        if name not in ("db_outbox_submit","db_outbox_status","db_outbox_list","db_outbox_ack","__outbox_process"):
+            fail("INVALID_ARGUMENT","Only outbox operations enter the write queue.")
         if self.depth >= self.capacity:
             fail("DB_QUEUE_FULL", "SQL queue is full; no SQL executed.")
         self.depth += 1
@@ -71,6 +73,38 @@ class SqlQueue:
             self.depth -= 1
 
 
+class ReadQueue:
+    """Bounded parallel read-only requests; never acquire the write queue."""
+    def __init__(self, concurrency=8, capacity=256):
+        self.slots=asyncio.Semaphore(concurrency)
+        self.capacity=capacity
+        self.depth=0
+
+    async def run(self, resolve, arguments):
+        if self.depth>=self.capacity:
+            fail("DB_READ_QUEUE_FULL","Read queue full; retry later.")
+        self.depth+=1
+        try:
+            try:
+                await asyncio.wait_for(self.slots.acquire(),8)
+            except asyncio.TimeoutError:
+                fail("DB_READ_QUEUE_TIMEOUT","Read queue deadline reached.")
+            try:
+                task=asyncio.create_task(asyncio.to_thread(call,resolve,"db_query",arguments))
+                try:
+                    return await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    try:
+                        await task
+                    except Exception:
+                        pass
+                    raise
+            finally:
+                self.slots.release()
+        finally:
+            self.depth-=1
+
+
 class MemoryOperationError(Exception):
     def __init__(self, code, message, state="not_started", sqlite_code=None, sqlite_name=None, index=None):
         super().__init__(message)
@@ -87,22 +121,27 @@ def check_file(path):
         fail("WORKSPACE_PATH_INVALID", "Memory path must be a regular unlinked file.")
 
 
-def connect(resolve):
-    resolve("scheduled").mkdir(exist_ok=True)
+def connect(resolve, read_only=False):
+    if not read_only:
+        resolve("scheduled").mkdir(exist_ok=True)
     path = resolve(DB_FILE)
     for suffix in ("", "-wal", "-shm", "-journal"):
         check_file(resolve(DB_FILE + suffix))
-    connection = sqlite3.connect(path, timeout=0.5, isolation_level=None)
+    connection = sqlite3.connect(path.resolve().as_uri()+"?mode=ro" if read_only else path, uri=read_only, timeout=0.5, isolation_level=None)
     try:
         connection.execute("PRAGMA busy_timeout=500")
-        connection.execute("PRAGMA synchronous=FULL")
+        if read_only:
+            connection.execute("PRAGMA query_only=ON")
+        else:
+            connection.execute("PRAGMA synchronous=FULL")
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute("PRAGMA trusted_schema=OFF")
         connection.execute("PRAGMA temp_store=MEMORY")
         # Bound database growth from untrusted agent-generated SQL.
-        connection.execute("PRAGMA max_page_count=262144")
-        if connection.execute("PRAGMA journal_mode").fetchone()[0].lower() != "wal" and connection.execute("PRAGMA journal_mode=WAL").fetchone()[0].lower() != "wal":
-            fail("DB_SQL_ERROR", "Could not enable WAL.")
+        if not read_only:
+            connection.execute("PRAGMA max_page_count=262144")
+            if connection.execute("PRAGMA journal_mode").fetchone()[0].lower() != "wal" and connection.execute("PRAGMA journal_mode=WAL").fetchone()[0].lower() != "wal":
+                fail("DB_SQL_ERROR", "Could not enable WAL.")
         connection.enable_load_extension(False)
         if hasattr(connection, "setlimit"):
             for name, limit in (("SQLITE_LIMIT_LENGTH", 1048576), ("SQLITE_LIMIT_SQL_LENGTH", MAX_SQL_BYTES),
@@ -189,10 +228,76 @@ def cell(value):
     return value
 
 
-def db_sql(resolve, sql, operation_id=None):
+_READ_ACTIONS={sqlite3.SQLITE_SELECT,sqlite3.SQLITE_READ,sqlite3.SQLITE_FUNCTION,sqlite3.SQLITE_PRAGMA}
+if hasattr(sqlite3,"SQLITE_RECURSIVE"):
+    _READ_ACTIONS.add(sqlite3.SQLITE_RECURSIVE)
+
+
+def authorize_read(action,a,b,database,source):
+    if action not in _READ_ACTIONS:
+        return sqlite3.SQLITE_DENY
+    return authorize(action,a,b,database,source)
+
+
+def db_query(resolve,sql):
+    parts=statements(sql)
+    connection=None
+    started=time.monotonic()
+    deadline=started+8
+    results=[]
+    used=0
+    index=None
+    try:
+        connection=connect(resolve,read_only=True)
+        connection.set_progress_handler(lambda:int(time.monotonic()>=deadline),1000)
+        # One consistent snapshot across a batch, no write reservation.
+        connection.execute("BEGIN")
+        connection.set_authorizer(authorize_read)
+        emit("SQL_READ_STARTED",statementCount=len(parts))
+        for index,statement in enumerate(parts):
+            if time.monotonic()>=deadline:
+                fail("DB_SQL_TIMEOUT","Read execution exceeded its time budget.")
+            cursor=connection.execute(statement)
+            columns=[column[0] for column in cursor.description or ()]
+            entry={"columns":columns,"rows":[],"rowsAffected":0,"truncated":False}
+            used+=len(json.dumps(columns,ensure_ascii=False).encode("utf-8"))+100
+            if used>MAX_RESPONSE_BYTES:
+                fail("DB_SQL_LIMIT","Read result metadata exceeds the response budget.")
+            for raw in cursor:
+                if time.monotonic()>=deadline:
+                    fail("DB_SQL_TIMEOUT","Read execution exceeded its time budget.")
+                if len(entry["rows"])>=MAX_ROWS:
+                    entry["truncated"]=True
+                    break
+                row=[cell(value) for value in raw]
+                size=len(json.dumps(row,ensure_ascii=False,allow_nan=False).encode("utf-8"))+1
+                if used+size>MAX_RESPONSE_BYTES:
+                    entry["truncated"]=True
+                    break
+                entry["rows"].append(row)
+                used+=size
+            cursor.close()
+            results.append(entry)
+        emit("SQL_READ_COMPLETED",statementCount=len(parts),durationMs=(time.monotonic()-started)*1000)
+        return {"success":True,"results":results,"truncated":any(r["truncated"] for r in results)}
+    except sqlite3.Error as error:
+        raw=getattr(error,"sqlite_errorcode",None)
+        name=getattr(error,"sqlite_errorname","SQLITE_ERROR")
+        primary=raw&255 if isinstance(raw,int) else None
+        code={sqlite3.SQLITE_AUTH:"DB_READ_ONLY",sqlite3.SQLITE_READONLY:"DB_READ_ONLY",sqlite3.SQLITE_BUSY:"DB_BUSY",sqlite3.SQLITE_LOCKED:"DB_LOCKED"}.get(primary,"DB_SQL_TIMEOUT" if time.monotonic()>=deadline else "DB_SQL_ERROR")
+        emit("SQL_READ_FAILED",level="ERROR",code=code,sqliteCode=raw,sqliteName=name,statementIndex=index)
+        message="Only read-only SQL is accepted; use db_outbox_submit for changes." if code=="DB_READ_ONLY" else "Read failed: "+name
+        raise MemoryOperationError(code,message,"not_started",raw,name,index) from error
+    finally:
+        if connection is not None:
+            connection.set_authorizer(None)
+            connection.set_progress_handler(None,0)
+            connection.close()
+
+
+def _execute_write(resolve, sql, operation_id):
     parts = statements(sql)
-    if operation_id is not None and (not isinstance(operation_id, str) or not _OPERATION.fullmatch(operation_id)):
-        fail("DB_SQL_INVALID", "Invalid operationId.")
+    operation_key(operation_id)
     # Direct Python callers and the Agent's FIFO queue share this guard.
     with _DB_LOCK:
         deadline = time.monotonic() + 8
@@ -225,7 +330,7 @@ def _transaction(resolve, sql, parts, operation_id, deadline, attempt):
         connection.execute("BEGIN IMMEDIATE")
         stage = "transaction"
         emit("SQL_TRANSACTION_STARTED", attempt=attempt, statementCount=len(parts))
-        # Keep the internal ledger reserved even for legacy calls without keys.
+        # All production writes are keyed durable outbox jobs.
         ensure_dedup(connection)
         if operation_id is not None:
             fingerprint = hashlib.sha256(sql.encode("utf-8")).hexdigest()
@@ -326,7 +431,7 @@ def _transaction(resolve, sql, parts, operation_id, deadline, attempt):
 
 def text_path(resolve, logical):
     if not isinstance(logical, str) or logical.lower().startswith("scheduled/database.sqlite") or logical.lower()=="scheduled/reliability-trace.jsonl":
-        fail("WORKSPACE_PATH_INVALID", "Database files must be accessed through db_sql.")
+        fail("WORKSPACE_PATH_INVALID", "Database files must be accessed through db_query or the outbox.")
     path = resolve(logical)
     check_file(path)
     return path
@@ -502,7 +607,7 @@ def outbox_process_one(resolve):
         return False
     emit("OUTBOX_PROCESSING",attempt=job["attempts"])
     try:
-        db_sql(resolve,job["sql"],job["operationId"])
+        _execute_write(resolve,job["sql"],job["operationId"])
         emit("OUTBOX_COMMITTED",executionState="committed")
     except (MemoryOperationError,OSError) as error:
         value=outbox_failure(resolve,job,error)
@@ -523,8 +628,8 @@ def call(resolve, name, arguments):
         return outbox_ack(resolve,arguments["operationId"])
     if name == "db_outbox_list" and set(arguments)<={"limit","offset"}:
         return outbox_list(resolve,arguments.get("limit",50),arguments.get("offset",0))
-    if name == "db_sql" and set(arguments) in ({"sql"}, {"sql", "operationId"}):
-        return db_sql(resolve, arguments["sql"], arguments.get("operationId"))
+    if name == "db_query" and set(arguments)=={"sql"}:
+        return db_query(resolve,arguments["sql"])
     if name == "workspace_read_text" and set(arguments) == {"workspacePath"}:
         return read_text(resolve, arguments["workspacePath"])
     if name == "workspace_write_text" and set(arguments) == {"workspacePath", "text"}:
