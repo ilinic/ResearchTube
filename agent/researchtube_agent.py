@@ -48,8 +48,8 @@ except ImportError:
     from task_history import TaskHistory
     from browser_resources import save_browser_resource
 
-AGENT_VERSION = "2.8.10"
-INTERFACE_VERSION = 89
+AGENT_VERSION = "2.8.11"
+INTERFACE_VERSION = 90
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
 MAX_GOOGLE_TRANSLATE_AUDIO_BYTES = 16 * 1024 * 1024
@@ -1056,8 +1056,10 @@ class WorkspacePathResolver:
                 raise AgentApiError(error_code, f"{field_name} contains a non-portable workspace path component.")
         return tuple(parts), "/".join(parts)
 
-    def resolve_destination(self, value: Any, *, field_name: str, error_code: str, allow_root: bool = False) -> ResolvedWorkspacePath:
+    def resolve_destination(self, value: Any, *, field_name: str, error_code: str, allow_root: bool = False, allow_database: bool = False) -> ResolvedWorkspacePath:
         parts, logical_path = self.logical_parts(value, field_name=field_name, error_code=error_code, allow_root=allow_root)
+        if not allow_database and logical_path.lower().startswith("scheduled/database.sqlite"):
+            raise AgentApiError(error_code, "Live research database files are reserved for db_sql and the outbox.")
         candidate = self.root.joinpath(*parts)
         # Do not let built-in tools traverse a symbolic link or Windows
         # junction even when its current target happens to be inside workspace.
@@ -1117,7 +1119,7 @@ except ImportError:
 
 
 def memory_path(logical):
-    return WorkspacePathResolver().resolve_destination(logical, field_name="workspacePath", error_code="WORKSPACE_PATH_INVALID").physical_path
+    return WorkspacePathResolver().resolve_destination(logical, field_name="workspacePath", error_code="WORKSPACE_PATH_INVALID", allow_database=True).physical_path
 
 
 SQL_QUEUE = None
@@ -1130,10 +1132,12 @@ async def memory_tool_call(name, arguments):
     try:
         if name == "system_get_trace":
             value = await asyncio.to_thread(reliability.TRACE.query, arguments)
-        elif name == "db_sql":
+        elif name == "system_export_trace":
+            value = await asyncio.to_thread(reliability.TRACE.export, memory_path("scheduled/reliability-trace.jsonl"), arguments)
+        elif name == "db_sql" or name.startswith("db_outbox_"):
             if SQL_QUEUE is None:
                 SQL_QUEUE = scheduled_memory.SqlQueue()
-            value = await SQL_QUEUE.run(memory_path, arguments)
+            value = await SQL_QUEUE.run(memory_path, arguments, name)
         else:
             value = await asyncio.to_thread(scheduled_memory.call, memory_path, name, arguments)
         reliability.emit("AGENT_TOOL_COMPLETED", tool=name, durationMs=(time.monotonic()-started)*1000, executionState="completed")
@@ -1261,6 +1265,8 @@ def workspace_move(payload: Any) -> dict[str, Any]:
         raise AgentApiError("INVALID_REQUEST", "workspace_move requires a JSON object.")
     resolver = WorkspacePathResolver()
     source = resolver.resolve_existing(payload.get("source"), field_name="source")
+    if source.logical_path.lower() == "scheduled":
+        raise AgentApiError("WORKSPACE_PATH_INVALID", "The scheduled database directory cannot be moved while Agent is running.")
     source_type = workspace_object_type(source.physical_path)
     if source_type == "other":
         raise AgentApiError("WORKSPACE_NOT_FOUND", "source is not a regular file or directory.")
@@ -1283,6 +1289,8 @@ def workspace_delete(payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise AgentApiError("INVALID_REQUEST", "workspace_delete requires a JSON object.")
     item = WorkspacePathResolver().resolve_existing(payload.get("path"), field_name="path")
+    if item.logical_path.lower() == "scheduled":
+        raise AgentApiError("WORKSPACE_PATH_INVALID", "The scheduled database directory is reserved.")
     item_type = workspace_object_type(item.physical_path)
     try:
         if item_type == "file":
@@ -5687,7 +5695,7 @@ def http_response(status: str, body: dict[str, Any] | None = None) -> bytes:
     headers = [
         f"HTTP/1.1 {status}", "Content-Type: application/json; charset=utf-8", f"Content-Length: {len(encoded)}",
         "Access-Control-Allow-Origin: *", "Access-Control-Allow-Methods: GET, POST, OPTIONS",
-        "Access-Control-Allow-Headers: Content-Type", "Access-Control-Allow-Private-Network: true", "Connection: close", "", "",
+        "Access-Control-Allow-Headers: Content-Type, X-ResearchTube-Request-Id", "Access-Control-Allow-Private-Network: true", "Connection: close", "", "",
     ]
     return "\r\n".join(headers).encode("ascii") + encoded
 
@@ -6271,11 +6279,19 @@ def configured_startup_prompts() -> dict:
 
 async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
     method, path = "", ""
+    trace_context=None
+    started=time.monotonic()
     try:
         method, path, query, body, headers = await read_request(reader)
         if path == "/mcp" or path.startswith("/internal/local-mcp/"):
             await LOCAL_MCP.http(method, path, headers, body, reader, writer)
             return
+        request_id=headers.get("x-researchtube-request-id","")
+        if reliability.TOKEN.fullmatch(request_id):
+            trace_context=reliability.REQUEST.set({"requestId":request_id})
+            segment=path.lstrip("/").split("/",1)[0]
+            stage=segment if segment in ("workspace","tasks","media","system","custom-tools","timer","internal") else "other"
+            reliability.emit("AGENT_REQUEST_RECEIVED",stage=stage,method=method,bytes=len(body))
         if method == "OPTIONS":
             response_status, response_body = "204 No Content", None
         elif method == "GET" and path == "/health":
@@ -6469,17 +6485,25 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             response_status, response_body = "404 Not Found", error_document(AgentApiError("NOT_FOUND", "Unknown local Agent endpoint."))
         writer.write(http_response(response_status, response_body))
         await writer.drain()
+        if trace_context is not None:
+            reliability.emit("AGENT_RESPONSE_SENT",httpStatus=int(response_status.split()[0]),durationMs=(time.monotonic()-started)*1000)
         log_path = compact_google_translate_speech_log_path(path, response_body)
         log_path = compact_custom_tool_log_path(log_path, response_body)
         log(f"{method or 'INVALID'} {log_path or '/'} -> {response_status.split()[0]}{response_log_suffix(path, response_body)}")
     except AgentApiError as error:
+        if trace_context is not None:
+            reliability.emit("AGENT_REQUEST_FAILED",level="ERROR",code=error.code,exceptionType=type(error).__name__,durationMs=(time.monotonic()-started)*1000)
         status = "404 Not Found" if error.code in {"TASK_NOT_FOUND", "VISUAL_MAP_TASK_NOT_FOUND", "CAMERA_RECORD_TASK_NOT_FOUND", "CAPTURE_FRAME_TASK_NOT_FOUND", "MEDIA_CLIP_TASK_NOT_FOUND", "TIMER_NOT_FOUND", "CUSTOM_TOOL_NOT_FOUND", "CUSTOM_TOOL_TASK_NOT_FOUND"} else "400 Bad Request"
         writer.write(http_response(status, error_document(error)))
         await writer.drain()
         log(f"{method or 'INVALID'} {path or '/'} -> {status.split()[0]}")
     except (ConnectionError, asyncio.TimeoutError, UnicodeDecodeError, asyncio.IncompleteReadError) as error:
+        if trace_context is not None:
+            reliability.emit("AGENT_RESPONSE_LOST",level="ERROR",exceptionType=type(error).__name__,executionState="unknown")
         log(f"request failed: {error.__class__.__name__}", error=True)
     finally:
+        if trace_context is not None:
+            reliability.REQUEST.reset(trace_context)
         # Health and prompt reads only return startup snapshots. Task pruning reads
         # user configuration and belongs to task/other requests and done callbacks.
         if not (method == "GET" and path in {"/health", "/internal/prompt-templates"}):
@@ -6525,6 +6549,18 @@ async def scheduled_loop(settings):
         log("Scheduled activation stopped.")
 
 
+async def outbox_loop():
+    # One consumer, all calls through the same FIFO. Idle waits prevent polling
+    # storms; persistent pending state survives process termination.
+    while True:
+        try:
+            worked = await SQL_QUEUE.run(memory_path, {}, "__outbox_process")
+            await asyncio.sleep(.1 if worked else 5)
+        except Exception as error:
+            reliability.emit("OUTBOX_WORKER_FAILED",level="ERROR",code=getattr(error,"code","DB_OUTBOX_ERROR"),exceptionType=type(error).__name__)
+            await asyncio.sleep(15)
+
+
 async def initialize_scheduled_memory() -> None:
     try:
         await asyncio.to_thread(scheduled_memory.initialize, memory_path)
@@ -6547,6 +6583,20 @@ async def serve(port: int, on_started: Callable[[], None] | None = None) -> None
         queue_capacity = 4096
     SQL_QUEUE = scheduled_memory.SqlQueue(queue_capacity)
     try:
+        config=read_agent_config()
+        # Reserve 8 MiB for one 4 MiB export plus its atomic replacement.
+        cap=config.get("reliabilityDiskMiB",64)
+        ttl=config.get("reliabilityRetentionSeconds",3600)
+        if type(cap) is int and 16<=cap<=64:
+            reliability.TRACE.disk_bytes=(cap-8)*1048576
+        else:
+            reliability.TRACE.disk_bytes=56*1048576
+        if type(ttl) is int and 60<=ttl<=3600:
+            reliability.TRACE.ttl=ttl
+        reliability.TRACE.export_path=memory_path("scheduled/reliability-trace.jsonl")
+        quota=config.get("sqlOutboxMiB",64)
+        if type(quota) is int and 1<=quota<=256:
+            scheduled_memory.OUTBOX_BYTES=quota*1048576
         reliability.TRACE.start(ROOT / "reliability-trace")
     except Exception:
         log("Reliability diagnostic writer unavailable; continuing in memory.", error=True)
@@ -6558,13 +6608,15 @@ async def serve(port: int, on_started: Callable[[], None] | None = None) -> None
         on_started()
     diagnostics = asyncio.create_task(collect_startup_health(initial_health), name="startup-health")
     scheduled = asyncio.create_task(scheduled_loop(scheduled_settings), name="scheduled-activation")
+    outbox = asyncio.create_task(outbox_loop(), name="sql-outbox")
     try:
         async with server:
             await server.serve_forever()
     finally:
         diagnostics.cancel()
         scheduled.cancel()
-        await asyncio.gather(diagnostics, scheduled, return_exceptions=True)
+        outbox.cancel()
+        await asyncio.gather(diagnostics, scheduled, outbox, return_exceptions=True)
         async with PUBLIC_SHARE_LOCK:
             await stop_public_share_unlocked()
         await LOCAL_MCP.shutdown()

@@ -59,7 +59,11 @@ async function route(request: Request, env: Env): Promise<Response> {
       const bytes = await readBytes(request, 32_768);
       const started = Date.now();
       const result = await auth.handler(new Request(request, { body: bytes }));
-      if(suffix === "/oauth2/token") console.info(JSON.stringify({component:"worker",event:"OAUTH_TOKEN_RESPONSE",httpStatus:result.status,durationMs:Date.now()-started,atMs:Date.now()}));
+      if(suffix === "/oauth2/token") {
+        const grant = new URLSearchParams(new TextDecoder().decode(bytes)).get("grant_type");
+        const kind = grant === "refresh_token" || grant === "authorization_code" ? grant : "other";
+        console.info(JSON.stringify({component:"worker",event:"OAUTH_TOKEN_RESPONSE",stage:kind,httpStatus:result.status,durationMs:Date.now()-started,atMs:Date.now()}));
+      }
       return result;
     }
     return auth.handler(request);

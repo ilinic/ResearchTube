@@ -382,3 +382,15 @@ await assert.rejects(capped.run('site_open',{url:'https://example.test/',tabId:1
 await assert.rejects(capped.run('site_open',{url:'https://example.test/',tabId:22}),{code:'BROWSER_READ_ONLY'});
 const same=await capped.run('site_open',{url:'https://example.test/b'});assert.equal(same.status,'reused');
 assert.equal(capped.tabs.size,4);
+
+const recovering=fixture();
+await recovering.agent.start(10);
+const recoveredFirst=await recovering.run("site_read");
+const originalCommand=recovering.host.command;let injected=0;
+recovering.host.command=async(...args)=>{
+  if(args[1]==="Accessibility.getFullAXTree"&&injected++===0)throw Error("Debugger is not attached");
+  return originalCommand(...args);
+};
+const recoveredAgain=await recovering.run("site_read");
+assert.ok(recoveredAgain.nodes.length>0);
+assert.notEqual(recoveredAgain.nodes[0].nodeId,recoveredFirst.nodes[0].nodeId);

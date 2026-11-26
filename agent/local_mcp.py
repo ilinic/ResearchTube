@@ -29,7 +29,7 @@ except ImportError:
 
 MAX_MESSAGE = 2 * 1024 * 1024
 BASE_TOOLS = frozenset(("youtube_search", "youtube_get_video", "youtube_get_transcript", "youtube_get_comments", "youtube_get_comment_replies", "youtube_get_channel_videos", "youtube_get_channel_playlists", "youtube_get_playlist_videos"))
-MEMORY_TOOLS = frozenset(("db_sql", "workspace_read_text", "workspace_write_text", "system_get_trace"))
+MEMORY_TOOLS = frozenset(("db_sql", "workspace_read_text", "workspace_write_text", "system_get_trace", "system_export_trace", "db_outbox_submit", "db_outbox_status", "db_outbox_list", "db_outbox_ack"))
 BROWSER_TOOLS = frozenset(("site_open", "site_interact", "site_list_tabs", "site_read", "site_get_children", "site_get_node", "site_get_text", "site_get_images", "site_get_files", "site_files_status", "site_files_cancel"))
 CATALOG = json.loads(CATALOG_JSON)
 DEFINITIONS = {tool["name"]: tool for tool in CATALOG}
@@ -230,12 +230,15 @@ class LocalMcpService:
             else:
                 try:
                     payload = json.loads(body)
-                    if not isinstance(payload, dict) or payload.get("name") not in MEMORY_TOOLS or set(payload) not in ({"name", "arguments"}, {"name", "arguments", "requestId"}):
+                    if not isinstance(payload, dict) or payload.get("name") not in MEMORY_TOOLS or set(payload)-{"name","arguments","requestId","attempt"} or "arguments" not in payload:
                         raise LocalError("INVALID_ARGUMENT")
                     request_id = payload.get("requestId")
                     if not isinstance(request_id, str) or not reliability.TOKEN.fullmatch(request_id):
                         request_id = uuid.uuid4().hex
-                    context = reliability.REQUEST.set({"requestId":request_id,"tool":payload["name"],"attempt":1})
+                    attempt=payload.get("attempt",1)
+                    if type(attempt) is not int or not 1<=attempt<=4:
+                        raise LocalError("INVALID_ARGUMENT")
+                    context = reliability.REQUEST.set({"requestId":request_id,"tool":payload["name"],"attempt":attempt})
                     try:
                         reliability.emit("AGENT_REQUEST_RECEIVED", bytes=len(body))
                         arguments = normalized(DEFINITIONS[payload["name"]]["inputSchema"], payload["arguments"])
@@ -343,14 +346,18 @@ class LocalMcpService:
             raise LocalError("YOUTUBE_BRIDGE_OFFLINE")
         if len(self.pending) >= 32:
             raise LocalError("YOUTUBE_BRIDGE_BUSY", "The browser request queue is full. Retry later.")
-        identifier = secrets.token_hex(16)
+        parent=(reliability.REQUEST.get() or {}).get("requestId")
+        identifier = parent if isinstance(parent,str) and re.fullmatch(r"[a-f0-9]{32}",parent) and parent not in self.pending else secrets.token_hex(16)
+        reliability.emit("LOCAL_BRIDGE_DISPATCHED",tool=name)
         future = asyncio.get_running_loop().create_future()
         self.pending[identifier] = future
         try:
             async with self.send_lock:
                 await send_frame(writer, {"type": "request", "id": identifier, "name": name, "arguments": arguments})
             try:
-                return await asyncio.wait_for(future, 90)
+                value=await asyncio.wait_for(future,90)
+                reliability.emit("LOCAL_BRIDGE_RESPONSE_RECEIVED",tool=name)
+                return value
             except asyncio.TimeoutError as error:
                 raise LocalError("YOUTUBE_BRIDGE_TIMEOUT") from error
         except (ConnectionError, OSError) as error:

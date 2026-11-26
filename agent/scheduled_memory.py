@@ -41,7 +41,7 @@ class SqlQueue:
         self.lock = asyncio.Lock()
         self.depth = 0
 
-    async def run(self, resolve, arguments):
+    async def run(self, resolve, arguments, name="db_sql"):
         if self.depth >= self.capacity:
             fail("DB_QUEUE_FULL", "SQL queue is full; no SQL executed.")
         self.depth += 1
@@ -54,7 +54,7 @@ class SqlQueue:
                 fail("DB_QUEUE_TIMEOUT", "SQL queue deadline reached; no SQL executed.")
             try:
                 emit("SQL_QUEUE_ACQUIRED", queueDepth=self.depth, durationMs=(time.monotonic()-started)*1000)
-                task = asyncio.create_task(asyncio.to_thread(call, resolve, "db_sql", arguments))
+                task = asyncio.create_task(asyncio.to_thread(call, resolve, name, arguments))
                 try:
                     return await asyncio.shield(task)
                 except asyncio.CancelledError:
@@ -118,6 +118,7 @@ def connect(resolve):
 
 def ensure_dedup(connection):
     connection.execute("CREATE TABLE IF NOT EXISTS _rt_internal_operations (operation_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, result TEXT NOT NULL, created_at INTEGER NOT NULL)")
+    connection.execute("CREATE TABLE IF NOT EXISTS _rt_internal_outbox (operation_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, sql TEXT NOT NULL, created_at INTEGER NOT NULL, state TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL DEFAULT 0, code TEXT)")
 
 
 def initialize(resolve):
@@ -228,10 +229,14 @@ def _transaction(resolve, sql, parts, operation_id, deadline, attempt):
         ensure_dedup(connection)
         if operation_id is not None:
             fingerprint = hashlib.sha256(sql.encode("utf-8")).hexdigest()
+            reserved = connection.execute("SELECT fingerprint FROM _rt_internal_outbox WHERE operation_id=?", (operation_id,)).fetchone()
+            if reserved and reserved[0] != fingerprint:
+                fail("DB_OPERATION_CONFLICT", "operationId belongs to a different outbox payload.")
             previous = connection.execute("SELECT fingerprint,result FROM _rt_internal_operations WHERE operation_id=?", (operation_id,)).fetchone()
             if previous:
                 if previous[0] != fingerprint:
                     fail("DB_OPERATION_CONFLICT", "operationId already belongs to another SQL payload.")
+                connection.execute("UPDATE _rt_internal_outbox SET state=\'committed\',code=NULL WHERE operation_id=?", (operation_id,))
                 stage = "commit"
                 connection.execute("COMMIT")
                 stage = "committed"
@@ -277,6 +282,8 @@ def _transaction(resolve, sql, parts, operation_id, deadline, attempt):
                 fail("DB_SQL_LIMIT", "SQL result exceeds the operation ledger budget.")
             connection.execute("INSERT INTO _rt_internal_operations VALUES (?,?,?,?)", (operation_id, fingerprint, encoded, int(time.time())))
         stage = "commit"
+        if operation_id is not None:
+            connection.execute("UPDATE _rt_internal_outbox SET state=\'committed\',code=NULL WHERE operation_id=?", (operation_id,))
         connection.execute("COMMIT")
         stage = "committed"
         emit("SQL_COMMITTED", attempt=attempt, executionState="committed", statementCount=len(parts), rowsAffected=sum(r["rowsAffected"] for r in results), durationMs=(time.monotonic()-started)*1000)
@@ -318,7 +325,7 @@ def _transaction(resolve, sql, parts, operation_id, deadline, attempt):
 
 
 def text_path(resolve, logical):
-    if not isinstance(logical, str) or logical.lower().startswith("scheduled/database.sqlite"):
+    if not isinstance(logical, str) or logical.lower().startswith("scheduled/database.sqlite") or logical.lower()=="scheduled/reliability-trace.jsonl":
         fail("WORKSPACE_PATH_INVALID", "Database files must be accessed through db_sql.")
     path = resolve(logical)
     check_file(path)
@@ -362,9 +369,160 @@ def write_text(resolve, logical, text):
     return {"workspacePath": logical, "sizeBytes": len(data)}
 
 
+OUTBOX_BYTES = 64 * 1024 * 1024
+OUTBOX_COUNT = 10000
+
+
+def operation_key(value):
+    if not isinstance(value,str) or not _OPERATION.fullmatch(value):
+        fail("DB_SQL_INVALID","A stable operationId is required.")
+    return value
+
+
+def _outbox_transaction(resolve, work):
+    # One owner for all internal database operations. Never hold the lock over
+    # browser/network work. The outbox is in the same DB, not in the trace.
+    with _DB_LOCK:
+        con = None
+        try:
+            con = connect(resolve)
+            con.execute("BEGIN IMMEDIATE")
+            ensure_dedup(con)
+            result = work(con)
+            con.commit()
+            return result
+        except sqlite3.Error as error:
+            raw=getattr(error,"sqlite_errorcode",None)
+            kind=raw&255 if isinstance(raw,int) else None
+            code={sqlite3.SQLITE_BUSY:"DB_BUSY",sqlite3.SQLITE_LOCKED:"DB_LOCKED"}.get(kind,"DB_OUTBOX_ERROR")
+            state="unknown"
+            if con is not None and con.in_transaction:
+                try:
+                    con.rollback()
+                    state="rolled_back"
+                except sqlite3.Error:
+                    pass
+            raise MemoryOperationError(code,"Outbox transaction failed: "+getattr(error,"sqlite_errorname","SQLITE_ERROR"),state,raw,getattr(error,"sqlite_errorname",None)) from error
+        finally:
+            if con is not None:
+                con.close()
+
+
+def _outbox_state(con,key):
+    row=con.execute("SELECT state,created_at,attempts,code FROM _rt_internal_outbox WHERE operation_id=?",(key,)).fetchone()
+    committed=con.execute("SELECT created_at FROM _rt_internal_operations WHERE operation_id=?",(key,)).fetchone()
+    if committed:
+        return {"operationId":key,"state":"committed","createdAt":row[1] if row else committed[0],"attempts":row[2] if row else 0,"code":None,"acknowledged":row is None}
+    if row:
+        return {"operationId":key,"state":row[0],"createdAt":row[1],"attempts":row[2],"code":row[3],"acknowledged":False}
+    return {"operationId":key,"state":"not_found","createdAt":None,"attempts":0,"code":None,"acknowledged":False}
+
+
+def outbox_submit(resolve,key,sql):
+    key=operation_key(key)
+    statements(sql)  # Validate size and statement count before durable admission.
+    digest=hashlib.sha256(sql.encode("utf-8")).hexdigest()
+    def submit(con):
+        for table in ("_rt_internal_operations","_rt_internal_outbox"):
+            old=con.execute("SELECT fingerprint FROM "+table+" WHERE operation_id=?",(key,)).fetchone()
+            if old and old[0]!=digest:
+                fail("DB_OPERATION_CONFLICT","operationId already belongs to another SQL payload.")
+        current=_outbox_state(con,key)
+        if current["state"]!="not_found":
+            return current
+        count,size=con.execute("SELECT count(*),coalesce(sum(length(CAST(sql AS BLOB))+length(operation_id)+256),0) FROM _rt_internal_outbox").fetchone()
+        if count>=OUTBOX_COUNT or size+len(sql.encode("utf-8"))+512>OUTBOX_BYTES:
+            fail("DB_OUTBOX_FULL","Outbox is full. No package accepted; preserve your original data.")
+        con.execute("INSERT INTO _rt_internal_outbox(operation_id,fingerprint,sql,created_at,state) VALUES(?,?,?,?,?)",(key,digest,sql,int(time.time()),"pending"))
+        return _outbox_state(con,key)
+    value=_outbox_transaction(resolve,submit)
+    emit("OUTBOX_ACCEPTED",status=value["state"])
+    return value
+
+
+def outbox_status(resolve,key):
+    return _outbox_transaction(resolve,lambda con:_outbox_state(con,operation_key(key)))
+
+
+def outbox_list(resolve,limit=50,offset=0):
+    if type(limit) is not int or not 1<=limit<=100 or type(offset) is not int or not 0<=offset<=OUTBOX_COUNT:
+        fail("INVALID_ARGUMENT","Invalid outbox page.")
+    def list_items(con):
+        rows=con.execute("SELECT operation_id FROM _rt_internal_outbox ORDER BY created_at,operation_id LIMIT ? OFFSET ?",(limit+1,offset)).fetchall()
+        return {"items":[_outbox_state(con,row[0]) for row in rows[:limit]],"nextOffset":offset+limit if len(rows)>limit else None}
+    return _outbox_transaction(resolve,list_items)
+
+
+def outbox_ack(resolve,key):
+    key=operation_key(key)
+    def ack(con):
+        state=_outbox_state(con,key)
+        if state["state"]!="committed":
+            fail("DB_OUTBOX_NOT_COMMITTED","Cannot acknowledge an uncommitted package.")
+        con.execute("DELETE FROM _rt_internal_outbox WHERE operation_id=?",(key,))
+        return _outbox_state(con,key)
+    return _outbox_transaction(resolve,ack)
+
+
+def outbox_claim(resolve):
+    def claim(con):
+        # After a crash, processing is unknown; check the ledger before retry.
+        row=con.execute("SELECT operation_id,sql,attempts FROM _rt_internal_outbox WHERE state IN ('pending','processing','unknown') AND next_at<=? ORDER BY next_at,created_at,operation_id LIMIT 1",(int(time.time()),)).fetchone()
+        if not row:
+            return None
+        key,sql,attempts=row
+        if _outbox_state(con,key)["state"]=="committed":
+            con.execute("UPDATE _rt_internal_outbox SET state='committed',code=NULL WHERE operation_id=?",(key,))
+            return None
+        con.execute("UPDATE _rt_internal_outbox SET state='processing',attempts=attempts+1 WHERE operation_id=?",(key,))
+        return {"operationId":key,"sql":sql,"attempts":attempts+1}
+    return _outbox_transaction(resolve,claim)
+
+
+def outbox_failure(resolve,job,error):
+    key=job["operationId"]
+    code=getattr(error,"code","DB_OUTBOX_ERROR")
+    raw=getattr(error,"sqlite_code",None)
+    primary=raw&255 if isinstance(raw,int) else None
+    permanent=code in ("DB_OPERATION_CONFLICT","DB_SQL_INVALID","DB_SQL_LIMIT") or primary in (sqlite3.SQLITE_ERROR,sqlite3.SQLITE_CONSTRAINT,sqlite3.SQLITE_AUTH,sqlite3.SQLITE_MISMATCH,sqlite3.SQLITE_RANGE,sqlite3.SQLITE_TOOBIG)
+    def update(con):
+        state=_outbox_state(con,key)
+        if state["state"]=="committed":
+            return state
+        next_state="failed_permanent" if permanent else "unknown" if getattr(error,"executionState","unknown")=="unknown" else "pending"
+        delay=min(300,5*2**min(job["attempts"]-1,6))
+        con.execute("UPDATE _rt_internal_outbox SET state=?,code=?,next_at=? WHERE operation_id=?",(next_state,code,int(time.time())+delay,key))
+        return _outbox_state(con,key)
+    return _outbox_transaction(resolve,update)
+
+
+def outbox_process_one(resolve):
+    job=outbox_claim(resolve)
+    if job is None:
+        return False
+    emit("OUTBOX_PROCESSING",attempt=job["attempts"])
+    try:
+        db_sql(resolve,job["sql"],job["operationId"])
+        emit("OUTBOX_COMMITTED",executionState="committed")
+    except (MemoryOperationError,OSError) as error:
+        value=outbox_failure(resolve,job,error)
+        emit("OUTBOX_FAILED",level="ERROR",code=value["code"],status=value["state"])
+    return True
+
+
 def call(resolve, name, arguments):
     if not isinstance(arguments, dict):
         fail("INVALID_ARGUMENT", "Expected tool argument object.")
+    if name == "__outbox_process" and not arguments:
+        return outbox_process_one(resolve)
+    if name == "db_outbox_submit" and set(arguments)=={"operationId","sql"}:
+        return outbox_submit(resolve,arguments["operationId"],arguments["sql"])
+    if name == "db_outbox_status" and set(arguments)=={"operationId"}:
+        return outbox_status(resolve,arguments["operationId"])
+    if name == "db_outbox_ack" and set(arguments)=={"operationId"}:
+        return outbox_ack(resolve,arguments["operationId"])
+    if name == "db_outbox_list" and set(arguments)<={"limit","offset"}:
+        return outbox_list(resolve,arguments.get("limit",50),arguments.get("offset",0))
     if name == "db_sql" and set(arguments) in ({"sql"}, {"sql", "operationId"}):
         return db_sql(resolve, arguments["sql"], arguments.get("operationId"))
     if name == "workspace_read_text" and set(arguments) == {"workspacePath"}:

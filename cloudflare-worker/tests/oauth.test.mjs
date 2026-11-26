@@ -35,6 +35,7 @@ test("real D1-backed OAuth code + consent + PKCE token authorizes only account-s
     code, code_verifier: verifier, redirect_uri: CALLBACK, resource: BASE }));
   const tokens = await response.json(); expect(response.status, JSON.stringify(tokens)).toBe(200);
   expect(tokens.access_token).toBeTypeOf("string"); expect(tokens.refresh_token).toBeTypeOf("string");
+  expect(tokens.expires_in).toBe(3600);
   tokenResponse = { ...tokens, clientId: client.client_id };
   const status = await rpc(mf, "tools/call", { name: "system_connection_status", arguments: {}, _meta: { "openai/session": "chat-oauth" } }, tokens.access_token);
   const value = await status.json(); expect(status.status, JSON.stringify(value)).toBe(200);
@@ -56,7 +57,7 @@ test("refresh rotates credentials and a revoked refresh token cannot mint new ac
   const denied = await mf.dispatchFetch(BASE + "/api/auth/oauth2/token", form({ grant_type: "refresh_token", client_id: tokenResponse.clientId,
     refresh_token: tokens.refresh_token, resource: BASE }));
   expect(denied.status).toBe(400);
-  // Signed access tokens expire after five minutes; disconnecting a browser
+  // Signed access tokens expire after one hour; disconnecting a browser
   // binding or installation separately blocks routing immediately.
 });
 test("rejects an unregistered redirect and a wrong PKCE verifier", async () => {
@@ -107,4 +108,22 @@ test("the first OAuth-authenticated tool executes without a conversation or conn
     const status = await (await call("system_connection_status", {})).json();
     expect(status.result.structuredContent.connected).toBe(true);
   } finally { socket.close(); }
+});
+
+test("parallel authenticated calls and concurrent refresh attempts have explicit outcomes", async () => {
+  const {client,code}=await begin();
+  const exchange=await mf.dispatchFetch(BASE+"/api/auth/oauth2/token",form({grant_type:"authorization_code",client_id:client.client_id,code,code_verifier:verifier,redirect_uri:CALLBACK,resource:BASE}));
+  expect(exchange.status).toBe(200);
+  const original=await exchange.json();
+  const results=await Promise.all(Array.from({length:6},()=>rpc(mf,"tools/call",{name:"system_connection_status",arguments:{}},original.access_token)));
+  for(const response of results)expect(response.status).toBe(200);
+  const refresh=()=>mf.dispatchFetch(BASE+"/api/auth/oauth2/token",form({grant_type:"refresh_token",client_id:client.client_id,refresh_token:original.refresh_token,resource:BASE}));
+  const attempts=await Promise.all([refresh(),refresh()]);
+  const accepted=attempts.filter(response=>response.status===200);
+  expect(accepted.length).toBeGreaterThanOrEqual(1);
+  for(const response of attempts)expect([200,400,401]).toContain(response.status);
+  // Do not disable refresh rotation or accept revoked tokens to make this pass.
+  const tokens=await accepted[accepted.length-1].json();
+  const call=await rpc(mf,"tools/call",{name:"system_connection_status",arguments:{}},tokens.access_token);
+  expect(call.status).toBe(200);
 });

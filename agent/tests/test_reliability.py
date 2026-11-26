@@ -31,3 +31,35 @@ class ReliabilityTraceTest(unittest.TestCase):
             self.assertNotIn("SECRET", "".join(p.read_text() for p in trace.root.glob("*.jsonl")))
             trace.add({"event":"EXPIRED","atMs":(time.time()-3601)*1000})
             self.assertFalse(any(e["event"]=="EXPIRED" for e in trace.query({"limit":100})["events"]))
+
+    def test_export_and_request_report(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            trace=Trace()
+            trace.root=root/"trace"
+            trace.add({"event":"SQL_COMMITTED","requestId":"req-1","component":"agent","executionState":"committed","sql":"SECRET"})
+            trace.add({"event":"AGENT_TOOL_COMPLETED","requestId":"req-1","component":"agent","executionState":"completed"})
+            trace.add({"event":"OTHER","requestId":"req-2"})
+            trace._flush()
+            report=trace.query({"requestId":"req-1"})["requestReport"]
+            self.assertEqual(report["executionState"],"committed")
+            dest=root/"scheduled"/"reliability-trace.jsonl"
+            result=trace.export(dest,{"requestId":"req-1"})
+            self.assertEqual(result["events"],2)
+            self.assertNotIn("SECRET",dest.read_text())
+            self.assertNotIn("req-2",dest.read_text())
+            import os
+            os.utime(dest,(time.time()-3700,time.time()-3700))
+            trace._flush()
+            self.assertFalse(dest.exists())
+
+    def test_disk_failure_does_not_stop_trace(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)/"blocked"
+            root.write_text("not a directory")
+            trace=Trace()
+            trace.root=root
+            trace.add({"event":"TEST","requestId":"r"})
+            with self.assertRaises(OSError):
+                trace._flush()
+            self.assertEqual(trace.query({"requestId":"r"})["events"][0]["event"],"TEST")

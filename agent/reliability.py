@@ -6,6 +6,8 @@ from contextvars import ContextVar
 from datetime import datetime, timezone
 import json
 import math
+import os
+import tempfile
 from pathlib import Path
 import re
 import threading
@@ -76,6 +78,8 @@ class Trace:
         self.thread = None
         self.root = None
         self.sequence = 0
+        self.export_lock = threading.Lock()
+        self.export_path = None
 
     def _expire(self, now):
         for buffer in (*self.history, *self.pending):
@@ -131,6 +135,9 @@ class Trace:
     def _flush(self):
         self.root.mkdir(parents=True,exist_ok=True)
         cutoff=time.time()-self.ttl
+        with self.export_lock:
+            if self.export_path is not None and not self.export_path.is_symlink() and self.export_path.is_file() and self.export_path.stat().st_mtime < cutoff:
+                self.export_path.unlink()
         segments=[]
         for path in self._segments():
             # Use the segment's creation time rather than mtime: a slowly
@@ -262,6 +269,12 @@ class Trace:
         events=[event for _,event in ordered[:limit]]
         next_cursor=f"{events[-1]['atMs']}|{events[-1]['eventId']}" if len(ordered)>limit else None
         result={"events":events,"retained":len(snapshot),"returned":len(events),"truncated":next_cursor is not None,"nextCursor":next_cursor,"dropped":dropped,"diskErrors":disk_errors}
+        if filters.get("requestId"):
+            chain=sorted((event for _,event in page),key=lambda event:(event["atMs"],event["eventId"]))
+            terminal=next((event.get("executionState") for event in reversed(chain) if event.get("executionState") in ("committed","rolled_back","not_started","unknown")),None)
+            if terminal is None and any(event.get("executionState")=="completed" for event in chain):
+                terminal="completed"
+            result["requestReport"]={"lastEvent":chain[-1]["event"] if chain else None,"lastAtMs":chain[-1]["atMs"] if chain else None,"executionState":terminal or "unknown","observedStages":list(dict.fromkeys(e["event"] for e in chain)),"attempts":max((e.get("attempt",1) for e in chain),default=0),"scope":"retained page only; no proof of ChatGPT receipt"}
         if aggregate:
             summary=[]
             for (component,tool),item in stats.items():
@@ -270,6 +283,66 @@ class Trace:
                 summary.append({"component":component,"tool":tool,**item,**percentiles,"durationSamples":len(durations)})
             result["summary"]=sorted(summary,key=lambda item:(-item["errors"],-item["events"],item["tool"]))[:100]
         return result
+
+    def export(self, path, filters):
+        """Single replaceable export, up to 4 MiB; no unrestricted path input."""
+        limit=4*1024*1024
+        cutoff=time.time()*1000-self.ttl*1000
+        since=max(cutoff,filters.get("sinceMs",0))
+        with self.export_lock:
+            with self.lock:
+                self._expire(time.time())
+                snapshot=[data for buffer in self.history for _,data in buffer.items]
+            path=Path(path)
+            path.parent.mkdir(parents=True,exist_ok=True)
+            if path.is_symlink() or (path.exists() and (not path.is_file() or path.stat().st_nlink!=1)):
+                raise ValueError("unsafe export path")
+            count=used=0
+            seen=set()
+            truncated=False
+            fd,temp=tempfile.mkstemp(prefix=".rt-trace-",dir=path.parent)
+            try:
+                with os.fdopen(fd,"wb") as stream:
+                    def write(data):
+                        nonlocal count,used,truncated
+                        try:
+                            event=json.loads(data)
+                            if event["atMs"]<since or event["eventId"] in seen:
+                                return
+                            if any(filters.get(key) is not None and filters[key]!=event.get(key) for key in ("requestId","component","tool","code","level","tabId","chatTabId","groupId","taskId")):
+                                return
+                            # Re-project even persisted records; do not trust
+                            # arbitrary JSONL fields written by another process.
+                            clean=safe_fields(event)
+                            clean["eventId"]=event["eventId"]
+                            clean["ts"]=datetime.fromtimestamp(event["atMs"]/1000,timezone.utc).isoformat()
+                            encoded=(json.dumps(clean,separators=(",",":"),allow_nan=False)+"\n").encode()
+                            if used+len(encoded)>limit:
+                                truncated=True
+                                return
+                            stream.write(encoded)
+                            used+=len(encoded);count+=1;seen.add(event["eventId"])
+                        except (ValueError,KeyError,TypeError,OverflowError):
+                            return
+                    # Recent RAM events first, then recent disk segments.
+                    for data in reversed(snapshot):
+                        write(data)
+                    for segment in reversed(self._segments()):
+                        if truncated:
+                            break
+                        try:
+                            with segment.open("rb") as source:
+                                for data in source:
+                                    if len(data)<=4096 and data.endswith(b"\n"):
+                                        write(data)
+                        except FileNotFoundError:
+                            continue
+                os.replace(temp,path)
+                self.export_path=path
+            finally:
+                if os.path.exists(temp):
+                    os.unlink(temp)
+            return {"workspacePath":"scheduled/reliability-trace.jsonl","events":count,"sizeBytes":used,"truncated":truncated}
 
 
 TRACE=Trace()

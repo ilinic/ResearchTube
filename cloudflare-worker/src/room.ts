@@ -117,6 +117,7 @@ export class BrowserRoom extends DurableObject<Env> {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(requestId);
+        console.warn(JSON.stringify({component:"relay",event:"REQUEST_TIMEOUT",requestId,tool:request.params.name,atMs:Date.now(),executionState:"unknown"}));
         reject(new PublicError("BROWSER_OUTCOME_UNKNOWN", "The extension did not acknowledge the request. Inspect its state before repeating an action.", 504));
       }, 25_000);
       this.pending.set(requestId, { socket, resolve, reject, timer, tool: request.params.name,

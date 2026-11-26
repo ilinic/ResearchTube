@@ -238,6 +238,7 @@ export function createCloudConnection(host) {
     const text = JSON.stringify(payload);
     ws.send(new TextEncoder().encode(text).length <= 1048576 ? text : JSON.stringify({ type: "response", requestId: message.requestId,
       error: { code: -32000, message: "The response exceeded the relay limit. Request a smaller result." } }));
+    try{host.diagnostic?.("EXTENSION_RESPONSE_SENT",{requestId:message.requestId,tool:toolName,bytes:new TextEncoder().encode(text).length});}catch{}
   }
   async function finishAutomatic(error = null) {
     const current = automatic; if (!current) return;

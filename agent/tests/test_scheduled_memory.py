@@ -86,3 +86,45 @@ class SharedMemoryTest(unittest.TestCase):
                 thread.join()
                 con.close()
             self.assertEqual(memory.db_sql(resolve,"SELECT count(*) FROM t")["results"][0]["rows"],[[1]])
+
+    def test_outbox_recovery_and_ack(self):
+        with tempfile.TemporaryDirectory() as directory:
+            resolve=lambda p: Path(directory)/p
+            memory.initialize(resolve)
+            memory.db_sql(resolve,"CREATE TABLE t(x UNIQUE)")
+            sql="INSERT INTO t VALUES(1)"
+            self.assertEqual(memory.outbox_submit(resolve,"pack-1",sql)["state"],"pending")
+            self.assertEqual(memory.outbox_submit(resolve,"pack-1",sql)["state"],"pending")
+            with self.assertRaises(memory.MemoryOperationError):
+                memory.outbox_submit(resolve,"pack-1","INSERT INTO t VALUES(2)")
+            # Simulate process interruption after claim and before execution.
+            claimed=memory.outbox_claim(resolve)
+            self.assertEqual(claimed["operationId"],"pack-1")
+            self.assertEqual(memory.outbox_status(resolve,"pack-1")["state"],"processing")
+            memory.initialize(resolve)
+            self.assertTrue(memory.outbox_process_one(resolve))
+            self.assertEqual(memory.outbox_status(resolve,"pack-1")["state"],"committed")
+            # Simulate lost response after commit; use the same key.
+            self.assertEqual(memory.outbox_submit(resolve,"pack-1",sql)["state"],"committed")
+            self.assertFalse(memory.outbox_process_one(resolve))
+            self.assertEqual(memory.db_sql(resolve,"SELECT count(*) FROM t")["results"][0]["rows"],[[1]])
+            self.assertTrue(memory.outbox_ack(resolve,"pack-1")["acknowledged"])
+            self.assertEqual(memory.outbox_list(resolve)["items"],[])
+            self.assertEqual(memory.outbox_submit(resolve,"pack-1",sql)["state"],"committed")
+            self.assertTrue(memory.outbox_ack(resolve,"pack-1")["acknowledged"])
+            with self.assertRaises(memory.MemoryOperationError):
+                memory.db_sql(resolve,"SELECT * FROM _rt_internal_outbox")
+
+    def test_failed_outbox_preserves_payload(self):
+        with tempfile.TemporaryDirectory() as directory:
+            resolve=lambda p: Path(directory)/p
+            memory.initialize(resolve)
+            memory.db_sql(resolve,"CREATE TABLE t(x)")
+            memory.outbox_submit(resolve,"invalid","INSERT INTO t VALUES(1); SELECT * FROM missing")
+            self.assertTrue(memory.outbox_process_one(resolve))
+            self.assertEqual(memory.outbox_status(resolve,"invalid")["state"],"failed_permanent")
+            self.assertEqual(memory.db_sql(resolve,"SELECT count(*) FROM t")["results"][0]["rows"],[[0]])
+            self.assertFalse(memory.outbox_process_one(resolve))
+            with self.assertRaises(memory.MemoryOperationError):
+                memory.outbox_ack(resolve,"invalid")
+            self.assertEqual(len(memory.outbox_list(resolve)["items"]),1)

@@ -42,7 +42,7 @@ export function createLocalMcpConnection(host) {
         const execute = async () => {
           try {
             if (socket !== ws || revision !== generation) return;
-            send({ type: "response", id: message.id, result: await host.dispatch(message.name, message.arguments) });
+            send({ type: "response", id: message.id, result: await host.dispatch(message.name, message.arguments, message.id) });
           }
           catch (error) { send({ type: "response", id: message.id, error: { code: /^[A-Z][A-Z0-9_]{0,63}$/.test(error?.code) ? error.code : "YOUTUBE_REQUEST_FAILED", message: "The YouTube request could not complete. Check login, availability and retry delay." } }); }
           finally { pending.delete(message.id); }
