@@ -1,7 +1,7 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { CallToolRequestSchema, CallToolResultSchema, ListToolsRequestSchema, ListResourcesRequestSchema, ReadResourceRequestSchema, McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
-import { authenticateMcp, MCP_SCOPE, type Auth } from "./auth";
+import { authenticateMcp, MCP_AUTH_SCOPES, type Auth } from "./auth";
 import { errorResponse, json, origin, PublicError, readJson, room, type Env } from "./types";
 import { WORKER_VERSION } from "./version";
 import { setupResult } from "./onboarding";
@@ -40,7 +40,7 @@ export async function mcpResponse(request: Request, env: Env, auth: Auth): Promi
       console.warn(JSON.stringify({component:"worker",event:"MCP_AUTH_FAILED",requestId,code:error.code,httpStatus:error.status,atMs:Date.now()}));
       if (error.status !== 401 && error.status !== 403) return json({ jsonrpc: "2.0", id: body.id ?? null, error: { code: -32002, message: error.message, data: { code: error.code, requestId, executionState: "not_started" } } }, error.status, { "Retry-After": "2" });
       const insufficient = error.code === "INSUFFICIENT_SCOPE";
-      const challenge = `Bearer resource_metadata="${origin(env)}/.well-known/oauth-protected-resource", scope="${MCP_SCOPE}", error="${insufficient ? "insufficient_scope" : "invalid_token"}", error_description="Connect your ResearchTube account"`;
+      const challenge = `Bearer resource_metadata="${origin(env)}/.well-known/oauth-protected-resource", scope="${MCP_AUTH_SCOPES.join(" ")}", error="${insufficient ? "insufficient_scope" : "invalid_token"}", error_description="Connect your ResearchTube account"`;
       return json({ jsonrpc: "2.0", id: body.id ?? null, error: { code: -32001, message: error.message } }, error.status,
         { "WWW-Authenticate": challenge });
     }

@@ -6,7 +6,10 @@ import { z } from "zod";
 import { bearer, extensionOrigins, origin, PublicError, type Env } from "./types";
 
 export const MCP_SCOPE = "researchtube:use";
-export const ACCESS_TOKEN_TTL = 3600;
+// Long-lived user-authorized connection; keep one-time OAuth codes short.
+export const ACCESS_TOKEN_TTL = 10 * 365 * 24 * 60 * 60;
+export const REFRESH_TOKEN_TTL = ACCESS_TOKEN_TTL;
+export const MCP_AUTH_SCOPES = [MCP_SCOPE, "offline_access"];
 
 // Reuse one configuration for schema generation, authorization and verification.
 export function authOptions(env: Env): BetterAuthOptions {
@@ -15,7 +18,7 @@ export function authOptions(env: Env): BetterAuthOptions {
   const oauth: OAuthOptions<Scope[]> = {
     loginPage: "/sign-in", consentPage: "/consent",
     scopes: ["openid", "profile", "email", "offline_access", MCP_SCOPE],
-    resources: [{ identifier: base, allowedScopes: [MCP_SCOPE, "openid", "profile", "email", "offline_access"], accessTokenTtl: ACCESS_TOKEN_TTL }],
+    resources: [{ identifier: base, allowedScopes: [MCP_SCOPE, "openid", "profile", "email", "offline_access"], accessTokenTtl: ACCESS_TOKEN_TTL, refreshTokenTtl: REFRESH_TOKEN_TTL }],
     clientRegistrationDefaultResources: [base],
     grantTypes: ["authorization_code", "refresh_token"],
     allowDynamicClientRegistration: true,
@@ -23,7 +26,8 @@ export function authOptions(env: Env): BetterAuthOptions {
     // Only pre-registered exact redirect URIs are accepted; no wildcard relaxation.
     clientPrivileges: () => false,
     resourcePrivileges: () => false,
-    accessTokenExpiresIn: ACCESS_TOKEN_TTL
+    accessTokenExpiresIn: ACCESS_TOKEN_TTL,
+    refreshTokenExpiresIn: REFRESH_TOKEN_TTL
   };
   return {
     appName: "ResearchTube", baseURL: base, basePath: "/api/auth",

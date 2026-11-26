@@ -35,7 +35,7 @@ test("real D1-backed OAuth code + consent + PKCE token authorizes only account-s
     code, code_verifier: verifier, redirect_uri: CALLBACK, resource: BASE }));
   const tokens = await response.json(); expect(response.status, JSON.stringify(tokens)).toBe(200);
   expect(tokens.access_token).toBeTypeOf("string"); expect(tokens.refresh_token).toBeTypeOf("string");
-  expect(tokens.expires_in).toBe(3600);
+  expect(tokens.expires_in).toBe(315360000);
   tokenResponse = { ...tokens, clientId: client.client_id };
   const status = await rpc(mf, "tools/call", { name: "system_connection_status", arguments: {}, _meta: { "openai/session": "chat-oauth" } }, tokens.access_token);
   const value = await status.json(); expect(status.status, JSON.stringify(value)).toBe(200);
@@ -52,12 +52,13 @@ test("refresh rotates credentials and a revoked refresh token cannot mint new ac
     refresh_token: tokenResponse.refresh_token, resource: BASE }));
   const tokens = await refreshed.json(); expect(refreshed.status, JSON.stringify(tokens)).toBe(200);
   expect(tokens.refresh_token).not.toBe(tokenResponse.refresh_token);
+  expect(tokens.expires_in).toBe(315360000);
   const revoke = await mf.dispatchFetch(BASE + "/api/auth/oauth2/revoke", form({ client_id: tokenResponse.clientId, token: tokens.refresh_token, token_type_hint: "refresh_token" }));
   expect(revoke.status, await revoke.clone().text()).toBe(200);
   const denied = await mf.dispatchFetch(BASE + "/api/auth/oauth2/token", form({ grant_type: "refresh_token", client_id: tokenResponse.clientId,
     refresh_token: tokens.refresh_token, resource: BASE }));
   expect(denied.status).toBe(400);
-  // Signed access tokens expire after one hour; disconnecting a browser
+  // Signed access tokens remain valid until their configured expiry; disconnecting a browser
   // binding or installation separately blocks routing immediately.
 });
 test("rejects an unregistered redirect and a wrong PKCE verifier", async () => {

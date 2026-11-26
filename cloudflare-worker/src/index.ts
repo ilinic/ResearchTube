@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { createAuth, browserUser, MCP_SCOPE } from "./auth";
+import { createAuth, browserUser, MCP_AUTH_SCOPES } from "./auth";
 import { mcpResponse, roomRequest } from "./mcp";
 import { authScript, page } from "./pages";
 import { homePage, homeIcon, homeScript } from "./homepage";
@@ -34,7 +34,7 @@ async function route(request: Request, env: Env): Promise<Response> {
   if (request.method === "OPTIONS") return new Response(null, { status: 204 });
   if (path === "/health" && request.method === "GET") return json({ service: "ResearchTube", version: WORKER_VERSION, status: "ok" });
   if (path === "/.well-known/oauth-protected-resource")
-    return json({ resource: base, authorization_servers: [`${base}/api/auth`], scopes_supported: [MCP_SCOPE], bearer_methods_supported: ["header"] });
+    return json({ resource: base, authorization_servers: [`${base}/api/auth`], scopes_supported: MCP_AUTH_SCOPES, bearer_methods_supported: ["header"] });
   // These pages must not start asynchronous auth/D1 work that outlives their
   // response. Only endpoints that use authentication initialize it below.
   if (path === "/" && request.method === "GET" && !/application\/json|text\/event-stream/i.test(request.headers.get("Accept") || "")) return homePage(env);
