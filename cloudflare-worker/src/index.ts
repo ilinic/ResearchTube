@@ -57,7 +57,10 @@ async function route(request: Request, env: Env): Promise<Response> {
     if (request.method === "POST" && request.body) {
       // Bound upstream library input too, including form-encoded token requests.
       const bytes = await readBytes(request, 32_768);
-      return auth.handler(new Request(request, { body: bytes }));
+      const started = Date.now();
+      const result = await auth.handler(new Request(request, { body: bytes }));
+      if(suffix === "/oauth2/token") console.info(JSON.stringify({component:"worker",event:"OAUTH_TOKEN_RESPONSE",httpStatus:result.status,durationMs:Date.now()-started,atMs:Date.now()}));
+      return result;
     }
     return auth.handler(request);
   }

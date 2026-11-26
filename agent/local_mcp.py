@@ -16,17 +16,20 @@ import re
 import secrets
 import struct
 import time
+import uuid
 
 try:
     from .local_mcp_catalog import CATALOG_JSON, EXTENSION_ID
     from .task_history import TaskHistory
+    from . import reliability
 except ImportError:
     from local_mcp_catalog import CATALOG_JSON, EXTENSION_ID
     from task_history import TaskHistory
+    import reliability
 
 MAX_MESSAGE = 2 * 1024 * 1024
 BASE_TOOLS = frozenset(("youtube_search", "youtube_get_video", "youtube_get_transcript", "youtube_get_comments", "youtube_get_comment_replies", "youtube_get_channel_videos", "youtube_get_channel_playlists", "youtube_get_playlist_videos"))
-MEMORY_TOOLS = frozenset(("db_sql", "workspace_read_text", "workspace_write_text"))
+MEMORY_TOOLS = frozenset(("db_sql", "workspace_read_text", "workspace_write_text", "system_get_trace"))
 BROWSER_TOOLS = frozenset(("site_open", "site_interact", "site_list_tabs", "site_read", "site_get_children", "site_get_node", "site_get_text", "site_get_images", "site_get_files", "site_files_status", "site_files_cancel"))
 CATALOG = json.loads(CATALOG_JSON)
 DEFINITIONS = {tool["name"]: tool for tool in CATALOG}
@@ -227,12 +230,46 @@ class LocalMcpService:
             else:
                 try:
                     payload = json.loads(body)
-                    if not isinstance(payload, dict) or payload.get("name") not in MEMORY_TOOLS or set(payload) != {"name", "arguments"}:
+                    if not isinstance(payload, dict) or payload.get("name") not in MEMORY_TOOLS or set(payload) not in ({"name", "arguments"}, {"name", "arguments", "requestId"}):
                         raise LocalError("INVALID_ARGUMENT")
-                    value = await self.agent.memory_tool_call(payload["name"], payload["arguments"])
-                    writer.write(response("200 OK", value))
-                except Exception as error:
-                    writer.write(response("400 Bad Request", {"error": {"code": getattr(error, "code", "INVALID_ARGUMENT"), "message": str(error) if hasattr(error, "code") else "Memory request failed."}}))
+                    request_id = payload.get("requestId")
+                    if not isinstance(request_id, str) or not reliability.TOKEN.fullmatch(request_id):
+                        request_id = uuid.uuid4().hex
+                    context = reliability.REQUEST.set({"requestId":request_id,"tool":payload["name"],"attempt":1})
+                    try:
+                        reliability.emit("AGENT_REQUEST_RECEIVED", bytes=len(body))
+                        arguments = normalized(DEFINITIONS[payload["name"]]["inputSchema"], payload["arguments"])
+                        value = await self.agent.memory_tool_call(payload["name"], arguments)
+                        packet = response("200 OK", value)
+                        writer.write(packet)
+                        await writer.drain()
+                        reliability.emit("AGENT_RESPONSE_SENT", bytes=len(packet), httpStatus=200)
+                    except (ConnectionError, OSError):
+                        reliability.emit("AGENT_RESPONSE_LOST", level="ERROR", executionState="unknown")
+                        raise
+                    except Exception as error:
+                        reliability.emit("AGENT_REQUEST_FAILED", level="ERROR", code=getattr(error,"code","AGENT_INTERNAL_ERROR"), exceptionType=type(error).__name__, executionState=getattr(error,"executionState","unknown"))
+                        writer.write(response("400 Bad Request", {"error":{"code":getattr(error,"code","AGENT_INTERNAL_ERROR"),"message":str(error) if hasattr(error,"code") else "Memory request failed.","executionState":getattr(error,"executionState","unknown"),"requestId":request_id}}))
+                        await writer.drain()
+                    finally:
+                        reliability.REQUEST.reset(context)
+                except (ValueError, LocalError):
+                    writer.write(response("400 Bad Request", {"error":{"code":"INVALID_ARGUMENT","message":"Invalid memory request."}}))
+        elif path == "/internal/local-mcp/trace":
+            origin = headers.get("origin")
+            if method != "POST" or origin != f"chrome-extension://{EXTENSION_ID}" or not secrets.compare_digest(headers.get("x-researchtube-token", ""),self.token):
+                writer.write(response("403 Forbidden"))
+            else:
+                try:
+                    payload=json.loads(body)
+                    if not isinstance(payload,list) or len(payload)>250 or any(not isinstance(item,dict) for item in payload):
+                        raise ValueError("invalid batch")
+                    for item in payload:
+                        if item.get("component") in ("extension","relay","worker"):
+                            reliability.TRACE.add(item)
+                    writer.write(response("200 OK", {"accepted":len(payload)}))
+                except ValueError:
+                    writer.write(response("400 Bad Request"))
         elif path == "/internal/local-mcp/bridge":
             await self.attach(method, headers, reader, writer)
             return
@@ -335,16 +372,18 @@ class LocalMcpService:
         if method == "ping":
             return {**envelope, "result": {}}
         if method == "tools/list":
-            error_schema = {"type": "object", "additionalProperties": False, "properties": {"error": {"type": "object", "additionalProperties": False, "properties": {"code": {"type": "string"}, "message": {"type": "string"}}, "required": ["code", "message"]}}, "required": ["error"]}
+            error_schema = {"type": "object", "additionalProperties": False, "properties": {"error": {"type": "object", "additionalProperties": False, "properties": {"code": {"type": "string"}, "message": {"type": "string"}, "requestId": {"type": "string"}, "executionState": {"type": "string"}}, "required": ["code", "message"]}}, "required": ["error"]}
             return {**envelope, "result": {"tools": [{**tool, "outputSchema": {"type": "object", "anyOf": [tool["outputSchema"], error_schema]}} for tool in CATALOG]}}
         if method != "tools/call":
             return {**envelope, "error": {"code": -32601, "message": "Method not found."}}
         if not isinstance(params, dict) or set(params) - {"name", "arguments", "_meta"} or params.get("name") not in DEFINITIONS:
             return {**envelope, "error": {"code": -32602, "message": "Unknown tool or invalid call."}}
         name = params["name"]
+        context = reliability.REQUEST.set({"requestId":uuid.uuid4().hex,"tool":name,"attempt":1})
+        reliability.emit("MCP_REQUEST_RECEIVED")
         try:
             arguments = normalized(DEFINITIONS[name]["inputSchema"], params.get("arguments", {}))
-            if name != "youtube_bridge_status" and name not in self.enabled:
+            if name not in ("youtube_bridge_status", "system_get_trace") and name not in self.enabled:
                 raise LocalError("MCP_TOOL_DISABLED")
             value = await self.call(name, arguments)
             try:
@@ -353,19 +392,28 @@ class LocalMcpService:
                 raise RuntimeError("Invalid browser response") from error
             if len(json.dumps(value, ensure_ascii=False).encode("utf-8")) > MAX_MESSAGE:
                 raise LocalError("YOUTUBE_RESULT_TOO_LARGE", "Request a smaller result or use dataset export.")
+            reliability.emit("MCP_RESPONSE_PREPARED", executionState="completed")
             return {**envelope, "result": {"content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False)}], "structuredContent": value, "isError": False}}
         except LocalError as error:
+            reliability.emit("MCP_REQUEST_FAILED",level="ERROR",code=error.code,executionState=getattr(error,"executionState","unknown"))
             value = {"error": {"code": error.code, "message": str(error)}}
+            if name in MEMORY_TOOLS:
+                value["error"].update(requestId=(reliability.REQUEST.get() or {}).get("requestId"),executionState=getattr(error,"executionState","unknown"))
             return {**envelope, "result": {"content": [{"type": "text", "text": json.dumps(value)}], "structuredContent": value, "isError": False}}
-        except Exception:
+        except Exception as error:
+            reliability.emit("MCP_REQUEST_FAILED",level="ERROR",code="MCP_INTERNAL_ERROR",exceptionType=type(error).__name__)
             return {**envelope, "error": {"code": -32603, "message": "The local MCP operation failed unexpectedly."}}
+        finally:
+            reliability.REQUEST.reset(context)
 
     async def call(self, name, arguments):
         if name in MEMORY_TOOLS:
             try:
                 return await self.agent.memory_tool_call(name, arguments)
             except Exception as error:
-                raise LocalError(getattr(error, "code", "WORKSPACE_MEMORY_ERROR"), str(error)) from error
+                failure=LocalError(getattr(error,"code","WORKSPACE_MEMORY_ERROR"),str(error))
+                failure.executionState=getattr(error,"executionState","unknown")
+                raise failure from error
         if name in BASE_TOOLS or name in BROWSER_TOOLS:
             return await self.browser(name, arguments)
         if name == "youtube_bridge_status":

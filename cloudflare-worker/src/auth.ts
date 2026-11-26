@@ -6,6 +6,7 @@ import { z } from "zod";
 import { bearer, extensionOrigins, origin, PublicError, type Env } from "./types";
 
 export const MCP_SCOPE = "researchtube:use";
+export const ACCESS_TOKEN_TTL = 3600;
 
 // Reuse one configuration for schema generation, authorization and verification.
 export function authOptions(env: Env): BetterAuthOptions {
@@ -14,7 +15,7 @@ export function authOptions(env: Env): BetterAuthOptions {
   const oauth: OAuthOptions<Scope[]> = {
     loginPage: "/sign-in", consentPage: "/consent",
     scopes: ["openid", "profile", "email", "offline_access", MCP_SCOPE],
-    resources: [{ identifier: base, allowedScopes: [MCP_SCOPE, "openid", "profile", "email", "offline_access"], accessTokenTtl: 300 }],
+    resources: [{ identifier: base, allowedScopes: [MCP_SCOPE, "openid", "profile", "email", "offline_access"], accessTokenTtl: ACCESS_TOKEN_TTL }],
     clientRegistrationDefaultResources: [base],
     grantTypes: ["authorization_code", "refresh_token"],
     allowDynamicClientRegistration: true,
@@ -22,7 +23,7 @@ export function authOptions(env: Env): BetterAuthOptions {
     // Only pre-registered exact redirect URIs are accepted; no wildcard relaxation.
     clientPrivileges: () => false,
     resourcePrivileges: () => false,
-    accessTokenExpiresIn: 300
+    accessTokenExpiresIn: ACCESS_TOKEN_TTL
   };
   return {
     appName: "ResearchTube", baseURL: base, basePath: "/api/auth",
@@ -94,8 +95,15 @@ export async function authenticateMcp(request: Request, env: Env, auth: Auth): P
   let claims;
   try { claims = await auth.api.verifyResearchTubeToken({ body: { token } }); }
   catch (error) {
-    if (error instanceof PublicError && error.code === "AUTH_TIMEOUT") throw error;
-    throw new PublicError("AUTHENTICATION_REQUIRED", "Reconnect your ResearchTube account.", 401);
+    if (error instanceof PublicError) throw error;
+    // Better Auth API errors expose status/statusCode. Never interpret an
+    // unknown DB, adapter, or runtime exception as an expired credential.
+    const failure = error as {status?: unknown; statusCode?: unknown; body?: {error?: unknown; code?: unknown}} | null;
+    const status = failure?.statusCode ?? failure?.status;
+    const oauthCode = failure?.body?.error ?? failure?.body?.code;
+    if (status === 401 || status === "UNAUTHORIZED" || oauthCode === "invalid_token" || oauthCode === "INVALID_TOKEN")
+      throw new PublicError("AUTHENTICATION_REQUIRED", "Reconnect your ResearchTube account.", 401);
+    throw new PublicError("AUTH_TEMPORARY_UNAVAILABLE", "ResearchTube token verification is temporarily unavailable. Retry without reconnecting.", 503);
   }
   const audiences = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
   const scopes = typeof claims.scope === "string" ? claims.scope.split(" ") : [];

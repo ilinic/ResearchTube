@@ -33,6 +33,7 @@ export function createCloudConnection(host) {
   const config = async () => (await local.get({ [KEY]: null }))[KEY];
   async function publish(next, code = null) {
     state = next; errorCode = code;
+    try{host.diagnostic?.("CLOUD_CONNECTION_STATE",{status:next,code,level:code?"WARN":"INFO"});}catch{}
     await local.set({ cloudConnectionStatus: { state, errorCode } });
     await host.changed?.();
   }
@@ -187,6 +188,7 @@ export function createCloudConnection(host) {
       throw fail("CLOUD_PROTOCOL_ERROR", "Invalid relay request.");
     const toolName = message.request.params.name, chatTabId = message.request.params.arguments.chatTabId;
     const record = (stage, atMs) => {
+      try{host.diagnostic?.(stage.replaceAll(".","_").toUpperCase(),{component:stage.startsWith("worker.")?"worker":stage.startsWith("room.")?"relay":"extension",requestId:message.requestId,tool:toolName,chatTabId,atMs});}catch{}
       if (!/^site_[a-z_]+$/.test(toolName) || !Number.isSafeInteger(chatTabId) || chatTabId < 0) return;
       try { host.timing?.({ chatTabId, requestId: message.requestId, stage, event: "stamp", atMs }); } catch {}
     };
@@ -230,7 +232,7 @@ export function createCloudConnection(host) {
         : { error: { code: -32000, message: "The extension could not complete this request." } };
     }
     finally { requests.delete(message.requestId); pending.delete(message.requestId); }
-    if (socket !== ws || ws.readyState !== 1) return;
+    if (socket !== ws || ws.readyState !== 1) { try{host.diagnostic?.("EXTENSION_RESPONSE_LOST",{requestId:message.requestId,tool:toolName,level:"ERROR",executionState:"unknown"});}catch{} return; }
     record("extension.returned", Date.now());
     const payload = { type: "response", requestId: message.requestId, ...response };
     const text = JSON.stringify(payload);

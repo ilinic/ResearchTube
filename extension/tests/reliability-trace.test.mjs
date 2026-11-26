@@ -1,0 +1,18 @@
+import assert from "node:assert/strict";
+import {createReliabilityTrace} from "../reliability-trace.js";
+let now=1700000000000, batches=[], timers=new Map(), sequence=0, fail=false;
+const trace=createReliabilityTrace({version:"test",now:()=>now,uuid:()=>"fixture",schedule:(fn,ms)=>{timers.set(++sequence,{fn,ms});return sequence;},cancel:id=>timers.delete(id),send:async events=>{if(fail)throw Error("offline");batches.push(events);}});
+for(let i=0;i<1000;i++)trace.add("TEST",{tool:"db_sql",requestId:"id-"+i,password:"SECRET",sql:"SECRET",url:"https://example.test"});
+assert.equal(batches.length,0);
+assert.equal(timers.size,1);
+trace.add("ERROR_TEST",{level:"ERROR",code:"FAIL"});
+assert.ok([...timers.values()][0].ms<=1000);
+await trace.flush();
+assert.ok(batches.length<=4);
+assert.doesNotMatch(JSON.stringify(batches),/SECRET|example.test/);
+const queued=trace.status().queued;
+fail=true;await trace.flush();
+assert.equal(trace.status().queued,queued);
+now+=3600001;fail=false;await trace.flush();
+assert.equal(trace.status().queued,0);
+console.log("Reliability trace: bounded batching, retention, retry and privacy OK");

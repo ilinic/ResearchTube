@@ -1,7 +1,11 @@
 """Bounded, isolated shared memory for ResearchTube agents."""
 from __future__ import annotations
 
+import asyncio
 import base64
+import hashlib
+import random
+import re
 import json
 import math
 import os
@@ -10,6 +14,11 @@ import tempfile
 import threading
 import time
 
+try:
+    from .reliability import emit
+except ImportError:
+    from reliability import emit
+
 MAX_TEXT_BYTES = 32768
 MAX_SQL_BYTES = 32768
 MAX_STATEMENTS = 40
@@ -17,12 +26,56 @@ MAX_ROWS = 200
 MAX_RESPONSE_BYTES = 256 * 1024
 DB_FILE = "scheduled/database.sqlite"
 _LOCK = threading.RLock()
+_DB_LOCK = threading.Lock()
+_OPERATION = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
+_DEDUP_TABLE = "_rt_internal_operations"
+_DEDUP_LIMIT = 64 * 1024 * 1024
+_DEDUP_COUNT = 100000
+
+
+class SqlQueue:
+    """FIFO admission on the Agent event loop, not thousands of blocked threads."""
+    def __init__(self, capacity=4096, wait_seconds=12):
+        self.capacity = capacity
+        self.wait_seconds = wait_seconds
+        self.lock = asyncio.Lock()
+        self.depth = 0
+
+    async def run(self, resolve, arguments):
+        if self.depth >= self.capacity:
+            fail("DB_QUEUE_FULL", "SQL queue is full; no SQL executed.")
+        self.depth += 1
+        started = time.monotonic()
+        emit("SQL_QUEUED", queueDepth=self.depth)
+        try:
+            try:
+                await asyncio.wait_for(self.lock.acquire(), self.wait_seconds)
+            except asyncio.TimeoutError:
+                fail("DB_QUEUE_TIMEOUT", "SQL queue deadline reached; no SQL executed.")
+            try:
+                emit("SQL_QUEUE_ACQUIRED", queueDepth=self.depth, durationMs=(time.monotonic()-started)*1000)
+                task = asyncio.create_task(asyncio.to_thread(call, resolve, "db_sql", arguments))
+                try:
+                    return await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    # A cancelled HTTP caller cannot cancel a running SQLite thread.
+                    # Hold admission until its outcome has been recorded.
+                    try:
+                        await task
+                    except Exception:
+                        pass
+                    raise
+            finally:
+                self.lock.release()
+        finally:
+            self.depth -= 1
 
 
 class MemoryOperationError(Exception):
-    def __init__(self, code, message):
+    def __init__(self, code, message, state="not_started", sqlite_code=None, sqlite_name=None, index=None):
         super().__init__(message)
-        self.code = code
+        self.code, self.executionState = code, state
+        self.sqlite_code, self.sqlite_name, self.index = sqlite_code, sqlite_name, index
 
 
 def fail(code, message):
@@ -39,15 +92,16 @@ def connect(resolve):
     path = resolve(DB_FILE)
     for suffix in ("", "-wal", "-shm", "-journal"):
         check_file(resolve(DB_FILE + suffix))
-    connection = sqlite3.connect(path, timeout=1.5, isolation_level=None)
+    connection = sqlite3.connect(path, timeout=0.5, isolation_level=None)
     try:
-        connection.execute("PRAGMA busy_timeout=1500")
+        connection.execute("PRAGMA busy_timeout=500")
+        connection.execute("PRAGMA synchronous=FULL")
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute("PRAGMA trusted_schema=OFF")
         connection.execute("PRAGMA temp_store=MEMORY")
         # Bound database growth from untrusted agent-generated SQL.
         connection.execute("PRAGMA max_page_count=262144")
-        if connection.execute("PRAGMA journal_mode=WAL").fetchone()[0].lower() != "wal":
+        if connection.execute("PRAGMA journal_mode").fetchone()[0].lower() != "wal" and connection.execute("PRAGMA journal_mode=WAL").fetchone()[0].lower() != "wal":
             fail("DB_SQL_ERROR", "Could not enable WAL.")
         connection.enable_load_extension(False)
         if hasattr(connection, "setlimit"):
@@ -62,10 +116,17 @@ def connect(resolve):
         raise
 
 
+def ensure_dedup(connection):
+    connection.execute("CREATE TABLE IF NOT EXISTS _rt_internal_operations (operation_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, result TEXT NOT NULL, created_at INTEGER NOT NULL)")
+
+
 def initialize(resolve):
-    with _LOCK:
+    with _DB_LOCK:
         con = connect(resolve)
-        con.close()
+        try:
+            ensure_dedup(con)
+        finally:
+            con.close()
 
 
 _ALLOWED = {getattr(sqlite3, "SQLITE_" + name) for name in (
@@ -89,6 +150,8 @@ sin cos tan asin acos atan atan2 sinh cosh tanh asinh acosh atanh degrees radian
 
 
 def authorize(action, a, b, database, source):
+    if any(isinstance(name, str) and name.lower().startswith("_rt_internal_") for name in (a, b, source)):
+        return sqlite3.SQLITE_DENY
     if database == "temp" and a == "sqlite_temp_master" and action in (sqlite3.SQLITE_READ, sqlite3.SQLITE_UPDATE):
         return sqlite3.SQLITE_OK
     if database not in (None, "main"):
@@ -125,16 +188,61 @@ def cell(value):
     return value
 
 
-def db_sql(resolve, sql):
+def db_sql(resolve, sql, operation_id=None):
     parts = statements(sql)
-    connection = connect(resolve)
-    deadline = time.monotonic() + 5
-    connection.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+    if operation_id is not None and (not isinstance(operation_id, str) or not _OPERATION.fullmatch(operation_id)):
+        fail("DB_SQL_INVALID", "Invalid operationId.")
+    # Direct Python callers and the Agent's FIFO queue share this guard.
+    with _DB_LOCK:
+        deadline = time.monotonic() + 8
+        for attempt in range(1, 5):
+            try:
+                return _transaction(resolve, sql, parts, operation_id, deadline, attempt)
+            except MemoryOperationError as error:
+                if error.code not in ("DB_BUSY", "DB_LOCKED") or error.executionState not in ("not_started", "rolled_back"):
+                    raise
+                if attempt == 4:
+                    emit("RETRY_EXHAUSTED",level="ERROR",attempt=attempt,code=error.code,executionState=error.executionState)
+                    raise
+                delay = .25 * 2 ** (attempt - 1) * random.uniform(.85, 1.15)
+                if time.monotonic() + delay >= deadline:
+                    raise
+                emit("RETRY_SCHEDULED", attempt=attempt+1, code=error.code, durationMs=delay*1000)
+                time.sleep(delay)
+                emit("RETRY_STARTED", attempt=attempt+1)
+
+
+def _transaction(resolve, sql, parts, operation_id, deadline, attempt):
+    connection = None
+    index = None
+    stage = "connect"
+    started = time.monotonic()
     results, used = [], 0
     try:
-        connection.execute("BEGIN")
+        connection = connect(resolve)
+        connection.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+        connection.execute("BEGIN IMMEDIATE")
+        stage = "transaction"
+        emit("SQL_TRANSACTION_STARTED", attempt=attempt, statementCount=len(parts))
+        # Keep the internal ledger reserved even for legacy calls without keys.
+        ensure_dedup(connection)
+        if operation_id is not None:
+            fingerprint = hashlib.sha256(sql.encode("utf-8")).hexdigest()
+            previous = connection.execute("SELECT fingerprint,result FROM _rt_internal_operations WHERE operation_id=?", (operation_id,)).fetchone()
+            if previous:
+                if previous[0] != fingerprint:
+                    fail("DB_OPERATION_CONFLICT", "operationId already belongs to another SQL payload.")
+                stage = "commit"
+                connection.execute("COMMIT")
+                stage = "committed"
+                emit("SQL_DEDUP_HIT", attempt=attempt, executionState="committed")
+                return json.loads(previous[1])
+            count, size = connection.execute("SELECT count(*),coalesce(sum(length(CAST(result AS BLOB))+length(operation_id)+length(fingerprint)+128),0) FROM _rt_internal_operations").fetchone()
+            if count >= _DEDUP_COUNT or size + MAX_RESPONSE_BYTES + 1024 > _DEDUP_LIMIT:
+                fail("DB_DEDUP_FULL", "Operation ledger is full; no SQL executed. Do not remove keys without reconciliation.")
         connection.set_authorizer(authorize)
-        for statement in parts:
+        for index, statement in enumerate(parts):
+            statement_started = time.monotonic()
             if time.monotonic() >= deadline:
                 fail("DB_SQL_TIMEOUT", "SQL execution exceeded its time budget.")
             before = connection.total_changes
@@ -160,19 +268,53 @@ def db_sql(resolve, sql):
                     used += size
             entry["rowsAffected"] = connection.total_changes - before
             results.append(entry)
+            emit("SQL_STATEMENT_FINISHED", attempt=attempt, statementIndex=index, rowsAffected=entry["rowsAffected"], durationMs=(time.monotonic()-statement_started)*1000)
         connection.set_authorizer(None)
+        result = {"success": True, "results": results, "truncated": any(r["truncated"] for r in results)}
+        if operation_id is not None:
+            encoded = json.dumps(result, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+            if len(encoded.encode("utf-8")) > MAX_RESPONSE_BYTES + 1024:
+                fail("DB_SQL_LIMIT", "SQL result exceeds the operation ledger budget.")
+            connection.execute("INSERT INTO _rt_internal_operations VALUES (?,?,?,?)", (operation_id, fingerprint, encoded, int(time.time())))
+        stage = "commit"
         connection.execute("COMMIT")
-        return {"success": True, "results": results, "truncated": any(r["truncated"] for r in results)}
-    except sqlite3.Error as error:
-        code = "DB_SQL_TIMEOUT" if time.monotonic() >= deadline else "DB_SQL_ERROR"
-        # Don't log SQL or data; SQLite's raw message may include user data.
-        fail(code, "SQL was rolled back: " + getattr(error, "sqlite_errorname", "SQLITE_ERROR"))
+        stage = "committed"
+        emit("SQL_COMMITTED", attempt=attempt, executionState="committed", statementCount=len(parts), rowsAffected=sum(r["rowsAffected"] for r in results), durationMs=(time.monotonic()-started)*1000)
+        return result
+    except (sqlite3.Error, MemoryOperationError) as error:
+        state = "not_started" if stage == "connect" else "committed" if stage == "committed" else "unknown"
+        if connection is not None:
+            connection.set_authorizer(None)
+            connection.set_progress_handler(None, 0)
+            if connection.in_transaction:
+                try:
+                    connection.rollback()
+                    state = "rolled_back"
+                except sqlite3.Error:
+                    state = "unknown"
+            elif stage == "transaction":
+                state = "rolled_back"  # e.g. INSERT OR ROLLBACK
+        if isinstance(error, MemoryOperationError):
+            code, message = error.code, str(error)
+            sqlite_code = sqlite_name = None
+        else:
+            sqlite_code = getattr(error, "sqlite_errorcode", None)
+            sqlite_name = getattr(error, "sqlite_errorname", "SQLITE_ERROR")
+            primary = sqlite_code & 255 if isinstance(sqlite_code, int) else None
+            code = {sqlite3.SQLITE_BUSY: "DB_BUSY", sqlite3.SQLITE_LOCKED: "DB_LOCKED"}.get(primary, "DB_SQL_TIMEOUT" if time.monotonic() >= deadline else "DB_SQL_ERROR")
+            message = f"SQL {state}: {sqlite_name}" + (f" at statement {index+1}" if index is not None else "")
+        emit("SQL_ROLLED_BACK" if state == "rolled_back" else "SQL_FAILED", level="ERROR", attempt=attempt, code=code, executionState=state, sqliteCode=sqlite_code, sqliteName=sqlite_name, statementIndex=index, durationMs=(time.monotonic()-started)*1000)
+        raise MemoryOperationError(code, message, state, sqlite_code, sqlite_name, index) from error
     finally:
-        connection.set_authorizer(None)
-        connection.set_progress_handler(None, 0)
-        if connection.in_transaction:
-            connection.rollback()
-        connection.close()
+        if connection is not None:
+            connection.set_authorizer(None)
+            connection.set_progress_handler(None, 0)
+            if connection.in_transaction:
+                try:
+                    connection.rollback()
+                except sqlite3.Error:
+                    pass
+            connection.close()
 
 
 def text_path(resolve, logical):
@@ -223,8 +365,8 @@ def write_text(resolve, logical, text):
 def call(resolve, name, arguments):
     if not isinstance(arguments, dict):
         fail("INVALID_ARGUMENT", "Expected tool argument object.")
-    if name == "db_sql" and set(arguments) == {"sql"}:
-        return db_sql(resolve, arguments["sql"])
+    if name == "db_sql" and set(arguments) in ({"sql"}, {"sql", "operationId"}):
+        return db_sql(resolve, arguments["sql"], arguments.get("operationId"))
     if name == "workspace_read_text" and set(arguments) == {"workspacePath"}:
         return read_text(resolve, arguments["workspacePath"])
     if name == "workspace_write_text" and set(arguments) == {"workspacePath", "text"}:

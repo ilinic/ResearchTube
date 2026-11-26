@@ -1,4 +1,5 @@
 import { MEMORY_TOOL_NAMES, memoryToolDefinitions } from "./scheduled-memory-tools.js";
+import { createReliabilityTrace } from "./reliability-trace.js";
 import { createLocalMcpConnection } from "./local-mcp.js";
 import { LOCAL_YOUTUBE_TOOLS, LOCAL_BROWSER_TOOLS, localBrowserDefinitions, localResearchDefinitions, projectCommentRecord, validateLocalArguments } from "./local-mcp-tools.js";
 import { createBrowserOwner } from "./browser-owner.js";
@@ -65,6 +66,7 @@ const MCP_TOOL_SETTINGS = Object.freeze({
   system_get_chat_context: { group: "system" }, system_chat_context_status: { group: "system" }, system_chat_context_cancel: { group: "system" }, system_get_diagnostics: { group: "system" },
   timer_start: { group: "timers" }, timer_status: { group: "timers" }, timer_cancel: { group: "timers" },
   system_speech_list_voices: { group: "speech" }, system_speech_speak: { group: "speech" }, system_speech_status: { group: "speech" }, system_speech_cancel: { group: "speech" },
+  system_get_trace: { group: "system", alwaysEnabled: true },
   db_sql: { group: "workspace" }, workspace_read_text: { group: "workspace" }, workspace_write_text: { group: "workspace" },
   workspace_list: { group: "workspace" }, workspace_stat: { group: "workspace" }, workspace_open_folder: { group: "workspace" }, workspace_mkdir: { group: "workspace" }, workspace_move: { group: "workspace" }, workspace_delete: { group: "workspace" },
   media_probe: { group: "media" }, media_clip: { group: "media" }, media_clip_get_task: { group: "media" }, media_clip_cancel_task: { group: "media" }, media_capture_frame: { group: "media" }, media_capture_frame_get_task: { group: "media" }, media_capture_frame_task_diagnostics: { group: "media" }, media_capture_frame_cancel_task: { group: "media" }, media_capture_screen: { group: "media" }, media_image_crop: { group: "media" }, media_show: { group: "media" }, media_image_inspect: { group: "media" },
@@ -79,6 +81,7 @@ const MCP_TOOL_SETTINGS = Object.freeze({
   custom_tool_status: { group: "custom" }, custom_tool_cancel: { group: "custom" }
 });
 const EXTENSION_VERSION = chrome.runtime.getManifest().version;
+const reliabilityTrace=createReliabilityTrace({version:EXTENSION_VERSION,send:sendReliabilityBatch});
 const systemDiagnostics = createSystemDiagnostics({
   version: EXTENSION_VERSION,
   read: async () => {
@@ -93,7 +96,7 @@ const browserTimingSessions = createBrowserTimingSessions({
     set: value => chrome.storage.session.set(value)
   } : null
 });
-function recordSystemDiagnostic(entry) { void systemDiagnostics.append(entry).catch(() => {}); }
+function recordSystemDiagnostic(entry) { reliabilityTrace.add("SYSTEM_DIAGNOSTIC",{level:"ERROR",tool:entry.tool,stage:entry.stage,code:entry.code,tabId:entry.tabId,chatTabId:entry.chatTabId,groupId:entry.groupId,taskId:entry.taskId}); void systemDiagnostics.append(entry).catch(() => {}); }
 // Chrome dispatches this for requests made by our Extension-owned viewer.
 // Packaged assets and unrelated requests fall through without interception.
 globalThis.addEventListener?.("fetch", createMediaStreamHandler({
@@ -158,6 +161,7 @@ let searchQueueDepth = 0;
 let searchRequestSequence = 0;
 let searchDiagnosticWrite = Promise.resolve();
 let commandDiagnosticWrite = Promise.resolve();
+let commandDiagnosticBatch=[], commandDiagnosticTimer=null;
 const recentDescribeVideoRequests = new Map();
 let captureFrameOffscreenPromise = null;
 const googleTranslateSpeechRunners = new Map();
@@ -3640,7 +3644,7 @@ chrome.runtime.onStartup.addListener(() => {
 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === "local-mcp") void localMcpConnection.start();
+  if (alarm.name === "local-mcp") { void localMcpConnection.start(); void reliabilityTrace.flush(); }
   if (alarm.name === "public-relay") void cloudConnection.ensureAccount();
   if (alarm.name === "background-task-completions") void taskCompletionDelivery.tick();
   if (alarm.name.startsWith("artifact-task:")) void artifactTaskManager.advance(alarm.name.slice("artifact-task:".length));
@@ -3739,6 +3743,7 @@ async function logBrowserTabState(trace, tabId, point) {
 }
 const browserOwner = createBrowserOwner({getTab: id => chrome.tabs.get(id), execute: options => chrome.scripting.executeScript(options)});
 const browserAgent = createBrowserAgent({
+  reliability: (event,fields)=>reliabilityTrace.add(event,fields),
   onStep: ({ groupId, tabId, index, action, elapsedMs, outcome, code }) => browserTimingSessions.timing({
     groupId, tabId, stage: "page.actionStep", event: "end", stepIndex: index, action, elapsedMs, outcome, ...(code ? { code } : {})
   }),
@@ -3884,6 +3889,7 @@ const chatContext = createChatContext({
   error: value => recordSystemDiagnostic({ ...value, source: "tool", tool: "system_get_chat_context", stage: "chat.binding" })
 });
 const cloudConnection = createCloudConnection({
+  diagnostic: (event,fields)=>reliabilityTrace.add(event,fields),
   timing: record => browserTimingSessions.timing(record),
   chrome, fetch: (url, options) => fetch(url, options), webSocket: url => new WebSocket(url), uuid: () => crypto.randomUUID(),
   setTimeout: (...args) => globalThis.setTimeout(...args), clearTimeout: id => globalThis.clearTimeout(id),
@@ -6345,8 +6351,19 @@ async function handleMcpRequest(request) {
   const active=request?.method==="tools/call";
   const args=request?.params?.arguments;
   const caller=active?(cloudConnection.targetForRequest(request.id)?.tabId ?? args?.chatTabId ?? null):null;
-  if(active) activeScheduledMcpCalls.set(caller,(activeScheduledMcpCalls.get(caller)||0)+1);
-  try { return await handleMcpRequestInner(request); }
+  const requestId=active?(typeof request?.id==="string"?request.id:crypto.randomUUID()):null, tool=request?.params?.name;
+  const context={requestId,tool,chatTabId:caller,tabId:args?.tabId};
+  const started=active?performance.now():0;
+  if(active){activeScheduledMcpCalls.set(caller,(activeScheduledMcpCalls.get(caller)||0)+1);reliabilityTrace.add("EXTENSION_TOOL_STARTED",context);}
+  try {
+    const response=await handleMcpRequestInner(request);
+    if(active){
+      const value=response?.result?.structuredContent, code=value?.error?.code||value?.failedStep?.code;
+      const failed=Boolean(response?.error||response?.result?.isError||code);
+      reliabilityTrace.add(failed?"EXTENSION_TOOL_FAILED":"EXTENSION_TOOL_COMPLETED",{...context,level:failed?"ERROR":"INFO",code,durationMs:performance.now()-started,executionState:value?.error?.executionState});
+    }
+    return response;
+  }catch(error){if(active)reliabilityTrace.add("EXTENSION_TOOL_FAILED",{...context,level:"ERROR",code:error?.code,exceptionType:error?.name,durationMs:performance.now()-started});throw error;}
   finally { if(active) {
     const count=(activeScheduledMcpCalls.get(caller)||1)-1;
     if(count)activeScheduledMcpCalls.set(caller,count);else activeScheduledMcpCalls.delete(caller);
@@ -6405,9 +6422,10 @@ async function handleMcpRequestInner(request) {
     try { args = publicWorkspaceArguments(name, request.params.arguments ?? {}, toolDefinitions()); }
     catch (error) { return toolError(request.id, error); }
     if (MEMORY_TOOL_NAMES.includes(name)) {
+      if(name==="system_get_trace")await reliabilityTrace.flush();
       const definition=memoryToolDefinitions().find(t=>t.name===name);
       if (!validateLocalArguments(definition.inputSchema,args)) return toolError(request.id,localAgentError("INVALID_ARGUMENT","Invalid memory arguments."));
-      return executeToolCall(request.id,name,args,()=>callSharedMemory(name,args));
+      return executeToolCall(request.id,name,args,()=>callSharedMemory(name,args,request.id));
     }
     if (ARTIFACT_TOOLS.includes(name)) return executeArtifactStart(request.id, name, args);
     if (BROWSER_TOOL_NAMES.includes(name)) {
@@ -6919,7 +6937,7 @@ function toolError(id, error) {
   const code = error?.code;
   const message = String(error?.message ?? error);
   const text = typeof code === "string" ? `[${code}] ${message}` : message;
-  const errorDocument = { code: typeof code === "string" ? code : "TOOL_ERROR", message, detail: typeof error?.detail === "string" ? error.detail : null };
+  const errorDocument = { code: typeof code === "string" ? code : "TOOL_ERROR", message, detail: typeof error?.detail === "string" ? error.detail : null, ...(error?.requestId?{requestId:error.requestId}:{}), ...(error?.executionState?{executionState:error.executionState}:{}) };
   if (isExpectedToolError(errorDocument.code)) {
     const rejected = { status: "rejected", error: errorDocument };
     return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text }], structuredContent: rejected, isError: false } };
@@ -6968,15 +6986,22 @@ function searchDiagnosticQuery(query) {
 
 function recordCommandDiagnostic(event, fields = {}) {
   if (event === "failed") recordSystemDiagnostic({ source: "tool", stage: "tools.call", tool: fields.tool, code: fields.error_code, message: fields.error, elapsedMs: fields.elapsed_ms, ...fields.context });
-  const entry = { event, timestamp: new Date().toISOString(), ...fields };
-  commandDiagnosticWrite = commandDiagnosticWrite
-    .catch(() => undefined)
-    .then(async () => {
-      const { commandDiagnostics = [] } = await chrome.storage.local.get({ commandDiagnostics: [] });
-      const next = Array.isArray(commandDiagnostics) ? [...commandDiagnostics, entry] : [entry];
-      if (next.length > COMMAND_DIAGNOSTIC_MAX_ENTRIES) next.splice(0, next.length - COMMAND_DIAGNOSTIC_MAX_ENTRIES);
-      await chrome.storage.local.set({ commandDiagnostics: next });
-    });
+  const entry = { event, timestamp: new Date().toISOString(), tool: fields.tool, elapsed_ms:fields.elapsed_ms, error_code:fields.error_code, error:event==="failed"?searchDiagnosticMessage(fields.error):undefined };
+  commandDiagnosticBatch.push(entry);
+  if(commandDiagnosticBatch.length>COMMAND_DIAGNOSTIC_MAX_ENTRIES)commandDiagnosticBatch.shift();
+  if(commandDiagnosticTimer===null)commandDiagnosticTimer=setTimeout(flushCommandDiagnostics,30000);
+  return Promise.resolve();
+}
+function flushCommandDiagnostics(){
+  if(commandDiagnosticTimer!==null){clearTimeout(commandDiagnosticTimer);commandDiagnosticTimer=null;}
+  const batch=commandDiagnosticBatch;commandDiagnosticBatch=[];
+  if(!batch.length)return commandDiagnosticWrite;
+  commandDiagnosticWrite=commandDiagnosticWrite.catch(()=>undefined).then(async()=>{
+    const {commandDiagnostics=[]}=await chrome.storage.local.get({commandDiagnostics:[]});
+    const cutoff=Date.now()-3600000;
+    const next=[...(Array.isArray(commandDiagnostics)?commandDiagnostics:[]),...batch].filter(item=>Date.parse(item.timestamp)>=cutoff).slice(-COMMAND_DIAGNOSTIC_MAX_ENTRIES);
+    await chrome.storage.local.set({commandDiagnostics:next});
+  }).catch(()=>{});
   return commandDiagnosticWrite;
 }
 
@@ -7774,6 +7799,7 @@ function extractJsonAfterMarker(text, marker) {
 
 // Independent local MCP reuses the established anonymous page research.
 const localMcpConnection = createLocalMcpConnection({
+  diagnostic: (event,fields)=>reliabilityTrace.add(event,fields),
   extensionId: chrome.runtime.id, extensionVersion: EXTENSION_VERSION, interfaceVersion: REQUIRED_AGENT_INTERFACE_VERSION,
   port: async () => normalizeAgentPort((await getConfig()).agentPort),
   fetch: (url, options) => fetch(url, options), webSocket: url => new WebSocket(url),
@@ -7781,17 +7807,37 @@ const localMcpConnection = createLocalMcpConnection({
   enabledTools: async () => (await mcpToolSettingsCatalog()).filter(t => t.enabled && (LOCAL_YOUTUBE_TOOLS.includes(t.name) || LOCAL_BROWSER_TOOLS.includes(t.name) || MEMORY_TOOL_NAMES.includes(t.name) || localResearchDefinitions().some(d => d.name === t.name))).map(t => t.name),
   dispatch: dispatchLocalMcp
 });
-async function callSharedMemory(name,args) {
+async function memoryAuthorization() {
   const port=normalizeAgentPort((await getConfig()).agentPort);
-  await requireCompatibleAgent(port);
   const base=`http://127.0.0.1:${port}/internal/local-mcp/`;
-  const bootstrap=await fetch(base+"bootstrap",{method:"POST",signal:AbortSignal.timeout(5000),headers:{"Content-Type":"application/json","X-ResearchTube-Extension":chrome.runtime.id},body:"{}"});
-  if(!bootstrap.ok) throw localAgentError("AGENT_UNAVAILABLE","Local memory authorization failed.");
-  const {token}=await bootstrap.json();
-  const reply=await fetch(base+"memory",{method:"POST",signal:AbortSignal.timeout(20000),headers:{"Content-Type":"application/json","X-ResearchTube-Token":token},body:JSON.stringify({name,arguments:args})});
-  const value=await reply.json();
-  if(!reply.ok) throw localAgentError(value.error?.code || "WORKSPACE_MEMORY_ERROR",value.error?.message || "Local memory request failed.");
-  return value;
+  const bootstrap=await fetch(base+"bootstrap",{method:"POST",signal:AbortSignal.timeout(3000),headers:{"Content-Type":"application/json","X-ResearchTube-Extension":chrome.runtime.id},body:"{}"});
+  if(!bootstrap.ok)throw localAgentError("AGENT_UNAVAILABLE","Local memory authorization failed.");
+  const {token}=await bootstrap.json();return {base,token};
+}
+async function sendReliabilityBatch(events) {
+  const {base,token}=await memoryAuthorization();
+  const reply=await fetch(base+"trace",{method:"POST",signal:AbortSignal.timeout(5000),headers:{"Content-Type":"application/json","X-ResearchTube-Token":token},body:JSON.stringify(events)});
+  if(!reply.ok)throw Error("trace unavailable");
+}
+async function callSharedMemory(name,args,id) {
+  const requestId=typeof id==="string"?id:crypto.randomUUID(), context={requestId,tool:name};
+  let started=false;
+  try {
+    const port=normalizeAgentPort((await getConfig()).agentPort);
+    await requireCompatibleAgent(port);
+    const {base,token}=await memoryAuthorization();
+    reliabilityTrace.add("AGENT_HTTP_REQUEST_SENT",context);
+    started=true;
+    const reply=await fetch(base+"memory",{method:"POST",signal:AbortSignal.timeout(22000),headers:{"Content-Type":"application/json","X-ResearchTube-Token":token},body:JSON.stringify({name,arguments:args,requestId})});
+    const value=await reply.json();
+    reliabilityTrace.add("EXTENSION_RESPONSE_RECEIVED",{...context,httpStatus:reply.status});
+    if(!reply.ok)throw Object.assign(localAgentError(value.error?.code||"WORKSPACE_MEMORY_ERROR",value.error?.message||"Local memory request failed."),{executionState:value.error?.executionState||"unknown",requestId});
+    return value;
+  }catch(error){
+    const normalized=error?.code?error:localAgentError(started?"AGENT_RESPONSE_TIMEOUT":"AGENT_UNAVAILABLE",started?"No confirmed response from Local Agent. Check the operation before repeating.":"Local Agent is unavailable.");
+    normalized.requestId=requestId;normalized.executionState ||= started?"unknown":"not_started";
+    reliabilityTrace.add("AGENT_HTTP_FAILED",{...context,level:"ERROR",code:normalized.code,executionState:normalized.executionState,exceptionType:error?.name});throw normalized;
+  }
 }
 async function requireLocalYoutubeLogin() {
   const { tab } = await getOrCreateYouTubeTab();
@@ -7921,6 +7967,7 @@ async function tickScheduledGroup(input) {
         return {tabId,status:result.sent?"sent":"skipped",reason:result.reason||null,...(result.source?{source:result.source}:{})};
       } catch(error) {return {tabId,status:"skipped",reason:error.code||"CHAT_UNAVAILABLE"};}
     }));
+    for(const result of results)reliabilityTrace.add("SCHEDULER_TAB_DECISION",{groupId,tabId:result.tabId,status:result.status,code:result.reason});
     consoleAction("[ResearchTube scheduled] Tick",{groupId,results});
     return {status:"checked",results};
   } finally {scheduledTickRunning=false;}

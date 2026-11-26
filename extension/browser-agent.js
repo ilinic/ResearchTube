@@ -176,10 +176,14 @@ export function createBrowserAgent(host) {
     startupLeft: group => stopGroup(group, group.startup.chatTabId)
   });
   const command = async (tabId, method, params = {}, childSessionId = null) => {
+    const started=performance.now();
+    const report=(event,fields={})=>{try{host.reliability?.(event,{tabId,method,...fields});}catch{}};
+    report("CDP_COMMAND_STARTED");
     try {
       const trace = localTargets.get(tabId)?.operation ? localTargets.get(tabId).trace : (targets.get(tabId) || localTargets.get(tabId))?.trace;
-      return await (trace ? trace.command(method, () => host.command(tabId, method, params, childSessionId)) : host.command(tabId, method, params, childSessionId));
-    } catch { throw browserError("BROWSER_UNAVAILABLE", `Chrome could not complete ${method}. The page may be loading, closed or detached.`); }
+      const value=await (trace ? trace.command(method, () => host.command(tabId, method, params, childSessionId)) : host.command(tabId, method, params, childSessionId));
+      report("CDP_COMMAND_COMPLETED",{durationMs:performance.now()-started});return value;
+    } catch(error) {report("CDP_COMMAND_FAILED",{level:"ERROR",code:"BROWSER_UNAVAILABLE",exceptionType:error?.name,durationMs:performance.now()-started});throw browserError("BROWSER_UNAVAILABLE", `Chrome could not complete ${method}. The page may be loading, closed or detached.`); }
   };
   const publicTask = task => ({ ...Object.fromEntries(["taskId", "chatTabId", "tabId", "groupId", "kind", "resourceId", "resourceIds", "files", "status", "phase", "progressPercent", "pollIntervalMs", "createdAt", "updatedAt", "workspacePath", "mimeType", "extraction", "submittedFiles", "submittedAt", "error"].map(key => [key, structuredClone(task[key])])), ...(task.caller.local ? {} : {group: groups.project(task.caller.group, task.chatTabId)}) });
   function newTask(caller, tabId, kind, resourceIds = [], resourceId = null) {

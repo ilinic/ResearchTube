@@ -1,4 +1,5 @@
 {
+  "sqlQueueCapacity": {"value": 4096, "comment": "Maximum admitted SQL calls (1–16384). FIFO, 12-second queue deadline; restart Agent to apply."},
   "maxTabsPerGroup": {"value": 20, "comment": "Maximum total Chrome tabs in a ResearchTube group, including AI chats. Existing tabs are never closed."},
   "scheduledTasksEnabled": {"value": true, "comment": "Allow periodic continuation only in the existing scheduled group. Set false for a global opt-out. No group means no activation. Restart Agent after changing."},
   "scheduledTasksGroupName": {"value": "scheduled", "comment": "Exact Chrome group name; duplicate names skip the tick."},

@@ -75,13 +75,13 @@ export class BrowserRoom extends DurableObject<Env> {
       if (path === "/dispatch") {
         const body = z.object({ request: z.object({ jsonrpc: z.literal("2.0"), method: z.literal("tools/call"),
           params: z.object({ name: z.string(), arguments: z.record(z.string(), z.unknown()) }).strict() }).strict(),
-          workerReceivedAtMs: z.number().int().nonnegative() }).strict().parse(await readJson(request));
+          workerReceivedAtMs: z.number().int().nonnegative(), requestId: z.string().uuid().optional() }).strict().parse(await readJson(request));
         const name = body.request.params.name;
         if (!Object.hasOwn(validateArguments, name) || name === "system_connection_status" || !(validateArguments as Record<string, any>)[name](body.request.params.arguments))
           throw new PublicError("INVALID_ARGUMENT", "Arguments do not match an available tool.");
         const socket = await this.activeSocket();
         if (!socket) throw new PublicError("EXTENSION_OFFLINE", "Open Chrome with the connected ResearchTube extension.", 409);
-        return json(await this.dispatch(socket, body.request, body.workerReceivedAtMs, Date.now()));
+        return json(await this.dispatch(socket, body.request, body.workerReceivedAtMs, Date.now(), body.requestId));
       }
       return new Response(null, { status: 404 });
     } catch (error) {
@@ -110,9 +110,8 @@ export class BrowserRoom extends DurableObject<Env> {
       throw new PublicError("EXTENSION_UPDATE_REQUIRED", "Update the ResearchTube extension to run tools directly.", 409);
     return socket;
   }
-  private dispatch(socket: WebSocket, request: ToolCallRequest, workerReceivedAtMs: number, roomReceivedAtMs: number): Promise<Record<string, unknown>> {
+  private dispatch(socket: WebSocket, request: ToolCallRequest, workerReceivedAtMs: number, roomReceivedAtMs: number, requestId: string = crypto.randomUUID()): Promise<Record<string, unknown>> {
     if (this.pending.size >= 100) throw new PublicError("BROWSER_BUSY", "Too many requests are running.", 429);
-    const requestId = crypto.randomUUID();
     const argumentChatTabId = request.params.arguments.chatTabId;
     const chatTabId = typeof argumentChatTabId === "number" && Number.isSafeInteger(argumentChatTabId) && argumentChatTabId >= 0 ? argumentChatTabId : undefined;
     return new Promise((resolve, reject) => {

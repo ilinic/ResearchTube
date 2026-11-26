@@ -27,6 +27,7 @@ function toolResult(value: unknown, meta?: Record<string, unknown>) {
 export async function mcpResponse(request: Request, env: Env, auth: Auth): Promise<Response> {
   if (request.method !== "POST") return new Response(null, { status: 405, headers: { Allow: "POST" } });
   const workerReceivedAtMs = Date.now();
+  const requestId = crypto.randomUUID();
   let body: any;
   try { body = await readJson(request); } catch (error) { return errorResponse(error); }
   // Authenticate before SDK dispatch, including unknown tool calls. Discovery
@@ -36,6 +37,8 @@ export async function mcpResponse(request: Request, env: Env, auth: Auth): Promi
     try { userId = await authenticateMcp(request, env, auth); }
     catch (error) {
       if (!(error instanceof PublicError)) return errorResponse(error);
+      console.warn(JSON.stringify({component:"worker",event:"MCP_AUTH_FAILED",requestId,code:error.code,httpStatus:error.status,atMs:Date.now()}));
+      if (error.status !== 401 && error.status !== 403) return json({ jsonrpc: "2.0", id: body.id ?? null, error: { code: -32002, message: error.message, data: { code: error.code, requestId, executionState: "not_started" } } }, error.status, { "Retry-After": "2" });
       const insufficient = error.code === "INSUFFICIENT_SCOPE";
       const challenge = `Bearer resource_metadata="${origin(env)}/.well-known/oauth-protected-resource", scope="${MCP_SCOPE}", error="${insufficient ? "insufficient_scope" : "invalid_token"}", error_description="Connect your ResearchTube account"`;
       return json({ jsonrpc: "2.0", id: body.id ?? null, error: { code: -32001, message: error.message } }, error.status,
@@ -66,13 +69,13 @@ export async function mcpResponse(request: Request, env: Env, auth: Auth): Promi
         return toolResult(setupResult(env, await roomRequest(env, userId, "/status", {})));
       }
       const response = await roomRequest(env, userId, "/dispatch", {
-        workerReceivedAtMs,
+        workerReceivedAtMs, requestId,
         request: { jsonrpc: "2.0", method: "tools/call", params: { name: params.name, arguments: args } } });
       if (response.error) throw new PublicError("BROWSER_TOOL_ERROR", "The browser could not execute this tool. Check ResearchTube diagnostics.");
       return CallToolResultSchema.parse(response.result);
     } catch (error) {
       return { ...toolResult({ error: { code: error instanceof PublicError ? error.code : "BROWSER_UNAVAILABLE",
-        message: error instanceof PublicError ? error.message : "ResearchTube could not complete this browser request." } }), isError: true };
+        message: error instanceof PublicError ? error.message : "ResearchTube could not complete this browser request.", requestId, executionState: "unknown" } }), isError: true };
     }
   });
   const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });

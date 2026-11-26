@@ -48,7 +48,7 @@ except ImportError:
     from task_history import TaskHistory
     from browser_resources import save_browser_resource
 
-AGENT_VERSION = "2.8.9"
+AGENT_VERSION = "2.8.10"
 INTERFACE_VERSION = 89
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
@@ -1110,22 +1110,41 @@ class WorkspacePathResolver:
 
 
 try:
-    from . import scheduled_memory
+    from . import scheduled_memory, reliability
 except ImportError:
     import scheduled_memory
+    import reliability
 
 
 def memory_path(logical):
     return WorkspacePathResolver().resolve_destination(logical, field_name="workspacePath", error_code="WORKSPACE_PATH_INVALID").physical_path
 
 
+SQL_QUEUE = None
+
+
 async def memory_tool_call(name, arguments):
+    global SQL_QUEUE
+    started = time.monotonic()
+    reliability.emit("AGENT_TOOL_STARTED", tool=name,version=AGENT_VERSION)
     try:
-        return await asyncio.to_thread(scheduled_memory.call, memory_path, name, arguments)
+        if name == "system_get_trace":
+            value = await asyncio.to_thread(reliability.TRACE.query, arguments)
+        elif name == "db_sql":
+            if SQL_QUEUE is None:
+                SQL_QUEUE = scheduled_memory.SqlQueue()
+            value = await SQL_QUEUE.run(memory_path, arguments)
+        else:
+            value = await asyncio.to_thread(scheduled_memory.call, memory_path, name, arguments)
+        reliability.emit("AGENT_TOOL_COMPLETED", tool=name, durationMs=(time.monotonic()-started)*1000, executionState="completed")
+        return value
     except scheduled_memory.MemoryOperationError as error:
-        log(f"Shared memory operation {name}: {error.code}", error=True)
-        raise AgentApiError(error.code, str(error)) from error
+        reliability.emit("AGENT_TOOL_FAILED", tool=name, level="ERROR", code=error.code, executionState=error.executionState, sqliteCode=error.sqlite_code, sqliteName=error.sqlite_name, statementIndex=error.index, durationMs=(time.monotonic()-started)*1000)
+        failure = AgentApiError(error.code, str(error))
+        failure.executionState = error.executionState
+        raise failure from error
     except (OSError, UnicodeError, ValueError) as error:
+        reliability.emit("AGENT_TOOL_FAILED", tool=name, level="ERROR", code="WORKSPACE_MEMORY_ERROR", exceptionType=type(error).__name__, durationMs=(time.monotonic()-started)*1000)
         raise AgentApiError("WORKSPACE_MEMORY_ERROR", "Shared memory I/O failed.") from error
 
 
@@ -6512,16 +6531,25 @@ async def initialize_scheduled_memory() -> None:
     except Exception as error:
         # Shared memory is optional: preserve the database and keep unrelated
         # Agent tools available. Each db_sql call opens its own connection.
+        reliability.emit("SQL_INITIALIZE_FAILED", level="ERROR", exceptionType=type(error).__name__)
         log(f"Scheduled database initialization failed ({type(error).__name__}); Agent will continue. db_sql will retry on demand.", error=True)
 
 
 async def serve(port: int, on_started: Callable[[], None] | None = None) -> None:
-    global WORKSPACE_PATH, STARTUP_PROMPTS
+    global WORKSPACE_PATH, STARTUP_PROMPTS, SQL_QUEUE
     STARTUP_PROMPTS = configured_startup_prompts()
     # Freeze the root for this run: live edits must not redirect active tasks,
     # media viewers or shares into a different directory mid-operation.
     WORKSPACE_PATH = startup_workspace_path()
     scheduled_settings = configured_scheduled_tasks()
+    queue_capacity = read_agent_config().get("sqlQueueCapacity", 4096)
+    if type(queue_capacity) is not int or not 1 <= queue_capacity <= 16384:
+        queue_capacity = 4096
+    SQL_QUEUE = scheduled_memory.SqlQueue(queue_capacity)
+    try:
+        reliability.TRACE.start(ROOT / "reliability-trace")
+    except Exception:
+        log("Reliability diagnostic writer unavailable; continuing in memory.", error=True)
     await initialize_scheduled_memory()
     initial_health = initialize_health_snapshot()
     server = await asyncio.start_server(handle_client, host="127.0.0.1", port=port)
@@ -6549,6 +6577,7 @@ async def serve(port: int, on_started: Callable[[], None] | None = None) -> None
         await CAMERA_RECORD_TASKS.shutdown()
         await TASKS.shutdown()
         await CUSTOM_TOOLS.shutdown()
+        await asyncio.to_thread(reliability.TRACE.close)
 
 
 def parse_args(argv=None) -> argparse.Namespace:
