@@ -30,6 +30,13 @@ except ImportError:
 MAX_MESSAGE = 2 * 1024 * 1024
 BASE_TOOLS = frozenset(("youtube_search", "youtube_get_video", "youtube_get_transcript", "youtube_get_comments", "youtube_get_comment_replies", "youtube_get_channel_videos", "youtube_get_channel_playlists", "youtube_get_playlist_videos"))
 MEMORY_TOOLS = frozenset(("memory_append", "memory_read", "db_query", "workspace_read_text", "workspace_write_text", "system_get_trace", "system_export_trace", "db_outbox_submit", "db_outbox_status", "db_outbox_list", "db_outbox_ack"))
+try:
+    from . import agent_plans
+except ImportError:
+    import agent_plans
+PLAN_PUBLIC = agent_plans.READS|agent_plans.WRITES
+PLAN_PRIVATE = agent_plans.PRIVATE_READS|agent_plans.PRIVATE_WRITES
+MEMORY_TOOLS = MEMORY_TOOLS|PLAN_PUBLIC
 BROWSER_TOOLS = frozenset(("site_open", "site_interact", "site_list_tabs", "site_read", "site_get_children", "site_get_node", "site_get_text", "site_get_images", "site_get_files", "site_files_status", "site_files_cancel"))
 CATALOG = json.loads(CATALOG_JSON)
 DEFINITIONS = {tool["name"]: tool for tool in CATALOG}
@@ -230,7 +237,7 @@ class LocalMcpService:
             else:
                 try:
                     payload = json.loads(body)
-                    if not isinstance(payload, dict) or payload.get("name") not in MEMORY_TOOLS or set(payload)-{"name","arguments","requestId","attempt"} or "arguments" not in payload:
+                    if not isinstance(payload, dict) or payload.get("name") not in MEMORY_TOOLS|PLAN_PRIVATE or set(payload)-{"name","arguments","requestId","attempt"} or "arguments" not in payload:
                         raise LocalError("INVALID_ARGUMENT")
                     request_id = payload.get("requestId")
                     if not isinstance(request_id, str) or not reliability.TOKEN.fullmatch(request_id):
@@ -241,8 +248,22 @@ class LocalMcpService:
                     context = reliability.REQUEST.set({"requestId":request_id,"tool":payload["name"],"attempt":attempt})
                     try:
                         reliability.emit("AGENT_REQUEST_RECEIVED", bytes=len(body))
-                        arguments = normalized(DEFINITIONS[payload["name"]]["inputSchema"], payload["arguments"])
-                        value = await self.agent.memory_tool_call(payload["name"], arguments)
+                        name=payload["name"]
+                        if name in PLAN_PRIVATE:
+                            arguments=payload["arguments"]
+                            if not isinstance(arguments,dict): raise LocalError("INVALID_ARGUMENT")
+                        elif name in PLAN_PUBLIC:
+                            supplied=dict(payload["arguments"])
+                            chat_id=supplied.pop("chat_id",None)
+                            actor=supplied.pop("actor",None)
+                            if not name.startswith("skill_"): supplied["chatTabId"]=0
+                            arguments=normalized(DEFINITIONS[name]["inputSchema"],supplied)
+                            arguments.pop("chatTabId",None)
+                            if not name.startswith("skill_"): arguments["chat_id"]=chat_id
+                            elif actor is not None: arguments["actor"]=actor
+                        else:
+                            arguments = normalized(DEFINITIONS[name]["inputSchema"], payload["arguments"])
+                        value = await self.agent.memory_tool_call(name, arguments)
                         packet = response("200 OK", value)
                         writer.write(packet)
                         await writer.drain()
@@ -380,12 +401,14 @@ class LocalMcpService:
             return {**envelope, "result": {}}
         if method == "tools/list":
             error_schema = {"type": "object", "additionalProperties": False, "properties": {"error": {"type": "object", "additionalProperties": False, "properties": {"code": {"type": "string"}, "message": {"type": "string"}, "requestId": {"type": "string"}, "executionState": {"type": "string"}}, "required": ["code", "message"]}}, "required": ["error"]}
-            return {**envelope, "result": {"tools": [{**tool, "outputSchema": {"type": "object", "anyOf": [tool["outputSchema"], error_schema]}} for tool in CATALOG]}}
+            return {**envelope, "result": {"tools": [{**tool, "outputSchema": {"type": "object", "anyOf": [tool["outputSchema"], error_schema]}} for tool in CATALOG if tool["name"] not in PLAN_PUBLIC or tool["name"].startswith("skill_")]}}
         if method != "tools/call":
             return {**envelope, "error": {"code": -32601, "message": "Method not found."}}
         if not isinstance(params, dict) or set(params) - {"name", "arguments", "_meta"} or params.get("name") not in DEFINITIONS:
             return {**envelope, "error": {"code": -32602, "message": "Unknown tool or invalid call."}}
         name = params["name"]
+        if name in PLAN_PUBLIC and not name.startswith("skill_"):
+            return {**envelope,"error":{"code":-32602,"message":"Chat plans require a verified ChatGPT tab through the Extension."}}
         context = reliability.REQUEST.set({"requestId":uuid.uuid4().hex,"tool":name,"attempt":1})
         reliability.emit("MCP_REQUEST_RECEIVED")
         try:
@@ -416,6 +439,9 @@ class LocalMcpService:
     async def call(self, name, arguments):
         if name in MEMORY_TOOLS:
             try:
+                if name.startswith("skill_"):
+                    arguments=dict(arguments);arguments.pop("chatTabId",None)
+                    if name in agent_plans.WRITES: arguments["actor"]="codex"
                 return await self.agent.memory_tool_call(name, arguments)
             except Exception as error:
                 failure=LocalError(getattr(error,"code","WORKSPACE_MEMORY_ERROR"),str(error))

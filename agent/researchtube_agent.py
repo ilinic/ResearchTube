@@ -48,8 +48,8 @@ except ImportError:
     from task_history import TaskHistory
     from browser_resources import save_browser_resource
 
-AGENT_VERSION = "2.8.15"
-INTERFACE_VERSION = 92
+AGENT_VERSION = "2.8.16"
+INTERFACE_VERSION = 93
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
 MAX_GOOGLE_TRANSLATE_AUDIO_BYTES = 16 * 1024 * 1024
@@ -1136,6 +1136,10 @@ async def memory_tool_call(name, arguments):
             value = await asyncio.to_thread(reliability.TRACE.query, arguments)
         elif name == "system_export_trace":
             value = await asyncio.to_thread(reliability.TRACE.export, memory_path("scheduled/reliability-trace.jsonl"), arguments)
+        elif name in scheduled_memory.agent_plans.READS|scheduled_memory.agent_plans.WRITES|scheduled_memory.agent_plans.PRIVATE_READS|scheduled_memory.agent_plans.PRIVATE_WRITES:
+            if SQL_QUEUE is None: SQL_QUEUE=scheduled_memory.SqlQueue()
+            if READ_QUEUE is None: READ_QUEUE=scheduled_memory.ReadQueue()
+            value=await agent_plan_tool(name,arguments)
         elif name in ("memory_append","memory_read"):
             if SQL_QUEUE is None:
                 SQL_QUEUE = scheduled_memory.SqlQueue()
@@ -6530,13 +6534,30 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             pass
 
 
-async def scheduled_create_group():
-    # Tray shortcut only. Scheduling itself belongs to the extension.
+async def agent_plan_tool(name,arguments):
+    p=scheduled_memory.agent_plans
+    if name in p.READS|p.PRIVATE_READS:
+        value=await READ_QUEUE.run(memory_path,arguments,name)
+        return value if name in p.PRIVATE_READS else {"data":json.dumps(value,ensure_ascii=False,separators=(",",":"))}
+    args=dict(arguments)
+    key=args.pop("operation_id",None)
+    if key is None: raise scheduled_memory.MemoryOperationError("PLAN_INVALID","Provide a stable operation_id.")
     try:
-        result = await LOCAL_MCP.browser("__scheduled_create", {})
-        log(f"Scheduled group: {result.get('status', 'unknown')}")
-    except Exception as error:
-        log(f"Scheduled group not created: {getattr(error, 'code', type(error).__name__)}", error=True)
+        await SQL_QUEUE.run(memory_path,{"name":name,"arguments":args,"operation_id":key},"__plan_submit")
+    except scheduled_memory.MemoryOperationError as error:
+        if error.executionState=="unknown":
+            if OUTBOX_WAKE is not None: OUTBOX_WAKE.set()
+            return {"state":"unknown","operation_id":key}
+        raise
+    if OUTBOX_WAKE is not None: OUTBOX_WAKE.set()
+    deadline=time.monotonic()+6
+    while True:
+        try:
+            value=await READ_QUEUE.run(memory_path,{"operation_id":key},"__plan_status")
+        except (scheduled_memory.MemoryOperationError,OSError):
+            return {"state":"unknown","operation_id":key}
+        if value["state"] not in ("pending","unknown") or time.monotonic()>=deadline: return value
+        await asyncio.sleep(.25)
 
 
 async def shared_memory_tool(name,arguments):
@@ -6706,7 +6727,7 @@ def main(argv=None) -> int:
             return 0
         if tray:
             return run_tray(lambda ready: run_server(port, on_started=ready), ROOT,
-                            lambda: WORKSPACE_PATH, AGENT_VERSION, scheduled_create=scheduled_create_group)
+                            lambda: WORKSPACE_PATH, AGENT_VERSION)
         clear_console()
         # PyInstaller hides its owned console early; --console explicitly restores it.
         if getattr(sys, "frozen", False) and sys.platform == "win32":

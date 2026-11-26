@@ -275,10 +275,23 @@ Optional `tabId` on asynchronous launches carries the destination ChatGPT tab re
 
 `site_list_tabs` includes `otherTabs` after the current group, organized by window/group. Read external tabs using `scope: "all"` on read/resource tools; `site_interact` is group-only. Ungrouped chats can read. Restricted browser tabs are metadata-only. Use `scope: "group"` to list just the current group. The two lists have independent pagination.
 
-### Shared scheduled memory
+### Shared memory, database and reliability
 
-`db_sql` (`{sql}`) executes a bounded atomic SQLite script on `scheduled/database.sqlite`, returning ordered result sets. The Agent owns the transaction; omit BEGIN/COMMIT. BLOBs are `base64:` strings; unsafe file operations are denied. `workspace_read_text` (`{workspacePath}`) and `workspace_write_text` (`{workspacePath,text}`) read/atomically replace UTF-8 files up to 32 KiB. Coordinate concurrent updates via SQLite or distinct files. These tools are also available in local MCP.
+- `memory_append` and `memory_read`: private cross-chat journal, independent of browser groups.
+- `db_query`: bounded read-only SQLite query on `scheduled/database.sqlite`.
+- `db_outbox_submit`: durably admit a write package with stable operationId.
+- `db_outbox_status`, `db_outbox_list`, `db_outbox_ack`: inspect, reconcile and acknowledge committed packages.
+- `workspace_read_text` and `workspace_write_text`: read and atomically replace UTF-8 Workspace files.
+- `system_get_trace` and `system_export_trace`: bounded technical reliability diagnostics; export only on user request.
 
-### Scheduled ChatGPT tasks
+### Individual conversation plans and global skills
 
-Use the Agent tray menu **Create scheduled group** to create one Chrome group and a new empty ChatGPT tab in an existing window. Give the chat its task and send it yourself. Add/remove chats with normal Chrome grouping. The Agent checks the exact configured group name every 300 seconds by default; missing Chrome/group is a no-op. Duplicate groups are skipped. Group presence is the normal on/off switch; `scheduledTasksEnabled=false` is an optional global opt-out (restart Agent). The tick never creates tabs, interrupts generation or overwrites a draft. Pending work and uncertain sends are skipped. Only confirmed sends count as iterations. The shared memory persists after closing the group.
+See [Conversation plans and shared skills](features/AGENT_PLANS.md).
+
+- `plan_read`, `plan_status`: page pending tasks/history; inspect next task, current task and plan version.
+- `plan_edit`: atomic queue edits (add, update, reorder, delete, clear, result, retry, skip).
+- `plan_pause`: pause/resume the verified conversation.
+- `agent_memory_read`, `agent_memory_write`, `agent_memory_history`: personal goal, checkpoint and skill references.
+- `skill_list`, `skill_read`, `skill_create`, `skill_update`, `skill_history`: global versioned library, available to every chat and local Codex.
+
+Read data and committed mutation results are JSON in the `data` field. Mutation state must be committed before claiming success. Use expected_version for optimistic concurrency and stable operation_id on every retry. Scheduler no longer uses Chrome group names.

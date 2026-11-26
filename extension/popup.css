@@ -4,4 +4,3 @@
 #server-status { display:flex;align-items:center;justify-content:flex-end;gap:7px; }
 #tunnel-help[hidden] { display:none!important; }
 
-.scheduled-option{display:flex;align-items:center;gap:6px;margin-top:9px;color:var(--muted);font:inherit;font-weight:400;cursor:pointer}.scheduled-option input{width:13px;height:13px;margin:0;accent-color:var(--muted);flex:none}

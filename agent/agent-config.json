@@ -5,9 +5,9 @@
   "sqlReadConcurrency": {"value": 8, "comment": "Parallel read-only SQLite connections (1–16); restart Agent."},
   "sqlQueueCapacity": {"value": 4096, "comment": "Maximum admitted outbox calls (1–16384). FIFO, 12-second queue deadline; restart Agent to apply."},
   "maxTabsPerGroup": {"value": 20, "comment": "Maximum total Chrome tabs in a ResearchTube group, including AI chats. Existing tabs are never closed."},
-  "scheduledTasksEnabled": {"value": true, "comment": "Legacy setting; ignored by extension-owned Scheduler. Rename Scheduled groups to opt out."},
-  "scheduledTasksGroupName": {"value": "scheduled", "comment": "Legacy setting; Scheduled groups are recognized by name in the Extension."},
-  "scheduledTasksIntervalSeconds": {"value": 60, "comment": "Legacy setting; Extension checks every three seconds."},
+  "scheduledTasksEnabled": {"value": true, "comment": "Retired; ignored by individual conversation plans. Use plan_pause."},
+  "scheduledTasksGroupName": {"value": "scheduled", "comment": "Retired; browser group names no longer control scheduling."},
+  "scheduledTasksIntervalSeconds": {"value": 60, "comment": "Retired; the Extension checks individual plans every three seconds."},
   "port": {
     "value": 17843,
     "comment": "Loopback HTTP port for the Local Agent (1–65535). Match the port in Extension Settings. Restart the Agent after changing it."

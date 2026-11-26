@@ -20,6 +20,11 @@ try:
 except ImportError:
     from reliability import emit
 
+try:
+    from . import agent_plans
+except ImportError:
+    import agent_plans
+
 MAX_TEXT_BYTES = 32768
 MAX_SQL_BYTES = 32768
 MAX_STATEMENTS = 40
@@ -46,7 +51,7 @@ class SqlQueue:
         self.depth = 0
 
     async def run(self, resolve, arguments, name):
-        if name not in ("db_outbox_submit","db_outbox_status","db_outbox_list","db_outbox_ack","__outbox_process","__memory_submit"):
+        if name not in ("db_outbox_submit","db_outbox_status","db_outbox_list","db_outbox_ack","__outbox_process","__memory_submit","__plan_submit"):
             fail("INVALID_ARGUMENT","Only outbox operations enter the write queue.")
         if self.depth >= self.capacity:
             fail("DB_QUEUE_FULL", "SQL queue is full; no SQL executed.")
@@ -85,7 +90,7 @@ class ReadQueue:
         self.depth=0
 
     async def run(self, resolve, arguments, name="db_query"):
-        if name not in ("db_query","memory_read","__memory_status"):
+        if name not in ("db_query","memory_read","__memory_status","__plan_status") and name not in agent_plans.READS|agent_plans.PRIVATE_READS:
             fail("INVALID_ARGUMENT","Invalid read operation.")
         if self.depth>=self.capacity:
             fail("DB_READ_QUEUE_FULL","Read queue full; retry later.")
@@ -148,7 +153,8 @@ def connect(resolve, read_only=False):
             connection.execute("PRAGMA max_page_count=262144")
             if connection.execute("PRAGMA journal_mode").fetchone()[0].lower() != "wal" and connection.execute("PRAGMA journal_mode=WAL").fetchone()[0].lower() != "wal":
                 fail("DB_SQL_ERROR", "Could not enable WAL.")
-        connection.enable_load_extension(False)
+        if hasattr(connection, "enable_load_extension"):
+            connection.enable_load_extension(False)
         if hasattr(connection, "setlimit"):
             for name, limit in (("SQLITE_LIMIT_LENGTH", 1048576), ("SQLITE_LIMIT_SQL_LENGTH", MAX_SQL_BYTES),
                                 ("SQLITE_LIMIT_ATTACHED", 0), ("SQLITE_LIMIT_COLUMN", 256),
@@ -184,6 +190,7 @@ def initialize(resolve):
         try:
             ensure_dedup(con)
             ensure_shared_memory(con)
+            agent_plans.ensure(con)
         finally:
             con.close()
 
@@ -316,14 +323,15 @@ def db_query(resolve,sql):
 
 def _execute_write(resolve, sql, operation_id):
     memory = decode_memory(sql) if sql.startswith(MEMORY_PREFIX) else None
-    parts = [] if memory is not None else statements(sql)
+    planned = agent_plans.decode(sql) if sql.startswith(agent_plans.PREFIX) else None
+    parts = [] if memory is not None or planned is not None else statements(sql)
     operation_key(operation_id)
     # Direct Python callers and the Agent's FIFO queue share this guard.
     with _DB_LOCK:
         deadline = time.monotonic() + 8
         for attempt in range(1, 5):
             try:
-                return _transaction(resolve, sql, parts, operation_id, deadline, attempt, memory)
+                return _transaction(resolve, sql, parts, operation_id, deadline, attempt, memory, planned)
             except MemoryOperationError as error:
                 if error.code not in ("DB_BUSY", "DB_LOCKED") or error.executionState not in ("not_started", "rolled_back"):
                     raise
@@ -338,7 +346,7 @@ def _execute_write(resolve, sql, operation_id):
                 emit("RETRY_STARTED", attempt=attempt+1)
 
 
-def _transaction(resolve, sql, parts, operation_id, deadline, attempt, memory=None):
+def _transaction(resolve, sql, parts, operation_id, deadline, attempt, memory=None, planned=None):
     connection = None
     index = None
     stage = "connect"
@@ -379,6 +387,10 @@ def _transaction(resolve, sql, parts, operation_id, deadline, attempt, memory=No
             if not row or tuple(row[2:])!=(topic,source,content):
                 fail("DB_OPERATION_CONFLICT","Operation key already belongs to different memory data.")
             results.append({"columns":["id","created_at"],"rows":[list(row[:2])],"rowsAffected":connection.total_changes-before,"truncated":False})
+        if planned is not None:
+            name, arguments = planned
+            value=agent_plans.mutate(connection,name,arguments,operation_id)
+            results.append({"columns":["data"],"rows":[[json.dumps(value,ensure_ascii=False,separators=(",",":"))]],"rowsAffected":0,"truncated":False})
         connection.set_authorizer(authorize)
         for index, statement in enumerate(parts):
             statement_started = time.monotonic()
@@ -417,7 +429,7 @@ def _transaction(resolve, sql, parts, operation_id, deadline, attempt, memory=No
             connection.execute("INSERT INTO _rt_internal_operations VALUES (?,?,?,?)", (operation_id, fingerprint, encoded, int(time.time())))
         stage = "commit"
         if operation_id is not None:
-            if memory is not None:
+            if memory is not None or planned is not None:
                 connection.execute("DELETE FROM _rt_internal_outbox WHERE operation_id=?", (operation_id,))
             else:
                 connection.execute("UPDATE _rt_internal_outbox SET state=\'committed\',code=NULL WHERE operation_id=?", (operation_id,))
@@ -556,12 +568,14 @@ def _outbox_state(con,key):
     return {"operationId":key,"state":"not_found","createdAt":None,"attempts":0,"code":None,"acknowledged":False}
 
 
-def outbox_submit(resolve,key,sql,*,internal_memory=False):
+def outbox_submit(resolve,key,sql,*,internal_memory=False,internal_plan=False):
     key=operation_key(key)
     if internal_memory:
         decode_memory(sql)
+    elif internal_plan:
+        agent_plans.decode(sql)
     else:
-        if isinstance(sql,str) and sql.startswith(MEMORY_PREFIX):
+        if isinstance(sql,str) and sql.startswith((MEMORY_PREFIX,agent_plans.PREFIX)):
             fail("DB_SQL_INVALID","Internal memory payloads require memory_append.")
         statements(sql)  # Validate size and statement count before durable admission.
     digest=hashlib.sha256(sql.encode("utf-8")).hexdigest()
@@ -627,7 +641,7 @@ def outbox_failure(resolve,job,error):
     code=getattr(error,"code","DB_OUTBOX_ERROR")
     raw=getattr(error,"sqlite_code",None)
     primary=raw&255 if isinstance(raw,int) else None
-    permanent=code in ("DB_OPERATION_CONFLICT","DB_SQL_INVALID","DB_SQL_LIMIT","MEMORY_INVALID") or primary in (sqlite3.SQLITE_ERROR,sqlite3.SQLITE_CONSTRAINT,sqlite3.SQLITE_AUTH,sqlite3.SQLITE_MISMATCH,sqlite3.SQLITE_RANGE,sqlite3.SQLITE_TOOBIG)
+    permanent=code in ("DB_OPERATION_CONFLICT","DB_SQL_INVALID","DB_SQL_LIMIT","MEMORY_INVALID","PLAN_INVALID","PLAN_CONFLICT") or primary in (sqlite3.SQLITE_ERROR,sqlite3.SQLITE_CONSTRAINT,sqlite3.SQLITE_AUTH,sqlite3.SQLITE_MISMATCH,sqlite3.SQLITE_RANGE,sqlite3.SQLITE_TOOBIG)
     def update(con):
         state=_outbox_state(con,key)
         if state["state"]=="committed":
@@ -777,9 +791,45 @@ def memory_read(resolve,arguments):
             con.close()
 
 
+def plan_read(resolve,name,arguments):
+    con=connect(resolve,read_only=True)
+    try:
+        con.execute("BEGIN")
+        return agent_plans.read(con,name,arguments)
+    except sqlite3.Error as error:
+        raise MemoryOperationError("PLAN_READ_FAILED","Plan or skill read failed.","not_started") from error
+    finally:
+        con.close()
+
+
+def plan_operation_status(resolve,key):
+    key=operation_key(key)
+    con=connect(resolve,read_only=True)
+    try:
+        con.execute("BEGIN")
+        state=_outbox_state(con,key)
+        value={"state":"pending" if state["state"]=="processing" else state["state"],"operation_id":key}
+        if state["code"]: value["code"]=state["code"]
+        if state["state"]=="committed":
+            row=con.execute("SELECT result FROM _rt_internal_operations WHERE operation_id=?",(key,)).fetchone()
+            result=json.loads(row[0])
+            if not result.get("results") or result["results"][0]["columns"]!=["data"]: fail("DB_OPERATION_CONFLICT","Operation key does not identify a plan mutation.")
+            value["data"]=result["results"][0]["rows"][0][0]
+        return value
+    finally:
+        con.close()
+
+
 def call(resolve, name, arguments):
     if not isinstance(arguments, dict):
         fail("INVALID_ARGUMENT", "Expected tool argument object.")
+    if name=="__plan_submit":
+        key=operation_key(arguments["operation_id"])
+        return outbox_submit(resolve,key,agent_plans.encode(arguments["name"],arguments["arguments"]),internal_plan=True)
+    if name=="__plan_status":
+        return plan_operation_status(resolve,arguments["operation_id"])
+    if name in agent_plans.READS|agent_plans.PRIVATE_READS:
+        return plan_read(resolve,name,arguments)
     if name=="__memory_submit":
         return memory_submit(resolve,arguments)
     if name=="__memory_status" and set(arguments)=={"operation_id"}:

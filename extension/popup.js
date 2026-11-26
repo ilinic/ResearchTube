@@ -61,12 +61,10 @@ async function loadAgentStatus(port) {
 }
 let activeYouTubeVideoTab = null;
 function renderQuickActions() {
-  const scheduled = $("create-scheduled-group").checked;
-  $("describe-video").hidden = scheduled || !activeYouTubeVideoTab;
-  $("chatgpt").hidden = !scheduled && Boolean(activeYouTubeVideoTab);
+  $("describe-video").hidden = !activeYouTubeVideoTab;
+  $("chatgpt").hidden = Boolean(activeYouTubeVideoTab);
 }
 async function load() {
-  $("create-scheduled-group").checked = false;
   void loadGoogleProfileStatus();
   $("extension-status").textContent = version(chrome.runtime.getManifest().version);
   $("extension-status").className = "good";
@@ -89,29 +87,7 @@ async function load() {
   $("interface-version").className = "good";
   void loadAgentStatus(state.agentPort || 17843).catch((error) => console.info("[ResearchTube] Agent status unavailable", error));
 }
-$("create-scheduled-group").addEventListener("change", () => {
-  $("describe-video-status").hidden = true;
-  renderQuickActions();
-});
 $("chatgpt").addEventListener("click", async () => {
-  const option = $("create-scheduled-group");
-  const button = $("chatgpt");
-  if (button.disabled) return;
-  if (option.checked) {
-    button.disabled = option.disabled = true;
-    try {
-      const result = await call({type:"create-scheduled-group"});
-      if (result?.status === "created") { window.close(); return; }
-      $("describe-video-status").hidden = false;
-      $("describe-video-status").textContent = "Could not create a scheduled group: " + (result?.code || result?.status || "unknown");
-    } catch {
-      $("describe-video-status").hidden = false;
-      $("describe-video-status").textContent = "Could not create a scheduled group.";
-    } finally {
-      button.disabled = option.disabled = false;
-    }
-    return;
-  }
   const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
   if (!tab?.id || !/^https?:\/\//.test(tab.url || "")) { console.info("[ResearchTube Browser] Open a website before starting Study this site."); return; }
   void call({ type: "study-site", tabId: tab.id }).catch(error => console.info("[ResearchTube Browser]", error));
