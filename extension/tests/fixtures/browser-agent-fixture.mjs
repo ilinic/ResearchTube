@@ -60,7 +60,7 @@ export function fixture({multipleImages=false,nonImages=false,imageCount=1}={}){
     return {result:{value:{tag:id===112?'a':kind,attributes:[],bounds:{x:10,y:20,width:50,height:40},resources:[{kind,url:'https://cdn.test/'+kind+'?signature=PRIVATE',rendering:null}],editable:false,password:false}}};
    }
    if(params.functionDeclaration.includes('function inspectBrowserElement'))return {result:{value:{tag:imageBackends.has(id)?'img':id===105?'input':id===106?'select':'div',attributes:[],bounds:{x:10,y:20,width:50,height:40},resources:imageBackends.has(id)?[{kind:'image',url:'https://cdn.test/image.png?signature=PRIVATE',rendering:null}]:[],editable:id===105,password:false}}};
-   if(params.functionDeclaration.includes('elementFromPoint'))return {result:{value:true}};
+   if(params.functionDeclaration.includes('function inspectInteractionTarget'))return {result:{value:{elementExists:true,elementVisible:true,elementEnabled:true,insideViewport:true,focused:host.focus===id,bounds:{x:10,y:20,width:50,height:40},viewport:{width:800,height:600},blockedBy:null,focusedElement:null,point:args[0]||{x:35,y:40}}}};
    if(params.functionDeclaration.includes('this.options'))return {result:{value:args[0]==='a'}};
    if(params.functionDeclaration.includes('this.value'))return {result:{value:domValues.get(id)}};
    return {result:{value:null}};

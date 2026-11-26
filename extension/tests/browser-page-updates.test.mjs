@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { createBrowserPage } from "../browser-page.js";
-import { browserToolDefinitions } from "../browser-tools.js";
+import { createBrowserPage, inspectInteractionTarget } from "../browser-page.js";
+import { browserToolDefinitions, validateBrowserInput } from "../browser-tools.js";
 import { browserObservationOptions } from "../browser-observation-options.js";
 import { assertSchema } from "./fixtures/schema-check.mjs";
 
@@ -29,6 +29,7 @@ function fixture(observation) {
     if (method === "Runtime.callFunctionOn") {
       const backend = Number(params.objectId);
       if (params.functionDeclaration.includes("function inspectBrowserElement")) return { result: { value: { tag: "img", attributes: [], bounds: null, resources: urls.has(backend) ? [{ kind: [...trees.values()].flat().find(node => node.backendDOMNodeId === backend)?.role.value === "link" ? "document" : "image", url: urls.get(backend) }] : [], editable: false, password: false } } };
+      if(params.functionDeclaration.includes("function inspectInteractionTarget"))return {result:{value:{elementExists:true,elementVisible:true,elementEnabled:true,insideViewport:true,focused:true,bounds:{x:0,y:0,width:40,height:40},viewport:{width:800,height:600},blockedBy:null,focusedElement:null,point:params.arguments[0].value||{x:20,y:20}}}};
       return { result: { value: true } };
     }
     if (method === "DOM.getBoxModel") return { model: { content: [0, 0, 40, 0, 40, 40, 0, 40] } };
@@ -270,3 +271,85 @@ failedRoot.host.command=(tab,method,params,target)=>{if(method==='Page.getFrameT
 await assert.rejects(failedRoot.read(),{code:'BROWSER_UNAVAILABLE'});
 const failedMainAx=fixture();failedMainAx.frame();failedMainAx.failRead();await assert.rejects(failedMainAx.read(),{code:'BROWSER_UNAVAILABLE'});
 console.log('Browser inaccessible frames: protected descendants skipped, child AX/DOM failures and timeouts isolated, main-document failures explicit: ok');
+
+// A partially covered element can still be clicked at an unobstructed point.
+const fakeDoc={defaultView:{innerWidth:100,innerHeight:100,getComputedStyle:()=>({display:"block",visibility:"visible",opacity:"1",overflowX:"visible",overflowY:"visible"})}};
+const fake=(tag,role)=>({nodeType:1,isConnected:true,ownerDocument:fakeDoc,tagName:tag,getAttribute:name=>name==="role"?role:null,getRootNode:()=>fakeDoc,matches:()=>false,closest:()=>null,getClientRects:()=>[1],getBoundingClientRect:()=>({left:0,top:0,right:80,bottom:80,width:80,height:80})});
+const actualTarget=fake("BUTTON","button"),overlay=fake("DIV","dialog");
+fakeDoc.activeElement=actualTarget;fakeDoc.elementFromPoint=x=>x===40?overlay:actualTarget;
+assert.deepEqual(inspectInteractionTarget.call(actualTarget).point,{x:20,y:40});
+fakeDoc.elementFromPoint=()=>overlay;
+assert.equal(inspectInteractionTarget.call(actualTarget).blockedBy.role,"dialog");
+actualTarget.getBoundingClientRect=()=>({left:0,top:120,right:80,bottom:200,width:80,height:80});
+assert.equal(inspectInteractionTarget.call(actualTarget).insideViewport,false);
+
+// No mouse press is sent if the target stays obstructed after recovery.
+const blocked=fixture();const blockedRead=await blocked.read();
+const blockedCommand=blocked.host.command;let probes=0;
+const geometry=(overrides={})=>({elementExists:true,elementVisible:true,elementEnabled:true,insideViewport:true,focused:true,bounds:{x:0,y:0,width:40,height:40},viewport:{width:800,height:600},blockedBy:null,focusedElement:null,point:{x:20,y:20},...overrides});
+blocked.host.command=async(tab,method,params,target)=>{
+  if(method==="Runtime.callFunctionOn"&&params.functionDeclaration.includes("function inspectInteractionTarget")){
+    probes++;return {result:{value:geometry({focused:false,blockedBy:{tag:"div",role:"dialog"},point:null})}};
+  }
+  return blockedCommand(tab,method,params,target);
+};
+const obstruction=await blocked.click(blockedRead.nodes.find(n=>n.role==="button").nodeId);
+assert.equal(obstruction.failedStep.code,"BROWSER_ELEMENT_OBSCURED");
+assert.equal(obstruction.failedStep.diagnostics.actionDispatched,false);
+assert.equal(obstruction.failedStep.diagnostics.safeToRetry,true);
+assert.equal(obstruction.failedStep.diagnostics.element.blockedBy.role,"dialog");
+assert.equal(probes,2);
+assert.equal(blocked.commands.filter(row=>row.params.type==="mousePressed").length,0);
+
+// An offscreen target recovers after the centered fallback, without input replay.
+const offscreen=fixture();const offscreenRead=await offscreen.read();
+const offscreenCommand=offscreen.host.command;let centered=false;
+offscreen.host.command=async(tab,method,params,target)=>{
+  if(method==="Runtime.callFunctionOn"&&params.functionDeclaration.includes("function centerInteractionTarget"))centered=true;
+  if(method==="Runtime.callFunctionOn"&&params.functionDeclaration.includes("function inspectInteractionTarget"))
+    return {result:{value:centered?geometry():geometry({insideViewport:false,point:null})}};
+  return offscreenCommand(tab,method,params,target);
+};
+const offscreenResult=await offscreen.click(offscreenRead.nodes.find(n=>n.role==="button").nodeId);
+assert.equal(centered,true);assert.equal(offscreenResult.completedSteps,1);
+assert.equal(offscreen.commands.filter(row=>row.params.type==="mousePressed").length,1);
+
+// Reload is explicit, single-step, and invalidates old observation IDs.
+assert.throws(()=>validateBrowserInput("site_interact",{chatTabId:22,tabId:1,steps:[{action:"reload"},{action:"key",key:"Enter"}]}),{code:"BROWSER_INVALID"});
+const reload=fixture();const reloadRead=await reload.read();
+const reloadedPage=await reload.page.act({steps:[{action:"reload"}]});
+assert.equal(reloadedPage.completedSteps,1);
+assert.equal(reloadedPage.observeAgain,true);
+assert.equal(reloadedPage.observation,null);
+assert.equal(reload.commands.filter(row=>row.method==="Page.reload").length,1);
+await assert.rejects(reload.page.requireNode(reloadRead.nodes.find(n=>n.role==="button").nodeId),{code:"PAGE_CHANGED"});
+const uncertain=fixture();const uncertainRead=await uncertain.read();
+const uncertainCommand=uncertain.host.command;
+uncertain.host.command=async(tab,method,params,target)=>{
+ if(method==="Input.dispatchMouseEvent"&&params.type==="mousePressed")throw Error("transport lost");
+ return uncertainCommand(tab,method,params,target);
+};
+const unknown=await uncertain.click(uncertainRead.nodes.find(n=>n.role==="button").nodeId);
+assert.equal(unknown.failedStep.diagnostics.actionDispatched,true);
+assert.equal(unknown.failedStep.diagnostics.safeToRetry,false);
+console.log("Interaction geometry, scroll recovery, reload and dispatch uncertainty: ok");
+
+// An editable target that cannot acquire focus must not receive any key input.
+const unfocused=fixture();
+unfocused.trees.get("main")[0].childIds.push("50");
+unfocused.trees.get("main").push(ax("50","textbox","Name"));
+const unfocusedRead=await unfocused.read(),unfocusedCommand=unfocused.host.command;
+unfocused.host.command=async(tab,method,params,target)=>{
+  if(method==="Runtime.callFunctionOn"&&params.functionDeclaration.includes("function inspectBrowserElement"))
+    return {result:{value:{editable:true,password:false,resources:[]}}};
+  if(method==="Runtime.callFunctionOn"&&params.functionDeclaration.includes("function inspectInteractionTarget"))
+    return {result:{value:geometry({focused:false,focusedElement:{tag:"button",role:"button"}})}};
+  return unfocusedCommand(tab,method,params,target);
+};
+const noFocus=await unfocused.page.act({steps:[{action:"type",nodeId:unfocusedRead.nodes.find(n=>n.role==="textbox").nodeId,text:"hello"}]});
+assert.equal(noFocus.failedStep.code,"BROWSER_FOCUS_FAILED");
+assert.equal(noFocus.failedStep.diagnostics.actionDispatched,false);
+assert.equal(noFocus.failedStep.diagnostics.element.focusedElement.tag,"button");
+assert.equal(unfocused.commands.filter(row=>row.method==="Input.dispatchKeyEvent"||row.method==="Input.insertText").length,0);
+assert.ok(unfocused.commands.findIndex(row=>row.method==="DOM.scrollIntoViewIfNeeded")<unfocused.commands.findIndex(row=>row.method==="DOM.focus"));
+assertSchema(browserToolDefinitions().find(tool=>tool.name==="site_interact").outputSchema,noFocus);

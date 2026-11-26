@@ -74,6 +74,50 @@ export function inspectBrowserElement() {
   return { tag, attributes, bounds: { x: rect.x, y: rect.y, width: rect.width, height: rect.height }, resources, editable: element.isContentEditable || tag === "textarea" && !element.readOnly && !element.disabled || tag === "input" && ["text", "search", "tel", "url", "email", "number"].includes(element.type) && !element.readOnly && !element.disabled, password: tag === "input" && element.type === "password" };
 }
 
+// Fixed probe, not model-supplied code. Never return field values or URLs.
+export function inspectInteractionTarget(requested = null) {
+  const el=this.nodeType===1?this:this.parentElement;
+  const state={elementExists:false,elementVisible:false,elementEnabled:false,insideViewport:false,focused:false,bounds:null,viewport:null,blockedBy:null,focusedElement:null,point:null};
+  if(!el?.isConnected)return state;
+  const doc=el.ownerDocument,view=doc.defaultView,rect=el.getBoundingClientRect();
+  const parent=node=>node.parentElement||node.getRootNode()?.host||null;
+  const belongs=node=>{for(let p=node;p;p=parent(p))if(p===el)return true;return false;};
+  const describe=node=>node?{tag:node.tagName.toLowerCase().slice(0,40),role:(node.getAttribute("role")||"").slice(0,60)}:null;
+  state.elementExists=true;state.bounds={x:rect.left,y:rect.top,width:rect.width,height:rect.height};
+  const width=view.innerWidth,height=view.innerHeight;state.viewport={width,height};
+  let active=doc.activeElement;
+  while(active?.shadowRoot?.activeElement)active=active.shadowRoot.activeElement;
+  state.focusedElement=describe(active);state.focused=Boolean(active===el||el.isContentEditable&&belongs(active));
+  state.elementEnabled=!el.matches(":disabled")&&!el.closest('[aria-disabled="true"],[inert]');
+  let left=Math.max(0,rect.left),top=Math.max(0,rect.top),right=Math.min(width,rect.right),bottom=Math.min(height,rect.bottom);
+  const style=view.getComputedStyle(el);
+  state.elementVisible=rect.width>0&&rect.height>0&&el.getClientRects().length>0&&style.visibility!=="hidden"&&style.visibility!=="collapse";
+  for(let a=el;a;a=parent(a)){
+    const css=view.getComputedStyle(a);
+    if(css.display==="none"||css.contentVisibility==="hidden"||Number(css.opacity)===0)state.elementVisible=false;
+    if(a===el)continue;
+    const clip=a.getBoundingClientRect();
+    if(/^(hidden|clip|scroll|auto)$/.test(css.overflowX)){left=Math.max(left,clip.left);right=Math.min(right,clip.right);}
+    if(/^(hidden|clip|scroll|auto)$/.test(css.overflowY)){top=Math.max(top,clip.top);bottom=Math.min(bottom,clip.bottom);}
+  }
+  state.insideViewport=right>left&&bottom>top;
+  if(!state.elementVisible||!state.insideViewport||!state.elementEnabled)return state;
+  const samples=requested?[requested]:[[.5,.5],[.25,.5],[.75,.5],[.5,.25],[.5,.75],[.2,.2],[.8,.2],[.2,.8],[.8,.8]].map(([x,y])=>({x:left+(right-left)*x,y:top+(bottom-top)*y}));
+  for(const point of samples){
+    if(point.x<left||point.x>=right||point.y<top||point.y>=bottom)continue;
+    let hit=doc.elementFromPoint(point.x,point.y);
+    for(let i=0;i<16&&hit?.shadowRoot?.elementFromPoint;i++){const inner=hit.shadowRoot.elementFromPoint(point.x,point.y);if(!inner||inner===hit)break;hit=inner;}
+    if(belongs(hit)){state.point={x:point.x,y:point.y};state.blockedBy=null;break;}
+    if(!state.blockedBy)state.blockedBy=describe(hit?.closest('[role="dialog"],dialog,[role="menu"],[role="alertdialog"]')||hit);
+  }
+  return state;
+}
+function centerInteractionTarget(){
+  const el=this.nodeType===1?this:this.parentElement;
+  if(!el?.isConnected)return false;
+  el.scrollIntoView({block:"center",inline:"center",behavior:"instant"});return true;
+}
+
 export function createBrowserPage(session, host) {
   let index = new Map(), identifiers = new Map(), resources = new Map(), resourceKeys = new Map();
   let counter = 0, resourceCounter = 0, roots = [];
@@ -88,7 +132,7 @@ export function createBrowserPage(session, host) {
   const forgetCaller = tabId => reportedByCaller.delete(tabId);
   const command = (method, params = {}, target = {}) => {
     const work = async () => {
-      if (session.local && (/^Input\./.test(method) || ["DOM.focus","DOM.scrollIntoViewIfNeeded"].includes(method) || method === "Runtime.callFunctionOn" && params.userGesture))
+      if (session.local && (/^Input\./.test(method) || ["DOM.focus","DOM.scrollIntoViewIfNeeded","Page.reload"].includes(method) || method === "Runtime.callFunctionOn" && params.userGesture))
         await host.check(session,true);
       return host.command(session.agentTabId, method, params, target.sessionId);
     };
@@ -396,13 +440,53 @@ export function createBrowserPage(session, host) {
     const text = parts.join("\n");
     return { ...context(), page: metadata(), nodeId: id, text: text.slice(offset, offset + limit), totalCharacters: text.length, nextOffset: offset + limit < text.length ? offset + limit : null };
   }
-  async function point(entry) {
-    await command("DOM.scrollIntoViewIfNeeded", { backendNodeId: entry.backendNodeId }, entry.target);
-    let model;
-    try { model = (await command("DOM.getBoxModel", { backendNodeId: entry.backendNodeId }, entry.target)).model; }
-    catch { throw browserError("STALE_NODE", "The element has no visible layout box."); }
-    const quad = model.content;
-    return { x: (quad[0] + quad[2] + quad[4] + quad[6]) / 4, y: (quad[1] + quad[3] + quad[5] + quad[7]) / 4 };
+  async function probe(entry,diagnostic,requested=null){
+    await host.check(session,true);
+    if(index.get(entry.id)!==entry||!liveTarget(entry.target))throw browserError("STALE_NODE","The target changed during interaction preparation.");
+    const state=await withElement(entry,inspectInteractionTarget,[requested]);
+    await host.check(session,true);
+    if(index.get(entry.id)!==entry||!liveTarget(entry.target))throw browserError("STALE_NODE","The target changed during interaction preparation.");
+    if(!state||typeof state.elementExists!=="boolean")throw browserError("BROWSER_UNAVAILABLE","Element geometry could not be inspected.");
+    const {point,...details}=state;diagnostic.element=details;return state;
+  }
+  function requireReachable(state){
+    if(!state.elementExists)throw browserError("STALE_NODE","The element no longer exists.");
+    if(!state.elementEnabled)throw browserError("BROWSER_ELEMENT_DISABLED","The element is disabled or inert.");
+    if(!state.elementVisible)throw browserError("BROWSER_ELEMENT_HIDDEN","The element has no visible layout.");
+    if(!state.insideViewport)throw browserError("BROWSER_ELEMENT_OFFSCREEN","The element is outside the visible or clipped viewport.");
+    if(!state.point)throw browserError("BROWSER_ELEMENT_OBSCURED","The element is covered; inspect the blocker before retrying.");
+  }
+  async function prepare(entry,diagnostic){
+    diagnostic.stage="scroll";await host.check(session,true);diagnostic.scrollAttempted=true;
+    try{await command("DOM.scrollIntoViewIfNeeded",{backendNodeId:entry.backendNodeId},entry.target);}
+    catch(error){if(error.code&&error.code!=="BROWSER_UNAVAILABLE")throw error;}
+    diagnostic.stage="hit_test";
+    let state=await probe(entry,diagnostic);
+    if(state.elementExists&&state.elementVisible&&state.elementEnabled&&!state.point){
+      await host.check(session,true);await requireNode(entry.id);
+      await withElement(entry,centerInteractionTarget);state=await probe(entry,diagnostic);
+    }
+    requireReachable(state);await requireNode(entry.id);return state;
+  }
+  async function coordinatesFor(entry,state){
+    if(!entry.target.sessionId&&entry.target.frameId===session.mainFrameId)return state.point;
+    const model=(await command("DOM.getBoxModel",{backendNodeId:entry.backendNodeId},entry.target)).model;
+    const q=model?.border||model?.content;
+    if(!q||q.length!==8||!q.every(Number.isFinite))throw browserError("BROWSER_UNAVAILABLE","Could not map the element into its frame.");
+    const u=(state.point.x-state.bounds.x)/state.bounds.width,v=(state.point.y-state.bounds.y)/state.bounds.height;
+    return {x:(1-v)*((1-u)*q[0]+u*q[2])+v*((1-u)*q[6]+u*q[4]),y:(1-v)*((1-u)*q[1]+u*q[3])+v*((1-u)*q[7]+u*q[5])};
+  }
+  async function point(entry){
+    return coordinatesFor(entry,await prepare(entry,{}));
+  }
+  async function focusTarget(entry,diagnostic){
+    diagnostic.stage="focus";await host.check(session,true);await requireNode(entry.id);
+    await command("DOM.focus",{backendNodeId:entry.backendNodeId},entry.target);
+    if(!(await probe(entry,diagnostic)).focused)throw browserError("BROWSER_FOCUS_FAILED","Focus did not reach the requested element.");
+  }
+  function invalidateReload(){
+    if(host.invalidateReload)host.invalidateReload(session);else session.pageVersion++;
+    invalidate();
   }
   async function key(keyText, target = {}) {
     const pieces = keyText.split("+"); const name = pieces.pop();
@@ -416,46 +500,57 @@ export function createBrowserPage(session, host) {
     await host.check(session, true); await command("Input.dispatchKeyEvent", { ...params, type: text === null ? "rawKeyDown" : "keyDown", ...(text === null ? {} : { text }) }, target);
     await command("Input.dispatchKeyEvent", { ...params, type: "keyUp" }, target);
   }
-  async function dispatchStep(input) {
-    await host.check(session, true);
-    const entry = input.nodeId ? await requireNode(input.nodeId) : null;
-    if (entry && entry.raw.properties?.some(item => item.name === "disabled" && item.value?.value === true)) throw browserError("BROWSER_INVALID", "The requested element is disabled.");
-    const target = entry?.target || {};
-    if (["click", "hover"].includes(input.action)) {
-      const coordinates = await point(entry);
-      await host.check(session, true);
-      await command("Input.dispatchMouseEvent", { type: "mouseMoved", ...coordinates }, target);
-      if (input.action === "click") {
-        const reachable = await withElement(entry, function () { const element = this.nodeType === 1 ? this : this.parentElement; if (!element) return false; const rect = element.getBoundingClientRect(); const hit = element.ownerDocument.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2); return Boolean(hit && (hit === element || element.contains(hit))); });
-        if (!reachable) throw browserError("BROWSER_ELEMENT_OBSCURED", "The element is covered or outside its frame viewport. Observe/scroll before clicking; no mouse press was sent.");
-        await host.check(session, true);
-        await requireNode(entry.id);
-        await command("Input.dispatchMouseEvent", { type: "mousePressed", button: "left", clickCount: 1, ...coordinates }, target);
-        await command("Input.dispatchMouseEvent", { type: "mouseReleased", button: "left", clickCount: 1, ...coordinates }, target);
+  async function dispatchStep(input,diagnostic){
+    await host.check(session,true);
+    const entry=input.nodeId?await requireNode(input.nodeId):null;
+    if(entry&&entry.raw.properties?.some(item=>item.name==="disabled"&&item.value?.value===true))throw browserError("BROWSER_ELEMENT_DISABLED","The requested element is disabled.");
+    const target=entry?.target||{};
+    const dispatch=()=>{diagnostic.stage="dispatch";diagnostic.actionDispatched=true;};
+    if(input.action==="reload"){
+      await host.check(session,true);dispatch();await command("Page.reload",{});invalidateReload();
+    }else if(["click","hover"].includes(input.action)){
+      const state=await prepare(entry,diagnostic);
+      let coordinates=await coordinatesFor(entry,state);await host.check(session,true);
+      if(input.action==="hover")dispatch();
+      await command("Input.dispatchMouseEvent",{type:"mouseMoved",...coordinates},target);
+      if(input.action==="click"){
+        diagnostic.stage="hit_test";await host.check(session,true);await requireNode(entry.id);
+        const live=await probe(entry,diagnostic,state.point);requireReachable(live);
+        coordinates=await coordinatesFor(entry,live);await host.check(session,true);
+        if(index.get(entry.id)!==entry||!liveTarget(entry.target))throw browserError("STALE_NODE","The target changed before clicking.");
+        dispatch();
+        await command("Input.dispatchMouseEvent",{type:"mousePressed",button:"left",clickCount:1,...coordinates},target);
+        await command("Input.dispatchMouseEvent",{type:"mouseReleased",button:"left",clickCount:1,...coordinates},target);
       }
-    } else if (input.action === "type") {
-      const dom = await withElement(entry, inspectBrowserElement);
-      if (!dom?.editable || dom.password || protectedNode(entry.raw)) throw browserError("BROWSER_INVALID", "Type requires a non-password editable element.");
-      await command("DOM.focus", { backendNodeId: entry.backendNodeId }, target);
-      await key("Ctrl+A", target); await key("Backspace", target);
-      await host.check(session, true); await command("Input.insertText", { text: input.text }, target);
-      const actual = await withElement(entry, function () { return this.isContentEditable ? this.innerText : this.value; });
-      if (String(actual).replace(/\r\n/g, "\n") !== input.text.replace(/\r\n/g, "\n")) throw browserError("BROWSER_INVALID", "The editable field transformed the requested text. Observe its actual value before continuing.");
-    } else if (input.action === "key") {
-      if (entry) await command("DOM.focus", { backendNodeId: entry.backendNodeId }, target);
-      await key(input.key, target);
-    } else if (input.action === "select") {
-      await host.check(session, true);
-      const selected = await withElement(entry, function (value) { if (this.tagName !== "SELECT" || this.disabled) return false; const option = [...this.options].find(option => !option.disabled && (option.value === value || option.textContent.trim() === value)); if (!option) return false; this.value = option.value; this.dispatchEvent(new Event("input", { bubbles: true })); this.dispatchEvent(new Event("change", { bubbles: true })); return true; }, [input.value]);
-      if (!selected) throw browserError("BROWSER_INVALID", "Select requires an enabled native SELECT option; use click/observe for custom lists.");
-    } else if (input.action === "scroll") {
-      const viewport = (await command("Page.getLayoutMetrics", {}, target)).cssVisualViewport;
-      const coordinates = entry ? await point(entry) : { x: viewport.clientWidth / 2, y: viewport.clientHeight / 2 };
-      const amount = input.amount ?? 600, direction = input.direction ?? "down";
-      await host.check(session, true);
-      await command("Input.dispatchMouseEvent", { type: "mouseWheel", ...coordinates, deltaX: direction === "left" ? -amount : direction === "right" ? amount : 0, deltaY: direction === "up" ? -amount : direction === "down" ? amount : 0 }, target);
+    }else if(input.action==="type"){
+      const dom=await withElement(entry,inspectBrowserElement);
+      if(!dom?.editable||dom.password||protectedNode(entry.raw))throw browserError("BROWSER_INVALID","Type requires a non-password editable element.");
+      await prepare(entry,diagnostic);await focusTarget(entry,diagnostic);
+      dispatch();await key("Ctrl+A",target);
+      diagnostic.stage="focus";
+      if(!(await probe(entry,diagnostic)).focused)throw browserError("BROWSER_FOCUS_FAILED","Focus changed before clearing the field.");
+      diagnostic.stage="dispatch";await key("Backspace",target);
+      await host.check(session,true);diagnostic.stage="focus";
+      if(!(await probe(entry,diagnostic)).focused)throw browserError("BROWSER_FOCUS_FAILED","Focus changed during editing; inspect the field.");
+      diagnostic.stage="dispatch";await command("Input.insertText",{text:input.text},target);
+      diagnostic.stage="verify";
+      const actual=await withElement(entry,function(){return this.isContentEditable?this.innerText:this.value;});
+      if(String(actual).replace(/\r\n/g,"\n")!==input.text.replace(/\r\n/g,"\n"))throw browserError("BROWSER_INPUT_MISMATCH","The editable field transformed the requested text. Observe its actual value before continuing.");
+    }else if(input.action==="key"){
+      if(entry){await prepare(entry,diagnostic);await focusTarget(entry,diagnostic);}
+      dispatch();await key(input.key,target);
+    }else if(input.action==="select"){
+      await prepare(entry,diagnostic);await host.check(session,true);dispatch();
+      const selected=await withElement(entry,function(value){if(this.tagName!=="SELECT"||this.disabled)return false;const option=[...this.options].find(option=>!option.disabled&&(option.value===value||option.textContent.trim()===value));if(!option)return false;this.value=option.value;this.dispatchEvent(new Event("input",{bubbles:true}));this.dispatchEvent(new Event("change",{bubbles:true}));return true;},[input.value]);
+      if(!selected){diagnostic.actionDispatched=false;throw browserError("BROWSER_INVALID","Select requires an enabled native SELECT option; use click/observe for custom lists.");}
+    }else if(input.action==="scroll"){
+      const viewport=(await command("Page.getLayoutMetrics",{},target)).cssVisualViewport;
+      const coordinates=entry?await coordinatesFor(entry,await prepare(entry,diagnostic)):{x:viewport.clientWidth/2,y:viewport.clientHeight/2};
+      const amount=input.amount??600,direction=input.direction??"down";
+      await host.check(session,true);dispatch();
+      await command("Input.dispatchMouseEvent",{type:"mouseWheel",...coordinates,deltaX:direction==="left"?-amount:direction==="right"?amount:0,deltaY:direction==="up"?-amount:direction==="down"?amount:0},target);
     }
-    session.revision += 1;
+    session.revision+=1;
   }
   async function act({ steps }) {
     const pageVersion = session.pageVersion;
@@ -463,6 +558,7 @@ export function createBrowserPage(session, host) {
     for (const [stepIndex, step] of steps.entries()) {
       const started = performance.now();
       let code = null;
+      const diagnostic={action:step.action,stage:"validate",actionDispatched:false,scrollAttempted:false,element:null};
       try {
         // A sequence never continues into a different document. Steps referring
         // to nodes introduced by a preceding action require another MCP call.
@@ -470,14 +566,18 @@ export function createBrowserPage(session, host) {
         if (session.pageVersion !== pageVersion) throw browserError("PAGE_CHANGED", "The page navigated during the sequence. Observe it before continuing.");
         // Enter and links commonly start a document navigation asynchronously.
         // Avoid reading the old AX tree while the new document is replacing it.
-        const mayNavigate = step.action === "key" && step.key.split("+").at(-1) === "Enter"
+        const mayNavigate = step.action === "reload" || step.action === "key" && step.key.split("+").at(-1) === "Enter"
           || step.action === "click" && index.get(step.nodeId)?.role === "link";
-        await dispatchStep(step);
+        await dispatchStep(step,diagnostic);
         completedSteps++;
         if (mayNavigate) navigationPossible = true;
+        if(step.action==="reload")break;
       } catch (error) {
         code = error?.code || "BROWSER_UNAVAILABLE";
-        failedStep = { index: stepIndex, code, message: error?.code ? error.message : "The step may have been dispatched; observe the page before continuing." };
+        const safeToRetry=!diagnostic.actionDispatched&&["STALE_NODE","PAGE_CHANGED","BROWSER_ELEMENT_DISABLED","BROWSER_ELEMENT_HIDDEN","BROWSER_ELEMENT_OFFSCREEN","BROWSER_ELEMENT_OBSCURED","BROWSER_FOCUS_FAILED"].includes(code);
+        const suggestion=diagnostic.actionDispatched?"Observe the result; do not replay an action with an uncertain or partial outcome.":code==="BROWSER_ELEMENT_OBSCURED"?"Observe the blocking element; dismiss it only if appropriate, then use a fresh node.":code==="BROWSER_ELEMENT_OFFSCREEN"?"Observe or scroll the containing panel, then use a fresh node.":code==="BROWSER_FOCUS_FAILED"?"Observe the focused field and resolve any dialog or disabled state.":"Observe the page and correct the cause before deciding whether to retry.";
+        failedStep={index:stepIndex,code,message:error?.code?error.message:"Browser step failed; observe the page before continuing.",diagnostics:{...diagnostic,safeToRetry,suggestion}};
+        if(step.action==="reload"&&diagnostic.actionDispatched){invalidateReload();navigationPossible=true;}
       } finally {
         // Diagnostic capture is optional, bounded and deliberately excludes
         // text, node identifiers, addresses and keyboard values.

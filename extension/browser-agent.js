@@ -266,6 +266,7 @@ export function createBrowserAgent(host) {
       pageVersion: nextPageVersion(), revision: 1, childSessions: new Map(), attached: false, error: null, operation: null, lastPageCallEnd: null };
     target.trace = createBrowserDiagnostics({ enabled: options.detailedLogging, groupId: group?.groupId ?? null, log, onError: details => host.diagnostic?.({ ...details, tool: target.operation?.tool, tabId: target.agentTabId, chatTabId: target.operation?.chatTabId }), now: host.monotonicNow || host.now });
     target.page = createBrowserPage(target, { command, check, trace: target.trace,
+      invalidateReload: session => { session.pageVersion=nextPageVersion(); },
       onStep: timing => { if (!local) host.onStep?.({ ...timing, groupId: group.groupId, tabId: target.agentTabId }); },
       context: () => local ? {} : ({ chatTabId: target.operation?.chatTabId ?? target.agentTabId, group: groups.project(target.operation?.group ?? group, target.operation?.chatTabId ?? target.agentTabId) }) });
     if (!local) group.targets.set(tab.id, target);
