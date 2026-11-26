@@ -14,7 +14,6 @@ import tempfile
 import threading
 import time
 import uuid
-from pathlib import Path
 
 try:
     from .reliability import emit
@@ -36,32 +35,6 @@ _DEDUP_COUNT = 100000
 MEMORY_PREFIX = "-- RT_SHARED_MEMORY_V1\n"
 MEMORY_CONTENT_BYTES = 16 * 1024
 MEMORY_RESPONSE_BYTES = 128 * 1024
-
-
-class SharedMemoryPath:
-    """Private file namespace; reuse the same connection and outbox code."""
-    def __init__(self, root, workspace):
-        self.root=Path(root)
-        self.workspace=Path(workspace)
-        self.lock=threading.Lock()
-
-    def __call__(self, logical):
-        root=self.root.resolve()
-        workspace=self.workspace.resolve()
-        if self.root.is_symlink() or getattr(self.root,"is_junction",lambda:False)() or root==workspace or workspace in root.parents or root in workspace.parents:
-            fail("MEMORY_PATH_INVALID","Shared memory must be a private directory outside Workspace.")
-        if logical=="scheduled":
-            return root
-        if logical not in (DB_FILE,DB_FILE+"-wal",DB_FILE+"-shm",DB_FILE+"-journal"):
-            fail("MEMORY_PATH_INVALID","Invalid shared database path.")
-        path=root/logical.split("/")[-1]
-        if path.is_symlink() or getattr(path,"is_junction",lambda:False)():
-            fail("MEMORY_PATH_INVALID","Shared memory files cannot be redirects.")
-        return path
-
-
-def db_lock(resolve):
-    return resolve.lock if isinstance(resolve,SharedMemoryPath) else _DB_LOCK
 
 
 class SqlQueue:
@@ -206,12 +179,11 @@ def ensure_shared_memory(connection):
 
 
 def initialize(resolve):
-    with db_lock(resolve):
+    with _DB_LOCK:
         con = connect(resolve)
         try:
             ensure_dedup(con)
-            if isinstance(resolve,SharedMemoryPath):
-                ensure_shared_memory(con)
+            ensure_shared_memory(con)
         finally:
             con.close()
 
@@ -237,7 +209,7 @@ sin cos tan asin acos atan atan2 sinh cosh tanh asinh acosh atanh degrees radian
 
 
 def authorize(action, a, b, database, source):
-    if any(isinstance(name, str) and name.lower().startswith("_rt_internal_") for name in (a, b, source)):
+    if any(isinstance(name, str) and (name.lower().startswith("_rt_internal_") or name.lower() in ("shared_memory","idx_shared_memory_topic_id")) for name in (a, b, source)):
         return sqlite3.SQLITE_DENY
     if database == "temp" and a == "sqlite_temp_master" and action in (sqlite3.SQLITE_READ, sqlite3.SQLITE_UPDATE):
         return sqlite3.SQLITE_OK
@@ -343,11 +315,11 @@ def db_query(resolve,sql):
 
 
 def _execute_write(resolve, sql, operation_id):
-    memory = decode_memory(sql) if isinstance(resolve,SharedMemoryPath) else None
+    memory = decode_memory(sql) if sql.startswith(MEMORY_PREFIX) else None
     parts = [] if memory is not None else statements(sql)
     operation_key(operation_id)
     # Direct Python callers and the Agent's FIFO queue share this guard.
-    with db_lock(resolve):
+    with _DB_LOCK:
         deadline = time.monotonic() + 8
         for attempt in range(1, 5):
             try:
@@ -547,14 +519,13 @@ def operation_key(value):
 def _outbox_transaction(resolve, work):
     # One owner for all internal database operations. Never hold the lock over
     # browser/network work. The outbox is in the same DB, not in the trace.
-    with db_lock(resolve):
+    with _DB_LOCK:
         con = None
         try:
             con = connect(resolve)
             con.execute("BEGIN IMMEDIATE")
             ensure_dedup(con)
-            if isinstance(resolve,SharedMemoryPath):
-                ensure_shared_memory(con)
+            ensure_shared_memory(con)
             result = work(con)
             con.commit()
             return result
@@ -585,11 +556,13 @@ def _outbox_state(con,key):
     return {"operationId":key,"state":"not_found","createdAt":None,"attempts":0,"code":None,"acknowledged":False}
 
 
-def outbox_submit(resolve,key,sql):
+def outbox_submit(resolve,key,sql,*,internal_memory=False):
     key=operation_key(key)
-    if isinstance(resolve,SharedMemoryPath):
+    if internal_memory:
         decode_memory(sql)
     else:
+        if isinstance(sql,str) and sql.startswith(MEMORY_PREFIX):
+            fail("DB_SQL_INVALID","Internal memory payloads require memory_append.")
         statements(sql)  # Validate size and statement count before durable admission.
     digest=hashlib.sha256(sql.encode("utf-8")).hexdigest()
     def submit(con):
@@ -654,7 +627,7 @@ def outbox_failure(resolve,job,error):
     code=getattr(error,"code","DB_OUTBOX_ERROR")
     raw=getattr(error,"sqlite_code",None)
     primary=raw&255 if isinstance(raw,int) else None
-    permanent=code in ("DB_OPERATION_CONFLICT","DB_SQL_INVALID","DB_SQL_LIMIT") or primary in (sqlite3.SQLITE_ERROR,sqlite3.SQLITE_CONSTRAINT,sqlite3.SQLITE_AUTH,sqlite3.SQLITE_MISMATCH,sqlite3.SQLITE_RANGE,sqlite3.SQLITE_TOOBIG)
+    permanent=code in ("DB_OPERATION_CONFLICT","DB_SQL_INVALID","DB_SQL_LIMIT","MEMORY_INVALID") or primary in (sqlite3.SQLITE_ERROR,sqlite3.SQLITE_CONSTRAINT,sqlite3.SQLITE_AUTH,sqlite3.SQLITE_MISMATCH,sqlite3.SQLITE_RANGE,sqlite3.SQLITE_TOOBIG)
     def update(con):
         state=_outbox_state(con,key)
         if state["state"]=="committed":
@@ -670,13 +643,13 @@ def outbox_process_one(resolve):
     job=outbox_claim(resolve)
     if job is None:
         return False
-    emit("OUTBOX_PROCESSING",attempt=job["attempts"],operationId=job["operationId"],tool="memory_append" if isinstance(resolve,SharedMemoryPath) else "db_outbox_submit")
+    emit("OUTBOX_PROCESSING",attempt=job["attempts"],operationId=job["operationId"],tool="memory_append" if job["sql"].startswith(MEMORY_PREFIX) else "db_outbox_submit")
     try:
         _execute_write(resolve,job["sql"],job["operationId"])
-        emit("OUTBOX_COMMITTED",executionState="committed",operationId=job["operationId"],tool="memory_append" if isinstance(resolve,SharedMemoryPath) else "db_outbox_submit")
+        emit("OUTBOX_COMMITTED",executionState="committed",operationId=job["operationId"],tool="memory_append" if job["sql"].startswith(MEMORY_PREFIX) else "db_outbox_submit")
     except (MemoryOperationError,OSError) as error:
         value=outbox_failure(resolve,job,error)
-        emit("OUTBOX_FAILED",level="ERROR",code=value["code"],status=value["state"],operationId=job["operationId"],tool="memory_append" if isinstance(resolve,SharedMemoryPath) else "db_outbox_submit")
+        emit("OUTBOX_FAILED",level="ERROR",code=value["code"],status=value["state"],operationId=job["operationId"],tool="memory_append" if job["sql"].startswith(MEMORY_PREFIX) else "db_outbox_submit")
     return True
 
 
@@ -726,7 +699,7 @@ def decode_memory(payload):
 def memory_submit(resolve,arguments):
     payload=memory_payload(arguments)
     key=operation_key(arguments.get("operation_id","sm."+uuid.uuid4().hex))
-    state=outbox_submit(resolve,key,payload)
+    state=outbox_submit(resolve,key,payload,internal_memory=True)
     emit("MEMORY_ACCEPTED",tool="memory_append",operationId=key,status=state["state"],bytes=len(arguments["content"].encode("utf-8")))
     return {"state":state["state"],"operation_id":key}
 
@@ -807,18 +780,12 @@ def memory_read(resolve,arguments):
 def call(resolve, name, arguments):
     if not isinstance(arguments, dict):
         fail("INVALID_ARGUMENT", "Expected tool argument object.")
-    private=isinstance(resolve,SharedMemoryPath)
-    if private:
-        if name=="__memory_submit":
-            return memory_submit(resolve,arguments)
-        if name=="__memory_status" and set(arguments)=={"operation_id"}:
-            return memory_status(resolve,arguments["operation_id"])
-        if name=="memory_read":
-            return memory_read(resolve,arguments)
-        if name!="__outbox_process":
-            fail("INVALID_ARGUMENT","Only shared memory tools can access this database.")
-    elif name in ("__memory_submit","__memory_status","memory_read"):
-        fail("INVALID_ARGUMENT","Shared memory requires its own database.")
+    if name=="__memory_submit":
+        return memory_submit(resolve,arguments)
+    if name=="__memory_status" and set(arguments)=={"operation_id"}:
+        return memory_status(resolve,arguments["operation_id"])
+    if name=="memory_read":
+        return memory_read(resolve,arguments)
     if name == "__outbox_process" and not arguments:
         return outbox_process_one(resolve)
     if name == "db_outbox_submit" and set(arguments)=={"operationId","sql"}:
