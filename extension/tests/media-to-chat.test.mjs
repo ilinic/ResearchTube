@@ -127,6 +127,26 @@ assert.equal(sends, 1);
 assert.equal(detached, 1);
 assert.equal(commands.find((item) => item.method === "DOM.setFileInputFiles").id, 42);
 
+// A configured Composer total includes existing attachments. An over-limit
+// attempt must not even mutate the file input or clear the existing draft.
+const limitsBeforeComposerTest=context.configuredToolLimits;
+context.configuredToolLimits=async()=>({mediaToChatMaxFiles:100,composerMaxFiles:20});
+attachmentNames=Array.from({length:19},(_,i)=>"old-"+i+".pdf");
+draftEmpty=false;
+const beforeLimitUploads=commands.filter(x=>x.method==="DOM.setFileInputFiles").length;
+const beforeLimitSends=sends, beforeLimitDetach=detached;
+await assert.rejects(context.cdpAttachFilesNow(["/workspace/one.pdf","/workspace/two.pdf"],{currentChatTarget:target}),e=>e.code==="MEDIA_TO_CHAT_INVALID"&&/19 already attached \+ 2 new/.test(e.message));
+assert.equal(commands.filter(x=>x.method==="DOM.setFileInputFiles").length,beforeLimitUploads);
+assert.equal(sends,beforeLimitSends);
+assert.equal(attachmentNames.length,19);
+assert.equal(draftEmpty,false);
+assert.doesNotThrow(()=>context.assertComposerFileCapacity(19,1,20));
+assert.throws(()=>context.assertComposerFileCapacity(20,1,20),{code:"MEDIA_TO_CHAT_INVALID"});
+assert.throws(()=>context.assertComposerFileCapacity(21,0,20),{code:"MEDIA_TO_CHAT_INVALID"});
+assert.equal(detached,beforeLimitDetach+1);
+detached=beforeLimitDetach; // preserve existing fixture's cumulative counters
+attachmentNames=[];draftEmpty=true;context.configuredToolLimits=limitsBeforeComposerTest;
+
 // A navigation after attachment must never send to another conversation.
 afterAcceptance = () => { tabUrl = "https://chatgpt.com/c/other"; };
 await assert.rejects(context.cdpAttachFilesNow(["/workspace/report.pdf"], { currentChatTarget: target }), /closed or changed/);

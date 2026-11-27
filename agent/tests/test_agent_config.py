@@ -132,6 +132,20 @@ class AgentConfigTests(unittest.TestCase):
         with self.assertRaises(agent.AgentApiError):
             agent.configured_new_tools_default()
 
+    def test_composer_total_file_limit(self):
+        self.assertEqual(self.original['limits']['composerMaxFiles']['value'], 20)
+        self.assertEqual(agent.configured_tool_limits()['composerMaxFiles'], 20)
+        self.write({})
+        self.assertEqual(agent.configured_tool_limits()['composerMaxFiles'], 20)
+        for value in (1, 10, 20):
+            self.write({'limits': {'composerMaxFiles': {'value': value}}})
+            self.assertEqual(agent.configured_tool_limits()['composerMaxFiles'], value)
+        for value in (0, 21, True, '20'):
+            self.write({'limits': {'composerMaxFiles': {'value': value}}})
+            with self.assertRaises(agent.AgentApiError) as raised:
+                agent.configured_tool_limits()
+            self.assertIn('composerMaxFiles', raised.exception.message)
+
     def test_default_upload_size_is_twenty_mib_for_both_destinations(self):
         for key in ['libraryStoreMaxFileSizeMiB', 'mediaToChatMaxFileSizeMiB']:
             self.assertEqual(self.original['limits'][key]['value'], 20)

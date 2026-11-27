@@ -2446,6 +2446,8 @@ async function cdpAttachFilesNow(filePathValues, { onPhase = null, currentChatTa
     throw cdpError("A file batch must contain at least one eligible file.");
   }
   const retryPolicy = await configuredComposerMediaRetry();
+  const composerLimit = await configuredComposerFileLimit();
+  assertComposerFileCapacity(0,filePathValues.length,composerLimit);
   const filePaths = filePathValues.map(cdpAbsoluteFilePath);
   const fileNames = filePaths.map((filePath) => filePath.split(/[/\\\\]/).pop());
   cdpLog("File batch attachment started", { fileCount: filePaths.length, fileNames });
@@ -2477,6 +2479,7 @@ async function cdpAttachFilesNow(filePathValues, { onPhase = null, currentChatTa
       const initial = (await cdpEvaluate(tab.id, chatComposerPageExpression(inspectChatComposer)))?.value;
       if (initial?.found) existingAttachmentCount = composerVisibleAttachmentCount(initial);
     }
+    assertComposerFileCapacity(existingAttachmentCount,filePaths.length,composerLimit);
     checkCancelled?.();
     await cdpCommand(tab.id, "Page.setInterceptFileChooserDialog", { enabled: true });
     cdpLog("File-chooser interception enabled", { tabId: tab.id });
@@ -2494,12 +2497,16 @@ async function cdpAttachFilesNow(filePathValues, { onPhase = null, currentChatTa
     checkCancelled?.();
     await beforeUpload?.();
     checkCancelled?.();
+    // Recount immediately before mutating the input: a user may have added
+    // files while the file chooser or target guard was being prepared.
+    existingAttachmentCount=await checkComposerFileCapacity(tab.id,filePaths.length,composerLimit,currentChatTarget);
     await cdpCommand(tab.id, "DOM.setFileInputFiles", { files: filePaths, backendNodeId: chooser.backendNodeId });
     cdpLog("DOM.setFileInputFiles completed", { tabId: tab.id, backendNodeId: chooser.backendNodeId, fileCount: filePaths.length });
     await cdpWaitForAttachmentAccepted(tab.id, fileNames, retryPolicy, async () => { checkCancelled?.(); if (currentChatTarget) await requireCurrentChatTarget(currentChatTarget); }, existingAttachmentCount);
     await logBrowserTabState(trace, tab.id, "resource.composerAccepted");
     checkCancelled?.();
     if (onPhase) await onPhase("composerAccepted");
+    await checkComposerFileCapacity(tab.id,0,composerLimit,currentChatTarget);
     if (deferSend && currentChatTarget) {
       await assertCurrentChatComposer(currentChatTarget, { fileNames, guardToken: composerGuardToken, retryPolicy, checkCancelled });
       checkCancelled?.();
@@ -2511,9 +2518,9 @@ async function cdpAttachFilesNow(filePathValues, { onPhase = null, currentChatTa
 if (onPhase) await onPhase("submitting");
     await cdpSendAttachedFiles(tab.id, filePaths.length, currentChatTarget ? {
       timeoutMs: 5 * 60_000,
-      beforeClick: async () => { checkCancelled?.(); await beforeSend?.(); await assertCurrentChatComposer(currentChatTarget, { fileNames, guardToken: composerGuardToken, retryPolicy, checkCancelled }); checkCancelled?.(); },
+      beforeClick: async () => { checkCancelled?.(); await beforeSend?.(); await assertCurrentChatComposer(currentChatTarget, { fileNames, guardToken: composerGuardToken, retryPolicy, checkCancelled }); await checkComposerFileCapacity(tab.id,0,composerLimit,currentChatTarget); checkCancelled?.(); },
       onSendCommit, retryPolicy
-    } : { retryPolicy });
+    } : { retryPolicy, beforeClick: async()=>{checkCancelled?.();await checkComposerFileCapacity(tab.id,0,composerLimit);checkCancelled?.();} });
     recoverySubmitted = true;
     cdpLog("File batch completed", { tabId: tab.id, fileCount: filePaths.length });
     await logBrowserTabState(trace, tab.id, "resource.afterSend");
@@ -2528,9 +2535,28 @@ if (onPhase) await onPhase("submitting");
   }
 }
 
+// Keep this separate from the number of source files requested in one task.
+// Older Agents do not expose the new field; their safe fallback is 20.
+async function configuredComposerFileLimit(){
+  const limits=await configuredToolLimits();
+  const maximum=limits.composerMaxFiles??20;
+  if(!Number.isSafeInteger(maximum)||maximum<1||maximum>20)throw localAgentError("AGENT_INVALID_RESPONSE","Invalid Composer file limit.");
+  return maximum;
+}
+function assertComposerFileCapacity(existing,additional,maximum){
+  if(existing+additional>maximum)throw localAgentError("MEDIA_TO_CHAT_INVALID",`Composer attachment limit is ${maximum}: ${existing} already attached + ${additional} new. Existing files and draft were preserved; no Send.`);
+}
+async function checkComposerFileCapacity(tabId,additional,maximum,target=null){
+  const state=target?await currentChatComposerState(target):(await cdpEvaluate(tabId,chatComposerPageExpression(inspectChatComposer)))?.value;
+  if(!state?.found)throw localAgentError("MEDIA_TO_CHAT_INVALID","Composer unavailable; attachment capacity cannot be verified.");
+  const count=composerVisibleAttachmentCount(state);
+  assertComposerFileCapacity(count,additional,maximum);
+  return count;
+}
 async function cdpSendPreparedChatFiles(task) {
   const { fileNames, guardToken } = task.prepared;
   const retryPolicy = await configuredComposerMediaRetry();
+  const composerLimit = await configuredComposerFileLimit();
   const tab = await requireCurrentChatTarget(task.target);
   let attached = false;
   try {
@@ -2543,6 +2569,7 @@ async function cdpSendPreparedChatFiles(task) {
       beforeClick: async () => {
         assertMediaToChatNotCancelled(task);
         await assertCurrentChatComposer(task.target, { fileNames, guardToken, retryPolicy, checkCancelled: () => assertMediaToChatNotCancelled(task) });
+        await checkComposerFileCapacity(tab.id,0,composerLimit,task.target);
         assertMediaToChatNotCancelled(task);
       },
       retryPolicy,

@@ -48,7 +48,7 @@ except ImportError:
     from task_history import TaskHistory
     from browser_resources import save_browser_resource
 
-AGENT_VERSION = "2.8.20"
+AGENT_VERSION = "2.8.21"
 INTERFACE_VERSION = 97
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
@@ -109,6 +109,7 @@ DEFAULT_TOOL_LIMITS = {
     "libraryStoreMaxFiles": 5,
     "libraryStoreMaxFileSizeMiB": 20,
     "mediaToChatMaxFiles": 20,
+    "composerMaxFiles": 20,
     "mediaToChatMaxFileSizeMiB": 20,
     "completedTaskHistoryLimit": 2000,
 }
@@ -120,6 +121,7 @@ TOOL_LIMIT_CEILINGS = {
     "libraryStoreMaxFiles": 100,
     "libraryStoreMaxFileSizeMiB": 512,
     "mediaToChatMaxFiles": 100,
+    "composerMaxFiles": 20,
     "mediaToChatMaxFileSizeMiB": 512,
     "completedTaskHistoryLimit": 100_000,
 }

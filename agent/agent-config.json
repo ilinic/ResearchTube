@@ -47,7 +47,11 @@
     },
     "mediaToChatMaxFiles": {
       "value": 20,
-      "comment": "Maximum Workspace files in one media_view or Browser Agent resourceIds batch; default 20, range 1–100. Independent of the Library limit."
+      "comment": "Maximum Workspace files in one media_view or Browser Agent resourceIds batch; default 20, range 1–100. Independent of the Library limit. The Composer total is separately bounded by composerMaxFiles."
+    },
+    "composerMaxFiles": {
+      "value": 20,
+      "comment": "Maximum total attachments in one automated Composer submission, including existing and newly added files. Default 20; integer 1–20. Over-limit batches are refused without removing files or silently sending a subset. Read before upload and submission."
     },
     "mediaToChatMaxFileSizeMiB": {
       "value": 20,
