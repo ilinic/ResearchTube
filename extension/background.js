@@ -3569,6 +3569,18 @@ const taskCompletionDelivery = createTaskCompletionDelivery({
   load: async () => (await chrome.storage.local.get({ researchtubeBackgroundTaskRecordsV1: [] })).researchtubeBackgroundTaskRecordsV1,
   save: records => chrome.storage.local.set({ researchtubeBackgroundTaskRecordsV1: records }),
   schedule: scheduleBackgroundTaskPoll, send: sendComposerWhenReady, log: consoleAction,
+  id:createAsyncTaskId,
+  inspect:scheduledChatState,
+  pending:scheduledPending,
+  resolveTarget:async record=>{
+    let id=record.conversationId;
+    // Follow the persistent agent mapping if this conversation was retired.
+    // If the Agent is offline, the exact original conversation is still safe.
+    try{const p=await callSharedMemory("__plan_peek",{chat_id:id});if(p.retired&&p.chat_id)id=p.chat_id;}catch{}
+    const matches=(await chrome.tabs.query({})).filter(t=>Number.isInteger(t.id)&&!t.pendingUrl&&planConversationId(t.url)===id);
+    if(matches.length!==1)return null;
+    return {tabId:matches[0].id,conversationId:id,chatPath:chatConversationPath(matches[0].url)};
+  },
   status: async (kind, taskId) => kind === "timer"
     ? normalizeTimerResult("timer_status", await agentJsonRequest("/tasks/timer/" + encodeURIComponent(taskId)))
     : customToolStatus(taskId)
@@ -3593,7 +3605,7 @@ function taskContextDefinitions(definitions) {
 }
 async function registerBackgroundChatTask(tool, task, tabId, cloudTarget = null) {
   const kind = tool === "timer_start" ? "timer" : customToolByName(tool)?._meta?.["researchtube/customTool"]?.execution === "task" ? "custom" : null;
-  if (!kind || !task?.taskId) return task;
+  if (!kind || !task?.taskId || task.repeat) return task;
   const normalized = normalizeTaskTabId(tabId);
   if (normalized != null) await startComposerWatchdog(normalized).catch(() => {});
   return taskCompletionDelivery.register(task, kind, normalized, cloudTarget);
@@ -6554,6 +6566,21 @@ async function handleMcpRequestInner(request) {
       const nativeInput = { ...input }; delete nativeInput.tabId;
       normalizeTaskTabId(input.tabId);
       const args = validateTimerInput(name, nativeInput);
+      if(name!=="timer_start"){
+        const repeated=await taskCompletionDelivery.repeatingStatus(args.taskId,name==="timer_cancel");
+        if(repeated)return repeated;
+      }
+      if(name==="timer_start"&&args.repeat){
+        const tabId=normalizeTaskTabId(input.tabId);
+        if(tabId===null)throw localAgentError("TIMER_INVALID","repeat=true requires the verified current chat tabId.");
+        const tab=await chrome.tabs.get(tabId);
+        const conversationId=planConversationId(tab.url);
+        if(!conversationId||tab.pendingUrl)throw localAgentError("TIMER_INVALID","The repeating timer needs an existing, identified ChatGPT conversation.");
+        const timeZone=args.timeZone??Intl.DateTimeFormat().resolvedOptions().timeZone;
+        const intervalMs=Math.round(args.duration*({seconds:1000,minutes:60000,hours:3600000}[args.unit??"seconds"]));
+        return taskCompletionDelivery.startRepeating({tabId,conversationId,intervalMs,timeZone});
+      }
+      delete args.repeat;
       const route = name === "timer_start" ? "/timer/start" : `/tasks/timer/${args.taskId}${name === "timer_cancel" ? "/cancel" : ""}`;
       const options = name === "timer_start"
         ? { method: "POST", body: { ...args, localTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone }, timeoutMs: AGENT_TASK_TIMEOUT_MS }
@@ -8078,6 +8105,7 @@ async function scheduledChatState(tabId) {
     const markerOf=(message,pattern)=>[message.text,message.raw].map(t=>t.match(pattern)?.[1]).find(Boolean)||null;
     const rolloverMarkers=[...new Set(users.slice(-30).map(m=>markerOf(m,rolloverPattern)).filter(Boolean))];
     const taskMarkers=users.slice(-30).map(m=>markerOf(m,taskPattern)).filter(Boolean);
+    const timerMarkers=[...new Set([native,structured,headingRecords].flatMap(sequence=>sequence.filter(m=>m.role==="user").slice(-30).flatMap(m=>[m.text,m.raw].map(t=>t.match(/^ResearchTube timer tsk_[A-Za-z0-9_-]{10} tick \d+(?= completed\.)/)?.[0]).filter(Boolean))))];
     const contextMarkers=users.slice(-30).filter(m=>markerOf(m,taskPattern)).flatMap(m=>Array.from((m.text||m.raw).matchAll(/^\[ResearchTube context ([a-f0-9]{64})\]$/gm),match=>match[1]));
     const acknowledged=new Set(),respondedTasks=new Set();
     let visibleHistoryBytes=0;
@@ -8103,7 +8131,7 @@ async function scheduledChatState(tabId) {
     let responseHash=2166136261;
     for(let i=0;i<responseText.length;i++)responseHash=Math.imul(responseHash^responseText.charCodeAt(i),16777619);
     const completionAnchor=anchor+":"+responseText.length+":"+(responseHash>>>0).toString(16);
-    return {ready:reason===null,reason,draft,draftMarker,generating,explicitIdle,userCount:users.length,lastUserId,anchor,completionAnchor,taskMarkers,respondedTaskMarkers:[...respondedTasks],rolloverMarkers,acknowledgedRolloverMarkers,contextMarkers,contextLimit,hasAssistant:completed,visibleHistoryBytes,roleCounts:{native:native.length,structured:structured.length,headings:headingRecords.length}};
+    return {ready:reason===null,reason,draft,draftMarker,generating,explicitIdle,userCount:users.length,lastUserId,anchor,completionAnchor,taskMarkers,timerMarkers,respondedTaskMarkers:[...respondedTasks],rolloverMarkers,acknowledgedRolloverMarkers,contextMarkers,contextLimit,hasAssistant:completed,visibleHistoryBytes,roleCounts:{native:native.length,structured:structured.length,headings:headingRecords.length}};
   }});
   return result[0]?.result||{ready:false,reason:"CHAT_STATE_UNAVAILABLE"};
 }

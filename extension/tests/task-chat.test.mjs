@@ -300,3 +300,39 @@ const cloudDelivery=createTaskCompletionDelivery({now:()=>0,historyLimit:()=>20,
 const publicStart=await cloudDelivery.register({taskId:"cloud-test",status:"working"},"timer",42,{bindingId:"original"});
 assert.ok(!Object.hasOwn(publicStart,"cloudTarget"));assert.equal(cloudRecords[0].cloudTarget.bindingId,"original");
 allowCloud=false;await cloudDelivery.observe({taskId:"cloud-test",status:"completed"});assert.equal(cloudSends,0);
+
+// Persistent unlimited recurring notifications, distinct from one-shot tasks.
+{
+  let now=1795764000000,stored=[],sent=[],busy=false,ack=true,markers=[],pending=false,serial=0;
+  let target={tabId:42,conversationId:"chat-a",chatPath:"/c/chat-a"};
+  const repeatHost={
+    now:()=>now,id:()=>`tsk_${String(++serial).padStart(10,'0')}`,historyLimit:()=>2,
+    load:async()=>structuredClone(stored),save:async value=>{stored=structuredClone(value);},
+    schedule(){},resolveTarget:async()=>target,
+    inspect:async()=>({ready:!busy,draft:false,generating:busy,timerMarkers:markers}),
+    pending:async()=>pending,
+    send:async(id,options)=>{await options.beforeSend();sent.push({id,text:options.completionText});return ack?{sent:true}:{sent:false,committed:true};},
+    status:async()=>{throw Error("recurring timers must not poll the Agent");}
+  };
+  let repeat=createTaskCompletionDelivery(repeatHost);
+  const first=await repeat.startRepeating({tabId:42,conversationId:"chat-a",intervalMs:180000,timeZone:"Pacific/Auckland"});
+  assert.equal(first.remainingSeconds,180);
+  assert.equal(first.repeat,true);
+  assert.equal((await repeat.startRepeating({tabId:42,conversationId:"chat-a",intervalMs:180000,timeZone:"Pacific/Auckland"})).taskId,first.taskId);
+  now+=180000;busy=true;await repeat.tick();assert.equal(sent.length,0);
+  now+=300000;busy=false;pending=true;await repeat.tick();assert.equal(sent.length,0);
+  pending=false;target={tabId:43,conversationId:"chat-a",chatPath:"/c/chat-a"};await repeat.tick();
+  assert.equal(sent[0].id,43);assert.equal(sent.length,1);
+  assert.equal((await repeat.repeatingStatus(first.taskId)).fireCount,1);
+  assert.equal((await repeat.repeatingStatus(first.taskId)).remainingSeconds,180);
+  repeat=createTaskCompletionDelivery(repeatHost);
+  now+=180000;await repeat.tick();assert.equal(sent.length,2);
+  now+=180000;ack=false;await repeat.tick();assert.equal(sent.length,3);
+  assert.equal((await repeat.repeatingStatus(first.taskId)).deliveryUncertain,true);
+  await repeat.tick();assert.equal(sent.length,3);
+  markers=["ResearchTube timer "+first.taskId+" tick 3"];await repeat.tick();
+  assert.equal((await repeat.repeatingStatus(first.taskId)).fireCount,3);
+  assert.equal((await repeat.repeatingStatus(first.taskId,true)).cancelled,true);
+  now+=180000;await repeat.tick();assert.equal(sent.length,3);
+  console.log("Repeating timers: busy and pending, coalescing, tab rebind, restoration, uncertain ACK, cancellation: ok");
+}
