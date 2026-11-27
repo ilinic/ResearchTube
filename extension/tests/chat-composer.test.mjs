@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import { pageFixture } from './fixtures/chat-composer-page.mjs';
-import { resolveChatComposer, chatComposerPageExpression, chatComposerAttachmentNamesMatch, inspectChatComposer, clickChatComposerAttachmentRemoval, resetChatComposerFileInputs, installChatComposerGuard, readChatComposerGuard, disposeChatComposerGuard, authorizeChatComposerText } from '../chat-composer.js';
+import { resolveChatComposer, resolveChatSendButton, chatComposerPageExpression, chatComposerAttachmentNamesMatch, inspectChatComposer, clickChatComposerAttachmentRemoval, resetChatComposerFileInputs, installChatComposerGuard, readChatComposerGuard, disposeChatComposerGuard, authorizeChatComposerText } from '../chat-composer.js';
 
 const page = pageFixture();
 let snapshot = page.run(inspectChatComposer);
@@ -242,3 +242,17 @@ interfering.run(authorizeChatComposerText,'interfering','Continue study.');
 interfering.event('beforeinput',interfering.composer,{inputType:'insertText',data:'x'});
 assert.equal(interfering.run(readChatComposerGuard,'interfering').changed,true,'user input during authorized window is not masked');
 console.log('Chat Composer: Browser Agent continuations append while preserving editing observations');
+
+const blank=pageFixture();
+const placeholder=blank.button('','',{markedCard:true});
+placeholder.parentElement.getAttribute=name=>name==='data-testid'?'composer-attachments-container':'';
+assert.equal(blank.run(inspectChatComposer).attachments.length,0,'empty attachment container is not a file');
+blank.composer.innerText='\u200b';
+assert.equal(blank.run(inspectChatComposer).textEmpty,true,'editor zero-width sentinel is not a draft');
+const makeSend=(label='',hidden=false)=>({hidden,type:'button',disabled:false,getAttribute:k=>k==='aria-label'?label:'',getBoundingClientRect:()=>({width:20,height:20,left:0,top:0})});
+const send=makeSend('Send message'), stop=makeSend('Stop generating');
+blank.root.querySelectorAll=selector=>selector.includes('send-button')?[send]:selector==='button[type="submit"]'?[stop]:[];
+assert.equal(blank.run(resolveChatSendButton),send);
+send.disabled=true;assert.equal(blank.run(resolveChatSendButton),send,'disabled explicit Send is still the right control');
+blank.root.querySelectorAll=selector=>selector.includes('send-button')?[]:[stop];
+assert.equal(blank.run(resolveChatSendButton),null,'never submit Stop');

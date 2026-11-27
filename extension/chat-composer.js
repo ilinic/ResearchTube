@@ -18,10 +18,29 @@ export function resolveChatComposer() {
   return root ? { composer, root, form } : { composer: null, root: null, form: null };
 }
 
+// Match the explicit Send control first; newer ChatGPT variants may use
+// type=button or place the control outside data-composer-body but in its form.
+// Never choose a hidden control, Stop, voice, or an ambiguous submitter.
+export function resolveChatSendButton() {
+  const {composer,root,form}=resolveChatComposer();
+  if(!composer||!root)return null;
+  const scopes=[...new Set([root,form].filter(Boolean))];
+  const visible=button=>{
+    if(!button)return false;
+    const b=button.getBoundingClientRect(),style=getComputedStyle(button);
+    return b.width>0&&b.height>0&&style.display!=="none"&&style.visibility!=="hidden"&&Number(style.opacity??"1")>0;
+  };
+  const find=selector=>[...new Set(scopes.flatMap(scope=>Array.from(scope.querySelectorAll(selector))))].filter(visible);
+  const explicit=find('button[data-testid="send-button"], button#composer-submit-button, button[aria-label="Send message"], button[aria-label="Send prompt"], button[aria-label="Отправить сообщение"]');
+  if(explicit.length)return explicit.length===1?explicit[0]:null;
+  const submit=find('button[type="submit"]').filter(button=>!/(stop|voice|microphone|останов|голос)/i.test([button.getAttribute("data-testid"),button.getAttribute("aria-label"),button.getAttribute("title")].join(" ")));
+  return submit.length===1?submit[0]:null;
+}
+
 // Put dependencies in the same lexical scope when serializing page functions.
 export function chatComposerPageExpression(fn, ...args) {
   const serialized = args.map((arg) => typeof arg === 'function' ? arg.toString() : JSON.stringify(arg)).join(', ');
-  return `(() => { const resolveChatComposer = ${resolveChatComposer.toString()}; return (${fn.toString()})(${serialized}); })()`;
+  return `(() => { const resolveChatComposer = ${resolveChatComposer.toString()}; const resolveChatSendButton = ${resolveChatSendButton.toString()}; return (${fn.toString()})(${serialized}); })()`;
 }
 
 // The host can insert (YYYYMMDD-HHMMSS) before the extension after upload.
@@ -73,6 +92,11 @@ export function inspectChatComposer() {
     return bounds.width > 0 && bounds.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
   };
   const cardSelector = '[data-composer-attachments] [class~="group/composer-attachment"], [data-composer-attachments] .composer-attachment-surface[role="button"], [data-file-id], [data-testid*="attachment"]';
+  const isContainer = card => {
+    const id=card?.getAttribute('data-testid')||'';
+    return /^(?:composer-)?attachments?(?:-(?:list|container|wrapper|area|region|tray|panel|button|menu|upload|placeholder|empty))?$/i.test(id)
+      || card?.getAttribute('data-composer-attachments')!==null&&card?.hasAttribute?.('data-composer-attachments');
+  };
   const previewImages = [...root.querySelectorAll('img')].filter((image) => {
     if (!visible(image)) return false;
     const src = image.getAttribute('src') || '';
@@ -82,7 +106,7 @@ export function inspectChatComposer() {
   const attachmentCard = (button) => {
     const group = button.closest('[class~="group/composer-attachment"]');
     const marked = group && root.contains(group) ? group : button.closest(cardSelector);
-    if (marked && marked !== root && root.contains(marked) && !marked.contains(composer)) return marked;
+    if (marked && marked !== root && !isContainer(marked) && root.contains(marked) && !marked.contains(composer)) return marked;
     // Preview close controls are often unlabelled siblings of an image wrapper.
     let parent = button.parentElement;
     for (let depth = 0; parent && parent !== root && depth < 5; depth++, parent = parent.parentElement) {
@@ -148,7 +172,7 @@ export function inspectChatComposer() {
   });
   const cards = new Set();
   const addCard = (card) => {
-    if (!card || card === root || card.contains(composer) || !visible(card)) return;
+    if (!card || card === root || isContainer(card) || card.contains(composer) || !visible(card)) return;
     if (card.tagName === 'BUTTON' && !card.matches('.composer-attachment-surface')) return;
     if ([...cards].some((existing) => existing.contains(card))) return;
     for (const existing of cards) if (card.contains(existing)) cards.delete(existing);
@@ -157,7 +181,13 @@ export function inspectChatComposer() {
   // A PDF/audio/document card can have no thumbnail and no visible close button.
   for (const card of root.querySelectorAll(cardSelector)) addCard(card);
   for (const { card } of removals) addCard(card);
-  for (const image of previewImages) addCard(image.closest('[class~="group/composer-attachment"]') || image.closest(cardSelector) || image.parentElement);
+  for (const image of previewImages) {
+    const marked=image.closest('[class~="group/composer-attachment"]') || image.closest(cardSelector);
+    // Toolbar/app logos are not file previews merely because they are images.
+    // Keep genuine native previews and marked or removable HTTPS cards.
+    if(marked&&!isContainer(marked))addCard(marked);
+    else if(removals.some(({card})=>card?.contains(image)) || /^(?:blob:|data:)/i.test(image.getAttribute('src')||'')&&!image.closest?.('button, [role="button"]'))addCard(image.parentElement);
+  }
   const attachments = [...cards].map((card) => {
     const removal = removals.find((item) => card.contains(item.button));
     const image = card.querySelector('img');
@@ -170,7 +200,7 @@ export function inspectChatComposer() {
   const hoverTargets = [...cards].map(center);
   const previewCount = cards.size;
   const text = composer.value ?? composer.innerText ?? composer.textContent ?? '';
-  return { found: true, textEmpty: String(text).trim() === '', textLength: String(text).length,
+  return { found: true, textEmpty: String(text).replace(/[\u200b\u200c\u200d\ufeff]/g,'').trim() === '', textLength: String(text).length,
     editor: composer.tagName, scope: root === form ? 'form' : 'composerBody',
     attachments, selectedFiles, removeTargets, hoverTargets, previewCount };
 }

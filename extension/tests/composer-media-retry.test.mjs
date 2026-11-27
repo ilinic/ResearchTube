@@ -32,8 +32,10 @@ function worker({ acceptedAt = 0, enabledAt = 0, acknowledgedAfter = 0, busyUnti
   let supplied = false, accepted = false, onSleep = () => {};
   const commands = [], logs = [], sleeps = [], submissions = [], page = pageFixture();
   const tab = { id: 42, url: 'https://chatgpt.com/c/exact' };
-  const sendButton = { get disabled() { return now < enabledAt || sentAt !== null && now < sentAt + acknowledgedAfter; }, getAttribute: () => '', getBoundingClientRect: () => ({ left: 100, top: 100, width: 20, height: 20 }) };
+  const sendButton = { type:'submit', get disabled() { return now < enabledAt || sentAt !== null && now < sentAt + acknowledgedAfter; }, getAttribute: () => '', getBoundingClientRect: () => ({ left: 100, top: 100, width: 20, height: 20 }) };
   page.root.querySelector = selector => selector === 'button[type="submit"]' && now >= missingSendUntil ? sendButton : null;
+  const rootQueryAll=page.root.querySelectorAll.bind(page.root);
+  page.root.querySelectorAll=selector=>selector.includes('send-button')?[]:selector==='button[type="submit"]'?(now>=missingSendUntil?[sendButton]:[]):rootQueryAll(selector);
   sendButton.form = nativeForm ? page.root : null;
   if (nativeForm) page.root.requestSubmit = button => {
     assert.equal(button, sendButton); assert.equal(button.disabled, false);

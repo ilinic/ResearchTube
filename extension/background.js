@@ -20,7 +20,7 @@ import { ARTIFACT_TOOLS, ARTIFACT_STATUS_TOOLS, ARTIFACT_CANCEL_TOOLS, createArt
 import { artifactToolDefinitions, publicWorkspaceArguments } from "./artifact-tools.js";
 import { pruneCompletedTasks } from "./task-history.js";
 import { createMediaStreamHandler } from "./media-stream.js";
-import { resolveChatComposer, chatComposerPageExpression, inspectChatComposer, clickChatComposerAttachmentRemoval, resetChatComposerFileInputs, installChatComposerGuard, readChatComposerGuard, disposeChatComposerGuard, authorizeChatComposerText } from "./chat-composer.js";
+import { resolveChatComposer, resolveChatSendButton, chatComposerPageExpression, inspectChatComposer, clickChatComposerAttachmentRemoval, resetChatComposerFileInputs, installChatComposerGuard, readChatComposerGuard, disposeChatComposerGuard, authorizeChatComposerText } from "./chat-composer.js";
 import { STORYBOARD_TOOL_NAMES, storyboardDefinitions, validateStoryboardInput, normalizeStoryboardResult } from "./storyboards.js";
 const RESEARCHTUBE_HELP_GUIDE_URL = "https://github.com/ilinic/ResearchTube/blob/main/docs/HELP.md";
 const RESEARCHTUBE_HELP_PROMPT = `Read ${RESEARCHTUBE_HELP_GUIDE_URL} and use it to answer my ResearchTube setup, usage and troubleshooting questions in my language. Ask what I need help with.`;
@@ -1988,7 +1988,7 @@ async function cdpWaitForTextComposer(tabId, timeoutMs = 45_000, { checkCancelle
 }
 
 function normalizeComposerTextForComparison(value) {
-  return String(value ?? "").normalize("NFC").replace(/\s+/gu, " ").trim();
+  return String(value ?? "").normalize("NFC").replace(/[\u200b\ufeff]/g,"").replace(/\s+/gu, " ").trim();
 }
 
 async function cdpSetComposerText(tabId, text) {
@@ -2080,7 +2080,7 @@ async function cdpClearComposerDraft(tabId) {
 const CDP_COMPOSER_EMPTY_EXPRESSION = `(() => {
   const { composer, root: composerRoot, form: composerForm } = (${resolveChatComposer.toString()})();
   const current = composer?.value ?? composer?.innerText ?? composer?.textContent ?? '';
-  return Boolean(composer) && current.trim() === '';
+  return Boolean(composer) && current.replace(/[\\u200b\\u200c\\u200d\\ufeff]/g,'').trim() === '';
 })()`;
 
 function canonicalYouTubeVideoUrl(value) {
@@ -2226,40 +2226,25 @@ function cdpAbsoluteFilePath(value) {
   return filePath;
 }
 
-const CDP_ENABLED_SEND_BUTTON_EXPRESSION = `(() => {
-  const { composer, root: composerRoot, form: composerForm } = (${resolveChatComposer.toString()})();
-  const form = composerRoot;
-  const button = form?.querySelector('button[type="submit"]');
-  return Boolean(button && !button.disabled && button.getAttribute('aria-disabled') !== 'true');
-})()`;
-
-const CDP_SEND_BUTTON_CENTER_EXPRESSION = `(() => {
-  const { composer, root: composerRoot, form: composerForm } = (${resolveChatComposer.toString()})();
-  const form = composerRoot;
-  const button = form?.querySelector('button[type="submit"]');
-  if (!button || button.disabled || button.getAttribute('aria-disabled') === 'true') return null;
-  const bounds = button.getBoundingClientRect();
-  if (bounds.width <= 0 || bounds.height <= 0) return null;
-  return { x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2 };
-})()`;
-
-const CDP_SUBMIT_COMPOSER_FORM_EXPRESSION = `(() => {
-  const { composer, root: composerRoot, form: composerForm } = (${resolveChatComposer.toString()})();
-  if (!composer) return false;
-  const form = composerForm;
-  if (!form) return false;
-  const submitButton = composerRoot?.querySelector('button[type="submit"]');
-  if (!submitButton || submitButton.form !== form || submitButton.disabled || submitButton.getAttribute('aria-disabled') === 'true') return false;
-  form.requestSubmit(submitButton);
-  return true;
-})()`;
-
-const CDP_CAN_SUBMIT_COMPOSER_FORM_EXPRESSION = `(() => {
-  const { composer, root, form } = (${resolveChatComposer.toString()})();
-  const button = root?.querySelector('button[type="submit"]');
-  return Boolean(composer && form && typeof form.requestSubmit === 'function' && button && button.form === form
-    && !button.disabled && button.getAttribute('aria-disabled') !== 'true');
-})()`;
+const CDP_ENABLED_SEND_BUTTON_EXPRESSION = chatComposerPageExpression(function(){
+  const button=resolveChatSendButton();
+  return Boolean(button&&!button.disabled&&button.getAttribute('aria-disabled')!=='true');
+});
+const CDP_SEND_BUTTON_CENTER_EXPRESSION = chatComposerPageExpression(function(){
+  const button=resolveChatSendButton();
+  if(!button||button.disabled||button.getAttribute('aria-disabled')==='true')return null;
+  const bounds=button.getBoundingClientRect();
+  return {x:bounds.left+bounds.width/2,y:bounds.top+bounds.height/2};
+});
+const CDP_SUBMIT_COMPOSER_FORM_EXPRESSION = chatComposerPageExpression(function(){
+  const {form}=resolveChatComposer(),button=resolveChatSendButton();
+  if(!form||typeof form.requestSubmit!=='function'||!button||button.type!=='submit'||button.form!==form||button.disabled||button.getAttribute('aria-disabled')==='true')return false;
+  form.requestSubmit(button);return true;
+});
+const CDP_CAN_SUBMIT_COMPOSER_FORM_EXPRESSION = chatComposerPageExpression(function(){
+  const {form}=resolveChatComposer(),button=resolveChatSendButton();
+  return Boolean(form&&typeof form.requestSubmit==='function'&&button&&button.type==='submit'&&button.form===form&&!button.disabled&&button.getAttribute('aria-disabled')!=='true');
+});
 
 function cdpComposerTextExpression(expectedText) {
   return `(() => {
@@ -2417,8 +2402,7 @@ async function cdpSendComposerText(tabId, text, beforeClick = null) {
 async function cdpReadMediaSubmissionState(tabId) {
   const expression = chatComposerPageExpression(function (inspect) {
     const state = inspect();
-    const { root } = resolveChatComposer();
-    const send = root?.querySelector('button[type="submit"]');
+    const send = resolveChatSendButton();
     const pagePath = typeof location === 'object' ? location.pathname : null;
     const chatPath = pagePath && new RegExp('/c/[^/]+/?$').test(pagePath) && !pagePath.includes('local-chatgpt') ? (pagePath.endsWith('/') ? pagePath.slice(0, -1) : pagePath) : null;
     const users = [...document.querySelectorAll('[data-message-author-role="user"]')];
@@ -2713,8 +2697,18 @@ async function clearCurrentChatComposer(target, checkCancelled = null) {
     // Startup reset also discards stale native selections with no visible card.
     await cdpEvaluate(target.tabId, chatComposerPageExpression(resetChatComposerFileInputs));
   }
-  const final = await currentChatComposerState(target);
-  if (!final.textEmpty || composerAttachmentCount(final)) throw localAgentError("MEDIA_TO_CHAT_INVALID", "ChatGPT Composer could not be cleared before the startup prompt.");
+  // A native file input can be re-rendered immediately after reset. Allow
+  // bounded settling, but never clear a new visible attachment or user draft.
+  let final=await currentChatComposerState(target);
+  for(let attempt=0;attempt<8&&final.textEmpty&&!composerVisibleAttachmentCount(final)&&final.selectedFiles.length;attempt++){
+    checkCancelled?.();await sleep(250);
+    final=await currentChatComposerState(target);
+  }
+  if (!final.textEmpty || composerAttachmentCount(final)) {
+    const reason=!final.textEmpty?"COMPOSER_NEW_DRAFT":composerVisibleAttachmentCount(final)?"COMPOSER_ATTACHMENTS_REMAIN":"COMPOSER_FILE_SELECTION_REMAINS";
+    recordSystemDiagnostic({source:"extension",stage:"composer.clear",code:reason,tabId:target.tabId,message:`Composer clear blocked: textLength=${final.textLength??0}, visibleAttachments=${composerVisibleAttachmentCount(final)}, selectedFiles=${final.selectedFiles.length}.`});
+    throw localAgentError("MEDIA_TO_CHAT_INVALID", "ChatGPT Composer could not be cleared before the startup prompt ("+reason+").");
+  }
 }
 
 function libraryStoreNow() { return new Date().toISOString(); }
