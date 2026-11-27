@@ -26,6 +26,13 @@
       <p>Exit Chrome completely, reopen it using that shortcut, then restart the Local Agent. On macOS/Linux, add the same flag to your Chrome launch command.</p>
     </section>
 
+    <section aria-labelledby="rollover-heading">
+      <h2 id="rollover-heading">Scheduled agent context rollover</h2>
+      <p class="field-help">Rotate at a safe task boundary before context is exhausted. This is approximate transport/history size, not a token limit. Set 0 to disable early rollover; hard-limit recovery remains enabled.</p>
+      <label for="plan-rollover-kib">Approximate context pressure (KiB)</label>
+      <div class="copy-row"><input id="plan-rollover-kib" type="number" min="0" max="16384" step="1" value="768"><button id="save-plan-rollover" class="secondary" type="button">Save</button></div>
+      <p id="plan-rollover-result" class="field-help" role="status"></p>
+    </section>
     <section>
       <h2>Diagnostics</h2>
       <p class="field-help">For troubleshooting only. The local log records concise tool timing, safe request summaries, errors, search queue state, and YouTube HTTP status. It never records credentials, YouTube cookies, request headers, response bodies, transcript text, or comment text.</p>

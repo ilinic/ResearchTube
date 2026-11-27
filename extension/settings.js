@@ -75,7 +75,17 @@ document.querySelectorAll("[data-open]").forEach((link) => link.addEventListener
 $("copy-silent-automation-flag").addEventListener("click", async () => { await navigator.clipboard.writeText($("silent-automation-flag").textContent.trim()); $("copy-silent-automation-flag").textContent = "Copied"; setTimeout(() => { $("copy-silent-automation-flag").textContent = "Copy"; }, 1400); });
 $("copy-diagnostics").addEventListener("click", async () => { const button = $("copy-diagnostics"); const result = await call({ type: "get-diagnostics" }); if (!result?.ok) { $("diagnostics-summary").textContent = "Could not export diagnostics."; return; } await navigator.clipboard.writeText(result.text); button.textContent = "Copied"; setTimeout(() => { button.textContent = "Copy diagnostics log"; }, 1400); });
 $("clear-diagnostics").addEventListener("click", async () => { const result = await call({ type: "clear-diagnostics" }); if (result?.ok) { $("diagnostics-summary").textContent = "No diagnostic events captured yet."; } else { $("diagnostics-summary").textContent = "Could not clear diagnostics."; } });
+$("save-plan-rollover").addEventListener("click",async()=>{
+  const value=Number($("plan-rollover-kib").value);
+  if(!$("plan-rollover-kib").value.trim()||!Number.isInteger(value)||value!==0&&(value<128||value>16384)){
+    $("plan-rollover-result").textContent="Enter 0 (disabled) or 128–16384 KiB.";return;
+  }
+  try{await chrome.storage.local.set({planRolloverKiB:value});$("plan-rollover-result").textContent="Saved.";}
+  catch{$("plan-rollover-result").textContent="Could not save the setting.";}
+});
 async function init() {
+  const rollover=await chrome.storage.local.get({planRolloverKiB:768});
+  $("plan-rollover-kib").value=rollover.planRolloverKiB;
   const state = await call({ type: "status", includeAgent: false });
   $("agent-port").value = state.agentPort || 17843;
   await refreshDiagnostics(); await loadMcpToolSettings();

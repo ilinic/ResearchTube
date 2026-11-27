@@ -7943,14 +7943,18 @@ async function scheduledChatState(tabId) {
     const composer=live.length===1?live[0]:null;
     const form=composer?.closest('[data-composer-body]')||composer?.closest('form');
     const enabled=e=>visible(e)&&!e.disabled&&e.getAttribute("aria-disabled")!=="true";
-    const sendControls=form?[...form.querySelectorAll('button[type="submit"], button[data-testid="send-button"]')].filter(visible):[];
+    const scopes=[...new Set([form,composer?.closest('form')].filter(Boolean))];
+    const sendControls=[...new Set(scopes.flatMap(scope=>[...scope.querySelectorAll('button[type="submit"], button[data-testid="send-button"], button#composer-submit-button, button[aria-label="Send message"], button[aria-label="Send prompt"], button[aria-label="Отправить сообщение"]')]))].filter(visible);
     const send=sendControls.some(enabled);
     const idleVoice=form&&[...form.querySelectorAll('button[data-testid="voice-mode-button"], button[aria-label="Start Voice"], button[aria-label="Start voice mode"], button[aria-label="Start Voice Mode"]')].some(enabled);
-    const draft=Boolean(String(composer?.value??composer?.innerText??composer?.textContent??"").trim());
-    const completed=last?.getAttribute("data-message-author-role")==="assistant"&&Boolean(last.innerText?.trim());
+    const textDraft=Boolean(String(composer?.value??composer?.innerText??composer?.textContent??"").replace(/[\u200b\u200c\u200d\ufeff]/g,"").trim());
+    const attachmentDraft=scopes.some(scope=>[...scope.querySelectorAll('input[type="file"]')].some(e=>e.files?.length)||[...scope.querySelectorAll('[data-file-id], [class~="group/composer-attachment"], .composer-attachment-surface[role="button"]')].some(visible));
+    const draft=textDraft||attachmentDraft;
+    const generating=matches('button[data-testid="stop-button"], button[aria-label="Stop generating"], button[aria-label="Stop streaming"]');
+    const completed=last?.getAttribute("data-message-author-role")==="assistant"&&Boolean((last.innerText||last.textContent||"").trim());
     let reason=null;
     if (document.readyState!=="complete") reason="CHAT_LOADING";
-    else if(matches('button[data-testid="stop-button"], button[aria-label="Stop generating"], button[aria-label="Stop streaming"]')) reason="CHAT_GENERATING";
+    else if(generating) reason="CHAT_GENERATING";
     else if(matches('[role="dialog"], [aria-modal="true"]')) reason="CHAT_DIALOG_OPEN";
     else if(matches('input[type="password"]')) reason="CHAT_AUTH_REQUIRED";
     else if(!composer||!form) reason="CHAT_COMPOSER_UNAVAILABLE";
@@ -7971,7 +7975,18 @@ async function scheduledChatState(tabId) {
     const rolloverMarkers=users.slice(-30).map(m=>(m.innerText||m.textContent||"").trim().match(/^\[ResearchTube rollover ([a-f0-9]{64})\]/)?.[1]).filter(Boolean);
     const contextMarkers=users.slice(-30).filter(m=>/^\[ResearchTube task \d+ [a-f0-9]{64}\]/.test((m.innerText||m.textContent||"").trim())).flatMap(m=>Array.from((m.innerText||m.textContent||"").matchAll(/^\[ResearchTube context ([a-f0-9]{64})\]$/gm),match=>match[1]));
     const taskMarkers=users.slice(-30).map(m=>(m.innerText||m.textContent||"").trim().match(/^\[ResearchTube task \d+ ([a-f0-9]{64})\]/)?.[1]).filter(Boolean);
-    return {ready:reason===null,reason,draft,draftMarker,userCount:users.length,lastUserId,anchor,taskMarkers,rolloverMarkers,contextMarkers,contextLimit,hasAssistant:completed};
+    // Verify the exact handoff marker and a following assistant turn, not
+    // the current Composer's readiness or whether ACK is the latest message.
+    const acknowledgedRolloverMarkers=[];
+    let awaitingMarker=null,visibleHistoryBytes=0;
+    const encoder=new TextEncoder();
+    for(const message of messages){
+      const value=(message.textContent||"").trim();
+      if(visibleHistoryBytes<16*1024*1024)visibleHistoryBytes+=encoder.encode(value.slice(0,16*1024*1024)).length;
+      if(message.getAttribute("data-message-author-role")==="user")awaitingMarker=value.includes("[ResearchTube rollover ")?(message.innerText||value).trim().match(/^\[ResearchTube rollover ([a-f0-9]{64})\]/)?.[1]||null:null;
+      else if(awaitingMarker&&visible(message)&&(message.innerText||value).trim()){acknowledgedRolloverMarkers.push(awaitingMarker);awaitingMarker=null;}
+    }
+    return {ready:reason===null,reason,draft,draftMarker,generating,userCount:users.length,lastUserId,anchor,taskMarkers,rolloverMarkers,acknowledgedRolloverMarkers,contextMarkers,contextLimit,hasAssistant:completed,visibleHistoryBytes};
   }});
   return result[0]?.result||{ready:false,reason:"CHAT_STATE_UNAVAILABLE"};
 }
@@ -7997,22 +8012,59 @@ function planTaskMessage(p,task,marker,contextHash,includeContext=true) {
   const context=includeContext?"\n\n[ResearchTube context "+contextHash+"]"+goal+skills+"\n\nUse your plan tools to record the outcome, edit future tasks and improve relevant shared skills when useful. Respect the user's authorized objective.":"\n\nContinue under the recorded goal and skills. If prior context is unavailable, read agent_memory_read and relevant skills (force_full=true). Record the outcome and maintain the plan.";
   return "[ResearchTube task "+task.id+" "+marker+"]\n"+task.prompt+context;
 }
-async function resumePlanRollover(tab,chatId,p,state) {
+// Transport/history size is only an approximate pressure signal, not tokens.
+// Reuse retained diagnostics; no additional durable telemetry database.
+const PLAN_ROLLOVER_DEFAULT_KIB=768;
+function normalizePlanRolloverKiB(value){
+  return Number.isInteger(value)&&(value===0||value>=128&&value<=16384)?value:PLAN_ROLLOVER_DEFAULT_KIB;
+}
+const rolloverPressureCache=new Map();
+function planRolloverPressure(chatId,state,policy){
+  const limit=normalizePlanRolloverKiB(policy?.rolloverKiB)*1024;
+  if(!limit)return null;
+  const history=Number(state.visibleHistoryBytes)||0;
+  if(history>=limit)return {bytes:history,limit,source:"visible_history"};
+  let sample=rolloverPressureCache.get(chatId);
+  if(!sample||Date.now()-sample.at>=60000){
+    sample={at:Date.now(),bytes:0};
+    rolloverPressureCache.delete(chatId);rolloverPressureCache.set(chatId,sample);
+    while(rolloverPressureCache.size>256)rolloverPressureCache.delete(rolloverPressureCache.keys().next().value);
+    // Do not delay normal task delivery on a diagnostics call.
+    void callSharedMemory("system_get_trace",{conversationId:chatId,includePayloadSummary:true,limit:1}).then(result=>{
+      const totals=result.payloadSummary?.totals;
+      if(totals)sample.bytes=["resultBytes","requestBytes","promptBytes"].reduce((sum,key)=>sum+Math.max(0,Number(totals[key])||0),0);
+    }).catch(()=>{});
+  }
+  return sample.bytes>=limit?{bytes:sample.bytes,limit,source:"retained_trace"}:null;
+}
+function rolloverSourceEligible(state,journal){
+  if(!state||state.draft||state.generating||state.reason==="CHAT_GENERATING")return false;
+  if(journal.mode==="proactive")return state.ready&&state.anchor===journal.sourceAnchor;
+  return state.contextLimit||Boolean(journal.sourceAnchor&&state.anchor===journal.sourceAnchor);
+}
+async function resumePlanRollover(tab,chatId,p,state,pressure=null) {
   const key=ROLLOVER_PREFIX+chatId;
   let journal=(await chrome.storage.local.get(key))[key];
   const trace=(code)=>planDecision(tab.id,"rollover",code);
   const save=async(value)=>{journal=value;await chrome.storage.local.set({[key]:value});};
-  const sameOld=async()=>{
-    const old=await chrome.tabs.get(tab.id);
-    return chatConversationPath(old.url)===chatConversationPath(tab.url)&&!old.pendingUrl&&old.groupId===tab.groupId&&old.windowId===tab.windowId;
+  const sourceStatus=async()=>{
+    const old=await chrome.tabs.get(tab.id).catch(()=>null);
+    if(!old){
+      const tabs=await chrome.tabs.query({});
+      return tabs.some(t=>t.id===tab.id||planConversationId(t.url)===chatId)?"changed":"closed";
+    }
+    return chatConversationPath(old.url)===chatConversationPath(tab.url)&&!old.pendingUrl&&old.groupId===tab.groupId&&old.windowId===tab.windowId?"same":"changed";
   };
   if(!journal) {
-    if(!state.contextLimit||state.draft||tab.groupId<0||!Number.isInteger(tab.groupId))return trace("ROLLOVER_BLOCKED");
+    if(p.retired||(!state.contextLimit&&!pressure)||state.draft||state.generating||tab.groupId<0||!Number.isInteger(tab.groupId))return trace("ROLLOVER_BLOCKED");
+    if(pressure&&(!state.ready||!state.anchor||p.current||!p.next||!p.state?.trim()))return trace("ROLLOVER_CHECKPOINT_REQUIRED");
     const landing=rolloverLanding(tab.url);
     if(!landing)return trace("ROLLOVER_PROJECT_UNSUPPORTED");
+    const mode=state.contextLimit?"hard_limit":"proactive";
     const marker=(await planOperationKey({agent_id:p.agent_id||chatId,chat_id:chatId,version:p.version,action:"rollover"})).slice(5);
-    await save({chatId,oldTabId:tab.id,oldUrl:tab.url,groupId:tab.groupId,windowId:tab.windowId,landing,marker,phase:"creating"});
-    if(!await sameOld())return trace("ROLLOVER_SOURCE_CHANGED");
+    if(await sourceStatus()!=="same")return trace("ROLLOVER_SOURCE_CHANGED");
+    await save({chatId,oldTabId:tab.id,oldUrl:tab.url,groupId:tab.groupId,windowId:tab.windowId,landing,marker,mode,sourceAnchor:state.anchor,phase:"creating"});
+    if(pressure)reliabilityTrace.add("PLAN_ROLLOVER_PRESSURE",{conversationId:chatId,chatTabId:tab.id,bytes:pressure.bytes,stage:pressure.source});
     const fresh=await chrome.tabs.create({windowId:tab.windowId,index:tab.index+1,url:landing,active:false});
     await save({...journal,newTabId:fresh.id,phase:"opened"});
     await chrome.tabs.group({groupId:tab.groupId,tabIds:[fresh.id]});
@@ -8023,47 +8075,68 @@ async function resumePlanRollover(tab,chatId,p,state) {
   if(fresh.groupId!==journal.groupId||fresh.windowId!==journal.windowId)return trace("ROLLOVER_GROUP_CHANGED");
   const successor=planConversationId(fresh.url);
   if(successor) {
-    if(successor===chatId||planProjectPath(fresh.url)!==planProjectPath(journal.oldUrl))return trace("ROLLOVER_PROJECT_MISMATCH");
-    const nextState=await scheduledChatState(fresh.id);
-    if(!nextState.ready||nextState.draft||!nextState.hasAssistant||!nextState.rolloverMarkers?.includes(journal.marker))return trace("ROLLOVER_WAIT_ACK");
-    if(!await sameOld()||await scheduledPending(tab.id)||await scheduledPending(fresh.id))return trace("ROLLOVER_BUSY");
-    const oldState=await scheduledChatState(tab.id);
-    if(oldState.draft||!oldState.contextLimit)return trace("ROLLOVER_SOURCE_CHANGED");
-    const latest=await callSharedMemory("__plan_peek",{chat_id:chatId});
-    if(latest.paused)return trace("PLAN_PAUSED");
-    if(!latest.retired) {
-      if(!await planTransition(chatId,latest.version,"rollover",{successor}))return trace("ROLLOVER_COMMIT_PENDING");
-    } else if(latest.chat_id!==successor)return trace("ROLLOVER_CONFLICT");
+    if(successor===chatId||planProjectPath(fresh.url)!==planProjectPath(journal.oldUrl)||fresh.pendingUrl)return trace("ROLLOVER_PROJECT_MISMATCH");
+    let latest=await callSharedMemory("__plan_peek",{chat_id:chatId});
+    if(latest.retired&&latest.chat_id!==successor)return trace("ROLLOVER_CONFLICT");
+    if(!latest.retired&&!latest.version)return trace("ROLLOVER_PLAN_MISSING");
+    if(!latest.retired){
+      if(latest.paused)return trace("PLAN_PAUSED");
+      const nextState=await scheduledChatState(fresh.id);
+      if(!nextState.acknowledgedRolloverMarkers?.includes(journal.marker))return trace(nextState.rolloverMarkers?.includes(journal.marker)?"ROLLOVER_ACK_RESPONSE_PENDING":"ROLLOVER_ACK_MARKER_MISSING");
+      if(nextState.generating||["CHAT_GENERATING","CHAT_LOADING","CHAT_RESPONSE_BUSY"].includes(nextState.reason)||await scheduledPending(fresh.id))return trace("ROLLOVER_SUCCESSOR_BUSY");
+      const source=await sourceStatus();
+      if(source==="changed")return trace("ROLLOVER_SOURCE_CHANGED");
+      if(source==="same"){
+        if(await scheduledPending(tab.id))return trace("ROLLOVER_SOURCE_BUSY");
+        const oldState=await scheduledChatState(tab.id);
+        if(!rolloverSourceEligible(oldState,journal))return trace("ROLLOVER_SOURCE_CHANGED");
+      }
+      // Recover the existing queue even when the old browser tab was closed.
+      latest=await callSharedMemory("__plan_peek",{chat_id:chatId});
+      if(latest.paused||journal.mode==="proactive"&&latest.current)return trace("ROLLOVER_PLAN_CHANGED");
+      if(!latest.retired&&!await planTransition(chatId,latest.version,"rollover",{successor}))return trace("ROLLOVER_COMMIT_PENDING");
+      latest=await callSharedMemory("__plan_peek",{chat_id:chatId});
+      if(!latest.retired||latest.chat_id!==successor)return trace("ROLLOVER_MAPPING_UNCONFIRMED");
+    }
     await save({...journal,successor,phase:"committed"});
-    // Closing the browser tab never deletes the old conversation. Verify both
-    // endpoints again after committing and do not close changed documents.
     fresh=await chrome.tabs.get(journal.newTabId);
-    if(!await sameOld()||planConversationId(fresh.url)!==successor||fresh.groupId!==journal.groupId||planProjectPath(fresh.url)!==planProjectPath(journal.oldUrl))return trace("ROLLOVER_CLOSE_BLOCKED");
-    if((await scheduledChatState(tab.id)).draft)return trace("ROLLOVER_CLOSE_BLOCKED");
-    await chrome.tabs.remove(tab.id);
+    if(planConversationId(fresh.url)!==successor||fresh.pendingUrl||fresh.groupId!==journal.groupId||fresh.windowId!==journal.windowId||planProjectPath(fresh.url)!==planProjectPath(journal.oldUrl))return trace("ROLLOVER_CLOSE_BLOCKED");
+    const source=await sourceStatus();
+    if(source==="changed")return trace("ROLLOVER_CLOSE_BLOCKED");
+    if(source==="same"){
+      if(await scheduledPending(tab.id))return trace("ROLLOVER_SOURCE_BUSY");
+      const oldState=await scheduledChatState(tab.id);
+      if(oldState.draft||oldState.generating||oldState.reason==="CHAT_GENERATING"||journal.sourceAnchor&&oldState.anchor!==journal.sourceAnchor&&!oldState.contextLimit)return trace("ROLLOVER_CLOSE_BLOCKED");
+      if(await sourceStatus()!=="same")return trace("ROLLOVER_CLOSE_BLOCKED");
+      await chrome.tabs.remove(tab.id);
+    }
     await chrome.storage.local.remove(key);
+    rolloverPressureCache.delete(chatId);
     return trace("ROLLOVER_COMPLETE");
   }
   if(journal.phase!=="opened")return trace("ROLLOVER_SEND_UNCERTAIN");
+  if(await sourceStatus()!=="same")return trace("ROLLOVER_SOURCE_CLOSED_BEFORE_ACK");
   await waitForChatGPTTab(fresh.id);
   const newState=await scheduledChatState(fresh.id);
   if(!newState.ready||newState.draft)return trace("ROLLOVER_COMPOSER_NOT_READY");
-  const message="[ResearchTube rollover "+journal.marker+"]\nYou are the successor of ResearchTube agent "+(p.agent_id||chatId)+". The previous conversation reached its maximum length: "+journal.oldUrl+"\n\nRecorded goal:\n"+p.goal+"\n\nRecorded checkpoint:\n"+p.state+"\n\nShared skills: "+(p.skills||[]).map(x=>"#"+x.id+" v"+x.version).join(", ")+"\n\nA persistent queue and full history will be attached to this conversation after this handoff. Acknowledge this handoff now, without running tools or creating a new plan. End your response so the scheduler can attach the existing agent and deliver the next task. Do not repeat previous actions blindly.";
+  const latest=await callSharedMemory("__plan_peek",{chat_id:chatId});
+  if(latest.paused||latest.retired||journal.mode==="proactive"&&latest.current)return trace("ROLLOVER_PLAN_CHANGED");
+  const why=journal.mode==="proactive"?"The previous conversation is being compacted proactively: ":"The previous conversation reached its maximum length: ";
+  const message="[ResearchTube rollover "+journal.marker+"]\nYou are the successor of ResearchTube agent "+(latest.agent_id||chatId)+". "+why+journal.oldUrl+"\n\nRecorded goal:\n"+latest.goal+"\n\nRecorded checkpoint:\n"+latest.state+"\n\nShared skills: "+(latest.skills||[]).map(x=>"#"+x.id+" v"+x.version).join(", ")+"\n\nThe scheduler will bind the existing agent, memory and queue after your acknowledgement, then automatically deliver the next task. Acknowledge briefly now, without running tools or creating a new plan. End your response. When the next task arrives, read the latest durable checkpoint and continue the existing work; do not repeat previous actions blindly.";
   const guard=async()=>{
     const t=await chrome.tabs.get(fresh.id);
-    if(t.url!==journal.landing||t.groupId!==journal.groupId||t.pendingUrl||!await sameOld())throw localAgentError("ROLLOVER_TARGET_CHANGED","Project/group or original conversation changed.");
+    if(t.url!==journal.landing||t.groupId!==journal.groupId||t.pendingUrl||await sourceStatus()!=="same")throw localAgentError("ROLLOVER_TARGET_CHANGED","Project/group or original conversation changed.");
   };
   let reserved=false;
   const result=await sendComposerWhenReady(fresh.id,{completionText:message,scheduled:true,planned:true,allowNewConversation:true,beforeSend:guard,beforeInsert:guard,beforeDispatch:async()=>{
     await guard();
     if(!reserved){await save({...journal,phase:"dispatching"});reserved=true;}
   }});
-  // Never blindly replay after an uncertain dispatch or overwrite a draft.
   if(result.sent){reliabilityTrace.add("PLAN_PROMPT_SIZE",{tool:"rollover",conversationId:planConversationId((await chrome.tabs.get(fresh.id)).url)||undefined,chatTabId:fresh.id,promptBytes:new TextEncoder().encode(message).length});await save({...journal,phase:"sent"});}
   else if(result.inserted&&!reserved)await save({...journal,phase:"draft_unconfirmed"});
   trace(result.sent?"ROLLOVER_WAIT_ACK":result.reason||"ROLLOVER_SEND_UNCERTAIN");
 }
-async function runPlannedChat(tab,chatId) {
+async function runPlannedChat(tab,chatId,policy=null,journal=null) {
   const tabId=tab.id,path=chatConversationPath(tab.url);
   const peek=()=>callSharedMemory("__plan_peek",{chat_id:chatId});
   const decision=(status,code)=>planDecision(tabId,status,code);
@@ -8075,10 +8148,14 @@ async function runPlannedChat(tab,chatId) {
     return scheduledChatState(tabId);
   };
   let p=await peek();
-  if(p.paused)return decision("blocked","PLAN_PAUSED");
+  if(p.paused&&!p.retired)return decision("blocked","PLAN_PAUSED");
   const state=await liveState();
   const pending=await scheduledPending(tabId);
-  if((state.contextLimit||p.retired)&&!pending&&tab.groupId>=0) {
+  if(journal){
+    if(pending)return decision("blocked",pending);
+    await resumePlanRollover(tab,chatId,p,state);return;
+  }
+  if(state.contextLimit&&!p.retired&&!pending&&tab.groupId>=0) {
     await resumePlanRollover(tab,chatId,p,state);return;
   }
   if(p.retired||!p.current&&!p.next)return decision("idle","PLAN_EMPTY");
@@ -8103,6 +8180,15 @@ async function runPlannedChat(tab,chatId) {
     } else return decision("blocked","PLAN_SEND_UNCERTAIN");
   } else {
     if(state.draft)return decision("blocked","PLAN_USER_DRAFT");
+    if(policy&&tab.groupId>=0&&p.next&&p.state?.trim()){
+      const pressure=planRolloverPressure(chatId,state,policy);
+      if(pressure){
+        const current=await peek(),live=await liveState();
+        if(!current.paused&&!current.retired&&!current.current&&current.next&&current.state?.trim()&&live.ready&&!live.draft&&live.anchor===state.anchor&&!await scheduledPending(tabId)){
+          await resumePlanRollover(tab,chatId,current,live,pressure);return;
+        }
+      }
+    }
     if(p.idle_anchor!==state.anchor||p.idle_since===null) {
       await planTransition(chatId,p.version,"observe",{anchor:state.anchor});return decision("waiting","PLAN_IDLE_OBSERVED");
     }
@@ -8155,7 +8241,9 @@ async function scheduledWatchdogTick() {
   scheduledScanRunning=true;
   try {
     const chats=new Map();
-    for(const tab of await chrome.tabs.query({url:"https://chatgpt.com/*"})) {
+    const openTabs=await chrome.tabs.query({url:"https://chatgpt.com/*"});
+    const openTabIds=new Set(openTabs.map(tab=>tab.id));
+    for(const tab of openTabs) {
       const id=planConversationId(tab.url);
       if(!id||!Number.isInteger(tab.id))continue;
       chats.set(id,chats.has(id)?null:tab);
@@ -8163,13 +8251,25 @@ async function scheduledWatchdogTick() {
     const ids=[...chats].filter(([id,tab])=>tab&&!activePlanChats.has(id)).map(([id])=>id);
     const journals=await chrome.storage.local.get(null);
     const recovering=new Set(ids.filter(id=>journals[ROLLOVER_PREFIX+id]));
+    const policy={rolloverKiB:normalizePlanRolloverKiB(journals.planRolloverKiB)};
+    // Recover an acknowledged successor even if its original tab is closed.
+    for(const [key,journal] of Object.entries(journals)){
+      if(!key.startsWith(ROLLOVER_PREFIX)||!journal||!Number.isInteger(journal.oldTabId)||!Number.isInteger(journal.newTabId))continue;
+      const id=key.slice(ROLLOVER_PREFIX.length);
+      if(id!==journal.chatId||chats.has(id)||activePlanChats.has(id))continue;
+      // A journal with neither endpoint open requires no Agent polling.
+      if(!openTabIds.has(journal.newTabId))continue;
+      const old={id:journal.oldTabId,url:journal.oldUrl,groupId:journal.groupId,windowId:journal.windowId};
+      activePlanChats.add(id);
+      void resumePlanRollover(old,id,{},{}).catch(error=>planDecision(old.id,"error",error?.code||error?.name||"ROLLOVER_RECOVERY_FAILED")).finally(()=>activePlanChats.delete(id));
+    }
     for(let i=0;i<ids.length;i+=200) {
       const active=await callSharedMemory("__plan_scan",{chat_ids:ids.slice(i,i+200)});
       for(const id of new Set([...active.chat_ids,...ids.slice(i,i+200).filter(id=>recovering.has(id))])) {
         const tab=chats.get(id);
         if(!tab||activePlanChats.has(id))continue;
         activePlanChats.add(id);
-        void runPlannedChat(tab,id).catch(error=>planDecision(tab.id,"error",error?.code||error?.name||"PLAN_CHECK_FAILED")).finally(()=>activePlanChats.delete(id));
+        void runPlannedChat(tab,id,policy,journals[ROLLOVER_PREFIX+id]).catch(error=>planDecision(tab.id,"error",error?.code||error?.name||"PLAN_CHECK_FAILED")).finally(()=>activePlanChats.delete(id));
       }
     }
   } finally {scheduledScanRunning=false;}

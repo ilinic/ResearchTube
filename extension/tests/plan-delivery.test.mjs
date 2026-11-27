@@ -27,8 +27,8 @@ const send=async(id,options)=>{
  await options.beforeDispatch();await options.beforeDispatch();
  assert.equal(current.status,"dispatching");return {sent:true};
 };
-const factory=new Function("chrome","chatConversationPath","planConversationId","scheduledChatState","scheduledPending","callSharedMemory","planTransition","planOperationKey","sendComposerWhenReady","planDecision","localAgentError","Date","reliabilityTrace",src.slice(begin,end)+"\nreturn {runPlannedChat,rolloverLanding,planProjectPath};");
-const env=factory({tabs:{get:async()=>tab,query:async()=>[tab]}},path,u=>path(u).split("/").at(-1),async()=>state,async()=>null,async()=>peek(),transition,async v=>"plan."+Buffer.from(await webcrypto.subtle.digest("SHA-256",new TextEncoder().encode(JSON.stringify(v)))).toString("hex"),send,(...a)=>decisions.push(a),(code,msg)=>Object.assign(Error(msg),{code}),{now:()=>now},{add(){}});
+const factory=new Function("chrome","chatConversationPath","planConversationId","scheduledChatState","scheduledPending","callSharedMemory","planTransition","planOperationKey","sendComposerWhenReady","planDecision","localAgentError","Date","reliabilityTrace","URL","TextEncoder",'const ROLLOVER_PREFIX="researchtubePlanRollover:";\n'+src.slice(begin,end)+"\nreturn {runPlannedChat,rolloverLanding,planProjectPath,normalizePlanRolloverKiB,planRolloverPressure,rolloverSourceEligible,resumePlanRollover};");
+const env=factory({tabs:{get:async()=>tab,query:async()=>[tab]}},path,u=>path(u).split("/").at(-1),async()=>state,async()=>null,async()=>peek(),transition,async v=>"plan."+Buffer.from(await webcrypto.subtle.digest("SHA-256",new TextEncoder().encode(JSON.stringify(v)))).toString("hex"),send,(...a)=>decisions.push(a),(code,msg)=>Object.assign(Error(msg),{code}),{now:()=>now},{add(){}},URL,TextEncoder);
 assert.equal(env.rolloverLanding("https://chatgpt.com/g/g-p-abc-project/c/old"),"https://chatgpt.com/g/g-p-abc-project/project");
 assert.equal(env.rolloverLanding("https://chatgpt.com/c/old"),"https://chatgpt.com/");
 assert.equal(env.rolloverLanding("https://chatgpt.com/g/g-custom/c/old"),null);
@@ -47,3 +47,52 @@ assert.doesNotMatch(sentMessages[1],/Persistent test objective|Test method/);
 assert.match(sentMessages[1],/force_full=true/);
 assert.equal(decisions.filter(x=>x[1]==="sent").length,2);
 console.log("plan dispatch guards, independent idle delay and project rollover routing: ok");
+
+assert.equal(env.normalizePlanRolloverKiB(undefined),768);
+assert.equal(env.normalizePlanRolloverKiB(0),0);
+assert.equal(env.normalizePlanRolloverKiB(64),768);
+assert.equal(env.planRolloverPressure("first",{visibleHistoryBytes:999999},{rolloverKiB:0}),null);
+assert.equal(env.planRolloverPressure("first",{visibleHistoryBytes:999999},{rolloverKiB:768}).source,"visible_history");
+assert.equal(env.rolloverSourceEligible({ready:true,anchor:"x",draft:false},{mode:"proactive",sourceAnchor:"x"}),true);
+assert.equal(env.rolloverSourceEligible({ready:true,anchor:"y",draft:false},{mode:"proactive",sourceAnchor:"x"}),false);
+assert.equal(env.rolloverSourceEligible({contextLimit:true,draft:true},{mode:"hard_limit"}),false);
+const marker="a".repeat(64),old={id:10,url:"https://chatgpt.com/c/old",windowId:1,groupId:4},fresh={id:11,url:"https://chatgpt.com/c/new",windowId:1,groupId:4};
+const journalKey="researchtubePlanRollover:old";
+const journal={chatId:"old",oldTabId:10,oldUrl:old.url,windowId:1,groupId:4,newTabId:11,marker,phase:"sent",mode:"hard_limit"};
+async function recovery({oldOpen=false,ack=true,successorReady=false,oldDraft=false,alreadyCommitted=false,proactive=false,oldChanged=false}={}){
+  let stored={[journalKey]:{...journal,...(proactive?{mode:"proactive",sourceAnchor:"source"}:{})}},retired=alreadyCommitted,removed=[],moved=0,logged=[];
+  let next={id:9,prompt:"continue original task",delay_seconds:0},cur=null,version=1,idleAnchor=null,idleSince=null,sent=[];
+  const tabs={get:async id=>id===11?fresh:id===10&&oldOpen?old:Promise.reject(Error("closed")),query:async()=>oldOpen&&!removed.length?[old,fresh]:[fresh],remove:async id=>{removed.push(id);oldOpen=false;}};
+  const storage={local:{get:async key=>({[key]:stored[key]}),set:async x=>Object.assign(stored,x),remove:async key=>delete stored[key]}};
+  const live=id=>id===11?{ready:successorReady,draft:false,anchor:"successor",acknowledgedRolloverMarkers:ack?[marker]:[],rolloverMarkers:[marker]}:{contextLimit:!proactive,ready:true,anchor:oldChanged?"changed":"source",draft:oldDraft};
+  const read=async(name,a)=>({retired:a.chat_id==="old"&&retired,chat_id:retired?"new":"old",agent_id:"old",version,paused:false,goal:"goal",state:"checkpoint",current:cur,next,idle_anchor:idleAnchor,idle_since:idleSince});
+  const mutate=async(id,v,action,fields)=>{
+    assert.equal(v,version);
+    if(action==="rollover"){assert.equal(fields.successor,"new");retired=true;moved++;}
+    else if(action==="observe"){idleAnchor=fields.anchor;idleSince=now;}
+    else if(action==="claim"){cur={...next,...fields,status:"claimed"};next=null;}
+    else if(action==="dispatch")cur.status="dispatching";
+    else if(action==="sent")cur.status="sent";
+    else throw Error("unexpected "+action);
+    version++;return true;
+  };
+  const sendNew=async(id,options)=>{assert.equal(id,11);sent.push(options.completionText);await options.beforeSend();await options.beforeInsert();await options.beforeDispatch();return {sent:true};};
+  const instance=factory({tabs,storage},path,u=>u?path(u).split("/").at(-1):null,async id=>live(id),async()=>null,read,mutate,async()=>"plan."+marker,sendNew,(...a)=>logged.push(a),(code,msg)=>Object.assign(Error(msg),{code}),{now:()=>now},{add(){}},URL,TextEncoder);
+  if(proactive&&oldOpen)await instance.runPlannedChat(old,"old",{rolloverKiB:768},stored[journalKey]);
+  else await instance.resumePlanRollover(old,"old",{retired,paused:false},{});
+  if(retired&&!stored[journalKey]&&successorReady){
+    await instance.runPlannedChat(fresh,"new");
+    await instance.runPlannedChat(fresh,"new");
+  }
+  return {moved,removed,stored,logged,sent};
+}
+let rec=await recovery();assert.equal(rec.moved,1);assert.deepEqual(rec.removed,[]);assert.equal(rec.stored[journalKey],undefined);assert.equal(rec.logged.at(-1)[2],"ROLLOVER_COMPLETE");
+rec=await recovery({oldOpen:true,successorReady:true});assert.equal(rec.moved,1);assert.deepEqual(rec.removed,[10]);assert.equal(rec.sent.length,1);assert.match(rec.sent[0],/continue original task/);
+rec=await recovery({ack:false});assert.equal(rec.moved,0);assert.ok(rec.stored[journalKey]);assert.equal(rec.logged.at(-1)[2],"ROLLOVER_ACK_RESPONSE_PENDING");
+rec=await recovery({oldOpen:true,oldDraft:true});assert.equal(rec.moved,0);assert.deepEqual(rec.removed,[]);
+rec=await recovery({oldOpen:true,oldDraft:true,alreadyCommitted:true});assert.equal(rec.moved,0);assert.deepEqual(rec.removed,[]);assert.ok(rec.stored[journalKey]);
+rec=await recovery({oldOpen:true,ack:false,alreadyCommitted:true});assert.equal(rec.moved,0);assert.deepEqual(rec.removed,[10]);
+rec=await recovery({oldOpen:true,proactive:true,successorReady:true});assert.equal(rec.moved,1);assert.deepEqual(rec.removed,[10]);assert.equal(rec.sent.length,1);
+rec=await recovery({oldOpen:true,proactive:true,oldChanged:true});assert.equal(rec.moved,0);assert.deepEqual(rec.removed,[]);
+assert.match(src,/if\(id!==journal\.chatId\|\|chats\.has\(id\)\|\|activePlanChats\.has\(id\)\)continue;/);
+console.log("proactive pressure, acknowledged handoff recovery, automatic successor dispatch, draft safety: ok");
