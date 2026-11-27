@@ -439,6 +439,8 @@ class LocalMcpService:
     async def call(self, name, arguments):
         if name in MEMORY_TOOLS:
             try:
+                if name not in ("system_get_trace","system_export_trace"):
+                    arguments=dict(arguments);arguments.pop("chatTabId",None)
                 if name.startswith("skill_"):
                     arguments=dict(arguments);arguments.pop("chatTabId",None)
                     if name in agent_plans.WRITES: arguments["actor"]="codex"

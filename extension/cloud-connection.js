@@ -1,5 +1,7 @@
 // Public transport only. All actual tools still run through handleMcpRequest.
 
+import { mcpPayloadSizes } from "./mcp-payload-metrics.js";
+
 export const CLOUD_ORIGIN = "https://rtube.win";
 const KEY = "researchtubeCloudCredential";
 const SESSION_KEY = "researchtubeCloudEnrollment";
@@ -204,7 +206,7 @@ export function createCloudConnection(host) {
       ws.send(JSON.stringify({type:"response",requestId:message.requestId,error:{code:-32000,message:"Extension request capacity reached."}}));return;
     }
     pending.add(message.requestId);
-    let response;
+    let response, verifiedTarget=null;
     try {
       const { name, arguments: args } = message.request.params;
       if (!await host.accepts(name, args)) throw fail("INVALID_ARGUMENT", "Arguments do not match an available tool.");
@@ -226,6 +228,7 @@ export function createCloudConnection(host) {
           bindings.set(target.bindingId, target);
         }
         requests.set(message.requestId, target);
+        verifiedTarget=target;
       }
       const result = await host.dispatch({ jsonrpc: "2.0", id: message.requestId, method: "tools/call", params: message.request.params });
       if (target) await verifyTarget(target);
@@ -240,9 +243,16 @@ export function createCloudConnection(host) {
     record("extension.returned", Date.now());
     const payload = { type: "response", requestId: message.requestId, ...response };
     const text = JSON.stringify(payload);
-    ws.send(new TextEncoder().encode(text).length <= 1048576 ? text : JSON.stringify({ type: "response", requestId: message.requestId,
-      error: { code: -32000, message: "The response exceeded the relay limit. Request a smaller result." } }));
-    try{host.diagnostic?.("EXTENSION_RESPONSE_SENT",{requestId:message.requestId,tool:toolName,bytes:new TextEncoder().encode(text).length});}catch{}
+    const encoder=new TextEncoder();
+    const size=encoder.encode(text).length;
+    const actual=size<=1048576?text:JSON.stringify({type:"response",requestId:message.requestId,error:{code:-32000,message:"The response exceeded the relay limit. Request a smaller result."}});
+    ws.send(actual);
+    try {
+      const relayBytes=actual===text?size:encoder.encode(actual).length;
+      host.diagnostic?.("EXTENSION_RESPONSE_SENT",{requestId:message.requestId,tool:toolName,bytes:relayBytes});
+      host.diagnostic?.("MCP_PAYLOAD_SIZE",{requestId:message.requestId,tool:toolName,chatTabId:verifiedTarget?.tabId,conversationId:verifiedTarget?.conversationId,
+        ...mcpPayloadSizes(message.request.params.arguments,response.result??response.error),relayBytes,status:actual===text?"forwarded":"relay_limit"});
+    } catch { /* diagnostics must never change tool outcomes */ }
   }
   async function finishAutomatic(error = null) {
     const current = automatic; if (!current) return;

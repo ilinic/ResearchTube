@@ -1,5 +1,5 @@
 {
-  "reliabilityRetentionSeconds": {"value": 3600, "comment": "Detailed trace retention (60–3600 seconds). Restart Agent."},
+  "reliabilityRetentionSeconds": {"value": 3600, "comment": "Detailed trace retention (60–86400 seconds); disk cap remains a safety ceiling. Restart Agent."},
   "reliabilityDiskMiB": {"value": 64, "comment": "Trace and export disk budget (16–64 MiB). Restart Agent."},
   "sqlOutboxMiB": {"value": 64, "comment": "Maximum logical durable SQL outbox payload (1–256 MiB), separate from trace. Restart Agent."},
   "sqlReadConcurrency": {"value": 8, "comment": "Parallel read-only SQLite connections (1–16); restart Agent."},

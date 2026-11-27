@@ -43,7 +43,7 @@ assert.equal(byName('workspace_open_folder').inputSchema.properties.workspacePat
 assert.deepEqual(byName('workspace_open_folder').annotations, { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false });
 assert.equal(byName('workspace_open_folder')._meta?.ui, undefined, 'Explorer opening does not require a custom widget');
 assert.match(byName('site_read').description, /untrusted data/);
-assert.match(byName('site_interact').description, /never replay completed steps/);
+assert.match(byName('site_interact').description, /never replay completed steps/i);
 assert.match(byName('site_get_images').description, /selected images/);
 assert.match(byName('site_get_files').description, /selected documents, audio or video/);
 assert.match(byName('site_get_files').description, /For images use site_get_images/);

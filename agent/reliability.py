@@ -16,8 +16,8 @@ import uuid
 
 REQUEST = ContextVar("reliability_request", default=None)
 TOKEN = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
-TEXT_FIELDS = frozenset(("requestId", "tool", "component", "event", "level", "instanceId", "version", "code", "sqliteName", "stage", "method", "status", "executionState", "exceptionType", "schedulerTickId", "taskId", "operationId"))
-NUM_FIELDS = frozenset(("attempt", "tabId", "chatTabId", "groupId", "durationMs", "monoMs", "atMs", "bytes", "statementCount", "statementIndex", "rowsAffected", "sqliteCode", "httpStatus", "queueDepth"))
+TEXT_FIELDS = frozenset(("requestId", "tool", "component", "event", "level", "instanceId", "version", "code", "sqliteName", "stage", "method", "status", "executionState", "exceptionType", "schedulerTickId", "taskId", "operationId", "conversationId"))
+NUM_FIELDS = frozenset(("attempt", "tabId", "chatTabId", "groupId", "durationMs", "monoMs", "atMs", "bytes", "statementCount", "statementIndex", "rowsAffected", "sqliteCode", "httpStatus", "queueDepth", "requestBytes", "resultBytes", "textBytes", "structuredBytes", "duplicateBytes", "relayBytes", "promptBytes"))
 INSTANCE = uuid.uuid4().hex
 
 
@@ -218,18 +218,45 @@ class Trace:
         page=[]
         selected=set()
         aggregate=filters.get("includeSummary",False)
+        payload_summary=filters.get("includePayloadSummary",False)
         seen=set()
+        payload_seen=set()
         stats={}
+        payloads={}
+        totals={"calls":0,"prompts":0,"relayLimited":0,"unattributedCalls":0,**{k:0 for k in ("requestBytes","resultBytes","textBytes","structuredBytes","duplicateBytes","relayBytes","promptBytes")}}
         def consider(data):
             try:
                 event=json.loads(data)
                 key=(event["atMs"],event["eventId"])
                 if not since<=key[0] or (before is not None and key>=before):
                     return
-                if any(filters.get(k) is not None and filters[k]!=event.get(k) for k in ("requestId","component","tool","code","level","tabId","chatTabId","groupId","taskId")):
+                if any(filters.get(k) is not None and filters[k]!=event.get(k) for k in ("requestId","component","tool","code","level","tabId","chatTabId","groupId","taskId","conversationId")):
                     return
                 if key in selected:
                     return
+                if payload_summary and event.get("event") in ("MCP_PAYLOAD_SIZE","PLAN_PROMPT_SIZE"):
+                    # Only one terminal relay sample per request. Trace batches
+                    # may be retried after lost acknowledgement.
+                    identity=(event.get("event"),event.get("requestId") or event["eventId"])
+                    if identity not in payload_seen:
+                        payload_seen.add(identity)
+                        conversation=event.get("conversationId") or "unattributed"
+                        tool=event.get("tool","unknown")
+                        label=(conversation,tool)
+                        # Bound the number of distinct keys, but never omit their
+                        # bytes from totals. Report overflow as one bucket.
+                        if label not in payloads and len(payloads)>=2000:
+                            label=("overflow","overflow")
+                        item=payloads.setdefault(label,{"calls":0,"prompts":0,"relayLimited":0,**{k:0 for k in ("requestBytes","resultBytes","textBytes","structuredBytes","duplicateBytes","relayBytes","promptBytes")}})
+                        is_call=event["event"]=="MCP_PAYLOAD_SIZE"
+                        for target in (item,totals):
+                            target["calls"]+=int(is_call)
+                            target["prompts"]+=int(not is_call)
+                            target["relayLimited"]+=int(is_call and event.get("status")=="relay_limit")
+                            for field in ("requestBytes","resultBytes","textBytes","structuredBytes","duplicateBytes","relayBytes","promptBytes"):
+                                v=event.get(field,0)
+                                if isinstance(v,int) and v>=0: target[field]+=v
+                        totals["unattributedCalls"]+=int(is_call and conversation=="unattributed")
                 if aggregate and key not in seen:
                     seen.add(key)
                     label=(event.get("component","unknown"),event.get("tool","unknown"))
@@ -282,6 +309,9 @@ class Trace:
                 percentiles={f"p{p}Ms":durations[max(0,math.ceil(len(durations)*p/100)-1)] if durations else None for p in (50,95,99)}
                 summary.append({"component":component,"tool":tool,**item,**percentiles,"durationSamples":len(durations)})
             result["summary"]=sorted(summary,key=lambda item:(-item["errors"],-item["events"],item["tool"]))[:100]
+        if payload_summary:
+            grouped=sorted(({"conversationId":c,"tool":t,**v} for (c,t),v in payloads.items()),key=lambda v:(-v["resultBytes"],-v["promptBytes"],v["conversationId"],v["tool"]))
+            result["payloadSummary"]={"sinceMs":int(since),"totals":totals,"byConversationTool":grouped[:100],"truncated":len(grouped)>100}
         return result
 
     def export(self, path, filters):
@@ -309,7 +339,7 @@ class Trace:
                             event=json.loads(data)
                             if event["atMs"]<since or event["eventId"] in seen:
                                 return
-                            if any(filters.get(key) is not None and filters[key]!=event.get(key) for key in ("requestId","component","tool","code","level","tabId","chatTabId","groupId","taskId")):
+                            if any(filters.get(key) is not None and filters[key]!=event.get(key) for key in ("requestId","component","tool","code","level","tabId","chatTabId","groupId","taskId","conversationId")):
                                 return
                             # Re-project even persisted records; do not trust
                             # arbitrary JSONL fields written by another process.

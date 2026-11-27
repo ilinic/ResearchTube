@@ -63,3 +63,25 @@ class ReliabilityTraceTest(unittest.TestCase):
             with self.assertRaises(OSError):
                 trace._flush()
             self.assertEqual(trace.query({"requestId":"r"})["events"][0]["event"],"TEST")
+
+
+    def test_payload_summary_uses_verified_conversation_and_deduplicates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            trace=Trace()
+            trace.root=Path(directory)
+            sample={"event":"MCP_PAYLOAD_SIZE","component":"extension","tool":"site_read","requestId":"req-one","conversationId":"chat-one","requestBytes":10,"resultBytes":1000,"structuredBytes":400,"textBytes":400,"duplicateBytes":400,"relayBytes":1100,"status":"forwarded"}
+            trace.add(sample)
+            trace.add(sample)
+            trace.add({"event":"MCP_PAYLOAD_SIZE","tool":"db_query","requestId":"req-two","requestBytes":20,"resultBytes":600,"relayBytes":700,"status":"relay_limit"})
+            trace.add({"event":"PLAN_PROMPT_SIZE","tool":"scheduler","conversationId":"chat-one","promptBytes":50})
+            trace._flush()
+            summary=trace.query({"includePayloadSummary":True,"limit":1})["payloadSummary"]
+            self.assertEqual(summary["totals"]["calls"],2)
+            self.assertEqual(summary["totals"]["resultBytes"],1600)
+            self.assertEqual(summary["totals"]["unattributedCalls"],1)
+            self.assertEqual(summary["totals"]["relayLimited"],1)
+            self.assertEqual(summary["totals"]["promptBytes"],50)
+            own=trace.query({"conversationId":"chat-one","includePayloadSummary":True})["payloadSummary"]["totals"]
+            self.assertEqual(own["calls"],1)
+            self.assertEqual(own["duplicateBytes"],400)
+            self.assertEqual(own["promptBytes"],50)

@@ -48,8 +48,8 @@ except ImportError:
     from task_history import TaskHistory
     from browser_resources import save_browser_resource
 
-AGENT_VERSION = "2.8.17"
-INTERFACE_VERSION = 94
+AGENT_VERSION = "2.8.18"
+INTERFACE_VERSION = 95
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
 MAX_GOOGLE_TRANSLATE_AUDIO_BYTES = 16 * 1024 * 1024
@@ -6641,7 +6641,7 @@ async def serve(port: int, on_started: Callable[[], None] | None = None) -> None
             reliability.TRACE.disk_bytes=(cap-8)*1048576
         else:
             reliability.TRACE.disk_bytes=56*1048576
-        if type(ttl) is int and 60<=ttl<=3600:
+        if type(ttl) is int and 60<=ttl<=86400:
             reliability.TRACE.ttl=ttl
         reliability.TRACE.export_path=memory_path("scheduled/reliability-trace.jsonl")
         quota=config.get("sqlOutboxMiB",64)

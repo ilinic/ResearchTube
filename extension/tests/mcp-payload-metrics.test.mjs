@@ -1,0 +1,14 @@
+import assert from "node:assert/strict";
+import {mcpPayloadSizes} from "../mcp-payload-metrics.js";
+const value={message:"Привет 🌍"};
+const text=JSON.stringify(value);
+const sizes=mcpPayloadSizes({query:"é"},{content:[{type:"text",text},{type:"text",text:"extra"},{type:"image",data:"xyz"}],structuredContent:value});
+assert.equal(sizes.requestBytes,Buffer.byteLength(JSON.stringify({query:"é"})));
+assert.equal(sizes.structuredBytes,Buffer.byteLength(text));
+assert.equal(sizes.duplicateBytes,Buffer.byteLength(text));
+assert.equal(sizes.textBytes,Buffer.byteLength(text)+5);
+assert.ok(sizes.resultBytes>sizes.textBytes+sizes.structuredBytes);
+assert.equal(mcpPayloadSizes({},{content:[{type:"text",text:"error"}]}).duplicateBytes,0);
+assert.ok(Object.values(sizes).every(Number.isSafeInteger));
+assert.doesNotMatch(JSON.stringify(sizes),/Привет|query|message/);
+console.log("MCP payload metrics: UTF-8, duplicate representation and privacy OK");

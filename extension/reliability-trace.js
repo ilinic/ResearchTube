@@ -1,9 +1,9 @@
 // Bounded, best-effort diagnostic batching; no payloads or credentials.
 export function createReliabilityTrace({send,version,now=()=>Date.now(),uuid=()=>crypto.randomUUID(),schedule=(fn,ms)=>setTimeout(fn,ms),cancel=id=>clearTimeout(id)}) {
-  const allowed=new Set(["event","component","requestId","tool","instanceId","version","level","stage","code","method","status","executionState","exceptionType","schedulerTickId","taskId"]);
-  const numbers=new Set(["attempt","tabId","chatTabId","groupId","durationMs","monoMs","atMs","bytes","statementCount","rowsAffected","httpStatus","queueDepth"]);
+  const allowed=new Set(["event","component","requestId","tool","instanceId","version","level","stage","code","method","status","executionState","exceptionType","schedulerTickId","taskId","operationId","conversationId"]);
+  const numbers=new Set(["attempt","tabId","chatTabId","groupId","durationMs","monoMs","atMs","bytes","statementCount","rowsAffected","httpStatus","queueDepth","requestBytes","resultBytes","textBytes","structuredBytes","duplicateBytes","relayBytes","promptBytes"]);
   let instance=null,timer=null,due=Infinity,flushing=false,dropped=0,bytes=0,retryAfter=0;
-  const pending=[];
+  let pending=[];
   const prune=()=>{const cutoff=now()-3600000;while(pending.length&&pending[0].created<cutoff){bytes-=pending.shift().size;dropped++;}};
   function plan(delay=30000){const target=Math.max(now()+delay,retryAfter);if(timer!==null&&due<=target)return;if(timer!==null)cancel(timer);due=target;timer=schedule(()=>{timer=null;due=Infinity;void flush();},Math.max(0,target-now()));}
   function add(event,fields={}){
@@ -41,7 +41,8 @@ export function createReliabilityTrace({send,version,now=()=>Date.now(),uuid=()=
         const events=batch.map(item=>item.value);
         if(lost)events.push({component:"extension",event:"TRACE_DROPPED",level:"WARN",atMs:now(),rowsAffected:lost,instanceId:instance,version});
         await send(events);
-        for(const item of batch){const index=pending.indexOf(item);if(index>=0){pending.splice(index,1);bytes-=item.size;}}
+        const sent=new Set(batch);
+        pending=pending.filter(item=>{if(!sent.has(item))return true;bytes-=item.size;return false;});
         dropped=Math.max(0,dropped-lost);
       }
     }catch{retryAfter=now()+30000;}finally{flushing=false;if(pending.length)plan();}
