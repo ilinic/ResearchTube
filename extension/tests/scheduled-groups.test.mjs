@@ -9,7 +9,7 @@ assert.match(source,/activePlanChats\.delete\(id\)/);
 assert.match(source,/__plan_scan/);
 assert.match(source,/__plan_transition/);
 assert.match(source,/planned:true/);
-assert.match(source,/if \(planned && nonempty\)/);
+assert.match(source,/if \(planned && nonempty && !resumeExact\)/);
 assert.match(source,/planConversationId\(live.url\)!==chatId/);
 assert.equal(PLAN_TOOL_NAMES.length,12);
 const defs=memoryToolDefinitions();

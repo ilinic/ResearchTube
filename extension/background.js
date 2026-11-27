@@ -109,7 +109,7 @@ globalThis.addEventListener?.("fetch", createMediaStreamHandler({
   fetchMedia: (url, options) => fetch(url, options),
   log: (stage, details = {}) => consoleAction(`[ResearchTube media stream ${EXTENSION_VERSION}]`, stage, details)
 }));
-const REQUIRED_AGENT_INTERFACE_VERSION = 93;
+const REQUIRED_AGENT_INTERFACE_VERSION = 94;
 // A UI resource URI is a cache key in MCP Apps. Increment it whenever the
 // rendered template changes so ChatGPT does not reuse a stale iframe bundle.
 const MEDIA_TO_CHAT_WIDGET_URI = "ui://researchtube/chat-target-v8.html";
@@ -3402,7 +3402,7 @@ async function updateComposerWatchdog(tabId, action, preserve = false) {
       else state?.suppress();
     }, args: [action, preserve] });
 }
-async function sendComposerWhenReady(tabId, { completionText = null, revision = null, chatPath = null, beforeSend = null, onSendCommit = null, cloudTarget = null, scheduled = false, planned = false, beforeInsert = null, beforeDispatch = null } = {}) {
+async function sendComposerWhenReady(tabId, { completionText = null, revision = null, chatPath = null, beforeSend = null, onSendCommit = null, cloudTarget = null, scheduled = false, planned = false, resumePlannedDraft = false, allowNewConversation = false, beforeInsert = null, beforeDispatch = null } = {}) {
   if (cloudTarget) {
     const previous = beforeSend;
     beforeSend = async () => { await cloudConnection.verifyTarget(cloudTarget); await previous?.(); };
@@ -3428,8 +3428,9 @@ async function sendComposerWhenReady(tabId, { completionText = null, revision = 
       const nonempty = Boolean(initial.text.trim() || initial.attachments);
       // Scheduled group membership explicitly opts into sending a text draft as-is.
       // Do not add the continuation to it or consume pending attachments.
-      if (planned && nonempty) return {sent:false,reason:"PLAN_DRAFT_PRESENT"};
-      const scheduledDraft = scheduled && Boolean(initial.text.trim());
+      const resumeExact = planned && resumePlannedDraft && !initial.attachments && initial.text === completionText;
+      if (planned && nonempty && !resumeExact) return {sent:false,reason:"PLAN_DRAFT_PRESENT"};
+      const scheduledDraft = scheduled && !planned && Boolean(initial.text.trim());
       if (scheduled && initial.attachments) return {sent:false,reason:"SCHEDULED_ATTACHMENTS_PRESENT"};
       if (scheduledDraft) completionText = null;
       if (scheduled) { await updateComposerWatchdog(tabId,"hold"); held=true; }
@@ -3451,7 +3452,7 @@ async function sendComposerWhenReady(tabId, { completionText = null, revision = 
         if (!latest?.found || !latest.idle || latest.text !== expected || latest.attachments || latest.revision !== initial.revision)
           return {sent:false,reason:"SCHEDULED_DRAFT_CHANGED"};
       }
-      if (completionText) {
+      if (completionText && !resumeExact) {
         // Append with real editor input. Never clear/replace the existing draft.
         const suffix = (expected.trim() ? "\n\n" : "") + completionText;
         const positioned = (await cdpEvaluate(tabId, chatComposerPageExpression(function () {
@@ -3502,7 +3503,7 @@ async function sendComposerWhenReady(tabId, { completionText = null, revision = 
             (!baseline.generating && state.generating ||
              baseline.sendPresent && !baseline.sendDisabled && baseline.sendAriaDisabled!=="true" &&
              (!state.sendPresent || state.sendDisabled || state.sendAriaDisabled==="true"));
-          if (state.chatPath===expectedChatPath && (state.userCount>baseline.userCount || state.lastUserId && state.lastUserId!==baseline.lastUserId || composerAccepted)) {
+          if ((allowNewConversation ? Boolean(state.chatPath) && state.chatPath!==expectedChatPath : state.chatPath===expectedChatPath) && (state.userCount>baseline.userCount || state.lastUserId && state.lastUserId!==baseline.lastUserId || composerAccepted)) {
             await updateComposerWatchdog(tabId,"suppress");
             return {sent:true,source:scheduledDraft?"draft":"continuation"};
           }
@@ -7902,7 +7903,13 @@ async function planOperationKey(value) {
 async function planTransition(chatId,version,action,fields={}) {
   const payload={chat_id:chatId,version,action,...fields};
   const result=await callSharedMemory("__plan_transition",{...payload,operation_id:await planOperationKey(payload)});
+  if(result.state!=="committed") reliabilityTrace.add("PLAN_TRANSITION_DEFERRED",{tool:"__plan_transition",stage:action,code:result.code||result.state,operationId:result.operation_id});
   return result.state==="committed";
+}
+const planDecisions=new Map();
+function planDecision(tabId,status,code=null) {
+  const key=status+":"+code;
+  if(planDecisions.get(tabId)!==key){planDecisions.set(tabId,key);reliabilityTrace.add("PLAN_SCHEDULER_DECISION",{tabId,status,code});}
 }
 async function scheduledPending(tabId) {
   await Promise.all([ensureMediaToChatLoaded(),ensureLibraryStoreLoaded(),artifactTaskManager.ensure(),taskCompletionDelivery.ensure()]);
@@ -7913,11 +7920,8 @@ async function scheduledPending(tabId) {
   if (taskCompletionDelivery.hasPendingChat(tabId)) return "TASK_COMPLETION_PENDING";
   if ([...mediaToChatTasks.values()].some(t=>active(t)&&(t.target?.tabId===tabId || t.tabId===tabId))) return "MEDIA_DELIVERY_PENDING";
   if ([...libraryStoreTasks.values()].some(t=>active(t)&&t.tabId===tabId)) return "LIBRARY_DELIVERY_PENDING";
-  // Unknown ownership is not evidence of a busy specific chat; keep the
-  // conservative guard but make this distinct from actual chat activity.
-  if (activeScheduledMcpCalls.has(null)) return "MCP_CALL_UNBOUND";
-  if ([...mediaToChatTasks.values()].some(t=>active(t)&&!t.target&&t.tabId==null)) return "MEDIA_DELIVERY_UNBOUND";
-  if ([...libraryStoreTasks.values()].some(t=>active(t)&&t.tabId==null)) return "LIBRARY_DELIVERY_UNBOUND";
+  // Unbound calls cannot prove this particular conversation is busy.
+  // The live composer, scoped tasks and guarded Send still protect it.
   return null;
 }
 // Scheduled readiness is based on the live Composer and generation controls.
@@ -7956,16 +7960,110 @@ async function scheduledChatState(tabId) {
     // even if the last turn was stopped before the assistant produced text.
     else if(!completed&&!send&&!idleVoice&&!( !draft && sendControls.length)) reason="CHAT_IDLE_UNCONFIRMED";
     else if(draft&&!send) reason="CHAT_DRAFT_SEND_DISABLED";
+    const fingerprint=m=>{if(!m)return "none";const id=m.getAttribute("data-message-id")||m.closest("[data-message-id]")?.getAttribute("data-message-id");if(id)return id;const t=(m.innerText||m.textContent||"").trim();let h=2166136261;for(let i=0;i<t.length;i++)h=Math.imul(h^t.charCodeAt(i),16777619);return m.getAttribute("data-message-author-role")+":"+t.length+":"+(h>>>0).toString(16);};
     const lastUserId=users.at(-1)?.getAttribute("data-message-id")||null;
-    const lastId=last?.getAttribute("data-message-id")||null;
+    const anchor=fingerprint(users.at(-1))+":"+fingerprint(last);
+    const draftText=String(composer?.value??composer?.innerText??composer?.textContent??"");
+    const draftMarker=draftText.trim().match(/^\[ResearchTube task \d+ ([a-f0-9]{64})\]/)?.[1]||null;
+    const limitText=/^(?:(?:you(?:\u2019|\x27)ve|you have) reached the maximum length (?:for|of) this conversation(?:[,.; ]|$)|this conversation has reached its maximum length(?:[,.; ]|$)|достигнута максимальная длина (?:этого )?(?:разговора|чата)(?:[,.; ]|$))/i;
+    const contextLimit=[...document.querySelectorAll('[role="alert"],[role="status"],[data-testid*="error"],main p')].some(e=>visible(e)&&!e.closest('[data-message-author-role="user"]')&&(!e.closest('[data-message-author-role="assistant"]')||e.matches('[role="alert"],[data-testid*="error"]'))&&limitText.test((e.innerText||e.textContent||"").trim()));
+    const rolloverMarkers=users.slice(-30).map(m=>(m.innerText||m.textContent||"").trim().match(/^\[ResearchTube rollover ([a-f0-9]{64})\]/)?.[1]).filter(Boolean);
     const taskMarkers=users.slice(-30).map(m=>(m.innerText||m.textContent||"").trim().match(/^\[ResearchTube task \d+ ([a-f0-9]{64})\]/)?.[1]).filter(Boolean);
-    return {ready:reason===null,reason,draft,userCount:users.length,lastUserId,anchor:lastUserId?lastUserId+":"+(lastId||last?.getAttribute("data-message-author-role")||"unknown"):null,taskMarkers};
+    return {ready:reason===null,reason,draft,draftMarker,userCount:users.length,lastUserId,anchor,taskMarkers,rolloverMarkers,contextLimit,hasAssistant:completed};
   }});
   return result[0]?.result||{ready:false,reason:"CHAT_STATE_UNAVAILABLE"};
+}
+// Browser-local recovery journal. The authoritative agent/queue mapping is
+// committed atomically in SQLite; this journal only tracks browser handoff.
+const ROLLOVER_PREFIX="researchtubePlanRollover:";
+function planProjectPath(url) {
+  try {
+    const u=new URL(url);
+    if(u.origin!=="https://chatgpt.com")return null;
+    return /^\/g\/(g-p-[A-Za-z0-9_-]+)\/(?:c\/[^/]+|project)\/?$/.exec(u.pathname)?.[1]||null;
+  } catch {return null;}
+}
+function rolloverLanding(url) {
+  const project=planProjectPath(url);
+  const path=chatConversationPath(url);
+  if(!path||path.startsWith("/g/")&&!project)return null;
+  return project?"https://chatgpt.com/g/"+project+"/project":"https://chatgpt.com/";
+}
+function planTaskMessage(p,task,marker) {
+  const goal=p.goal?"\n\nCurrent recorded goal (context): "+p.goal:"";
+  const skills=p.skills?.length?"\n\nShared skill references (read relevant versions with skill_read): "+p.skills.map(s=>"#"+s.id+" "+s.name+" v"+s.version).join("; "):"";
+  return "[ResearchTube task "+task.id+" "+marker+"]\n"+task.prompt+goal+skills+"\n\nUse your plan tools to record the outcome, edit future tasks and improve relevant shared skills when useful. Respect the user's authorized objective.";
+}
+async function resumePlanRollover(tab,chatId,p,state) {
+  const key=ROLLOVER_PREFIX+chatId;
+  let journal=(await chrome.storage.local.get(key))[key];
+  const trace=(code)=>planDecision(tab.id,"rollover",code);
+  const save=async(value)=>{journal=value;await chrome.storage.local.set({[key]:value});};
+  const sameOld=async()=>{
+    const old=await chrome.tabs.get(tab.id);
+    return chatConversationPath(old.url)===chatConversationPath(tab.url)&&!old.pendingUrl&&old.groupId===tab.groupId&&old.windowId===tab.windowId;
+  };
+  if(!journal) {
+    if(!state.contextLimit||state.draft||tab.groupId<0||!Number.isInteger(tab.groupId))return trace("ROLLOVER_BLOCKED");
+    const landing=rolloverLanding(tab.url);
+    if(!landing)return trace("ROLLOVER_PROJECT_UNSUPPORTED");
+    const marker=(await planOperationKey({agent_id:p.agent_id||chatId,chat_id:chatId,version:p.version,action:"rollover"})).slice(5);
+    await save({chatId,oldTabId:tab.id,oldUrl:tab.url,groupId:tab.groupId,windowId:tab.windowId,landing,marker,phase:"creating"});
+    if(!await sameOld())return trace("ROLLOVER_SOURCE_CHANGED");
+    const fresh=await chrome.tabs.create({windowId:tab.windowId,index:tab.index+1,url:landing,active:false});
+    await save({...journal,newTabId:fresh.id,phase:"opened"});
+    await chrome.tabs.group({groupId:tab.groupId,tabIds:[fresh.id]});
+  }
+  if(journal.oldTabId!==tab.id||journal.groupId!==tab.groupId||journal.oldUrl!==tab.url||!Number.isInteger(journal.newTabId))return trace("ROLLOVER_RECOVERY_REQUIRED");
+  let fresh=await chrome.tabs.get(journal.newTabId).catch(()=>null);
+  if(!fresh)return trace("ROLLOVER_SUCCESSOR_MISSING");
+  if(fresh.groupId!==journal.groupId||fresh.windowId!==journal.windowId)return trace("ROLLOVER_GROUP_CHANGED");
+  const successor=planConversationId(fresh.url);
+  if(successor) {
+    if(successor===chatId||planProjectPath(fresh.url)!==planProjectPath(journal.oldUrl))return trace("ROLLOVER_PROJECT_MISMATCH");
+    const nextState=await scheduledChatState(fresh.id);
+    if(!nextState.ready||nextState.draft||!nextState.hasAssistant||!nextState.rolloverMarkers?.includes(journal.marker))return trace("ROLLOVER_WAIT_ACK");
+    if(!await sameOld()||await scheduledPending(tab.id)||await scheduledPending(fresh.id))return trace("ROLLOVER_BUSY");
+    const oldState=await scheduledChatState(tab.id);
+    if(oldState.draft||!oldState.contextLimit)return trace("ROLLOVER_SOURCE_CHANGED");
+    const latest=await callSharedMemory("__plan_peek",{chat_id:chatId});
+    if(latest.paused)return trace("PLAN_PAUSED");
+    if(!latest.retired) {
+      if(!await planTransition(chatId,latest.version,"rollover",{successor}))return trace("ROLLOVER_COMMIT_PENDING");
+    } else if(latest.chat_id!==successor)return trace("ROLLOVER_CONFLICT");
+    await save({...journal,successor,phase:"committed"});
+    // Closing the browser tab never deletes the old conversation. Verify both
+    // endpoints again after committing and do not close changed documents.
+    fresh=await chrome.tabs.get(journal.newTabId);
+    if(!await sameOld()||planConversationId(fresh.url)!==successor||fresh.groupId!==journal.groupId||planProjectPath(fresh.url)!==planProjectPath(journal.oldUrl))return trace("ROLLOVER_CLOSE_BLOCKED");
+    if((await scheduledChatState(tab.id)).draft)return trace("ROLLOVER_CLOSE_BLOCKED");
+    await chrome.tabs.remove(tab.id);
+    await chrome.storage.local.remove(key);
+    return trace("ROLLOVER_COMPLETE");
+  }
+  if(journal.phase!=="opened")return trace("ROLLOVER_SEND_UNCERTAIN");
+  await waitForChatGPTTab(fresh.id);
+  const newState=await scheduledChatState(fresh.id);
+  if(!newState.ready||newState.draft)return trace("ROLLOVER_COMPOSER_NOT_READY");
+  const message="[ResearchTube rollover "+journal.marker+"]\nYou are the successor of ResearchTube agent "+(p.agent_id||chatId)+". The previous conversation reached its maximum length: "+journal.oldUrl+"\n\nRecorded goal:\n"+p.goal+"\n\nRecorded checkpoint:\n"+p.state+"\n\nShared skills: "+(p.skills||[]).map(x=>"#"+x.id+" v"+x.version).join(", ")+"\n\nA persistent queue and full history will be attached to this conversation after this handoff. Acknowledge this handoff now, without running tools or creating a new plan. End your response so the scheduler can attach the existing agent and deliver the next task. Do not repeat previous actions blindly.";
+  const guard=async()=>{
+    const t=await chrome.tabs.get(fresh.id);
+    if(t.url!==journal.landing||t.groupId!==journal.groupId||t.pendingUrl||!await sameOld())throw localAgentError("ROLLOVER_TARGET_CHANGED","Project/group or original conversation changed.");
+  };
+  let reserved=false;
+  const result=await sendComposerWhenReady(fresh.id,{completionText:message,scheduled:true,planned:true,allowNewConversation:true,beforeSend:guard,beforeInsert:guard,beforeDispatch:async()=>{
+    await guard();
+    if(!reserved){await save({...journal,phase:"dispatching"});reserved=true;}
+  }});
+  // Never blindly replay after an uncertain dispatch or overwrite a draft.
+  if(result.sent)await save({...journal,phase:"sent"});
+  else if(result.inserted&&!reserved)await save({...journal,phase:"draft_unconfirmed"});
+  trace(result.sent?"ROLLOVER_WAIT_ACK":result.reason||"ROLLOVER_SEND_UNCERTAIN");
 }
 async function runPlannedChat(tab,chatId) {
   const tabId=tab.id,path=chatConversationPath(tab.url);
   const peek=()=>callSharedMemory("__plan_peek",{chat_id:chatId});
+  const decision=(status,code)=>planDecision(tabId,status,code);
   const liveState=async()=>{
     const live=await chrome.tabs.get(tabId);
     if(live.pendingUrl||chatConversationPath(live.url)!==path||planConversationId(live.url)!==chatId)throw localAgentError("BROWSER_TARGET_CHANGED","Planned conversation changed.");
@@ -7974,63 +8072,74 @@ async function runPlannedChat(tab,chatId) {
     return scheduledChatState(tabId);
   };
   let p=await peek();
-  if(p.paused||!p.current&&!p.next)return;
+  if(p.paused)return decision("blocked","PLAN_PAUSED");
   const state=await liveState();
   const pending=await scheduledPending(tabId);
+  if((state.contextLimit||p.retired)&&!pending&&tab.groupId>=0) {
+    await resumePlanRollover(tab,chatId,p,state);return;
+  }
+  if(p.retired||!p.current&&!p.next)return decision("idle","PLAN_EMPTY");
   if(!state.ready||pending||!state.anchor) {
-    // If another user turn begins, the waiting delay must start again after it ends.
+    decision("blocked",pending||state.reason||"PLAN_ANCHOR_MISSING");
     if(!p.current&&p.idle_since!==null&&(state.reason==="CHAT_GENERATING"||state.reason==="CHAT_RESPONSE_BUSY"||pending))
       await planTransition(chatId,p.version,"busy");
     return;
   }
+  let task,marker,resume=false;
   if(p.current) {
     const t=p.current;
     const delivered=state.taskMarkers?.includes(t.marker);
-    if(delivered || t.status==="sent"&&state.anchor!==t.anchor) {
-      await planTransition(chatId,p.version,"finish",{id:t.id,marker:t.marker,anchor:state.anchor});
+    if(delivered&&!state.draft||t.status==="sent"&&!state.draft) {
+      if(await planTransition(chatId,p.version,"finish",{id:t.id,marker:t.marker,anchor:state.anchor}))decision("finished","PLAN_FINISHED");
       return;
     }
-    // A claim cannot click Send until its durable dispatch transition succeeds.
-    // If there is no draft or delivery evidence after a restart, this is safe to release.
-    if(t.status==="claimed"&&!state.draft&&state.anchor===t.anchor)
-      await planTransition(chatId,p.version,"release",{id:t.id,marker:t.marker});
-    // Dispatching with no evidence remains visible as uncertain. Never replay it blindly.
-    return;
+    if(t.status==="claimed"&&state.anchor===t.anchor) {
+      if(!state.draft) {await planTransition(chatId,p.version,"release",{id:t.id,marker:t.marker});return decision("retry","PLAN_CLAIM_RELEASED");}
+      if(state.draftMarker===t.marker){task=t;marker=t.marker;resume=true;}
+      else return decision("blocked","PLAN_USER_DRAFT");
+    } else return decision("blocked","PLAN_SEND_UNCERTAIN");
+  } else {
+    if(state.draft)return decision("blocked","PLAN_USER_DRAFT");
+    if(p.idle_anchor!==state.anchor||p.idle_since===null) {
+      await planTransition(chatId,p.version,"observe",{anchor:state.anchor});return decision("waiting","PLAN_IDLE_OBSERVED");
+    }
+    if(Date.now()-p.idle_since<p.next.delay_seconds*1000)return decision("waiting","PLAN_DELAY");
+    task=p.next;
+    marker=(await planOperationKey({chat_id:chatId,version:p.version,id:task.id,anchor:state.anchor})).slice(5);
+    if(!await planTransition(chatId,p.version,"claim",{id:task.id,anchor:state.anchor,marker}))return decision("blocked","PLAN_CLAIM_PENDING");
+    p=await peek();
+    if(p.paused||p.current?.id!==task.id||p.current?.marker!==marker||p.current.status!=="claimed")return decision("blocked","PLAN_CLAIM_CHANGED");
   }
-  if(state.draft)return;
-  if(p.idle_anchor!==state.anchor||p.idle_since===null) {
-    await planTransition(chatId,p.version,"observe",{anchor:state.anchor});return;
-  }
-  if(Date.now()-p.idle_since<p.next.delay_seconds*1000)return;
-  const task=p.next;
-  const marker=(await planOperationKey({chat_id:chatId,version:p.version,id:task.id,anchor:state.anchor})).slice(5);
-  if(!await planTransition(chatId,p.version,"claim",{id:task.id,anchor:state.anchor,marker}))return;
-  p=await peek();
-  if(p.paused||p.current?.id!==task.id||p.current?.marker!==marker||p.current.status!=="claimed")return;
-  const goal=p.goal?"\n\nCurrent recorded goal (context): "+p.goal:"";
-  const skills=p.skills?.length?"\n\nShared skill references (read relevant versions with skill_read): "+p.skills.map(s=>"#"+s.id+" "+s.name+" v"+s.version).join("; "):"";
-  const message="[ResearchTube task "+task.id+" "+marker+"]\n"+task.prompt+goal+skills+"\n\nUse your plan tools to record the outcome, edit future tasks and improve relevant shared skills when useful. Respect the user's authorized objective.";
+  const message=planTaskMessage(p,task,marker);
   let dispatching=false;
   const verify=async()=>{
     const live=await liveState();
-    if(!live.ready||live.anchor!==state.anchor||await scheduledPending(tabId))throw localAgentError("PLAN_CHAT_BUSY","Planned chat is no longer idle.");
+    if(!live.ready||live.contextLimit||live.anchor!==state.anchor||await scheduledPending(tabId))throw localAgentError("PLAN_CHAT_BUSY","Planned chat is no longer idle.");
     const current=await peek();
-    if(current.paused||current.current?.id!==task.id||current.current?.marker!==marker||!["claimed","dispatching"].includes(current.current?.status))throw localAgentError("PLAN_CONFLICT","Plan reservation changed.");
+    if(current.paused||current.retired||current.current?.id!==task.id||current.current?.marker!==marker||!["claimed","dispatching"].includes(current.current?.status))throw localAgentError("PLAN_CONFLICT","Plan reservation changed.");
     return live;
   };
-  const result=await sendComposerWhenReady(tabId,{completionText:message,chatPath:path,scheduled:true,planned:true,beforeSend:verify,
+  const result=await sendComposerWhenReady(tabId,{completionText:message,chatPath:path,scheduled:true,planned:true,resumePlannedDraft:resume,beforeSend:verify,
     beforeInsert:async()=>{if((await verify()).draft)throw localAgentError("PLAN_DRAFT_PRESENT","User draft must not be consumed.");},
     beforeDispatch:async()=>{
       await verify();
       const fresh=await peek();
-      if(fresh.paused||fresh.current?.marker!==marker||!await planTransition(chatId,fresh.version,"dispatch",{id:task.id,marker}))throw localAgentError("PLAN_CONFLICT","Could not durably reserve Send.");
+      if(fresh.paused||fresh.retired||fresh.current?.marker!==marker)throw localAgentError("PLAN_CONFLICT","Reservation changed.");
+      // CDP invokes beforeClick twice. The first call durably reserves the
+      // dispatch; the second must validate that same reservation, not redo it.
+      if(dispatching&&fresh.current.status==="dispatching")return;
+      if(fresh.current.status!=="claimed"||!await planTransition(chatId,fresh.version,"dispatch",{id:task.id,marker}))throw localAgentError("PLAN_CONFLICT","Could not durably reserve Send.");
       dispatching=true;
     }});
   const fresh=await peek();
-  if(fresh.current?.marker!==marker||fresh.paused)return;
-  if(result.sent)await planTransition(chatId,fresh.version,"sent",{id:task.id,marker});
-  else if(!dispatching&&!result.inserted&&!result.committed&&fresh.current.status==="claimed")
+  if(fresh.current?.marker!==marker||fresh.paused)return decision("blocked","PLAN_RESERVATION_CHANGED");
+  if(result.sent) {await planTransition(chatId,fresh.version,"sent",{id:task.id,marker});return decision("sent","PLAN_SENT");}
+  if(dispatching&&!result.committed&&fresh.current.status==="dispatching") {
+    // The current invocation can prove no click crossed its commit boundary.
+    await planTransition(chatId,fresh.version,"undispatch",{id:task.id,marker});
+  } else if(!dispatching&&!result.inserted&&!result.committed&&fresh.current.status==="claimed"&&!resume)
     await planTransition(chatId,fresh.version,"release",{id:task.id,marker});
+  decision("blocked",result.reason||"PLAN_SEND_UNCONFIRMED");
 }
 async function scheduledWatchdogTick() {
   if(!connectionWatchdogRunning) {
@@ -8047,20 +8156,22 @@ async function scheduledWatchdogTick() {
       chats.set(id,chats.has(id)?null:tab);
     }
     const ids=[...chats].filter(([id,tab])=>tab&&!activePlanChats.has(id)).map(([id])=>id);
+    const journals=await chrome.storage.local.get(null);
+    const recovering=new Set(ids.filter(id=>journals[ROLLOVER_PREFIX+id]));
     for(let i=0;i<ids.length;i+=200) {
       const active=await callSharedMemory("__plan_scan",{chat_ids:ids.slice(i,i+200)});
-      for(const id of active.chat_ids) {
+      for(const id of new Set([...active.chat_ids,...ids.slice(i,i+200).filter(id=>recovering.has(id))])) {
         const tab=chats.get(id);
         if(!tab||activePlanChats.has(id))continue;
         activePlanChats.add(id);
-        void runPlannedChat(tab,id).catch(error=>consoleAction("[ResearchTube plan] Check failed",error?.code||error?.name)).finally(()=>activePlanChats.delete(id));
+        void runPlannedChat(tab,id).catch(error=>planDecision(tab.id,"error",error?.code||error?.name||"PLAN_CHECK_FAILED")).finally(()=>activePlanChats.delete(id));
       }
     }
   } finally {scheduledScanRunning=false;}
 }
 function startScheduledWatchdog() {
   if(!chrome.tabs?.query||!chrome.alarms?.create||typeof setInterval!=="function")return;
-  if(scheduledTimer===null)scheduledTimer=setInterval(()=>{void scheduledWatchdogTick().catch(()=>{});},SCHEDULER_INTERVAL_MS);
+  if(scheduledTimer===null)scheduledTimer=setInterval(()=>{void scheduledWatchdogTick().catch(error=>reliabilityTrace.add("PLAN_SCAN_FAILED",{code:error?.code||error?.name||"PLAN_SCAN_FAILED",level:"WARN"}));},SCHEDULER_INTERVAL_MS);
   void scheduledWatchdogTick().catch(()=>{});
   void chrome.alarms.get(SCHEDULER_ALARM).then(alarm=>{if(!alarm)return chrome.alarms.create(SCHEDULER_ALARM,{periodInMinutes:.5});}).catch(()=>{});
 }

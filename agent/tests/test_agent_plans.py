@@ -41,6 +41,22 @@ class AgentPlanTest(unittest.TestCase):
             self.assertEqual(read("skill_read",{"id":i,"version":1})["skill"]["content"],"# Method")
             self.assertEqual(read("skill_read",{"id":i})["skill"]["version"],2)
             self.assertEqual(write("skill_update",{"id":i,"expected_version":1,"content":"stale"},"test.stale")["state"],"failed_permanent")
+            # Roll over after one task has finished; preserve queue, skill refs and history.
+            self.assertEqual(write("agent_memory_write",{**c,"expected_version":0,"goal":"goal","state":"checkpoint","skill_ids":[i]},"test.mem")["state"],"committed")
+            s=read("__plan_peek",c)
+            v=s["version"]
+            self.assertEqual(write("__plan_transition",{**c,"version":v,"action":"rollover","successor":"new-chat"},"test.rollover")["state"],"committed")
+            successor={"chat_id":"new-chat"}
+            s=read("__plan_peek",successor)
+            self.assertEqual(s["agent_id"],"test-chat")
+            self.assertEqual(s["chat_id"],"new-chat")
+            self.assertEqual(s["next"]["prompt"],"two")
+            self.assertEqual(s["goal"],"goal")
+            self.assertEqual(s["state"],"checkpoint")
+            self.assertEqual(s["skill_ids"],[i])
+            self.assertEqual(read("__plan_scan",{"chat_ids":["test-chat","new-chat"]})["chat_ids"],["new-chat"])
+            self.assertTrue(read("__plan_peek",c)["retired"])
+            self.assertEqual(write("plan_edit",{**c,"expected_version":s["version"],"actions":[{"op":"add","prompt":"stale"}]},"test.retired")["state"],"failed_permanent")
             with self.assertRaises(m.MemoryOperationError):
                 m.db_query(resolve,"SELECT * FROM _rt_internal_plans")
 

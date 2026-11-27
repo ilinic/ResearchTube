@@ -28,6 +28,10 @@ def ensure(con):
         """CREATE TABLE IF NOT EXISTS _rt_internal_skill_versions (
         skill_id INTEGER NOT NULL, version INTEGER NOT NULL, name TEXT NOT NULL, description TEXT NOT NULL,
         content TEXT NOT NULL, editor_chat_id TEXT, updated_at INTEGER NOT NULL, PRIMARY KEY(skill_id,version))""",
+        """CREATE TABLE IF NOT EXISTS _rt_internal_agent_conversations (
+        conversation_id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, active INTEGER NOT NULL,
+        created_at INTEGER NOT NULL, FOREIGN KEY(agent_id) REFERENCES _rt_internal_plans(chat_id))""",
+        "CREATE UNIQUE INDEX IF NOT EXISTS _rt_internal_active_conversation ON _rt_internal_agent_conversations(agent_id) WHERE active=1",
         """CREATE TABLE IF NOT EXISTS _rt_internal_agent_memory_versions (
         chat_id TEXT NOT NULL, version INTEGER NOT NULL, goal TEXT NOT NULL, state TEXT NOT NULL,
         skill_ids TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY(chat_id,version))"""
@@ -78,9 +82,22 @@ def rows(con,sql,args=()):
     names=[d[0] for d in cur.description]
     return [dict(zip(names,v)) for v in cur]
 
+def resolve_agent(con,c,write=False):
+    binding=row(con,"SELECT agent_id,active FROM _rt_internal_agent_conversations WHERE conversation_id=?",(c,))
+    if binding:
+        if write and not binding["active"]: conflict("Conversation retired; use its active successor.")
+        return binding["agent_id"]
+    return c
+
+def active_conversation(con,c):
+    binding=row(con,"SELECT conversation_id FROM _rt_internal_agent_conversations WHERE agent_id=? AND active=1",(c,))
+    return binding["conversation_id"] if binding else c
+
 def plan(con,c,create=False):
     if create:
         con.execute("INSERT OR IGNORE INTO _rt_internal_plans(chat_id) VALUES (?)",(c,))
+        if not row(con,"SELECT conversation_id FROM _rt_internal_agent_conversations WHERE agent_id=? LIMIT 1",(c,)):
+            con.execute("INSERT INTO _rt_internal_agent_conversations VALUES(?,?,1,?)",(c,c,now()))
     return row(con,"SELECT * FROM _rt_internal_plans WHERE chat_id=?",(c,))
 
 def task(con,c,i):
@@ -92,7 +109,9 @@ def head(con,c):
 def snapshot(con,c):
     p=plan(con,c)
     if not p:
-        return {"chat_id":c,"version":0,"paused":False,"current":None,"next":None,"idle_since":None,"idle_anchor":None,"goal":"","state":"","skill_ids":[],"memory_version":0,"skills":[]}
+        return {"chat_id":c,"agent_id":c,"version":0,"paused":False,"current":None,"next":None,"idle_since":None,"idle_anchor":None,"goal":"","state":"","skill_ids":[],"memory_version":0,"skills":[]}
+    p["agent_id"]=c
+    p["chat_id"]=active_conversation(con,c)
     p["paused"]=bool(p["paused"])
     p["current"]=task(con,c,p.pop("current_id")) if p["current_id"] is not None else None
     p.pop("current_id",None)
@@ -118,10 +137,19 @@ def read(con,name,a):
     if name=="__plan_scan":
         ids=a.get("chat_ids",[])
         if not isinstance(ids,list) or len(ids)>200: bad("Invalid scan batch.")
-        return {"chat_ids":[c for c in ids if plan(con,chat({"chat_id":c})) and row(con,"SELECT 1 AS active FROM _rt_internal_plans p WHERE p.chat_id=? AND p.paused=0 AND (p.current_id IS NOT NULL OR EXISTS (SELECT 1 FROM _rt_internal_plan_tasks t WHERE t.chat_id=p.chat_id AND t.status='queued'))",(c,))]}
+        result=[]
+        for c in ids:
+            c=chat({"chat_id":c})
+            agent=resolve_agent(con,c)
+            if active_conversation(con,agent)!=c: continue
+            if row(con,"SELECT 1 AS active FROM _rt_internal_plans p WHERE p.chat_id=? AND p.paused=0 AND (p.current_id IS NOT NULL OR EXISTS (SELECT 1 FROM _rt_internal_plan_tasks t WHERE t.chat_id=p.chat_id AND t.status='queued'))",(agent,)):
+                result.append(c)
+        return {"chat_ids":result}
     if name=="__plan_peek" or name in ("plan_status","plan_read"):
-        c=chat(a)
+        conversation=chat(a)
+        c=resolve_agent(con,conversation)
         p=snapshot(con,c)
+        p["retired"]=p["chat_id"]!=conversation
         if name=="plan_read":
             history=a.get("history",False)
             items=rows(con,"SELECT * FROM _rt_internal_plan_tasks WHERE chat_id=? AND "+("status IN ('finished','skipped','cancelled')" if history else "status IN ('queued','claimed','dispatching','sent')")+" ORDER BY "+("id DESC" if history else "position,id")+" LIMIT ? OFFSET ?",(c,limit+1,offset))
@@ -130,10 +158,10 @@ def read(con,name,a):
             p.update(page(items,limit,offset))
         return p
     if name=="agent_memory_read":
-        p=snapshot(con,chat(a))
-        return {k:p[k] for k in ("chat_id","goal","state","skill_ids","skills","memory_version")}
+        p=snapshot(con,resolve_agent(con,chat(a)))
+        return {k:p[k] for k in ("chat_id","agent_id","goal","state","skill_ids","skills","memory_version")}
     if name=="agent_memory_history":
-        return page(rows(con,"SELECT * FROM _rt_internal_agent_memory_versions WHERE chat_id=? ORDER BY version DESC LIMIT ? OFFSET ?",(chat(a),limit+1,offset)),limit,offset)
+        return page(rows(con,"SELECT * FROM _rt_internal_agent_memory_versions WHERE chat_id=? ORDER BY version DESC LIMIT ? OFFSET ?",(resolve_agent(con,chat(a)),limit+1,offset)),limit,offset)
     if name=="skill_list":
         q=text(a.get("query",""),512)
         return page(rows(con,"SELECT id,name,description,owner_chat_id,version,created_at,updated_at FROM _rt_internal_skills WHERE instr(lower(name||' '||description),lower(?))>0 OR ?='' ORDER BY id LIMIT ? OFFSET ?",(q,q,limit+1,offset)),limit,offset)
@@ -183,7 +211,8 @@ def mutate(con,name,a,operation_id):
             con.execute("UPDATE _rt_internal_skills SET name=?,description=?,content=?,version=?,updated_at=? WHERE id=?",(n,d,body,v,t,i))
         con.execute("INSERT INTO _rt_internal_skill_versions VALUES(?,?,?,?,?,?,?)",(i,v,n,d,body,actor,t))
         return {"id":i,"version":v}
-    c=chat(a)
+    conversation=chat(a)
+    c=resolve_agent(con,conversation,write=True)
     p=plan(con,c,True)
     if name=="agent_memory_write":
         if p["memory_version"]!=integer(a.get("expected_version")): conflict("Agent memory changed; reread.")
@@ -259,6 +288,25 @@ def mutate(con,name,a,operation_id):
     if p["paused"]: conflict("Plan paused.")
     current=task(con,c,p["current_id"]) if p["current_id"] is not None else None
     anchor=text(a.get("anchor",""),512)
+    if kind=="rollover":
+        successor=chat({"chat_id":a.get("successor")})
+        if successor==conversation or plan(con,successor) or row(con,"SELECT 1 FROM _rt_internal_agent_conversations WHERE conversation_id=?",(successor,)): conflict("Successor already has an agent.")
+        if active_conversation(con,c)!=conversation: conflict("Conversation already replaced.")
+        if current:
+            # A not-yet-dispatched claim is safe to requeue; a possibly sent task
+            # must be reconciled rather than blindly re-executed.
+            con.execute("UPDATE _rt_internal_plan_tasks SET position=position+1 WHERE chat_id=? AND status='queued'",(c,))
+            if current["status"]=="claimed":
+                con.execute("UPDATE _rt_internal_plan_tasks SET status='queued',position=0,anchor=NULL,marker=NULL,started_at=NULL WHERE id=?",(current["id"],))
+            else:
+                con.execute("UPDATE _rt_internal_plan_tasks SET status='skipped',finished_at=? WHERE id=?",(t,current["id"]))
+                prompt="Reconcile previous task #"+str(current["id"])+" in the retired conversation. Its execution may be incomplete or already committed. Read history and durable results; do not repeat external effects blindly. Original task: "+current["prompt"]
+                prompt=prompt.encode("utf-8")[:16000].decode("utf-8","ignore")
+                con.execute("INSERT INTO _rt_internal_plan_tasks(chat_id,position,prompt,delay_seconds,created_at) VALUES(?,0,?,0,?)",(c,prompt,t))
+        con.execute("UPDATE _rt_internal_agent_conversations SET active=0 WHERE agent_id=?",(c,))
+        con.execute("INSERT INTO _rt_internal_agent_conversations VALUES(?,?,1,?)",(successor,c,t))
+        con.execute("UPDATE _rt_internal_plans SET current_id=NULL,idle_anchor=NULL,idle_since=NULL,version=version+1 WHERE chat_id=?",(c,))
+        return {"agent_id":c,"chat_id":successor,"previous_chat_id":conversation}
     if kind=="observe":
         if current: conflict("Current task has not finished.")
         if not anchor: bad("Idle observation requires an anchor.")
@@ -282,6 +330,8 @@ def mutate(con,name,a,operation_id):
     status=current["status"]
     if kind=="dispatch" and status=="claimed":
         con.execute("UPDATE _rt_internal_plan_tasks SET status='dispatching' WHERE id=?",(i,))
+    elif kind=="undispatch" and status=="dispatching":
+        con.execute("UPDATE _rt_internal_plan_tasks SET status='claimed' WHERE id=?",(i,))
     elif kind=="sent" and status in ("claimed","dispatching","sent"):
         con.execute("UPDATE _rt_internal_plan_tasks SET status='sent' WHERE id=?",(i,))
     elif kind=="release" and status=="claimed":
