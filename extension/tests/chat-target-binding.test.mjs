@@ -19,7 +19,7 @@ function worker({initialStorage={},initialNow=Date.now()}={}) {
  const tabs=new Map([[42,{...tabA}],[81,{...tabB}]]),ownerPages=new Map();
  const storage=JSON.parse(JSON.stringify(initialStorage)),alarms=new Map(),mutations=[],queries=[],logs=[];
  class Clock extends Date {static now(){return now;}}
- const context=vm.createContext({URL,Intl,TextEncoder,TextDecoder,AbortController,structuredClone,crypto:webcrypto,Date:Clock,setTimeout,clearTimeout,
+ const context=vm.createContext({URL,Intl,TextEncoder,TextDecoder,AbortController,structuredClone,crypto:webcrypto,Date:Clock,performance:{now:()=>now-initialNow},setTimeout,clearTimeout,
   console:{info(line){logs.push(line);},warn(){},error(){}},
   chrome:{runtime:{ getManifest: () => ({ version: "9.8.7" }),id:'extension-id',getURL:path=>path,onInstalled:{addListener(){}},onStartup:{addListener(){}},onMessage:{addListener(fn){listener=fn;}}},
    alarms:{onAlarm:{addListener(){}},create:async(name,value)=>alarms.set(name,value),clear:async name=>alarms.delete(name)},
