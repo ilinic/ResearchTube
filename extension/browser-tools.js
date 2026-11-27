@@ -40,7 +40,7 @@ export function browserToolDefinitions() {
   const define = (name, title, description, properties, required, outputSchema, annotations = read, target = true) => ({ name, title, description, inputSchema: object({ chatTabId, ...(target ? { tabId, ...(name === 'site_interact' ? {} : { scope: readScope }) } : {}), ...properties }, [...(target ? ["tabId"] : []), ...required]), outputSchema, annotations });
   const download = (name, title, description, kinds) => define(name, title, description, {
     resourceId: { type: "string", pattern: "^r_[0-9]+_[0-9]+_[0-9]+$", description: `One current ${kinds} ID observed in this exact tab. Provide this or resourceIds, never both. URLs are not accepted.` },
-    resourceIds: { type: "array", minItems: 1, uniqueItems: true, description: `Ordered batch of distinct current ${kinds} IDs from the same target tab. Provide this or resourceId, never both. All are saved before delivery.`, items: { type: "string", pattern: "^r_[0-9]+_[0-9]+_[0-9]+$" } },
+    resourceIds: { type: "array", minItems: 1, uniqueItems: true, description: `Ordered batch of distinct current ${kinds} IDs from the same target tab. Provide this or resourceId, never both. For addToChat=true, request at most 20 IDs per call (or remaining Composer capacity if lower), await confirmed delivery, and continue with unsent IDs; send the final smaller batch immediately. All selected files are saved before delivery.`, items: { type: "string", pattern: "^r_[0-9]+_[0-9]+_[0-9]+$" } },
     addToChat: { type: "boolean", default: true, description: "true (default): save, attach to the initiating chatTabId and send a continuation. false: save Workspace files only, with no chat attachment or message." }
   }, [], resourceTask, write);
   return [
