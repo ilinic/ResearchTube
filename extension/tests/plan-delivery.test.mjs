@@ -59,12 +59,14 @@ assert.equal(env.rolloverSourceEligible({contextLimit:true,draft:true},{mode:"ha
 const marker="a".repeat(64),old={id:10,url:"https://chatgpt.com/c/old",windowId:1,groupId:4},fresh={id:11,url:"https://chatgpt.com/c/new",windowId:1,groupId:4};
 const journalKey="researchtubePlanRollover:old";
 const journal={chatId:"old",oldTabId:10,oldUrl:old.url,windowId:1,groupId:4,newTabId:11,marker,phase:"sent",mode:"hard_limit"};
-async function recovery({oldOpen=false,ack=true,successorReady=false,oldDraft=false,alreadyCommitted=false,proactive=false,oldChanged=false}={}){
+async function recovery({oldOpen=false,ack=true,successorReady=false,oldDraft=false,alreadyCommitted=false,proactive=false,oldChanged=false,reopened=false,newReopened=false,ambiguous=false,legacyAlertGone=false,changedPlan=false}={}){
+  const liveOld={...old,id:reopened?20:10},liveFresh={...fresh,id:newReopened?21:11};
+  const duplicate={...liveFresh,id:22,url:"https://chatgpt.com/c/other"};
   let stored={[journalKey]:{...journal,...(proactive?{mode:"proactive",sourceAnchor:"source"}:{})}},retired=alreadyCommitted,removed=[],moved=0,logged=[];
   let next={id:9,prompt:"continue original task",delay_seconds:0},cur=null,version=1,idleAnchor=null,idleSince=null,sent=[];
-  const tabs={get:async id=>id===11?fresh:id===10&&oldOpen?old:Promise.reject(Error("closed")),query:async()=>oldOpen&&!removed.length?[old,fresh]:[fresh],remove:async id=>{removed.push(id);oldOpen=false;}};
+  const tabs={get:async id=>id===liveFresh.id?liveFresh:id===liveOld.id&&oldOpen?liveOld:Promise.reject(Error("closed")),query:async()=>[...(oldOpen&&!removed.length?[liveOld]:[]),liveFresh,...(ambiguous?[duplicate]:[])],remove:async id=>{removed.push(id);oldOpen=false;}};
   const storage={local:{get:async key=>({[key]:stored[key]}),set:async x=>Object.assign(stored,x),remove:async key=>delete stored[key]}};
-  const live=id=>id===11?{ready:successorReady,draft:false,anchor:"successor",acknowledgedRolloverMarkers:ack?[marker]:[],rolloverMarkers:[marker]}:{contextLimit:!proactive,ready:true,anchor:oldChanged?"changed":"source",draft:oldDraft};
+  const live=id=>id===liveFresh.id||id===duplicate.id?{ready:successorReady,draft:false,anchor:"successor",acknowledgedRolloverMarkers:ack?[marker]:[],rolloverMarkers:[marker]}:{contextLimit:!proactive&&!legacyAlertGone,ready:true,anchor:oldChanged?"changed":"source",draft:oldDraft};
   const read=async(name,a)=>({retired:a.chat_id==="old"&&retired,chat_id:retired?"new":"old",agent_id:"old",version,paused:false,goal:"goal",state:"checkpoint",current:cur,next,idle_anchor:idleAnchor,idle_since:idleSince});
   const mutate=async(id,v,action,fields)=>{
     assert.equal(v,version);
@@ -76,13 +78,13 @@ async function recovery({oldOpen=false,ack=true,successorReady=false,oldDraft=fa
     else throw Error("unexpected "+action);
     version++;return true;
   };
-  const sendNew=async(id,options)=>{assert.equal(id,11);sent.push(options.completionText);await options.beforeSend();await options.beforeInsert();await options.beforeDispatch();return {sent:true};};
-  const instance=factory({tabs,storage},path,u=>u?path(u).split("/").at(-1):null,async id=>live(id),async()=>null,read,mutate,async()=>"plan."+marker,sendNew,(...a)=>logged.push(a),(code,msg)=>Object.assign(Error(msg),{code}),{now:()=>now},{add(){}},URL,TextEncoder);
-  if(proactive&&oldOpen)await instance.runPlannedChat(old,"old",{rolloverKiB:768},stored[journalKey]);
-  else await instance.resumePlanRollover(old,"old",{retired,paused:false},{});
+  const sendNew=async(id,options)=>{assert.equal(id,liveFresh.id);sent.push(options.completionText);await options.beforeSend();await options.beforeInsert();await options.beforeDispatch();return {sent:true};};
+  const instance=factory({tabs,storage},path,u=>u?path(u).split("/").at(-1):null,async id=>live(id),async()=>null,read,mutate,async()=>"plan."+(changedPlan?"b".repeat(64):marker),sendNew,(...a)=>logged.push(a),(code,msg)=>Object.assign(Error(msg),{code}),{now:()=>now},{add(){}},URL,TextEncoder);
+  if(proactive&&oldOpen)await instance.runPlannedChat(liveOld,"old",{rolloverKiB:768},stored[journalKey]);
+  else await instance.resumePlanRollover(liveOld,"old",{retired,paused:false},{});
   if(retired&&!stored[journalKey]&&successorReady){
-    await instance.runPlannedChat(fresh,"new");
-    await instance.runPlannedChat(fresh,"new");
+    await instance.runPlannedChat(liveFresh,"new");
+    await instance.runPlannedChat(liveFresh,"new");
   }
   return {moved,removed,stored,logged,sent};
 }
@@ -96,3 +98,9 @@ rec=await recovery({oldOpen:true,proactive:true,successorReady:true});assert.equ
 rec=await recovery({oldOpen:true,proactive:true,oldChanged:true});assert.equal(rec.moved,0);assert.deepEqual(rec.removed,[]);
 assert.match(src,/if\(id!==journal\.chatId\|\|chats\.has\(id\)\|\|activePlanChats\.has\(id\)\)continue;/);
 console.log("proactive pressure, acknowledged handoff recovery, automatic successor dispatch, draft safety: ok");
+
+rec=await recovery({oldOpen:true,reopened:true,successorReady:true});assert.equal(rec.moved,1);assert.deepEqual(rec.removed,[20]);assert.equal(rec.sent.length,1);
+rec=await recovery({oldOpen:true,reopened:true,newReopened:true,legacyAlertGone:true,successorReady:true});assert.equal(rec.moved,1);assert.deepEqual(rec.removed,[20]);assert.equal(rec.sent.length,1);
+rec=await recovery({oldOpen:true,reopened:true,ambiguous:true});assert.equal(rec.moved,0);assert.deepEqual(rec.removed,[]);assert.equal(rec.logged.at(-1)[2],"ROLLOVER_SUCCESSOR_AMBIGUOUS");
+rec=await recovery({oldOpen:true,reopened:true,legacyAlertGone:true,changedPlan:true});assert.equal(rec.moved,0);assert.deepEqual(rec.removed,[]);
+console.log("reopened tab IDs, unique marker, legacy alert disappearance, version safety: ok");

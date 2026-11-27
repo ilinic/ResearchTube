@@ -7983,8 +7983,10 @@ async function scheduledChatState(tabId) {
     for(const message of messages){
       const value=(message.textContent||"").trim();
       if(visibleHistoryBytes<16*1024*1024)visibleHistoryBytes+=encoder.encode(value.slice(0,16*1024*1024)).length;
-      if(message.getAttribute("data-message-author-role")==="user")awaitingMarker=value.includes("[ResearchTube rollover ")?(message.innerText||value).trim().match(/^\[ResearchTube rollover ([a-f0-9]{64})\]/)?.[1]||null:null;
-      else if(awaitingMarker&&visible(message)&&(message.innerText||value).trim()){acknowledgedRolloverMarkers.push(awaitingMarker);awaitingMarker=null;}
+      if(message.getAttribute("data-message-author-role")==="user"){
+        const markerText=[message.innerText||"",value].map(v=>v.replace(/[\u200b\ufeff]/g,"").trim());
+        awaitingMarker=markerText.map(v=>v.match(/^\[ResearchTube rollover ([a-f0-9]{64})\]/)?.[1]).find(Boolean)||null;
+      }else if(awaitingMarker&&(message.innerText||value).trim()){acknowledgedRolloverMarkers.push(awaitingMarker);awaitingMarker=null;}
     }
     return {ready:reason===null,reason,draft,draftMarker,generating,userCount:users.length,lastUserId,anchor,taskMarkers,rolloverMarkers,acknowledgedRolloverMarkers,contextMarkers,contextLimit,hasAssistant:completed,visibleHistoryBytes};
   }});
@@ -8069,9 +8071,27 @@ async function resumePlanRollover(tab,chatId,p,state,pressure=null) {
     await save({...journal,newTabId:fresh.id,phase:"opened"});
     await chrome.tabs.group({groupId:tab.groupId,tabIds:[fresh.id]});
   }
-  if(journal.oldTabId!==tab.id||journal.groupId!==tab.groupId||journal.oldUrl!==tab.url||!Number.isInteger(journal.newTabId))return trace("ROLLOVER_RECOVERY_REQUIRED");
+  if(journal.chatId!==chatId||journal.oldUrl!==tab.url||planConversationId(journal.oldUrl)!==chatId||!Number.isInteger(journal.newTabId))return trace("ROLLOVER_RECOVERY_REQUIRED");
+  // Chrome tab IDs are ephemeral. Recover only a unique exact conversation
+  // and a unique successor with the journal's own handoff marker.
+  const rebindSource=journal.oldTabId!==tab.id||journal.groupId!==tab.groupId||journal.windowId!==tab.windowId;
   let fresh=await chrome.tabs.get(journal.newTabId).catch(()=>null);
-  if(!fresh)return trace("ROLLOVER_SUCCESSOR_MISSING");
+  if(rebindSource||!fresh||fresh.groupId!==journal.groupId||fresh.windowId!==journal.windowId){
+    const open=await chrome.tabs.query({url:"https://chatgpt.com/*"});
+    const copies=open.filter(t=>planConversationId(t.url)===chatId);
+    if(rebindSource&&(copies.length!==1||copies[0].id!==tab.id||copies[0].pendingUrl||tab.groupId<0))return trace("ROLLOVER_SOURCE_REBIND_BLOCKED");
+    const candidates=open.filter(t=>t.id!==tab.id&&!t.pendingUrl&&t.groupId===tab.groupId&&t.windowId===tab.windowId&&planProjectPath(t.url)===planProjectPath(journal.oldUrl)&&planConversationId(t.url)&&planConversationId(t.url)!==chatId&&(!journal.successor||planConversationId(t.url)===journal.successor));
+    const matched=[];
+    for(const candidate of candidates){
+      const observed=await scheduledChatState(candidate.id).catch(()=>null);
+      if(observed?.acknowledgedRolloverMarkers?.includes(journal.marker))matched.push(candidate);
+    }
+    if(matched.length!==1)return trace(matched.length?"ROLLOVER_SUCCESSOR_AMBIGUOUS":"ROLLOVER_SUCCESSOR_REBIND_PENDING");
+    fresh=matched[0];
+    if(open.filter(t=>planConversationId(t.url)===planConversationId(fresh.url)).length!==1)return trace("ROLLOVER_SUCCESSOR_AMBIGUOUS");
+    await save({...journal,oldTabId:tab.id,newTabId:fresh.id,groupId:tab.groupId,windowId:tab.windowId});
+    reliabilityTrace.add("PLAN_ROLLOVER_REBOUND",{conversationId:chatId,chatTabId:tab.id,tabId:fresh.id});
+  }
   if(fresh.groupId!==journal.groupId||fresh.windowId!==journal.windowId)return trace("ROLLOVER_GROUP_CHANGED");
   const successor=planConversationId(fresh.url);
   if(successor) {
@@ -8089,11 +8109,22 @@ async function resumePlanRollover(tab,chatId,p,state,pressure=null) {
       if(source==="same"){
         if(await scheduledPending(tab.id))return trace("ROLLOVER_SOURCE_BUSY");
         const oldState=await scheduledChatState(tab.id);
-        if(!rolloverSourceEligible(oldState,journal))return trace("ROLLOVER_SOURCE_CHANGED");
+        if(!rolloverSourceEligible(oldState,journal)){
+          // Legacy hard-limit journals did not record a source anchor. The
+          // alert may disappear when a saved chat is reopened. Recover only
+          // if the plan version still proves the original handoff, no task
+          // is running, and the exact source is idle and draft-free.
+          const expected=(await planOperationKey({agent_id:latest.agent_id||chatId,chat_id:chatId,version:latest.version,action:"rollover"})).slice(5);
+          if(journal.mode==="proactive"||journal.sourceAnchor||expected!==journal.marker||latest.current||!oldState.ready||!oldState.anchor||oldState.draft||oldState.generating)return trace("ROLLOVER_SOURCE_CHANGED");
+          await save({...journal,sourceAnchor:oldState.anchor,mode:"hard_limit"});
+        }
       }
       // Recover the existing queue even when the old browser tab was closed.
+      const verifiedVersion=latest.version;
       latest=await callSharedMemory("__plan_peek",{chat_id:chatId});
-      if(latest.paused||journal.mode==="proactive"&&latest.current)return trace("ROLLOVER_PLAN_CHANGED");
+      if(latest.paused||!latest.retired&&latest.version!==verifiedVersion||journal.mode==="proactive"&&latest.current)return trace("ROLLOVER_PLAN_CHANGED");
+      const exact=await chrome.tabs.get(fresh.id).catch(()=>null);
+      if(!exact||exact.pendingUrl||planConversationId(exact.url)!==successor||exact.groupId!==journal.groupId||exact.windowId!==journal.windowId||planProjectPath(exact.url)!==planProjectPath(journal.oldUrl))return trace("ROLLOVER_SUCCESSOR_CHANGED");
       if(!latest.retired&&!await planTransition(chatId,latest.version,"rollover",{successor}))return trace("ROLLOVER_COMMIT_PENDING");
       latest=await callSharedMemory("__plan_peek",{chat_id:chatId});
       if(!latest.retired||latest.chat_id!==successor)return trace("ROLLOVER_MAPPING_UNCONFIRMED");
@@ -8258,7 +8289,7 @@ async function scheduledWatchdogTick() {
       const id=key.slice(ROLLOVER_PREFIX.length);
       if(id!==journal.chatId||chats.has(id)||activePlanChats.has(id))continue;
       // A journal with neither endpoint open requires no Agent polling.
-      if(!openTabIds.has(journal.newTabId))continue;
+      if(!openTabIds.has(journal.newTabId)&&!openTabs.some(t=>t.groupId===journal.groupId&&t.windowId===journal.windowId&&planConversationId(t.url)&&planProjectPath(t.url)===planProjectPath(journal.oldUrl)))continue;
       const old={id:journal.oldTabId,url:journal.oldUrl,groupId:journal.groupId,windowId:journal.windowId};
       activePlanChats.add(id);
       void resumePlanRollover(old,id,{},{}).catch(error=>planDecision(old.id,"error",error?.code||error?.name||"ROLLOVER_RECOVERY_FAILED")).finally(()=>activePlanChats.delete(id));
