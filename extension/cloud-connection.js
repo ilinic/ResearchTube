@@ -1,6 +1,6 @@
 // Public transport only. All actual tools still run through handleMcpRequest.
 
-import { mcpPayloadSizes } from "./mcp-payload-metrics.js";
+import { mcpPayloadSizes, compactMcpResult } from "./mcp-payload-metrics.js";
 
 export const CLOUD_ORIGIN = "https://rtube.win";
 const KEY = "researchtubeCloudCredential";
@@ -241,6 +241,8 @@ export function createCloudConnection(host) {
     finally { requests.delete(message.requestId); pending.delete(message.requestId); }
     if (socket !== ws || ws.readyState !== 1) { try{host.diagnostic?.("EXTENSION_RESPONSE_LOST",{requestId:message.requestId,tool:toolName,level:"ERROR",executionState:"unknown"});}catch{} return; }
     record("extension.returned", Date.now());
+    const originalResult=response.result;
+    if(originalResult)response={...response,result:compactMcpResult(originalResult)};
     const payload = { type: "response", requestId: message.requestId, ...response };
     const text = JSON.stringify(payload);
     const encoder=new TextEncoder();
@@ -250,6 +252,7 @@ export function createCloudConnection(host) {
     try {
       const relayBytes=actual===text?size:encoder.encode(actual).length;
       host.diagnostic?.("EXTENSION_RESPONSE_SENT",{requestId:message.requestId,tool:toolName,bytes:relayBytes});
+      if(originalResult && originalResult!==response.result)host.diagnostic?.("MCP_DUPLICATE_REMOVED",{requestId:message.requestId,tool:toolName,chatTabId:verifiedTarget?.tabId,conversationId:verifiedTarget?.conversationId,bytes:encoder.encode(JSON.stringify(originalResult)).length-encoder.encode(JSON.stringify(response.result)).length});
       host.diagnostic?.("MCP_PAYLOAD_SIZE",{requestId:message.requestId,tool:toolName,chatTabId:verifiedTarget?.tabId,conversationId:verifiedTarget?.conversationId,
         ...mcpPayloadSizes(message.request.params.arguments,response.result??response.error),relayBytes,status:actual===text?"forwarded":"relay_limit"});
     } catch { /* diagnostics must never change tool outcomes */ }

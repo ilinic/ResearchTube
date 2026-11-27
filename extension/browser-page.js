@@ -356,7 +356,9 @@ export function createBrowserPage(session, host) {
   }
   function compactProject(entry, textLimit) {
     const node = project(entry, textLimit);
-    for (const name of ["description", "text", "relationships", "states", "value"]) if (node[name] == null || node[name].length === 0) delete node[name];
+    for (const name of ["description", "text", "relationships", "states", "value", "childIds", "resources"]) if (node[name] == null || node[name].length === 0) delete node[name];
+    if (node.childCount === 0) delete node.childCount;
+    if (node.truncated === false) delete node.truncated;
     return node;
   }
   function snapshot() {

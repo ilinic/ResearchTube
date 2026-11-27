@@ -295,3 +295,5 @@ See [Conversation plans and shared skills](features/AGENT_PLANS.md).
 - `skill_list`, `skill_read`, `skill_create`, `skill_update`, `skill_history`: global versioned library, available to every chat and local Codex.
 
 Read data and committed mutation results are JSON in the `data` field. Mutation state must be committed before claiming success. Use expected_version for optimistic concurrency and stable operation_id on every retry. Scheduler no longer uses Chrome group names.
+
+Cloud MCP results use the complete structuredContent with a short text marker instead of an identical JSON text copy (except widget/error results). Browser observation nodes omit empty childIds/resources, zero childCount and false truncated; missing means the corresponding default. Nonempty relationships, references and true truncation are retained.

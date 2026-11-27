@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import {mcpPayloadSizes} from "../mcp-payload-metrics.js";
+import {mcpPayloadSizes,compactMcpResult} from "../mcp-payload-metrics.js";
 const value={message:"Привет 🌍"};
 const text=JSON.stringify(value);
 const sizes=mcpPayloadSizes({query:"é"},{content:[{type:"text",text},{type:"text",text:"extra"},{type:"image",data:"xyz"}],structuredContent:value});
@@ -12,3 +12,15 @@ assert.equal(mcpPayloadSizes({},{content:[{type:"text",text:"error"}]}).duplicat
 assert.ok(Object.values(sizes).every(Number.isSafeInteger));
 assert.doesNotMatch(JSON.stringify(sizes),/Привет|query|message/);
 console.log("MCP payload metrics: UTF-8, duplicate representation and privacy OK");
+
+const original={content:[{type:"text",text}],structuredContent:value,isError:false};
+const compact=compactMcpResult(original);
+assert.deepEqual(compact.structuredContent,value);
+assert.equal(mcpPayloadSizes({},compact).duplicateBytes,0);
+assert.equal(original.content[0].text,text);
+assert.deepEqual(compactMcpResult(compact),compact);
+const rich={...original,content:[...original.content,{type:"text",text:"Meaningful independent text"},{type:"image",data:"abc",mimeType:"image/png"}]};
+assert.deepEqual(compactMcpResult(rich).content,rich.content.slice(1));
+for(const protectedResult of [{...original,isError:true},{...original,_meta:{widget:true}},{...original,structuredContent:{error:{code:"FAIL"}}},{...original,content:[{type:"text",text,annotations:{audience:["assistant"]}}]}])assert.equal(compactMcpResult(protectedResult),protectedResult);
+const large={content:[{type:"text",text:JSON.stringify({text:"x".repeat(50000)})}],structuredContent:{text:"x".repeat(50000)}};
+assert.ok(mcpPayloadSizes({},compactMcpResult(large)).resultBytes < mcpPayloadSizes({},large).resultBytes*.51);

@@ -190,3 +190,17 @@ console.log('Direct account connection: no chat widget, first productive call, e
  assert.equal((await f.connection.status()).state,'ready');
  assert.equal(f.sockets.length,1);
 }
+
+{
+ const f=fixture(),ws=await f.online(),events=[];
+ f.host.diagnostic=(event,fields)=>events.push({event,...fields});
+ const data={nodes:[{nodeId:"n_1_2_3",role:"StaticText",name:"Evidence ".repeat(5000)}]};
+ f.handle(async()=>({result:{content:[{type:"text",text:JSON.stringify(data)}],structuredContent:data,isError:false}}));
+ await f.receive(ws,request("site_read",{chatTabId:7,tabId:8}));
+ const result=JSON.parse(ws.sent.at(-1)).result;
+ assert.deepEqual(result.structuredContent,data);
+ assert.equal(result.content.length,1);
+ assert.equal(result.content[0].text,"Result in structuredContent.");
+ assert.ok(events.some(e=>e.event==="MCP_DUPLICATE_REMOVED"&&e.bytes>40000));
+ assert.ok(events.some(e=>e.event==="MCP_PAYLOAD_SIZE"&&e.duplicateBytes===0&&e.conversationId==="chat-1"));
+}

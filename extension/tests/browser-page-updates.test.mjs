@@ -129,7 +129,7 @@ assert.equal(update.observation.changes.pageChanged, false);
 assert.equal(update.observation.changes.addedNodes, 1);
 assert.equal(update.observation.changes.updatedNodes, 1);
 assert.equal(update.observation.changes.addedResources, 1);
-assert.ok(update.observation.nodes.some(node => node.name === "New photograph" && node.resources.length === 1));
+assert.ok(update.observation.nodes.some(node => node.name === "New photograph" && node.resources?.length === 1));
 assert.ok(!update.observation.nodes.some(node => node.nodeId === image.nodeId));
 assert.equal(first.page.getResource(oldResource).entry.id, image.nodeId);
 

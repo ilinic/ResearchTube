@@ -15,3 +15,16 @@ export function mcpPayloadSizes(args,result) {
   return {requestBytes:bytes(json(args)),resultBytes:bytes(json(result)),textBytes,
     structuredBytes:structured===null?0:bytes(structured),duplicateBytes};
 }
+
+// Public cloud MCP only: structuredContent remains authoritative.
+// Keep independent text, images, audio, resource links, error details and UI
+// metadata untouched. Local MCP/Codex retains its compatibility representation.
+export function compactMcpResult(result) {
+  if (!result || result.isError || result.structuredContent?.error || result._meta ||
+      result.structuredContent == null || !Array.isArray(result.content)) return result;
+  const json=JSON.stringify(result.structuredContent);
+  const content=result.content.filter(item=>!(item?.type==="text" && item.text===json &&
+    Object.keys(item).every(key=>key==="type" || key==="text")));
+  if(content.length===result.content.length)return result;
+  return {...result,content:content.length?content:[{type:"text",text:"Result in structuredContent."}]};
+}
