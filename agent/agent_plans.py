@@ -152,6 +152,9 @@ def read(con,name,a):
         p["retired"]=p["chat_id"]!=conversation
         if name=="plan_read":
             history=a.get("history",False)
+            known=a.get("known_version")
+            if known is not None and integer(known)==p["version"]:
+                return {"unchanged":True,"version":p["version"],"chat_id":p["chat_id"],"agent_id":p["agent_id"],"paused":p["paused"],"retired":p["retired"],"offset":offset,"limit":limit,"history":history,"memory_version":p["memory_version"],"skills":p["skills"],"message":"Same plan revision; reuse the previously read identical page, or omit known_version to read it."}
             items=rows(con,"SELECT * FROM _rt_internal_plan_tasks WHERE chat_id=? AND "+("status IN ('finished','skipped','cancelled')" if history else "status IN ('queued','claimed','dispatching','sent')")+" ORDER BY "+("id DESC" if history else "position,id")+" LIMIT ? OFFSET ?",(c,limit+1,offset))
             # Avoid duplicating large text in queue pages.
             p={k:v for k,v in p.items() if k not in ("next","current","goal","state")}
@@ -159,6 +162,9 @@ def read(con,name,a):
         return p
     if name=="agent_memory_read":
         p=snapshot(con,resolve_agent(con,chat(a)))
+        known=a.get("known_version")
+        if known is not None and integer(known)==p["memory_version"]:
+            return {"unchanged":True,**{k:p[k] for k in ("chat_id","agent_id","skill_ids","skills","memory_version")}}
         return {k:p[k] for k in ("chat_id","agent_id","goal","state","skill_ids","skills","memory_version")}
     if name=="agent_memory_history":
         return page(rows(con,"SELECT * FROM _rt_internal_agent_memory_versions WHERE chat_id=? ORDER BY version DESC LIMIT ? OFFSET ?",(resolve_agent(con,chat(a)),limit+1,offset)),limit,offset)
@@ -168,7 +174,11 @@ def read(con,name,a):
     if name=="skill_read":
         i=integer(a.get("id"),1)
         v=a.get("version")
-        return {"skill":row(con,"SELECT * FROM _rt_internal_skills WHERE id=?",(i,)) if v is None else row(con,"SELECT * FROM _rt_internal_skill_versions WHERE skill_id=? AND version=?",(i,integer(v,1)))}
+        skill=row(con,"SELECT * FROM _rt_internal_skills WHERE id=?",(i,)) if v is None else row(con,"SELECT * FROM _rt_internal_skill_versions WHERE skill_id=? AND version=?",(i,integer(v,1)))
+        known=a.get("known_version")
+        if known is not None and skill and integer(known,1)==skill["version"]:
+            return {"unchanged":True,"id":i,"version":skill["version"]}
+        return {"skill":skill}
     if name=="skill_history":
         return page(rows(con,"SELECT skill_id,version,name,description,editor_chat_id,updated_at FROM _rt_internal_skill_versions WHERE skill_id=? ORDER BY version DESC LIMIT ? OFFSET ?",(integer(a.get("id"),1),limit+1,offset)),limit,offset)
     bad("Unknown read tool.")

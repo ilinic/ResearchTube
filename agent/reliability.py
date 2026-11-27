@@ -223,7 +223,9 @@ class Trace:
         payload_seen=set()
         stats={}
         payloads={}
-        totals={"calls":0,"prompts":0,"relayLimited":0,"unattributedCalls":0,**{k:0 for k in ("requestBytes","resultBytes","textBytes","structuredBytes","duplicateBytes","relayBytes","promptBytes")}}
+        savings_fields=("repeatHits","repeatSavedBytes","contextHits","contextSavedBytes","duplicateHits","duplicateSavedBytes")
+        payload_fields=("requestBytes","resultBytes","textBytes","structuredBytes","duplicateBytes","relayBytes","promptBytes")
+        totals={"calls":0,"prompts":0,"relayLimited":0,"unattributedCalls":0,**{k:0 for k in (*payload_fields,*savings_fields)}}
         def consider(data):
             try:
                 event=json.loads(data)
@@ -234,10 +236,10 @@ class Trace:
                     return
                 if key in selected:
                     return
-                if payload_summary and event.get("event") in ("MCP_PAYLOAD_SIZE","PLAN_PROMPT_SIZE"):
+                if payload_summary and event.get("event") in ("MCP_PAYLOAD_SIZE","PLAN_PROMPT_SIZE","MCP_REPEAT_REMOVED","PLAN_CONTEXT_REUSED","MCP_DUPLICATE_REMOVED"):
                     # Only one terminal relay sample per request. Trace batches
                     # may be retried after lost acknowledgement.
-                    identity=(event.get("event"),event.get("requestId") or event["eventId"])
+                    identity=(event.get("event"),event.get("requestId") or ((event.get("conversationId"),event.get("taskId")) if event.get("taskId") else event["eventId"]))
                     if identity not in payload_seen:
                         payload_seen.add(identity)
                         conversation=event.get("conversationId") or "unattributed"
@@ -247,13 +249,19 @@ class Trace:
                         # bytes from totals. Report overflow as one bucket.
                         if label not in payloads and len(payloads)>=2000:
                             label=("overflow","overflow")
-                        item=payloads.setdefault(label,{"calls":0,"prompts":0,"relayLimited":0,**{k:0 for k in ("requestBytes","resultBytes","textBytes","structuredBytes","duplicateBytes","relayBytes","promptBytes")}})
+                        item=payloads.setdefault(label,{"calls":0,"prompts":0,"relayLimited":0,**{k:0 for k in (*payload_fields,*savings_fields)}})
                         is_call=event["event"]=="MCP_PAYLOAD_SIZE"
+                        is_prompt=event["event"]=="PLAN_PROMPT_SIZE"
+                        saving={"MCP_REPEAT_REMOVED":"repeat","PLAN_CONTEXT_REUSED":"context","MCP_DUPLICATE_REMOVED":"duplicate"}.get(event["event"])
                         for target in (item,totals):
                             target["calls"]+=int(is_call)
-                            target["prompts"]+=int(not is_call)
+                            target["prompts"]+=int(is_prompt)
+                            if saving:
+                                target[saving+"Hits"]+=1
+                                value=event.get("bytes",0)
+                                if isinstance(value,int):target[saving+"SavedBytes"]+=max(0,value)
                             target["relayLimited"]+=int(is_call and event.get("status")=="relay_limit")
-                            for field in ("requestBytes","resultBytes","textBytes","structuredBytes","duplicateBytes","relayBytes","promptBytes"):
+                            for field in payload_fields:
                                 v=event.get(field,0)
                                 if isinstance(v,int) and v>=0: target[field]+=v
                         totals["unattributedCalls"]+=int(is_call and conversation=="unattributed")

@@ -1,6 +1,7 @@
 // Public transport only. All actual tools still run through handleMcpRequest.
 
 import { mcpPayloadSizes, compactMcpResult } from "./mcp-payload-metrics.js";
+import { createRepeatedReadCache } from "./repeated-read-results.js";
 
 export const CLOUD_ORIGIN = "https://rtube.win";
 const KEY = "researchtubeCloudCredential";
@@ -28,6 +29,7 @@ export function createCloudConnection(host) {
   const bindings = new Map(), requests = new Map(), pending = new Set(), seen = new Set();
   let automatic = null, accountOpening = null, accountRetryAt = 0;
   const now = () => host.now?.() ?? Date.now();
+  const repeatedReads=createRepeatedReadCache({now});
   // Defer browser API access until an operation runs (also permits catalog
   // export to instantiate the module without browser/storage authority).
   const local = Object.fromEntries(["get", "set", "remove"].map(name => [name, (...args) => host.chrome.storage.local[name](...args)]));
@@ -242,17 +244,29 @@ export function createCloudConnection(host) {
     if (socket !== ws || ws.readyState !== 1) { try{host.diagnostic?.("EXTENSION_RESPONSE_LOST",{requestId:message.requestId,tool:toolName,level:"ERROR",executionState:"unknown"});}catch{} return; }
     record("extension.returned", Date.now());
     const originalResult=response.result;
-    if(originalResult)response={...response,result:compactMcpResult(originalResult)};
+    let repeated=null, beforeCompact=originalResult;
+    if(originalResult) {
+      try { repeated=await repeatedReads.prepare(toolName,message.request.params.arguments,originalResult,verifiedTarget,message.requestId); } catch { /* always fall back to full result */ }
+      beforeCompact=repeated?.result??originalResult;
+      response={...response,result:compactMcpResult(beforeCompact)};
+    }
+    // Hashing is asynchronous: recheck the exact target for hashed reads.
+    if(repeated?.repeated||repeated?.remember){
+      try{await verifyTarget(verifiedTarget);}catch(error){repeated=null;beforeCompact=null;response={result:{isError:true,content:[{type:"text",text:"The exact browser target changed."}],structuredContent:{error:{code:error?.code||"BROWSER_TARGET_MISMATCH",message:"Reidentify the current conversation."}}}};}
+    }
+    if(socket!==ws||ws.readyState!==1)return;
     const payload = { type: "response", requestId: message.requestId, ...response };
     const text = JSON.stringify(payload);
     const encoder=new TextEncoder();
     const size=encoder.encode(text).length;
     const actual=size<=1048576?text:JSON.stringify({type:"response",requestId:message.requestId,error:{code:-32000,message:"The response exceeded the relay limit. Request a smaller result."}});
     ws.send(actual);
+    if(actual===text)repeated?.remember?.();
     try {
       const relayBytes=actual===text?size:encoder.encode(actual).length;
       host.diagnostic?.("EXTENSION_RESPONSE_SENT",{requestId:message.requestId,tool:toolName,bytes:relayBytes});
-      if(originalResult && originalResult!==response.result)host.diagnostic?.("MCP_DUPLICATE_REMOVED",{requestId:message.requestId,tool:toolName,chatTabId:verifiedTarget?.tabId,conversationId:verifiedTarget?.conversationId,bytes:encoder.encode(JSON.stringify(originalResult)).length-encoder.encode(JSON.stringify(response.result)).length});
+      if(repeated?.repeated)host.diagnostic?.("MCP_REPEAT_REMOVED",{requestId:message.requestId,tool:toolName,chatTabId:verifiedTarget?.tabId,conversationId:verifiedTarget?.conversationId,bytes:encoder.encode(JSON.stringify(compactMcpResult(originalResult))).length-encoder.encode(JSON.stringify(response.result)).length});
+      if(beforeCompact && beforeCompact!==response.result)host.diagnostic?.("MCP_DUPLICATE_REMOVED",{requestId:message.requestId,tool:toolName,chatTabId:verifiedTarget?.tabId,conversationId:verifiedTarget?.conversationId,bytes:encoder.encode(JSON.stringify(beforeCompact)).length-encoder.encode(JSON.stringify(response.result)).length});
       host.diagnostic?.("MCP_PAYLOAD_SIZE",{requestId:message.requestId,tool:toolName,chatTabId:verifiedTarget?.tabId,conversationId:verifiedTarget?.conversationId,
         ...mcpPayloadSizes(message.request.params.arguments,response.result??response.error),relayBytes,status:actual===text?"forwarded":"relay_limit"});
     } catch { /* diagnostics must never change tool outcomes */ }

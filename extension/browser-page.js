@@ -129,7 +129,32 @@ export function createBrowserPage(session, host) {
   const reportedByCaller = new Map();
   const callerKey = () => session.operation?.chatTabId ?? null;
   const reportedForCaller = () => reportedByCaller.get(callerKey()) || { version: null, nodes: new Map(), resources: new Set() };
-  const forgetCaller = tabId => reportedByCaller.delete(tabId);
+  const deliveredByCaller = new Map();
+  const forgetCaller = tabId => {reportedByCaller.delete(tabId);deliveredByCaller.delete(tabId);};
+  // Only returned nodes enter this baseline, never an unseen part of a
+  // truncated page. Expiry and eviction cause safe retransmission.
+  function deliveredBaseline(reset=false) {
+    const key=callerKey(), now=Date.now();
+    for(const [k,v] of deliveredByCaller)if(now-v.at>=3600000)deliveredByCaller.delete(k);
+    let baseline=deliveredByCaller.get(key);
+    const fresh=reset||!baseline||baseline.version!==session.pageVersion;
+    if(fresh)baseline={version:session.pageVersion,nodes:new Map(),resources:new Set(),at:now};
+    baseline.at=now;
+    deliveredByCaller.delete(key);deliveredByCaller.set(key,baseline);
+    while(deliveredByCaller.size>20)deliveredByCaller.delete(deliveredByCaller.keys().next().value);
+    return {baseline,fresh};
+  }
+  function rememberDelivered(baseline,result,current) {
+    for(const node of result.nodes) {
+      const signature=current.nodes.get(node.nodeId);
+      if(signature===undefined)continue;
+      baseline.nodes.delete(node.nodeId);baseline.nodes.set(node.nodeId,signature);
+      for(const resource of node.resources||[])baseline.resources.add(resource.resourceId);
+    }
+    // Oversize baselines are discarded rather than falsely claiming a complete
+    // delta. A subsequent delta reports reset and starts from full data again.
+    if(baseline.nodes.size>10000||baseline.resources.size>10000)deliveredByCaller.delete(callerKey());
+  }
   const command = (method, params = {}, target = {}) => {
     const work = async () => {
       if (session.local && (/^Input\./.test(method) || ["DOM.focus","DOM.scrollIntoViewIfNeeded","Page.reload"].includes(method) || method === "Runtime.callFunctionOn" && params.userGesture))
@@ -362,7 +387,7 @@ export function createBrowserPage(session, host) {
     return node;
   }
   function snapshot() {
-    return { version: session.pageVersion, nodes: new Map([...index].map(([id, entry]) => [id, JSON.stringify([nodeSignature(entry.raw), entry.description, entry.parentId, entry.childIds, entry.resources])])), resources: new Set(resources.keys()) };
+    return { version: session.pageVersion, nodes: new Map([...index].map(([id, entry]) => [id, JSON.stringify([nodeSignature(entry.raw),entry.role,entry.name,entry.text,entry.value,entry.description,entry.raw.properties,entry.parentId,entry.childIds,entry.resources])])), resources: new Set(resources.keys()) };
   }
   function difference(previous) {
     const current = snapshot();
@@ -417,17 +442,50 @@ export function createBrowserPage(session, host) {
     const base = input.nodeId ? [input.nodeId] : roots;
     if (input.nodeId && !index.has(input.nodeId)) throw browserError("STALE_NODE", "The requested node disappeared during refresh.");
     const mode = input.mode || "full";
-    const depth = input.depth ?? (mode === "full" ? 20 : 3);
+    const depth = input.depth ?? (mode === "full" || mode === "delta" ? 20 : 3);
     const entries = [];
     const walk = (id, level) => { const entry = index.get(id); if (!entry) return; entries.push(entry); if (level < depth) for (const child of entry.childIds) walk(child, level + 1); };
     for (const root of base) walk(root, 0);
     const finish = host.trace?.begin("page.projectAndEnrich", { mode });
-    await enrichMedia(entries.slice(input.offset ?? 0, (input.offset ?? 0) + Math.min(input.maxNodes ?? limits.maxNodes, limits.maxNodes)));
+    const {baseline,fresh}=deliveredBaseline(mode==="full"&&!input.nodeId&&!(input.offset||0));
+    const liveEntries=()=>entries.filter(entry=>index.get(entry.id)===entry);
+    let candidates=entries;
+    if(mode==="delta"){
+      // Discover changes using the existing AX signatures. Recheck known
+      // resources in the bounded media pass so URL replacements can surface.
+      const preliminary=snapshot();
+      const changed=entries.filter(entry=>baseline.nodes.get(entry.id)!==preliminary.nodes.get(entry.id));
+      const knownMedia=entries.filter(entry=>baseline.nodes.has(entry.id)&&(entry.resources.length||entry.visualMedia));
+      candidates=[...new Set([...changed,...knownMedia])];
+    }
+    await enrichMedia(candidates.slice(input.offset ?? 0, (input.offset ?? 0) + Math.min(input.maxNodes ?? limits.maxNodes, limits.maxNodes)));
     await host.check(session, false);
     if (indexedVersion !== session.pageVersion) throw browserError("PAGE_CHANGED", "The page navigated during observation. Read the current page again.");
     const delta = difference(reportedForCaller());
-    const result = serialize(entries.filter(entry => index.get(entry.id) === entry), input, delta.changes);
+    let result;
+    if(mode==="delta"){
+      const changed=liveEntries().filter(entry=>baseline.nodes.get(entry.id)!==delta.current.nodes.get(entry.id));
+      const removed=[...baseline.nodes.keys()].filter(id=>!delta.current.nodes.has(id));
+      const removedResources=[...baseline.resources].filter(id=>!delta.current.resources.has(id));
+      const cap=limits.maxNodes;
+      const changes={pageChanged:fresh,addedNodeIds:[],updatedNodeIds:[],removedNodeIds:removed.slice(0,cap),addedResourceIds:[],removedResourceIds:removedResources.slice(0,cap),addedNodes:0,updatedNodes:0,removedNodes:removed.length,addedResources:0,removedResources:removedResources.length,truncated:false};
+      result=serialize(changed,{...input,offset:0},changes);
+      for(const node of result.nodes){
+        (baseline.nodes.has(node.nodeId)?changes.updatedNodeIds:changes.addedNodeIds).push(node.nodeId);
+        for(const resource of node.resources||[])if(!baseline.resources.has(resource.resourceId)&&!changes.addedResourceIds.includes(resource.resourceId))changes.addedResourceIds.push(resource.resourceId);
+      }
+      changes.addedNodes=changes.addedNodeIds.length;changes.updatedNodes=changes.updatedNodeIds.length;changes.addedResources=changes.addedResourceIds.length;
+      for(const id of changes.removedNodeIds)baseline.nodes.delete(id);
+      for(const id of changes.removedResourceIds)baseline.resources.delete(id);
+      result.delta=true;result.deltaReset=fresh;
+      result.deltaPending=result.truncated||removed.length>cap||removedResources.length>cap;
+      result.truncated=result.deltaPending;changes.truncated=result.deltaPending;
+      // The next delta always starts at zero against the updated baseline.
+      // Offset pagination over a changing set would skip unsent nodes.
+      result.nextOffset=null;
+    }else result=serialize(liveEntries(),input,delta.changes);
     result.roots = base.slice(0, limits.maxNodes);
+    rememberDelivered(baseline,result,delta.current);
     reportedByCaller.set(callerKey(), delta.current);
     finish?.({ outcome: "ok", returnedNodes: result.nodes.length, totalNodes: entries.length, characters: JSON.stringify(result.nodes).length });
     return result;
@@ -604,6 +662,10 @@ export function createBrowserPage(session, host) {
       if (indexedVersion !== session.pageVersion) throw browserError("PAGE_CHANGED", "The page navigated during the post-action read.");
       const delta = difference(reportedForCaller());
       const observation = serialize(delta.entries, {}, delta.changes);
+      const {baseline}=deliveredBaseline();
+      for(const id of delta.changes.removedNodeIds)baseline.nodes.delete(id);
+      for(const id of delta.changes.removedResourceIds)baseline.resources.delete(id);
+      rememberDelivered(baseline,observation,delta.current);
       reportedByCaller.set(callerKey(), delta.current);
       return { ...context(), completedSteps, failedStep, page: metadata(), observeAgain: Boolean(failedStep) || session.observedRevision !== session.revision || observation.truncated || delta.changes.truncated, observation, observationError: null };
     } catch (error) {

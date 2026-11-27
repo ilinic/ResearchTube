@@ -109,7 +109,7 @@ globalThis.addEventListener?.("fetch", createMediaStreamHandler({
   fetchMedia: (url, options) => fetch(url, options),
   log: (stage, details = {}) => consoleAction(`[ResearchTube media stream ${EXTENSION_VERSION}]`, stage, details)
 }));
-const REQUIRED_AGENT_INTERFACE_VERSION = 96;
+const REQUIRED_AGENT_INTERFACE_VERSION = 97;
 // A UI resource URI is a cache key in MCP Apps. Increment it whenever the
 // rendered template changes so ChatGPT does not reuse a stale iframe bundle.
 const MEDIA_TO_CHAT_WIDGET_URI = "ui://researchtube/chat-target-v8.html";
@@ -6437,6 +6437,11 @@ async function handleMcpRequestInner(request) {
       const definition=memoryToolDefinitions().find(t=>t.name===name);
       if (!validateLocalArguments(definition.inputSchema,args)) return toolError(request.id,localAgentError("INVALID_ARGUMENT","Invalid memory arguments."));
       return executeToolCall(request.id,name,args,async()=>{
+        // force_full is a public result transport control. Local Agent reads
+        // remain authoritative, and an explicit full read overrides versions.
+        const inputArgs={...args};delete inputArgs.force_full;
+        if(args.force_full===true)delete inputArgs.known_version;
+        args=inputArgs;
         if(PLAN_TOOL_NAMES.includes(name)) {
           const input={...args};delete input.chatTabId;
           if(!name.startsWith("skill_") || args.chatTabId!==undefined) {
@@ -7970,8 +7975,9 @@ async function scheduledChatState(tabId) {
     const limitText=/^(?:(?:you(?:\u2019|\x27)ve|you have) reached the maximum length (?:for|of) this conversation(?:[,.; ]|$)|this conversation has reached its maximum length(?:[,.; ]|$)|достигнута максимальная длина (?:этого )?(?:разговора|чата)(?:[,.; ]|$))/i;
     const contextLimit=[...document.querySelectorAll('[role="alert"],[role="status"],[data-testid*="error"],main p')].some(e=>visible(e)&&!e.closest('[data-message-author-role="user"]')&&(!e.closest('[data-message-author-role="assistant"]')||e.matches('[role="alert"],[data-testid*="error"]'))&&limitText.test((e.innerText||e.textContent||"").trim()));
     const rolloverMarkers=users.slice(-30).map(m=>(m.innerText||m.textContent||"").trim().match(/^\[ResearchTube rollover ([a-f0-9]{64})\]/)?.[1]).filter(Boolean);
+    const contextMarkers=users.slice(-30).filter(m=>/^\[ResearchTube task \d+ [a-f0-9]{64}\]/.test((m.innerText||m.textContent||"").trim())).flatMap(m=>Array.from((m.innerText||m.textContent||"").matchAll(/^\[ResearchTube context ([a-f0-9]{64})\]$/gm),match=>match[1]));
     const taskMarkers=users.slice(-30).map(m=>(m.innerText||m.textContent||"").trim().match(/^\[ResearchTube task \d+ ([a-f0-9]{64})\]/)?.[1]).filter(Boolean);
-    return {ready:reason===null,reason,draft,draftMarker,userCount:users.length,lastUserId,anchor,taskMarkers,rolloverMarkers,contextLimit,hasAssistant:completed};
+    return {ready:reason===null,reason,draft,draftMarker,userCount:users.length,lastUserId,anchor,taskMarkers,rolloverMarkers,contextMarkers,contextLimit,hasAssistant:completed};
   }});
   return result[0]?.result||{ready:false,reason:"CHAT_STATE_UNAVAILABLE"};
 }
@@ -7991,10 +7997,11 @@ function rolloverLanding(url) {
   if(!path||path.startsWith("/g/")&&!project)return null;
   return project?"https://chatgpt.com/g/"+project+"/project":"https://chatgpt.com/";
 }
-function planTaskMessage(p,task,marker) {
-  const goal=p.goal?"\n\nCurrent recorded goal (context): "+p.goal:"";
-  const skills=p.skills?.length?"\n\nShared skill references (read relevant versions with skill_read): "+p.skills.map(s=>"#"+s.id+" "+s.name+" v"+s.version).join("; "):"";
-  return "[ResearchTube task "+task.id+" "+marker+"]\n"+task.prompt+goal+skills+"\n\nUse your plan tools to record the outcome, edit future tasks and improve relevant shared skills when useful. Respect the user's authorized objective.";
+function planTaskMessage(p,task,marker,contextHash,includeContext=true) {
+  const goal=includeContext&&p.goal?"\n\nCurrent recorded goal (context): "+p.goal:"";
+  const skills=includeContext&&p.skills?.length?"\n\nShared skill references (read relevant versions with skill_read): "+p.skills.map(s=>"#"+s.id+" "+s.name+" v"+s.version).join("; "):"";
+  const context=includeContext?"\n\n[ResearchTube context "+contextHash+"]"+goal+skills+"\n\nUse your plan tools to record the outcome, edit future tasks and improve relevant shared skills when useful. Respect the user's authorized objective.":"\n\nContinue under the recorded goal and skills. If prior context is unavailable, read agent_memory_read and relevant skills (force_full=true). Record the outcome and maintain the plan.";
+  return "[ResearchTube task "+task.id+" "+marker+"]\n"+task.prompt+context;
 }
 async function resumePlanRollover(tab,chatId,p,state) {
   const key=ROLLOVER_PREFIX+chatId;
@@ -8112,7 +8119,9 @@ async function runPlannedChat(tab,chatId) {
     p=await peek();
     if(p.paused||p.current?.id!==task.id||p.current?.marker!==marker||p.current.status!=="claimed")return decision("blocked","PLAN_CLAIM_CHANGED");
   }
-  const message=planTaskMessage(p,task,marker);
+  const contextHash=(await planOperationKey({goal:p.goal||"",skills:p.skills||[]})).slice(5);
+  const includeContext=!state.contextMarkers?.includes(contextHash);
+  const message=planTaskMessage(p,task,marker,contextHash,includeContext);
   let dispatching=false;
   const verify=async()=>{
     const live=await liveState();
@@ -8135,7 +8144,7 @@ async function runPlannedChat(tab,chatId) {
     }});
   const fresh=await peek();
   if(fresh.current?.marker!==marker||fresh.paused)return decision("blocked","PLAN_RESERVATION_CHANGED");
-  if(result.sent) {reliabilityTrace.add("PLAN_PROMPT_SIZE",{tool:"scheduler",conversationId:chatId,chatTabId:tabId,taskId:String(task.id),promptBytes:new TextEncoder().encode(message).length});await planTransition(chatId,fresh.version,"sent",{id:task.id,marker});return decision("sent","PLAN_SENT");}
+  if(result.sent) {if(!includeContext)reliabilityTrace.add("PLAN_CONTEXT_REUSED",{tool:"scheduler",conversationId:chatId,chatTabId:tabId,taskId:String(task.id),bytes:new TextEncoder().encode(planTaskMessage(p,task,marker,contextHash,true)).length-new TextEncoder().encode(message).length});reliabilityTrace.add("PLAN_PROMPT_SIZE",{tool:"scheduler",conversationId:chatId,chatTabId:tabId,taskId:String(task.id),promptBytes:new TextEncoder().encode(message).length});await planTransition(chatId,fresh.version,"sent",{id:task.id,marker});return decision("sent","PLAN_SENT");}
   if(dispatching&&!result.committed&&fresh.current.status==="dispatching") {
     // The current invocation can prove no click crossed its commit boundary.
     await planTransition(chatId,fresh.version,"undispatch",{id:task.id,marker});

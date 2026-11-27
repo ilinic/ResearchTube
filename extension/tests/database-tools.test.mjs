@@ -7,7 +7,7 @@ assert.equal(defs.some(t=>t.name==="db_sql"),false);
 const query=defs.find(t=>t.name==="db_query");
 assert.equal(query.annotations.readOnlyHint,true);
 assert.equal(query.annotations.destructiveHint,false);
-assert.deepEqual(Object.keys(query.inputSchema.properties).sort(),["chatTabId","sql"]);
+assert.deepEqual(Object.keys(query.inputSchema.properties).sort(),["chatTabId","force_full","sql"]);
 assert.equal(query.inputSchema.additionalProperties,false);
 assert.deepEqual(query.inputSchema.required,["sql"]);
 const submit=defs.find(t=>t.name==="db_outbox_submit");

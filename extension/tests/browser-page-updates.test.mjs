@@ -51,6 +51,25 @@ assert.ok(initial.nodes.some(node => node.name === "Useful article text"));
 assert.equal(initial.changes.pageChanged, true);
 assert.equal(initial.changes.addedResources, 1);
 assert.doesNotMatch(JSON.stringify(initial), /PRIVATE|signed|private\.test/);
+const deltaFixture=fixture();await deltaFixture.read();
+const unchangedDelta=await deltaFixture.read({mode:"delta"});
+assert.equal(unchangedDelta.delta,true);
+assert.equal(unchangedDelta.deltaReset,false);
+assert.equal(unchangedDelta.nodes.length,0);
+deltaFixture.trees.get("main").find(node=>node.nodeId==="2").name.value="Changed button";
+const changedDelta=await deltaFixture.read({mode:"delta"});
+assert.ok(changedDelta.nodes.some(node=>node.name==="Changed button"));
+assert.ok(!changedDelta.nodes.some(node=>node.name==="Useful article text"));
+assert.equal((await deltaFixture.read({mode:"delta"})).nodes.length,0);
+const pagedDelta=fixture({maxNodes:2,maxChars:1000});
+const beforeDelta=await pagedDelta.read();
+const seenDelta=new Set(beforeDelta.nodes.map(n=>n.nodeId));
+for(let n=0;n<20;n++){
+  const page=await pagedDelta.read({mode:"delta"});
+  for(const node of page.nodes){assert.ok(!seenDelta.has(node.nodeId));seenDelta.add(node.nodeId);}
+  if(!page.deltaPending)break;
+}
+assert.equal(seenDelta.size,beforeDelta.totalNodes);
 const outline = await first.read({ mode: "outline" });
 assert.ok(!outline.nodes.some(node => node.name === "Useful article text"));
 assert.equal(outline.changes.addedNodes, 0);
