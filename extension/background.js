@@ -8100,12 +8100,12 @@ function planTaskMessage(p,task,marker,contextHash,includeContext=true,verifiedT
   const goal=includeContext&&p.goal?"\n\nCurrent recorded goal (context): "+p.goal:"";
   const skills=includeContext&&p.skills?.length?"\n\nShared skill references (read relevant versions with skill_read): "+p.skills.map(s=>"#"+s.id+" "+s.name+" v"+s.version).join("; "):"";
   const context=includeContext?"\n\n[ResearchTube context "+contextHash+"]"+goal+skills+"\n\nUse your plan tools to record the outcome, edit future tasks and improve relevant shared skills when useful. Respect the user's authorized objective.":"\n\nContinue under the recorded goal and skills. If prior context is unavailable, read agent_memory_read and relevant skills (force_full=true). Record the outcome and maintain the plan.";
-  const routing=Number.isSafeInteger(verifiedTabId)&&verifiedTabId>=0?"\n\nResearchTube scheduler verified the current chatTabId: "+verifiedTabId+". Use this ID for tools requiring chatTabId, including agent_memory_read, plan_read/status/edit and site tools. If group inspection is needed, call system_get_chat_context with this explicit chatTabId to avoid the widget. If the ID is rejected or the tab changed, identify the current chat again; never reuse an older chatTabId from the checkpoint.":"";
+  const routing=Number.isSafeInteger(verifiedTabId)&&verifiedTabId>=0?"\n\nResearchTube scheduler verified the current chatTabId: "+verifiedTabId+". Use this ID for tools requiring chatTabId, including agent_memory_read, plan_read/status/edit and site tools. If group inspection is needed, call system_get_chat_context with this explicit chatTabId to avoid the widget. If the ID is rejected or the tab changed, identify the current chat again; never reuse an older chatTabId from the checkpoint. For website research omit mode in site_read: read nodes[0].text and paginate with nextOffset; request mode full or outline only for interaction or resources. Do not fetch the complete interactive tree for text research.":"";
   return "[ResearchTube task "+task.id+" "+marker+"]\n"+task.prompt+context+routing;
 }
 // Transport/history size is only an approximate pressure signal, not tokens.
 // Reuse retained diagnostics; no additional durable telemetry database.
-const PLAN_ROLLOVER_DEFAULT_KIB=768;
+const PLAN_ROLLOVER_DEFAULT_KIB=224;
 function normalizePlanRolloverKiB(value){
   return Number.isInteger(value)&&(value===0||value>=128&&value<=16384)?value:PLAN_ROLLOVER_DEFAULT_KIB;
 }

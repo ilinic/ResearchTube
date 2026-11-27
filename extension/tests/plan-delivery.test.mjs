@@ -59,9 +59,9 @@ assert.match(sentMessages[1],/verified the current chatTabId: 1/);
 assert.equal(decisions.filter(x=>x[1]==="sent").length,2);
 console.log("plan dispatch guards, independent idle delay and project rollover routing: ok");
 
-assert.equal(env.normalizePlanRolloverKiB(undefined),768);
+assert.equal(env.normalizePlanRolloverKiB(undefined),224);
 assert.equal(env.normalizePlanRolloverKiB(0),0);
-assert.equal(env.normalizePlanRolloverKiB(64),768);
+assert.equal(env.normalizePlanRolloverKiB(64),224);
 assert.equal(env.planRolloverPressure("first",{visibleHistoryBytes:999999},{rolloverKiB:0}),null);
 assert.equal(env.planRolloverPressure("first",{visibleHistoryBytes:999999},{rolloverKiB:768}).source,"visible_history");
 assert.equal(env.rolloverSourceEligible({ready:true,anchor:"x",draft:false},{mode:"proactive",sourceAnchor:"x"}),true);

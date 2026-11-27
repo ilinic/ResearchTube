@@ -372,3 +372,39 @@ assert.equal(noFocus.failedStep.diagnostics.element.focusedElement.tag,"button")
 assert.equal(unfocused.commands.filter(row=>row.method==="Input.dispatchKeyEvent"||row.method==="Input.insertText").length,0);
 assert.ok(unfocused.commands.findIndex(row=>row.method==="DOM.scrollIntoViewIfNeeded")<unfocused.commands.findIndex(row=>row.method==="DOM.focus"));
 assertSchema(browserToolDefinitions().find(tool=>tool.name==="site_interact").outputSchema,noFocus);
+
+// Text-only research defaults at the public dispatch layer. The explicit
+// interactive aliases must retain IDs/resources and delta baselines.
+const textFixture=fixture();
+const plain=await textFixture.read({mode:"text"});
+assert.equal(plain.nodes.length,1);
+assert.match(plain.nodes[0].text,/Useful article text/);
+assert.equal(plain.nodes[0].text.split("Useful article text").length,2);
+assert.ok(!plain.nodes[0].resources&&!plain.nodes[0].childIds);
+assert.equal(plain.nextOffset,null);
+assert.doesNotMatch(JSON.stringify(plain),/PRIVATE|signed|private\.test/);
+const tree=await textFixture.read({mode:"interactive"});
+assert.ok(tree.nodes.some(n=>n.role==="image"&&n.resources?.length));
+assert.ok(tree.nodes.some(n=>n.role==="StaticText"&&n.name==="Useful article text"));
+await textFixture.read({mode:"text"});
+assert.equal((await textFixture.read({mode:"delta"})).nodes.length,0,"text does not change interactive delivery baseline");
+assert.throws(()=>validateBrowserInput("site_read",{chatTabId:22,tabId:1,mode:"text",depth:2}),{code:"BROWSER_INVALID"});
+const many=fixture({maxNodes:200,maxChars:48000});
+many.trees.get("main")[0].childIds.push("90","91");
+const protectedInput=ax("90","textbox","Password",["92"]);
+protectedInput.value={value:"SECRET_PASSWORD_VALUE"};
+many.trees.get("main").push(protectedInput,ax("92","StaticText","SECRET_PASSWORD_VALUE"),ax("91","StaticText","Long original story 🚀 \"quote\"\n".repeat(1800)));
+let assembled="",offset=0,calls=0;
+do{
+  const result=await many.read({mode:"text",maxChars:1200,offset});
+  assert.ok(JSON.stringify(result.nodes).length<=1200);
+  assert.doesNotMatch(JSON.stringify(result),/SECRET_PASSWORD_VALUE/);
+  assembled+=result.nodes.map(n=>n.text).join("");
+  offset=result.nextOffset;
+  calls++;
+  assert.ok(calls<200);
+}while(offset!==null);
+assert.ok(assembled.endsWith(("Long original story 🚀 \"quote\"\n".repeat(1800)).trim()));
+assert.match(assembled,/Useful article text/);
+assert.ok(calls>1);
+console.log("Compact text, protected subtree exclusion, lossless pagination and independent interactive baseline: ok");

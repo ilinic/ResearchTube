@@ -118,6 +118,66 @@ function centerInteractionTarget(){
   el.scrollIntoView({block:"center",inline:"center",behavior:"instant"});return true;
 }
 
+// Text projection of the existing locally indexed AX tree. Preserve ordered
+// accessible text, but do not send the same parent/child label twice, field
+// values, identifiers for every leaf, relationships, resources or raw URLs.
+export function browserTextChunks(index,roots,maxChars){
+  const chunks=[];
+  const normalize=value=>String(value??"").replace(/\r\n?/g,"\n").trim();
+  function collect(id,parts,seen){
+    if(seen.has(id))return;
+    seen.add(id);
+    const entry=index.get(id);
+    if(!entry||protectedNode(entry.raw))return;
+    if(entry.role==="StaticText"){
+      const text=normalize(entry.name||entry.text);
+      if(text)parts.push(text);
+      return;
+    }
+    const start=parts.length;
+    for(const child of entry.childIds||[])collect(child,parts,seen);
+    // A labelled leaf (e.g. a link, heading, button or image alt) can be
+    // meaningful even if AX supplies no StaticText. Omit document titles here.
+    if(parts.length===start&&entry.role!=="RootWebArea"){
+      const text=normalize(entry.name||entry.text||entry.description);
+      if(text)parts.push(text);
+    }
+  }
+  for(const id of roots){
+    const entry=index.get(id);
+    if(!entry)continue;
+    const parts=[];
+    collect(id,parts,new Set());
+    const content=parts.join("\n");
+    const node={nodeId:entry.id,parentId:entry.parentId,role:entry.role,name:entry.name.slice(0,80),text:""};
+    // Chunk exactly against the JSON budget, including escaping and the
+    // enclosing array. The same offset and budget can recover all text.
+    let offset=0;
+    if(JSON.stringify([node]).length>maxChars)node.name="";
+    while(offset<content.length){
+      let low=0,high=Math.min(content.length-offset,maxChars);
+      while(low<high){
+        const middle=Math.ceil((low+high)/2);
+        if(JSON.stringify([{...node,text:content.slice(offset,offset+middle)}]).length<=maxChars)low=middle;
+        else high=middle-1;
+      }
+      if(!low)throw browserError("BROWSER_INVALID","Text observation budget is too small. Increase maxChars.");
+      let end=offset+low;
+      // Avoid splitting a surrogate pair, and prefer a nearby line boundary.
+      if(end<content.length&&/[\uD800-\uDBFF]/.test(content[end-1]))end--;
+      if(end<content.length){
+        const line=content.lastIndexOf("\n",end-1);
+        if(line>=offset+Math.floor(low*.8))end=line+1;
+      }
+      if(end<=offset)throw browserError("BROWSER_INVALID","Text observation budget is too small for a Unicode character.");
+      chunks.push({...node,text:content.slice(offset,end)});
+      offset=end;
+    }
+    if(!content)chunks.push(node);
+  }
+  return chunks;
+}
+
 export function createBrowserPage(session, host) {
   let index = new Map(), identifiers = new Map(), resources = new Map(), resourceKeys = new Map();
   let counter = 0, resourceCounter = 0, roots = [];
@@ -441,7 +501,20 @@ export function createBrowserPage(session, host) {
     await refresh();
     const base = input.nodeId ? [input.nodeId] : roots;
     if (input.nodeId && !index.has(input.nodeId)) throw browserError("STALE_NODE", "The requested node disappeared during refresh.");
-    const mode = input.mode || "full";
+    const mode = input.mode === "interactive" ? "full" : input.mode || "full";
+    if(mode==="text"){
+      if(input.nodeId!==undefined||input.depth!==undefined)throw browserError("BROWSER_INVALID","Text mode reads the whole page. Use full/subtree for a selected node or depth.");
+      // Text reads do not enrich media or advance the caller's interactive
+      // delta baseline. The complete AX index remains available locally.
+      const budget=Math.min(input.maxChars??16000,limits.maxChars);
+      const chunks=browserTextChunks(index,roots,budget);
+      const offset=input.offset??0,nodes=chunks.slice(offset,offset+1);
+      const nextOffset=offset+nodes.length<chunks.length?offset+nodes.length:null;
+      const changes={pageChanged:reportedForCaller().version!==session.pageVersion,addedNodeIds:[],updatedNodeIds:[],removedNodeIds:[],addedResourceIds:[],removedResourceIds:[],addedNodes:0,updatedNodes:0,removedNodes:0,addedResources:0,removedResources:0,truncated:false};
+      await host.check(session,false);
+      if(indexedVersion!==session.pageVersion)throw browserError("PAGE_CHANGED","The page navigated during text observation. Read again.");
+      return {...context(),page:metadata(),roots:nodes.map(n=>n.nodeId),nodes,truncated:nextOffset!==null,nextOffset,totalNodes:chunks.length,changes};
+    }
     const depth = input.depth ?? (mode === "full" || mode === "delta" ? 20 : 3);
     const entries = [];
     const walk = (id, level) => { const entry = index.get(id); if (!entry) return; entries.push(entry); if (level < depth) for (const child of entry.childIds) walk(child, level + 1); };

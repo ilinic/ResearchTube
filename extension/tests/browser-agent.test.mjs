@@ -46,7 +46,11 @@ for (const initialUrl of ['', 'about:blank', undefined]) {
  assert.equal(loading.events.filter(e=>e[0]==='prompt').length,1);
  assert.equal(result.group.tabs.filter(tab=>tab.role==='chatgpt').length,1);
 }
-const read=await f.run('site_read');assert.equal(read.nodes.length,7);assert.equal(read.tabId,21);assert.equal(read.chatTabId,22);
+const defaultText=await f.agent.execute('site_read',{chatTabId:22,tabId:21});
+assertSchema(definitions.find(t=>t.name==='site_read').outputSchema,defaultText);
+assert.equal(defaultText.nodes.length,1);assert.match(defaultText.nodes[0].text,/Detailed/);
+assert.ok(!defaultText.nodes[0].resources&&!defaultText.nodes[0].childIds);
+const read=await f.run('site_read',{mode:'full'});assert.equal(read.nodes.length,7);assert.equal(read.tabId,21);assert.equal(read.chatTabId,22);
 assert.equal(read.page.url,'https://site.test/article');assert.ok(!JSON.stringify(read).includes('PRIVATE'));
 const byRole=role=>read.nodes.find(node=>node.role===role);
 assert.match(byRole('image').nodeId,/^n_21_[0-9]+_[0-9]+$/);
@@ -280,7 +284,7 @@ const codex=fixture();
 codex.tabs.set(70,{id:70,groupId:-1,windowId:3,url:'https://chatgpt.com/c/standalone',title:'Standalone chat'});
 const localList=await codex.agent.executeLocal('site_list_tabs',{});
 assert.ok(localList.tabs.some(tab=>tab.tabId===70));
-const localRead=await codex.agent.executeLocal('site_read',{tabId:70});
+const localRead=await codex.agent.executeLocal('site_read',{mode:'full',tabId:70});
 assert.equal(localRead.tabId,70);assert.equal(localRead.chatTabId,undefined);
 assert.ok(localRead.nodes.length>0);
 await assert.rejects(codex.agent.executeLocal('site_interact',{tabId:70,steps:[{action:'key',key:'Enter'}]}),{code:'BROWSER_READ_ONLY'});
@@ -296,7 +300,7 @@ console.log('Local browser: no chat identity, read-only, Workspace-only resource
 // Local reads do not claim or depend on actual Chrome groups.
 const independent=fixture();await independent.agent.start(10);
 await independent.run('site_session_stop');
-const localStopped=await independent.agent.executeLocal('site_read',{tabId:21});
+const localStopped=await independent.agent.executeLocal('site_read',{mode:'full',tabId:21});
 assert.equal(localStopped.tabId,21);
 assert.equal((await independent.run('site_session_status')).group.state,'stopped');
 const list=await independent.agent.executeLocal('site_list_tabs',{});
@@ -310,7 +314,7 @@ await independent.run('site_session_stop');await independent.scheduled.shift()()
 assert.equal((await independent.agent.executeLocal('site_files_status',{taskId:queuedLocal.taskId})).status,'completed');
 assert.equal(independent.uploads.length,0);
 independent.tabs.delete(21);await independent.agent.onRemoved(21);
-await assert.rejects(independent.agent.executeLocal('site_read',{tabId:21}),{code:'TAB_CLOSED'});
+await assert.rejects(independent.agent.executeLocal('site_read',{mode:'full',tabId:21}),{code:'TAB_CLOSED'});
 console.log('Local tab reads: stopped groups and moves do not affect local observations');
 
 // site_open is a single entry point from an existing saved chat.
@@ -357,7 +361,7 @@ assert.equal(localStudy.tabs.get(codexOpen.tabId).active,false);
 const codexList=await localStudy.agent.executeLocal('site_list_tabs',{});
 assert.equal(codexList.tabs.find(t=>t.tabId===codexOpen.tabId).access,'read-write');
 assert.equal(codexList.tabs.find(t=>t.tabId===21).access,'read-only');
-const codexRead=await localStudy.agent.executeLocal('site_read',{tabId:codexOpen.tabId});
+const codexRead=await localStudy.agent.executeLocal('site_read',{mode:'full',tabId:codexOpen.tabId});
 const codexClick=await localStudy.agent.executeLocal('site_interact',{tabId:codexOpen.tabId,steps:[{action:'click',nodeId:codexRead.nodes.find(n=>n.role==='button').nodeId}]});
 assert.equal(codexClick.completedSteps,1,JSON.stringify(codexClick));
 await assert.rejects(localStudy.agent.executeLocal('site_interact',{tabId:21,steps:[{action:'key',key:'Enter'}]}),{code:'BROWSER_READ_ONLY'});
@@ -369,7 +373,7 @@ const afterRestart=createBrowserAgent(localStudy.host);
 assert.equal((await afterRestart.executeLocal('site_list_tabs',{})).tabs.find(t=>t.tabId===codexOther.tabId).access,'read-write');
 localStudy.tabs.get(codexOpen.tabId).groupId=-1;
 await assert.rejects(localStudy.agent.executeLocal('site_interact',{tabId:codexOpen.tabId,steps:[{action:'key',key:'Enter'}]}),{code:'BROWSER_READ_ONLY'});
-assert.equal((await localStudy.agent.executeLocal('site_read',{tabId:codexOpen.tabId})).tabId,codexOpen.tabId);
+assert.equal((await localStudy.agent.executeLocal('site_read',{mode:'full',tabId:codexOpen.tabId})).tabId,codexOpen.tabId);
 console.log('Codex own group, local interaction, reuse and live permission checks: ok');
 
 // Explicit navigation wins over URL reuse and never creates a fallback.

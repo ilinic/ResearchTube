@@ -836,7 +836,7 @@ export function createBrowserAgent(host) {
           target.localFocus = true;
         }
         return await target.trace.span(`tool.${name}`, async () => {
-          if (name === "site_read") return target.page.observe(input);
+          if (name === "site_read") return target.page.observe({...input,mode:input.mode??(input.nodeId!==undefined||input.depth!==undefined?"full":"text")});
           if (name === "site_get_children") return target.page.observe({ ...input, mode: "subtree", depth: input.depth ?? 1 });
           if (name === "site_get_node") return target.page.getNode(input.nodeId);
           if (name === "site_get_text") return target.page.getText(input.nodeId, input.offset, input.limit);

@@ -84,7 +84,7 @@ $("save-plan-rollover").addEventListener("click",async()=>{
   catch{$("plan-rollover-result").textContent="Could not save the setting.";}
 });
 async function init() {
-  const rollover=await chrome.storage.local.get({planRolloverKiB:768});
+  const rollover=await chrome.storage.local.get({planRolloverKiB:224});
   $("plan-rollover-kib").value=rollover.planRolloverKiB;
   const state = await call({ type: "status", includeAgent: false });
   $("agent-port").value = state.agentPort || 17843;

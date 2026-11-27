@@ -82,6 +82,6 @@ export function fixture({multipleImages=false,nonImages=false,imageCount=1}={}){
  }
  };
  const agent=createBrowserAgent(host);
- const run=async(name,args={})=>{const targeted=definitions.find(tool=>tool.name===name)?.inputSchema.required.includes('tabId');const input={chatTabId:22,...(targeted?{tabId:21}:{}),...args};const result=await agent.execute(name,input);checkSchema(name,result);return result;};
+ const run=async(name,args={})=>{const targeted=definitions.find(tool=>tool.name===name)?.inputSchema.required.includes('tabId');const input={chatTabId:22,...(targeted?{tabId:21}:{}),...(name==="site_read"?{mode:"full"}:{}),...args};const result=await agent.execute(name,input);checkSchema(name,result);return result;};
  return {agent,run,host,ownerMarkers,tabs,events,scheduled,uploads,saved,logs,setTree:value=>tree=value,setOriginalFailure:()=>failOriginal=true,setTooLarge:()=>tooLarge=true,onAttach:fn=>onAttach=fn,onSave:fn=>onSave=fn};
 }
