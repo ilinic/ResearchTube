@@ -104,3 +104,44 @@ rec=await recovery({oldOpen:true,reopened:true,newReopened:true,legacyAlertGone:
 rec=await recovery({oldOpen:true,reopened:true,ambiguous:true});assert.equal(rec.moved,0);assert.deepEqual(rec.removed,[]);assert.equal(rec.logged.at(-1)[2],"ROLLOVER_SUCCESSOR_AMBIGUOUS");
 rec=await recovery({oldOpen:true,reopened:true,legacyAlertGone:true,changedPlan:true});assert.equal(rec.moved,0);assert.deepEqual(rec.removed,[]);
 console.log("reopened tab IDs, unique marker, legacy alert disappearance, version safety: ok");
+
+// Exercise the actual injected DOM callback, not a mocked ACK flag.
+const domBegin=src.indexOf("async function scheduledChatState("),domEnd=src.indexOf("// Browser-local recovery journal",domBegin);
+assert.ok(domBegin>=0&&domEnd>domBegin);
+const markerText="[ResearchTube rollover "+marker+"]";
+function domNode(text="",attrs={}){
+  return {innerText:text,textContent:text,parentElement:null,childNodes:[],getAttribute:k=>attrs[k]||null,closest:()=>null,matches:()=>false,querySelectorAll:()=>[],querySelector:()=>null,getClientRects:()=>[{}]};
+}
+async function inspectDom({native=[],turns=[],headingTurns=[]}={}){
+  const root=domNode(),headingNodes=headingTurns.map(x=>domNode(x[0])),blocks=headingTurns.map(x=>x[1].map(y=>domNode(y)));
+  root.childNodes=headingNodes;
+  const roles='[data-message-author-role="user"],[data-message-author-role="assistant"]';
+  root.querySelectorAll=selector=>selector===roles?native:selector.startsWith('[data-testid^="conversation-turn-"]')?turns:selector.startsWith("h1,h2")?headingNodes:[];
+  const doc={readyState:"complete",querySelector:s=>s==="main"?root:null,querySelectorAll:()=>[],createRange:()=>{
+    let i=-1;return {setStartAfter:h=>{i=headingNodes.indexOf(h);},setEndBefore(){},setEnd(){},cloneContents:()=>({querySelectorAll:s=>s.startsWith("p,pre")?blocks[i]:[]})};
+  }};
+  const chromeMock={scripting:{executeScript:async({func})=>[{result:func()}]}};
+  const run=new Function("chrome","document","getComputedStyle","TextEncoder",src.slice(domBegin,domEnd)+"\nreturn scheduledChatState;")(chromeMock,doc,()=>({visibility:"visible",display:"block"}),TextEncoder);
+  return run(99);
+}
+const user=(body)=>domNode(body,{"data-message-author-role":"user"});
+const assistant=(body)=>domNode(body,{"data-message-author-role":"assistant"});
+let observed=await inspectDom({native:[user("You said:\n"+markerText+"\nGoal"),assistant("ChatGPT said:\nAcknowledged.")]});
+assert.deepEqual(observed.acknowledgedRolloverMarkers,[marker]);
+observed=await inspectDom({native:[user("You said:"+markerText+"\nGoal"),assistant("Acknowledged.")]});
+assert.deepEqual(observed.acknowledgedRolloverMarkers,[marker]);
+observed=await inspectDom({headingTurns:[["You said:",[markerText,"Goal"]],["ChatGPT said:",["Передача контекста принята."]]]});
+assert.deepEqual(observed.acknowledgedRolloverMarkers,[marker]);assert.equal(observed.roleCounts.headings,2);
+observed=await inspectDom({native:[user(""),assistant("")],headingTurns:[["You said:",[markerText]],["ChatGPT said:",["Acknowledged."]]]});
+assert.deepEqual(observed.acknowledgedRolloverMarkers,[marker]);
+observed=await inspectDom({headingTurns:[["You said:",[markerText]],["ChatGPT said:",[]]]});
+assert.deepEqual(observed.acknowledgedRolloverMarkers,[]);
+observed=await inspectDom({headingTurns:[["You said:",["Unrelated request"]],["ChatGPT said:",[markerText,"quoted only"]]]});
+assert.deepEqual(observed.acknowledgedRolloverMarkers,[]);
+observed=await inspectDom({headingTurns:[["You said:",[markerText]],["You said:",["Another request"]],["ChatGPT said:",["Not an ACK to handoff"]]]});
+assert.deepEqual(observed.acknowledgedRolloverMarkers,[]);
+observed=await inspectDom({native:[user(markerText),assistant(""),user("another request"),assistant("answer")]});
+assert.deepEqual(observed.acknowledgedRolloverMarkers,[]);
+observed=await inspectDom({native:[user("[ResearchTube task 10 "+marker+"]\nnext"),assistant("done")]});
+assert.deepEqual(observed.taskMarkers,[marker]);
+console.log("scheduled DOM recognition: native labels, role-heading fallback, empty/quoted response rejection: ok");

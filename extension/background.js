@@ -7908,9 +7908,9 @@ async function planTransition(chatId,version,action,fields={}) {
   return result.state==="committed";
 }
 const planDecisions=new Map();
-function planDecision(tabId,status,code=null) {
-  const key=status+":"+code;
-  if(planDecisions.get(tabId)!==key){planDecisions.set(tabId,key);reliabilityTrace.add("PLAN_SCHEDULER_DECISION",{tabId,status,code});}
+function planDecision(tabId,status,code=null,stage=null) {
+  const key=status+":"+code+":"+stage;
+  if(planDecisions.get(tabId)!==key){planDecisions.set(tabId,key);reliabilityTrace.add("PLAN_SCHEDULER_DECISION",{tabId,status,code,...(stage?{stage}:{})});}
 }
 async function scheduledPending(tabId) {
   await Promise.all([ensureMediaToChatLoaded(),ensureLibraryStoreLoaded(),artifactTaskManager.ensure(),taskCompletionDelivery.ensure()]);
@@ -7934,8 +7934,77 @@ async function scheduledChatState(tabId) {
     const matches=(selector,root=document)=>[...root.querySelectorAll(selector)].some(visible);
     // History may be virtualized, absent, or outside <main>. It is only
     // supplementary evidence, never a prerequisite for waking a known chat.
-    const messages=[...document.querySelectorAll('[data-message-author-role="user"],[data-message-author-role="assistant"]')];
-    const users=messages.filter(m=>m.getAttribute("data-message-author-role")==="user");
+    // Conversation markup changes independently of Composer markup. Prefer
+    // explicit role/turn containers; fall back to actual conversation headings.
+    // Never accept a marker quoted in an assistant answer or outside a user turn.
+    const roleSelector='[data-message-author-role="user"],[data-message-author-role="assistant"]';
+    const turnSelector='[data-testid^="conversation-turn-"],[data-turn="user"],[data-turn="assistant"],article[data-turn-id]';
+    const headingSelector='h1,h2,h3,h4,h5,h6,[role="heading"]';
+    const normalize=value=>String(value||"").replace(/[\u200b\u200c\u200d\ufeff]/g,"").trim();
+    const labelRole=value=>{
+      const label=normalize(value).replace(/:\s*$/,"").trim().toLowerCase();
+      if(["you said","вы сказали","вы написали"].includes(label))return "user";
+      if(["chatgpt said","chatgpt ответил","chatgpt сказал","chatgpt ответила"].includes(label))return "assistant";
+      return null;
+    };
+    const stripLabel=(value,role)=>{
+      const text=normalize(value);
+      const lines=text.split(/\r?\n/);
+      if(labelRole(lines[0])===role)return normalize(lines.slice(1).join("\n"));
+      // Some renderers concatenate a screen-reader heading with its body.
+      return normalize(text.replace(role==="user"?/^(?:You said|Вы сказали|Вы написали):\s*/i:/^(?:ChatGPT said|ChatGPT ответил[а]?|ChatGPT сказал):\s*/i,""));
+    };
+    const roleOf=e=>e?.getAttribute("data-message-author-role")||e?.getAttribute("data-turn")||null;
+    const contentOf=e=>normalize(e?.innerText||e?.textContent||"");
+    const record=(node,role,body=node)=>{
+      const text=stripLabel(body?.innerText||body?.textContent||"",role);
+      const raw=stripLabel(body?.textContent||body?.innerText||"",role);
+      return {node,role,text,raw,id:body?.getAttribute?.("data-message-id")||node?.getAttribute?.("data-message-id")||body?.closest?.("[data-message-id]")?.getAttribute("data-message-id")||null};
+    };
+    const main=document.querySelector("main")||document;
+    const conversation=main.querySelector?.('[aria-label="Conversation"],[aria-label="Разговор"],[data-testid="conversation"],#thread')||main;
+    const native=[...conversation.querySelectorAll(roleSelector)].filter(e=>!e.parentElement?.closest(roleSelector)).map(e=>record(e,roleOf(e)));
+    const turns=[...conversation.querySelectorAll(turnSelector)].filter(e=>!e.parentElement?.closest(turnSelector));
+    const structured=[];
+    for(const turn of turns){
+      const body=turn.matches(roleSelector)?turn:turn.querySelector(roleSelector);
+      const heading=[...turn.querySelectorAll(headingSelector)].find(h=>labelRole(contentOf(h))&&!h.closest(roleSelector));
+      const role=roleOf(body)||roleOf(turn)||labelRole(contentOf(heading));
+      if(role!=="user"&&role!=="assistant")continue;
+      // An empty shell, toolbar or thinking indicator is not an ACK.
+      const substantive=body||turn.querySelector('.markdown,[data-testid="user-message"],[data-testid="assistant-message"],.whitespace-pre-wrap')||turn.querySelector('p,pre,ul,ol,blockquote,table');
+      if(body)structured.push(record(body,role));
+      else if(substantive)structured.push(record(turn,role,substantive));
+      else structured.push({node:turn,role,text:"",raw:"",id:null});
+    }
+    // If the page has no recognizable turn attributes, use only role headings
+    // in the conversation region, not headings nested inside message content.
+    const headings=[...conversation.querySelectorAll(headingSelector)].filter(h=>labelRole(contentOf(h))&&!h.closest(roleSelector)&&!h.closest('button,[role="button"],nav,aside,.markdown,[contenteditable="true"],pre,blockquote'));
+    const headingRecords=[];
+    // Even if explicit role nodes exist, their body can be incomplete.
+    // Use heading ranges only when the stronger representations lack an ACK.
+    const containsHandoff=sequence=>sequence.some((m,i)=>m.role==="user"&&[m.text,m.raw].some(t=>/^\[ResearchTube rollover [a-f0-9]{64}\]/.test(t))&&(()=>{const n=sequence[i+1];return n?.role==="assistant"&&Boolean(n.text||n.raw);})());
+    if(headings.length&&!containsHandoff(native)&&!containsHandoff(structured)){
+      for(let i=Math.max(0,headings.length-80);i<headings.length;i++){
+        const heading=headings[i],role=labelRole(contentOf(heading)),next=headings[i+1];
+        try{
+          const range=document.createRange();
+          range.setStartAfter(heading);
+          if(next)range.setEndBefore(next);
+          else range.setEnd(conversation,conversation.childNodes.length);
+          const fragment=range.cloneContents();
+          fragment.querySelectorAll('button,[role="button"],[role="toolbar"],nav,aside,form,[contenteditable="true"],script,style,[role="status"],[role="alert"]').forEach(e=>e.remove());
+          // Only actual message content blocks count; not a label or action.
+          const blocks=[...fragment.querySelectorAll('p,pre,blockquote,ul,ol,table,.markdown,.whitespace-pre-wrap')].filter(e=>!e.parentElement?.closest('p,pre,blockquote,ul,ol,table,.markdown,.whitespace-pre-wrap'));
+          const raw=normalize(blocks.map(e=>e.textContent||"").filter(t=>!/^ChatGPT can make mistakes\b|^ChatGPT может ошибаться\b/i.test(normalize(t))).join("\n"));
+          headingRecords.push({node:heading,role,text:stripLabel(raw,role),raw:stripLabel(raw,role),id:null});
+        }catch{/* Unknown DOM: keep the stronger structural evidence. */}
+      }
+    }
+    // Choose the richest ordered structural representation; prefer native on ties.
+    // For ACK, also examine independent recognized role sequences below.
+    const messages=[native,structured,headingRecords].reduce((best,items)=>items.length>best.length?items:best,[]);
+    const users=messages.filter(m=>m.role==="user");
     const last=messages.at(-1);
     const candidates=[...document.querySelectorAll('[contenteditable="true"][role="textbox"], #prompt-textarea, textarea')].filter(e=>visible(e)&&!e.disabled&&e.getAttribute("aria-disabled")!=="true"&&(e.getAttribute("contenteditable")==="true"||e.tagName==="TEXTAREA"));
     const rich=candidates.filter(e=>e.matches('[data-composer-markdown], .ProseMirror'));
@@ -7951,7 +8020,7 @@ async function scheduledChatState(tabId) {
     const attachmentDraft=scopes.some(scope=>[...scope.querySelectorAll('input[type="file"]')].some(e=>e.files?.length)||[...scope.querySelectorAll('[data-file-id], [class~="group/composer-attachment"], .composer-attachment-surface[role="button"]')].some(visible));
     const draft=textDraft||attachmentDraft;
     const generating=matches('button[data-testid="stop-button"], button[aria-label="Stop generating"], button[aria-label="Stop streaming"]');
-    const completed=last?.getAttribute("data-message-author-role")==="assistant"&&Boolean((last.innerText||last.textContent||"").trim());
+    const completed=last?.role==="assistant"&&Boolean(last.text||last.raw);
     let reason=null;
     if (document.readyState!=="complete") reason="CHAT_LOADING";
     else if(generating) reason="CHAT_GENERATING";
@@ -7959,36 +8028,42 @@ async function scheduledChatState(tabId) {
     else if(matches('input[type="password"]')) reason="CHAT_AUTH_REQUIRED";
     else if(!composer||!form) reason="CHAT_COMPOSER_UNAVAILABLE";
     else if(form.getAttribute("aria-busy")==="true"||matches('[aria-busy="true"]',form)) reason="CHAT_COMPOSER_BUSY";
-    else if(last?.getAttribute("aria-busy")==="true") reason="CHAT_RESPONSE_BUSY";
+    else if(last?.node?.getAttribute("aria-busy")==="true") reason="CHAT_RESPONSE_BUSY";
     else if([...document.querySelectorAll('[role="alert"]')].some(e=>visible(e)&&Boolean(e.innerText?.trim())&&!e.closest('[data-message-author-role]'))) reason="CHAT_ALERT_VISIBLE";
     // A ready Send or Voice control is positive evidence of an idle Composer
     // even if the last turn was stopped before the assistant produced text.
     else if(!completed&&!send&&!idleVoice&&!( !draft && sendControls.length)) reason="CHAT_IDLE_UNCONFIRMED";
     else if(draft&&!send) reason="CHAT_DRAFT_SEND_DISABLED";
-    const fingerprint=m=>{if(!m)return "none";const id=m.getAttribute("data-message-id")||m.closest("[data-message-id]")?.getAttribute("data-message-id");if(id)return id;const t=(m.innerText||m.textContent||"").trim();let h=2166136261;for(let i=0;i<t.length;i++)h=Math.imul(h^t.charCodeAt(i),16777619);return m.getAttribute("data-message-author-role")+":"+t.length+":"+(h>>>0).toString(16);};
-    const lastUserId=users.at(-1)?.getAttribute("data-message-id")||null;
+    const fingerprint=m=>{if(!m)return "none";if(m.id)return m.id;const t=m.text||m.raw;let h=2166136261;for(let i=0;i<t.length;i++)h=Math.imul(h^t.charCodeAt(i),16777619);return m.role+":"+t.length+":"+(h>>>0).toString(16);};
+    const lastUserId=users.at(-1)?.id||null;
     const anchor=fingerprint(users.at(-1))+":"+fingerprint(last);
     const draftText=String(composer?.value??composer?.innerText??composer?.textContent??"");
     const draftMarker=draftText.trim().match(/^\[ResearchTube task \d+ ([a-f0-9]{64})\]/)?.[1]||null;
     const limitText=/^(?:(?:you(?:\u2019|\x27)ve|you have) reached the maximum length (?:for|of) this conversation(?:[,.; ]|$)|this conversation has reached its maximum length(?:[,.; ]|$)|достигнута максимальная длина (?:этого )?(?:разговора|чата)(?:[,.; ]|$))/i;
     const contextLimit=[...document.querySelectorAll('[role="alert"],[role="status"],[data-testid*="error"],main p')].some(e=>visible(e)&&!e.closest('[data-message-author-role="user"]')&&(!e.closest('[data-message-author-role="assistant"]')||e.matches('[role="alert"],[data-testid*="error"]'))&&limitText.test((e.innerText||e.textContent||"").trim()));
-    const rolloverMarkers=users.slice(-30).map(m=>(m.innerText||m.textContent||"").trim().match(/^\[ResearchTube rollover ([a-f0-9]{64})\]/)?.[1]).filter(Boolean);
-    const contextMarkers=users.slice(-30).filter(m=>/^\[ResearchTube task \d+ [a-f0-9]{64}\]/.test((m.innerText||m.textContent||"").trim())).flatMap(m=>Array.from((m.innerText||m.textContent||"").matchAll(/^\[ResearchTube context ([a-f0-9]{64})\]$/gm),match=>match[1]));
-    const taskMarkers=users.slice(-30).map(m=>(m.innerText||m.textContent||"").trim().match(/^\[ResearchTube task \d+ ([a-f0-9]{64})\]/)?.[1]).filter(Boolean);
-    // Verify the exact handoff marker and a following assistant turn, not
-    // the current Composer's readiness or whether ACK is the latest message.
-    const acknowledgedRolloverMarkers=[];
-    let awaitingMarker=null,visibleHistoryBytes=0;
+    const rolloverPattern=/^\[ResearchTube rollover ([a-f0-9]{64})\]/;
+    const taskPattern=/^\[ResearchTube task \d+ ([a-f0-9]{64})\]/;
+    const markerOf=(message,pattern)=>[message.text,message.raw].map(t=>t.match(pattern)?.[1]).find(Boolean)||null;
+    const rolloverMarkers=[...new Set(users.slice(-30).map(m=>markerOf(m,rolloverPattern)).filter(Boolean))];
+    const taskMarkers=users.slice(-30).map(m=>markerOf(m,taskPattern)).filter(Boolean);
+    const contextMarkers=users.slice(-30).filter(m=>markerOf(m,taskPattern)).flatMap(m=>Array.from((m.text||m.raw).matchAll(/^\[ResearchTube context ([a-f0-9]{64})\]$/gm),match=>match[1]));
+    const acknowledged=new Set();
+    let visibleHistoryBytes=0;
     const encoder=new TextEncoder();
-    for(const message of messages){
-      const value=(message.textContent||"").trim();
-      if(visibleHistoryBytes<16*1024*1024)visibleHistoryBytes+=encoder.encode(value.slice(0,16*1024*1024)).length;
-      if(message.getAttribute("data-message-author-role")==="user"){
-        const markerText=[message.innerText||"",value].map(v=>v.replace(/[\u200b\ufeff]/g,"").trim());
-        awaitingMarker=markerText.map(v=>v.match(/^\[ResearchTube rollover ([a-f0-9]{64})\]/)?.[1]).find(Boolean)||null;
-      }else if(awaitingMarker&&(message.innerText||value).trim()){acknowledgedRolloverMarkers.push(awaitingMarker);awaitingMarker=null;}
+    for(const message of messages)if(visibleHistoryBytes<16*1024*1024)visibleHistoryBytes+=encoder.encode((message.raw||message.text).slice(0,16*1024*1024)).length;
+    for(const sequence of [native,structured,headingRecords]){
+      let awaiting=null;
+      for(const message of sequence){
+        if(message.role==="user"){
+          awaiting=markerOf(message,rolloverPattern);
+          if(awaiting&&!rolloverMarkers.includes(awaiting))rolloverMarkers.push(awaiting);
+        }else if(awaiting&&message.role==="assistant"&&(message.text||message.raw)){
+          acknowledged.add(awaiting);awaiting=null;
+        }
+      }
     }
-    return {ready:reason===null,reason,draft,draftMarker,generating,userCount:users.length,lastUserId,anchor,taskMarkers,rolloverMarkers,acknowledgedRolloverMarkers,contextMarkers,contextLimit,hasAssistant:completed,visibleHistoryBytes};
+    const acknowledgedRolloverMarkers=[...acknowledged];
+    return {ready:reason===null,reason,draft,draftMarker,generating,userCount:users.length,lastUserId,anchor,taskMarkers,rolloverMarkers,acknowledgedRolloverMarkers,contextMarkers,contextLimit,hasAssistant:completed,visibleHistoryBytes,roleCounts:{native:native.length,structured:structured.length,headings:headingRecords.length}};
   }});
   return result[0]?.result||{ready:false,reason:"CHAT_STATE_UNAVAILABLE"};
 }
@@ -8047,7 +8122,8 @@ function rolloverSourceEligible(state,journal){
 async function resumePlanRollover(tab,chatId,p,state,pressure=null) {
   const key=ROLLOVER_PREFIX+chatId;
   let journal=(await chrome.storage.local.get(key))[key];
-  const trace=(code)=>planDecision(tab.id,"rollover",code);
+  const trace=(code,stage=null)=>planDecision(tab.id,"rollover",code,stage);
+  const roleStage=observed=>{const c=observed?.roleCounts||{};return "native-"+(c.native||0)+".turns-"+(c.structured||0)+".headings-"+(c.headings||0)+".markers-"+(observed?.rolloverMarkers?.length||0)+".acks-"+(observed?.acknowledgedRolloverMarkers?.length||0);};
   const save=async(value)=>{journal=value;await chrome.storage.local.set({[key]:value});};
   const sourceStatus=async()=>{
     const old=await chrome.tabs.get(tab.id).catch(()=>null);
@@ -8082,11 +8158,13 @@ async function resumePlanRollover(tab,chatId,p,state,pressure=null) {
     if(rebindSource&&(copies.length!==1||copies[0].id!==tab.id||copies[0].pendingUrl||tab.groupId<0))return trace("ROLLOVER_SOURCE_REBIND_BLOCKED");
     const candidates=open.filter(t=>t.id!==tab.id&&!t.pendingUrl&&t.groupId===tab.groupId&&t.windowId===tab.windowId&&planProjectPath(t.url)===planProjectPath(journal.oldUrl)&&planConversationId(t.url)&&planConversationId(t.url)!==chatId&&(!journal.successor||planConversationId(t.url)===journal.successor));
     const matched=[];
+    let observedStage="candidates-"+candidates.length;
     for(const candidate of candidates){
       const observed=await scheduledChatState(candidate.id).catch(()=>null);
+      if(candidates.length===1)observedStage=roleStage(observed);
       if(observed?.acknowledgedRolloverMarkers?.includes(journal.marker))matched.push(candidate);
     }
-    if(matched.length!==1)return trace(matched.length?"ROLLOVER_SUCCESSOR_AMBIGUOUS":"ROLLOVER_SUCCESSOR_REBIND_PENDING");
+    if(matched.length!==1)return trace(matched.length?"ROLLOVER_SUCCESSOR_AMBIGUOUS":"ROLLOVER_SUCCESSOR_REBIND_PENDING",observedStage);
     fresh=matched[0];
     if(open.filter(t=>planConversationId(t.url)===planConversationId(fresh.url)).length!==1)return trace("ROLLOVER_SUCCESSOR_AMBIGUOUS");
     await save({...journal,oldTabId:tab.id,newTabId:fresh.id,groupId:tab.groupId,windowId:tab.windowId});
@@ -8102,7 +8180,10 @@ async function resumePlanRollover(tab,chatId,p,state,pressure=null) {
     if(!latest.retired){
       if(latest.paused)return trace("PLAN_PAUSED");
       const nextState=await scheduledChatState(fresh.id);
-      if(!nextState.acknowledgedRolloverMarkers?.includes(journal.marker))return trace(nextState.rolloverMarkers?.includes(journal.marker)?"ROLLOVER_ACK_RESPONSE_PENDING":"ROLLOVER_ACK_MARKER_MISSING");
+      if(!nextState.acknowledgedRolloverMarkers?.includes(journal.marker)){
+        const code=nextState.rolloverMarkers?.includes(journal.marker)?"ROLLOVER_ACK_RESPONSE_PENDING":"ROLLOVER_ACK_MARKER_MISSING";
+        trace(code,roleStage(nextState));return;
+      }
       if(nextState.generating||["CHAT_GENERATING","CHAT_LOADING","CHAT_RESPONSE_BUSY"].includes(nextState.reason)||await scheduledPending(fresh.id))return trace("ROLLOVER_SUCCESSOR_BUSY");
       const source=await sourceStatus();
       if(source==="changed")return trace("ROLLOVER_SOURCE_CHANGED");
