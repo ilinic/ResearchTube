@@ -28,3 +28,5 @@ Early rollover reuses the retained payload summary and conversation text present
 PLAN_ROLLOVER_REBOUND reports successful recovery of transient browser tab IDs. ROLLOVER_SUCCESSOR_REBIND_PENDING, ROLLOVER_SUCCESSOR_AMBIGUOUS and ROLLOVER_SOURCE_REBIND_BLOCKED distinguish missing and ambiguous recovery evidence. No manual replay of uncertain tasks is performed.
 
 Rollover ACK and successor-rebind failures now report compact DOM recognition counts in the scheduler decision stage (native, structured turns, headings, markers, ACKs), without storing conversation text or marker values. The stage is emitted only on a change of scheduler decision or counts.
+
+PLAN_WAIT_RESPONSE_COMPLETION identifies a delivered or possibly delivered task whose exact assistant response has not yet been observed stable and idle for at least three seconds. The bounded RAM observation cache is not a new durable store. Current Composer Stop controls (including plain Stop) count as generating. Scheduler-provided current chatTabId avoids widget binding in automatic tasks; manual widget lifecycle remains independent.

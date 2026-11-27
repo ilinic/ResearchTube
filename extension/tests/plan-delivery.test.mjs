@@ -38,13 +38,24 @@ state={...state,ready:false,reason:"CHAT_GENERATING",anchor:"u2:a2"};
 await env.runPlannedChat(tab,"first");assert.equal(current.status,"sent");
 assert.match(sentMessages[0],/Persistent test objective/);
 const contextMarker=sentMessages[0].match(/\[ResearchTube context ([a-f0-9]{64})\]/)[1];
-state={...state,ready:true,reason:null,contextMarkers:[contextMarker]};
-await env.runPlannedChat(tab,"first");assert.equal(actions.at(-1),"finish");
+const firstMarker=current.marker;
+state={...state,ready:true,reason:null,explicitIdle:true,hasAssistant:true,completionAnchor:"response-1",respondedTaskMarkers:[],contextMarkers:[contextMarker]};
+await env.runPlannedChat(tab,"first");assert.equal(actions.at(-1),"sent");
+state={...state,respondedTaskMarkers:[firstMarker]};
+await env.runPlannedChat(tab,"first");assert.equal(actions.at(-1),"sent");
+now+=2999;await env.runPlannedChat(tab,"first");assert.equal(actions.at(-1),"sent");
+state={...state,completionAnchor:"response-2"};
+await env.runPlannedChat(tab,"first");assert.equal(actions.at(-1),"sent");
+now+=3000;state={...state,ready:false,generating:true};await env.runPlannedChat(tab,"first");assert.equal(actions.at(-1),"sent");
+state={...state,ready:true,generating:false};await env.runPlannedChat(tab,"first");assert.equal(actions.at(-1),"sent");
+now+=3000;await env.runPlannedChat(tab,"first");assert.equal(actions.at(-1),"finish");
 now+=4999;await env.runPlannedChat(tab,"first");assert.equal(actions.at(-1),"finish");
 now+=1;await env.runPlannedChat(tab,"first");assert.deepEqual(actions.slice(-3),["claim","dispatch","sent"]);
 assert.equal(actions.filter(x=>x==="dispatch").length,2);
 assert.doesNotMatch(sentMessages[1],/Persistent test objective|Test method/);
 assert.match(sentMessages[1],/force_full=true/);
+assert.match(sentMessages[0],/verified the current chatTabId: 1/);
+assert.match(sentMessages[1],/verified the current chatTabId: 1/);
 assert.equal(decisions.filter(x=>x[1]==="sent").length,2);
 console.log("plan dispatch guards, independent idle delay and project rollover routing: ok");
 
@@ -89,7 +100,7 @@ async function recovery({oldOpen=false,ack=true,successorReady=false,oldDraft=fa
   return {moved,removed,stored,logged,sent};
 }
 let rec=await recovery();assert.equal(rec.moved,1);assert.deepEqual(rec.removed,[]);assert.equal(rec.stored[journalKey],undefined);assert.equal(rec.logged.at(-1)[2],"ROLLOVER_COMPLETE");
-rec=await recovery({oldOpen:true,successorReady:true});assert.equal(rec.moved,1);assert.deepEqual(rec.removed,[10]);assert.equal(rec.sent.length,1);assert.match(rec.sent[0],/continue original task/);
+rec=await recovery({oldOpen:true,successorReady:true});assert.equal(rec.moved,1);assert.deepEqual(rec.removed,[10]);assert.equal(rec.sent.length,1);assert.match(rec.sent[0],/continue original task/);assert.match(rec.sent[0],/verified the current chatTabId: 11/);
 rec=await recovery({ack:false});assert.equal(rec.moved,0);assert.ok(rec.stored[journalKey]);assert.equal(rec.logged.at(-1)[2],"ROLLOVER_ACK_RESPONSE_PENDING");
 rec=await recovery({oldOpen:true,oldDraft:true});assert.equal(rec.moved,0);assert.deepEqual(rec.removed,[]);
 rec=await recovery({oldOpen:true,oldDraft:true,alreadyCommitted:true});assert.equal(rec.moved,0);assert.deepEqual(rec.removed,[]);assert.ok(rec.stored[journalKey]);
@@ -112,12 +123,15 @@ const markerText="[ResearchTube rollover "+marker+"]";
 function domNode(text="",attrs={}){
   return {innerText:text,textContent:text,parentElement:null,childNodes:[],getAttribute:k=>attrs[k]||null,closest:()=>null,matches:()=>false,querySelectorAll:()=>[],querySelector:()=>null,getClientRects:()=>[{}]};
 }
-async function inspectDom({native=[],turns=[],headingTurns=[]}={}){
+async function inspectDom({native=[],turns=[],headingTurns=[],stop=false,idle=false}={}){
   const root=domNode(),headingNodes=headingTurns.map(x=>domNode(x[0])),blocks=headingTurns.map(x=>x[1].map(y=>domNode(y)));
   root.childNodes=headingNodes;
   const roles='[data-message-author-role="user"],[data-message-author-role="assistant"]';
   root.querySelectorAll=selector=>selector===roles?native:selector.startsWith('[data-testid^="conversation-turn-"]')?turns:selector.startsWith("h1,h2")?headingNodes:[];
-  const doc={readyState:"complete",querySelector:s=>s==="main"?root:null,querySelectorAll:()=>[],createRange:()=>{
+  const form=domNode(),composer=domNode("",{contenteditable:"true"}),stopButton=domNode("",{"aria-label":"Stop"}),sendButton=domNode("",{"aria-label":"Send message"});
+  composer.closest=()=>form;
+  form.querySelectorAll=selector=>selector==='button,[role="button"]'?(stop?[stopButton]:idle?[sendButton]:[]):selector.includes('button[type="submit"]')&&idle?[sendButton]:[];
+  const doc={readyState:"complete",querySelector:s=>s==="main"?root:null,querySelectorAll:selector=>selector.includes('#prompt-textarea')?[composer]:selector.includes('button[data-testid="stop-button"]')&&stop?[stopButton]:[],createRange:()=>{
     let i=-1;return {setStartAfter:h=>{i=headingNodes.indexOf(h);},setEndBefore(){},setEnd(){},cloneContents:()=>({querySelectorAll:s=>s.startsWith("p,pre")?blocks[i]:[]})};
   }};
   const chromeMock={scripting:{executeScript:async({func})=>[{result:func()}]}};
@@ -145,3 +159,11 @@ assert.deepEqual(observed.acknowledgedRolloverMarkers,[]);
 observed=await inspectDom({native:[user("[ResearchTube task 10 "+marker+"]\nnext"),assistant("done")]});
 assert.deepEqual(observed.taskMarkers,[marker]);
 console.log("scheduled DOM recognition: native labels, role-heading fallback, empty/quoted response rejection: ok");
+
+observed=await inspectDom({native:[user("[ResearchTube task 10 "+marker+"]\nnext"),assistant("partial response")],stop:true});
+assert.equal(observed.generating,true);assert.equal(observed.ready,false);assert.equal(observed.explicitIdle,false);assert.deepEqual(observed.respondedTaskMarkers,[marker]);
+observed=await inspectDom({native:[user("[ResearchTube task 10 "+marker+"]\nnext"),assistant("complete")],idle:true});
+assert.equal(observed.generating,false);assert.equal(observed.ready,true);assert.equal(observed.explicitIdle,true);assert.deepEqual(observed.respondedTaskMarkers,[marker]);
+observed=await inspectDom({native:[user("[ResearchTube task 10 "+marker+"]\nnext")],idle:true});
+assert.deepEqual(observed.respondedTaskMarkers,[]);
+console.log("plain Stop, explicit idle, exact task response, stable completion and successor routing: ok");

@@ -7984,7 +7984,7 @@ async function scheduledChatState(tabId) {
     // Even if explicit role nodes exist, their body can be incomplete.
     // Use heading ranges only when the stronger representations lack an ACK.
     const containsHandoff=sequence=>sequence.some((m,i)=>m.role==="user"&&[m.text,m.raw].some(t=>/^\[ResearchTube rollover [a-f0-9]{64}\]/.test(t))&&(()=>{const n=sequence[i+1];return n?.role==="assistant"&&Boolean(n.text||n.raw);})());
-    if(headings.length&&!containsHandoff(native)&&!containsHandoff(structured)){
+    if(headings.length&&(headings.length>Math.max(native.length,structured.length)||!containsHandoff(native)&&!containsHandoff(structured))){
       for(let i=Math.max(0,headings.length-80);i<headings.length;i++){
         const heading=headings[i],role=labelRole(contentOf(heading)),next=headings[i+1];
         try{
@@ -8015,11 +8015,16 @@ async function scheduledChatState(tabId) {
     const scopes=[...new Set([form,composer?.closest('form')].filter(Boolean))];
     const sendControls=[...new Set(scopes.flatMap(scope=>[...scope.querySelectorAll('button[type="submit"], button[data-testid="send-button"], button#composer-submit-button, button[aria-label="Send message"], button[aria-label="Send prompt"], button[aria-label="Отправить сообщение"]')]))].filter(visible);
     const send=sendControls.some(enabled);
-    const idleVoice=form&&[...form.querySelectorAll('button[data-testid="voice-mode-button"], button[aria-label="Start Voice"], button[aria-label="Start voice mode"], button[aria-label="Start Voice Mode"]')].some(enabled);
+    const idleVoice=scopes.some(scope=>[...scope.querySelectorAll('button[data-testid="voice-mode-button"],button[aria-label="Start Voice"],button[aria-label="Start voice mode"],button[aria-label="Start Voice Mode"],button[aria-label="Voice mode"],button[aria-label="Voice"],button[aria-label="Голосовой режим"]')].some(enabled));
     const textDraft=Boolean(String(composer?.value??composer?.innerText??composer?.textContent??"").replace(/[\u200b\u200c\u200d\ufeff]/g,"").trim());
     const attachmentDraft=scopes.some(scope=>[...scope.querySelectorAll('input[type="file"]')].some(e=>e.files?.length)||[...scope.querySelectorAll('[data-file-id], [class~="group/composer-attachment"], .composer-attachment-surface[role="button"]')].some(visible));
     const draft=textDraft||attachmentDraft;
-    const generating=matches('button[data-testid="stop-button"], button[aria-label="Stop generating"], button[aria-label="Stop streaming"]');
+    const stopSelector='button[data-testid="stop-button"],button[aria-label="Stop generating"],button[aria-label="Stop streaming"],button[aria-label="Stop response"],button[aria-label="Stop"],button[aria-label="Остановить"],button[aria-label="Остановить генерацию"]';
+    // Current ChatGPT also uses a plain Stop control. Restrict plain labels
+    // to Composer scopes, excluding microphone/dictation controls.
+    const composerStop=scopes.some(scope=>[...scope.querySelectorAll('button,[role="button"]')].some(e=>visible(e)&&/^(?:stop|остановить)$/i.test(normalize(e.getAttribute("aria-label")||e.getAttribute("title")||e.innerText||e.textContent))));
+    const generating=matches(stopSelector)||composerStop||Boolean(form&&form.getAttribute("aria-busy")==="true");
+    const explicitIdle=!generating&&(idleVoice||send||(!draft&&sendControls.length>0));
     const completed=last?.role==="assistant"&&Boolean(last.text||last.raw);
     let reason=null;
     if (document.readyState!=="complete") reason="CHAT_LOADING";
@@ -8032,7 +8037,7 @@ async function scheduledChatState(tabId) {
     else if([...document.querySelectorAll('[role="alert"]')].some(e=>visible(e)&&Boolean(e.innerText?.trim())&&!e.closest('[data-message-author-role]'))) reason="CHAT_ALERT_VISIBLE";
     // A ready Send or Voice control is positive evidence of an idle Composer
     // even if the last turn was stopped before the assistant produced text.
-    else if(!completed&&!send&&!idleVoice&&!( !draft && sendControls.length)) reason="CHAT_IDLE_UNCONFIRMED";
+    else if(!explicitIdle) reason="CHAT_IDLE_UNCONFIRMED";
     else if(draft&&!send) reason="CHAT_DRAFT_SEND_DISABLED";
     const fingerprint=m=>{if(!m)return "none";if(m.id)return m.id;const t=m.text||m.raw;let h=2166136261;for(let i=0;i<t.length;i++)h=Math.imul(h^t.charCodeAt(i),16777619);return m.role+":"+t.length+":"+(h>>>0).toString(16);};
     const lastUserId=users.at(-1)?.id||null;
@@ -8047,23 +8052,31 @@ async function scheduledChatState(tabId) {
     const rolloverMarkers=[...new Set(users.slice(-30).map(m=>markerOf(m,rolloverPattern)).filter(Boolean))];
     const taskMarkers=users.slice(-30).map(m=>markerOf(m,taskPattern)).filter(Boolean);
     const contextMarkers=users.slice(-30).filter(m=>markerOf(m,taskPattern)).flatMap(m=>Array.from((m.text||m.raw).matchAll(/^\[ResearchTube context ([a-f0-9]{64})\]$/gm),match=>match[1]));
-    const acknowledged=new Set();
+    const acknowledged=new Set(),respondedTasks=new Set();
     let visibleHistoryBytes=0;
     const encoder=new TextEncoder();
     for(const message of messages)if(visibleHistoryBytes<16*1024*1024)visibleHistoryBytes+=encoder.encode((message.raw||message.text).slice(0,16*1024*1024)).length;
     for(const sequence of [native,structured,headingRecords]){
-      let awaiting=null;
+      let awaiting=null,awaitingTask=null;
       for(const message of sequence){
         if(message.role==="user"){
           awaiting=markerOf(message,rolloverPattern);
+          awaitingTask=markerOf(message,taskPattern);
           if(awaiting&&!rolloverMarkers.includes(awaiting))rolloverMarkers.push(awaiting);
-        }else if(awaiting&&message.role==="assistant"&&(message.text||message.raw)){
-          acknowledged.add(awaiting);awaiting=null;
+        }else if(message.role==="assistant"&&(message.text||message.raw)){
+          if(awaiting){acknowledged.add(awaiting);awaiting=null;}
+          if(awaitingTask){respondedTasks.add(awaitingTask);awaitingTask=null;}
         }
       }
     }
     const acknowledgedRolloverMarkers=[...acknowledged];
-    return {ready:reason===null,reason,draft,draftMarker,generating,userCount:users.length,lastUserId,anchor,taskMarkers,rolloverMarkers,acknowledgedRolloverMarkers,contextMarkers,contextLimit,hasAssistant:completed,visibleHistoryBytes,roleCounts:{native:native.length,structured:structured.length,headings:headingRecords.length}};
+    // Include the response contents in the completion fingerprint even when
+    // the provider assigns a stable message ID before streaming finishes.
+    const responseText=last?.role==="assistant"?(last.raw||last.text||""):"";
+    let responseHash=2166136261;
+    for(let i=0;i<responseText.length;i++)responseHash=Math.imul(responseHash^responseText.charCodeAt(i),16777619);
+    const completionAnchor=anchor+":"+responseText.length+":"+(responseHash>>>0).toString(16);
+    return {ready:reason===null,reason,draft,draftMarker,generating,explicitIdle,userCount:users.length,lastUserId,anchor,completionAnchor,taskMarkers,respondedTaskMarkers:[...respondedTasks],rolloverMarkers,acknowledgedRolloverMarkers,contextMarkers,contextLimit,hasAssistant:completed,visibleHistoryBytes,roleCounts:{native:native.length,structured:structured.length,headings:headingRecords.length}};
   }});
   return result[0]?.result||{ready:false,reason:"CHAT_STATE_UNAVAILABLE"};
 }
@@ -8083,11 +8096,12 @@ function rolloverLanding(url) {
   if(!path||path.startsWith("/g/")&&!project)return null;
   return project?"https://chatgpt.com/g/"+project+"/project":"https://chatgpt.com/";
 }
-function planTaskMessage(p,task,marker,contextHash,includeContext=true) {
+function planTaskMessage(p,task,marker,contextHash,includeContext=true,verifiedTabId=null) {
   const goal=includeContext&&p.goal?"\n\nCurrent recorded goal (context): "+p.goal:"";
   const skills=includeContext&&p.skills?.length?"\n\nShared skill references (read relevant versions with skill_read): "+p.skills.map(s=>"#"+s.id+" "+s.name+" v"+s.version).join("; "):"";
   const context=includeContext?"\n\n[ResearchTube context "+contextHash+"]"+goal+skills+"\n\nUse your plan tools to record the outcome, edit future tasks and improve relevant shared skills when useful. Respect the user's authorized objective.":"\n\nContinue under the recorded goal and skills. If prior context is unavailable, read agent_memory_read and relevant skills (force_full=true). Record the outcome and maintain the plan.";
-  return "[ResearchTube task "+task.id+" "+marker+"]\n"+task.prompt+context;
+  const routing=Number.isSafeInteger(verifiedTabId)&&verifiedTabId>=0?"\n\nResearchTube scheduler verified the current chatTabId: "+verifiedTabId+". Use this ID for tools requiring chatTabId, including agent_memory_read, plan_read/status/edit and site tools. If group inspection is needed, call system_get_chat_context with this explicit chatTabId to avoid the widget. If the ID is rejected or the tab changed, identify the current chat again; never reuse an older chatTabId from the checkpoint.":"";
+  return "[ResearchTube task "+task.id+" "+marker+"]\n"+task.prompt+context+routing;
 }
 // Transport/history size is only an approximate pressure signal, not tokens.
 // Reuse retained diagnostics; no additional durable telemetry database.
@@ -8248,6 +8262,25 @@ async function resumePlanRollover(tab,chatId,p,state,pressure=null) {
   else if(result.inserted&&!reserved)await save({...journal,phase:"draft_unconfirmed"});
   trace(result.sent?"ROLLOVER_WAIT_ACK":result.reason||"ROLLOVER_SEND_UNCERTAIN");
 }
+// Two independent idle observations with an unchanged response fingerprint
+// are required for completion. RAM only, bounded; a worker restart resets proof.
+const planCompletionObservations=new Map();
+const PLAN_COMPLETION_STABLE_MS=3000;
+function forgetPlanCompletion(chatId){planCompletionObservations.delete(chatId);}
+function confirmPlanCompletion(chatId,task,state){
+  if(!state.ready||!state.explicitIdle||state.generating||state.draft||!state.hasAssistant||!state.respondedTaskMarkers?.includes(task.marker)||!state.completionAnchor){
+    forgetPlanCompletion(chatId);return false;
+  }
+  const key=task.marker+":"+state.completionAnchor;
+  const observed=planCompletionObservations.get(chatId);
+  if(!observed||observed.key!==key){
+    planCompletionObservations.delete(chatId);
+    planCompletionObservations.set(chatId,{key,at:Date.now()});
+    while(planCompletionObservations.size>256)planCompletionObservations.delete(planCompletionObservations.keys().next().value);
+    return false;
+  }
+  return Date.now()-observed.at>=PLAN_COMPLETION_STABLE_MS;
+}
 async function runPlannedChat(tab,chatId,policy=null,journal=null) {
   const tabId=tab.id,path=chatConversationPath(tab.url);
   const peek=()=>callSharedMemory("__plan_peek",{chat_id:chatId});
@@ -8260,7 +8293,7 @@ async function runPlannedChat(tab,chatId,policy=null,journal=null) {
     return scheduledChatState(tabId);
   };
   let p=await peek();
-  if(p.paused&&!p.retired)return decision("blocked","PLAN_PAUSED");
+  if(p.paused&&!p.retired){forgetPlanCompletion(chatId);return decision("blocked","PLAN_PAUSED");}
   const state=await liveState();
   const pending=await scheduledPending(tabId);
   if(journal){
@@ -8270,8 +8303,9 @@ async function runPlannedChat(tab,chatId,policy=null,journal=null) {
   if(state.contextLimit&&!p.retired&&!pending&&tab.groupId>=0) {
     await resumePlanRollover(tab,chatId,p,state);return;
   }
-  if(p.retired||!p.current&&!p.next)return decision("idle","PLAN_EMPTY");
+  if(p.retired||!p.current&&!p.next){forgetPlanCompletion(chatId);return decision("idle","PLAN_EMPTY");}
   if(!state.ready||pending||!state.anchor) {
+    forgetPlanCompletion(chatId);
     decision("blocked",pending||state.reason||"PLAN_ANCHOR_MISSING");
     if(!p.current&&p.idle_since!==null&&(state.reason==="CHAT_GENERATING"||state.reason==="CHAT_RESPONSE_BUSY"||pending))
       await planTransition(chatId,p.version,"busy");
@@ -8281,8 +8315,16 @@ async function runPlannedChat(tab,chatId,policy=null,journal=null) {
   if(p.current) {
     const t=p.current;
     const delivered=state.taskMarkers?.includes(t.marker);
-    if(delivered&&!state.draft||t.status==="sent"&&!state.draft) {
-      if(await planTransition(chatId,p.version,"finish",{id:t.id,marker:t.marker,anchor:state.anchor}))decision("finished","PLAN_FINISHED");
+    if(delivered||t.status==="sent"||t.status==="dispatching"){
+      if(!confirmPlanCompletion(chatId,t,state))return decision("waiting","PLAN_WAIT_RESPONSE_COMPLETION");
+      const live=await liveState();
+      if(await scheduledPending(tabId)||live.completionAnchor!==state.completionAnchor){forgetPlanCompletion(chatId);return decision("waiting","PLAN_WAIT_RESPONSE_COMPLETION");}
+      if(!confirmPlanCompletion(chatId,t,live))return decision("waiting","PLAN_WAIT_RESPONSE_COMPLETION");
+      const latest=await peek();
+      if(latest.paused||latest.retired||latest.current?.id!==t.id||latest.current?.marker!==t.marker)return decision("blocked","PLAN_RESERVATION_CHANGED");
+      if(await planTransition(chatId,latest.version,"finish",{id:t.id,marker:t.marker,anchor:live.anchor})){
+        forgetPlanCompletion(chatId);decision("finished","PLAN_FINISHED");
+      }
       return;
     }
     if(t.status==="claimed"&&state.anchor===t.anchor) {
@@ -8313,7 +8355,7 @@ async function runPlannedChat(tab,chatId,policy=null,journal=null) {
   }
   const contextHash=(await planOperationKey({goal:p.goal||"",skills:p.skills||[]})).slice(5);
   const includeContext=!state.contextMarkers?.includes(contextHash);
-  const message=planTaskMessage(p,task,marker,contextHash,includeContext);
+  const message=planTaskMessage(p,task,marker,contextHash,includeContext,tabId);
   let dispatching=false;
   const verify=async()=>{
     const live=await liveState();
@@ -8336,7 +8378,7 @@ async function runPlannedChat(tab,chatId,policy=null,journal=null) {
     }});
   const fresh=await peek();
   if(fresh.current?.marker!==marker||fresh.paused)return decision("blocked","PLAN_RESERVATION_CHANGED");
-  if(result.sent) {if(!includeContext)reliabilityTrace.add("PLAN_CONTEXT_REUSED",{tool:"scheduler",conversationId:chatId,chatTabId:tabId,taskId:String(task.id),bytes:new TextEncoder().encode(planTaskMessage(p,task,marker,contextHash,true)).length-new TextEncoder().encode(message).length});reliabilityTrace.add("PLAN_PROMPT_SIZE",{tool:"scheduler",conversationId:chatId,chatTabId:tabId,taskId:String(task.id),promptBytes:new TextEncoder().encode(message).length});await planTransition(chatId,fresh.version,"sent",{id:task.id,marker});return decision("sent","PLAN_SENT");}
+  if(result.sent) {if(!includeContext)reliabilityTrace.add("PLAN_CONTEXT_REUSED",{tool:"scheduler",conversationId:chatId,chatTabId:tabId,taskId:String(task.id),bytes:new TextEncoder().encode(planTaskMessage(p,task,marker,contextHash,true,tabId)).length-new TextEncoder().encode(message).length});reliabilityTrace.add("PLAN_PROMPT_SIZE",{tool:"scheduler",conversationId:chatId,chatTabId:tabId,taskId:String(task.id),promptBytes:new TextEncoder().encode(message).length});await planTransition(chatId,fresh.version,"sent",{id:task.id,marker});return decision("sent","PLAN_SENT");}
   if(dispatching&&!result.committed&&fresh.current.status==="dispatching") {
     // The current invocation can prove no click crossed its commit boundary.
     await planTransition(chatId,fresh.version,"undispatch",{id:task.id,marker});
