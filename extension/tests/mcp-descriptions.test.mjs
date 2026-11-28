@@ -62,7 +62,7 @@ for (const name of ['site_get_images', 'site_get_files']) {
   assert.ok(!Object.hasOwn(tool.inputSchema.properties, 'url'));
   assert.ok(!Object.hasOwn(tool.inputSchema.properties, 'chatId'));
 }
-assert.match(byName('timer_start').description, /same assistant turn.*ending the response does not schedule/);
+assert.match(byName('timer_start').description, /persistent repeating timer/);
 for (const tool of tools.filter(t => t.inputSchema.properties?.addToChat && !['site_get_images', 'site_get_files'].includes(t.name))) {
   assert.match(tool.description, /asynchronous.*creation.data/);
   assert.match(tool.description, /media_task_status.*media_task_cancel/);

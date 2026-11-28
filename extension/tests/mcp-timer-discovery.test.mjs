@@ -38,6 +38,9 @@ for(const name of timers) {
  assert.equal(tool.inputSchema.type,'object');
  assert.ok(tool.outputSchema.anyOf);
 }
+const start=listed.result.tools.find(t=>t.name==="timer_start");
+assert.ok(start.inputSchema.required.includes("tabId"));
+for(const field of ["repeat","until","clockSource"])assert.ok(!Object.hasOwn(start.inputSchema.properties,field));
 const catalog=await clean.context.mcpToolSettingsCatalog();
 for(const name of timers) assert.ok(catalog.some(tool=>tool.name===name && tool.group==='timers' && tool.enabled));
 assert.ok(clean.messages.some(message=>message.includes('timers=timer_start,timer_status,timer_cancel')));

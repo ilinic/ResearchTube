@@ -9,13 +9,14 @@ import { pruneCompletedTasks } from '../task-history.js';
 assert.deepEqual(TIMER_TOOL_NAMES, ['timer_start', 'timer_status', 'timer_cancel']);
 const definitions = timerDefinitions({ readOnlyHint: true }, { readOnlyHint: false });
 assert.equal(definitions.length, 3);
-assert.match(definitions[0].description, /no precise internal running clock/);
-assert.match(definitions[0].description, /same assistant turn/);
+assert.match(definitions[0].description, /persistent repeating timer/);
+assert.match(definitions[0].description, /No one-shot mode/);
 assert.equal(definitions[0].inputSchema.additionalProperties, false);
+assert.deepEqual(definitions[0].inputSchema.required,["duration"]);
+for(const field of ["repeat","until","clockSource"])assert.ok(!Object.hasOwn(definitions[0].inputSchema.properties,field));
 assert.deepEqual(validateTimerInput('timer_start', { duration: 2 }), { duration: 2 });
-assert.deepEqual(validateTimerInput('timer_start', { duration: .5, unit: 'hours', clockSource: 'internet', timeZone: 'Pacific/Auckland' }), { duration: .5, unit: 'hours', clockSource: 'internet', timeZone: 'Pacific/Auckland' });
-assert.equal(validateTimerInput('timer_start', { until: '2026-10-06T13:00:00+13:00' }).until, '2026-10-06T13:00:00+13:00');
-for (const input of [{}, {duration:1, until:'x'}, {duration:true}, {duration:-1}, {duration:Infinity}, {duration:NaN}, {duration:1, unit:'days'}, {until:'13:00'}, {until:'2026-10-06T13:00:00Z', unit:'seconds'}, {duration:1, clockSource:null}, {duration:1, timeZone:'bogus'}, {duration:1, localTimeZone:'UTC'}, {duration:1, other:true}]) {
+assert.deepEqual(validateTimerInput('timer_start', { duration: .5, unit: 'hours', timeZone: 'Pacific/Auckland' }), { duration: .5, unit: 'hours', timeZone: 'Pacific/Auckland' });
+for (const input of [{}, {duration:0}, {duration:.5}, {duration:1,repeat:false}, {duration:1,repeat:true}, {duration:1, until:'x'}, {duration:true}, {duration:-1}, {duration:Infinity}, {duration:NaN}, {duration:1, unit:'days'}, {until:'13:00'}, {until:'2026-10-06T13:00:00Z', unit:'seconds'}, {duration:1, clockSource:null}, {duration:1, clockSource:"internet"}, {duration:1, timeZone:'bogus'}, {duration:1, localTimeZone:'UTC'}, {duration:1, other:true}]) {
   assert.throws(() => validateTimerInput('timer_start', input), e => e.code === 'TIMER_INVALID');
 }
 assert.throws(() => validateTimerInput('timer_status', {taskId:'tsk_abcdefghij', extra:true}), e => e.code === 'TIMER_INVALID');
@@ -48,20 +49,27 @@ const source = await readFile(new URL('../background.js', import.meta.url),'utf8
 const first=source.indexOf('  if (request?.method === "tools/call" && TIMER_TOOL_NAMES.includes');
 const last=source.indexOf('  if (request?.method === "tools/call" && request.params?.name === "system_agent_status")', first);
 assert.ok(first>=0 && last>first);
-const calls=[];
+const calls=[],repeatCalls=[];
 const route = vm.runInNewContext(`(async function(request){${source.slice(first,last)}})`, {
  TIMER_TOOL_NAMES,validateTimerInput,normalizeTimerResult,normalizeTaskTabId,Intl, AGENT_TASK_TIMEOUT_MS:10000,
+ chrome:{tabs:{get:async id=>({id,url:"https://chatgpt.com/c/test"})}},
+ planConversationId:()=> "test",
+ taskCompletionDelivery:{startRepeating:async args=>{repeatCalls.push(args);return {...task,repeat:true}},repeatingStatus:async(id,cancel)=>id===task.taskId?(cancel?{task:{...task,status:"cancelled",phase:"cancelled",repeat:true},cancelled:true}:{...task,repeat:true}):null},
  localAgentError:(code,message)=>Object.assign(new Error(message),{code}),
  executeToolCall:async (id,name,input,work)=>work(),
  agentJsonRequest:async (path,options)=> {calls.push({path,options}); return path.endsWith('/cancel')?{task:completed,cancelled:false}:task;}
 });
 await route({method:'tools/call',params:{name:'timer_start',arguments:{duration:10,tabId:42}}});
-assert.ok(!Object.hasOwn(calls[0].options.body,'tabId'),'browser context is not a native timer argument');
-assert.equal(calls[0].path,'/timer/start'); assert.ok(calls[0].options.body.localTimeZone);
-await route({method:'tools/call',params:{name:'timer_status',arguments:{taskId:task.taskId}}});
-assert.equal(calls[1].path,`/tasks/timer/${task.taskId}`);
-await route({method:'tools/call',params:{name:'timer_cancel',arguments:{taskId:task.taskId}}});
-assert.equal(calls[2].options.method,'POST'); assert.equal(calls[2].path,`/tasks/timer/${task.taskId}/cancel`);
+assert.equal(repeatCalls.length,1);
+assert.equal(repeatCalls[0].intervalMs,10000);
+assert.equal(repeatCalls[0].conversationId,"test");
+assert.equal(calls.length,0,"public start must never call the native one-shot endpoint");
+await assert.rejects(route({method:'tools/call',params:{name:'timer_start',arguments:{duration:10,repeat:false,tabId:42}}}),{code:"TIMER_INVALID"});
+await assert.rejects(route({method:'tools/call',params:{name:'timer_start',arguments:{duration:10}}}),{code:"TIMER_INVALID"});
+assert.equal((await route({method:'tools/call',params:{name:'timer_status',arguments:{taskId:task.taskId}}})).repeat,true);
+assert.equal((await route({method:'tools/call',params:{name:'timer_cancel',arguments:{taskId:task.taskId}}})).cancelled,true);
+await assert.rejects(route({method:'tools/call',params:{name:'timer_status',arguments:{taskId:"tsk_missing000"}}}),{code:"TIMER_NOT_FOUND"});
+assert.equal(calls.length,0,"no legacy timer fallback");
 
 // A developer default changes only initial choices, never a user's saved choice.
 const prefFirst=source.indexOf('function normalizeMcpToolPreferences(');

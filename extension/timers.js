@@ -24,17 +24,17 @@ export const TIMER_TOOL_NAMES = Object.freeze(["timer_start", "timer_status", "t
 
 export function timerDefinitions(readAnnotations, writeAnnotations) {
   return [
-    { name: "timer_start", title: "Start a real timer",
-      description: "Start a real asynchronous pause: LLMs have no precise internal running clock. Use duration+unit or an ISO until timestamp (UTC/offset, or local timeZone). Default clockSource system; internet uses timeapi.io without fallback. Relative time is monotonic; deadlines follow the clock. Warnings report clock changes; sleep fails and restart loses timers. Poll timer_status in the same assistant turn at pollIntervalMs before dependent work; without tabId, ending the response does not schedule a later reply. Optional tabId notifies that ChatGPT tab on completion only if idle. For continuous work use repeat=true with duration, system clock and the verified current tabId: unlimited notifications, wait for idle, next interval starts after confirmed delivery; stop with timer_cancel. Repeating timers persist in Chrome storage across browser/Agent restarts; missed intervals are coalesced. Do not start a new timer each iteration.",
+    { name: "timer_start", title: "Start a persistent repeating chat timer",
+      description: "Start a persistent repeating timer for the verified current ChatGPT tab. Unlimited wake-ups until timer_cancel; wait for idle and confirmed Send before the next interval. Survives browser/Agent restart and tabId changes. Call once, finish the response; never recreate it or poll waiting for completion. Use duration >= 1 second. No one-shot mode. If the persistent plan queue already drives this chat, use it instead.",
       annotations: { ...writeAnnotations, openWorldHint: true },
-      inputSchema: { ...object({ duration: { ...number, description: "Relative duration; mutually exclusive with until." }, unit: { enum: ["seconds", "minutes", "hours"], default: "seconds" }, until: { ...text, description: "Complete ISO timestamp; date and seconds required. Mutually exclusive with duration/unit." }, timeZone: { ...text, description: "IANA zone, for example Pacific/Auckland; defaults to browser local zone." }, clockSource: { enum: ["system", "internet"], default: "system" }, repeat:{type:"boolean",default:false,description:"true: persistent unlimited periodic notifications to the verified current tabId. Requires duration >= 1 second and system clock; stops only on cancel or unresolved delivery uncertainty."} }, []), oneOf: [{ required: ["duration"], not: { required: ["until"] } }, { required: ["until"], not: { anyOf: [{ required: ["duration"] }, { required: ["unit"] }] } }] },
+      inputSchema: object({ duration: { ...number, description: "Recurring interval, at least one second after unit conversion." }, unit: { enum: ["seconds", "minutes", "hours"], default: "seconds" }, timeZone: { ...text, description: "Optional IANA zone for displaying timestamps." } }, ["duration"]),
       outputSchema: timerTaskSchema,
-      _meta: { "openai/toolInvocation/invoking": "Starting timer…", "openai/toolInvocation/invoked": "Timer started." } },
+      _meta: { "openai/toolInvocation/invoking": "Starting persistent timer…", "openai/toolInvocation/invoked": "Persistent timer started." } },
     { name: "timer_status", title: "Check timer progress",
-      description: "Read real remaining/elapsed time, progress, UTC/local timestamps, zone, clock warnings and internet synchronization. Poll at pollIntervalMs. Terminal records last until history eviction or Agent restart. One-shot notifications skip busy tabs. Repeating timers remain working until cancelled, expose fireCount/deliveryPending/deliveryUncertain, and wait for idle without dropping the tick.",
+      description: "Read the existing persistent timer by taskId: next deadline, fireCount, deliveryPending and deliveryUncertain. It stays active until cancelled. A busy chat postpones the wake-up; no need to poll in the same assistant turn or start another timer.",
       annotations: readAnnotations, inputSchema: object({ taskId }), outputSchema: timerTaskSchema },
     { name: "timer_cancel", title: "Cancel a timer",
-      description: "Cancel a working timer; terminal status remains. cancelled is false if already terminal. TIMER_NOT_FOUND may mean an unknown ID, history eviction or Agent/computer restart.",
+      description: "Stop an existing persistent timer by taskId. No future wake-ups are sent after cancellation. Already delivered messages remain. cancelled is false if already terminal.",
       annotations: writeAnnotations, inputSchema: object({ taskId }), outputSchema: object({ task: timerTaskSchema, cancelled: { type: "boolean" } }) }
   ];
 }
@@ -47,18 +47,16 @@ export function validateTimerInput(name, value) {
     if (Object.keys(value).length !== 1 || typeof value.taskId !== "string" || !/^tsk_[A-Za-z0-9_-]{10}$/.test(value.taskId)) fail("Use the unchanged taskId returned by timer_start.");
     return { taskId: value.taskId };
   }
-  if (Object.keys(value).some((key) => !["duration", "unit", "until", "timeZone", "clockSource", "repeat"].includes(key)) || Object.hasOwn(value, "duration") === Object.hasOwn(value, "until")) fail("Specify exactly one of duration or until and no unsupported fields.");
-  if (value.clockSource !== undefined && !["system", "internet"].includes(value.clockSource)) fail("clockSource must be system or internet.");
+  if (Object.keys(value).some(key=>!["duration","unit","timeZone"].includes(key)) || !Object.hasOwn(value,"duration")) fail("Specify duration and optional unit/timeZone for the persistent timer.");
   if (value.timeZone !== undefined) {
-    try { new Intl.DateTimeFormat("en", { timeZone: value.timeZone }); } catch { fail("timeZone must be an available IANA time zone."); }
     if (typeof value.timeZone !== "string" || !value.timeZone) fail("timeZone must be a nonempty IANA name.");
+    try { new Intl.DateTimeFormat("en", { timeZone: value.timeZone }); } catch { fail("timeZone must be an available IANA time zone."); }
   }
-  if (Object.hasOwn(value, "duration")) {
-    if (typeof value.duration !== "number" || !Number.isFinite(value.duration) || value.duration < 0 || value.unit !== undefined && !["seconds", "minutes", "hours"].includes(value.unit)) fail("duration must be nonnegative and finite; unit must be seconds, minutes or hours.");
-  } else if (Object.hasOwn(value, "unit") || typeof value.until !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})?$/.test(value.until)) fail("until must contain a complete ISO date/time including seconds; omit unit.");
-  if(value.repeat!==undefined&&typeof value.repeat!=="boolean")fail("repeat must be boolean.");
-  if(value.repeat&&(!Object.hasOwn(value,"duration")||(value.clockSource??"system")!=="system"||value.duration*({seconds:1,minutes:60,hours:3600}[value.unit??"seconds"])<1))fail("repeat requires a system-clock duration of at least one second.");
-  return { ...value };
+  const unit=value.unit??"seconds";
+  const factor={seconds:1,minutes:60,hours:3600}[unit];
+  if (typeof value.duration!=="number" || !Number.isFinite(value.duration) || !["seconds","minutes","hours"].includes(unit) || value.unit===null || value.duration*factor<1 || !Number.isSafeInteger(Math.round(value.duration*factor*1000))) fail("A persistent timer needs a finite interval of at least one second; unit must be seconds, minutes or hours.");
+  return {duration:value.duration,...(value.unit!==undefined?{unit}:{}),...(value.timeZone!==undefined?{timeZone:value.timeZone}:{})};
+
 }
 
 // Project through the schema rather than returning unreviewed Agent fields.

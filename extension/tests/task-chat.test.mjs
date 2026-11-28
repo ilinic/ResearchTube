@@ -35,9 +35,9 @@ const host = {
 };
 const delivery = createTaskCompletionDelivery(host);
 const task = (id, status = "working") => ({ taskId: id, status, pollIntervalMs: 250 });
-await delivery.register(task("tsk_0000000000", "completed"), "timer", null);
+await delivery.register(task("tsk_0000000000", "completed"), "custom", null);
 assert.equal(sends.length, 0);
-await delivery.register(task("tsk_0000000001", "completed"), "timer", 42);
+await delivery.register(task("tsk_0000000001", "completed"), "custom", 42);
 assert.equal(sends.length, 1);
 assert.equal(sends[0].completionText, "ResearchTube task tsk_0000000001 completed.");
 await delivery.observe(task("tsk_0000000001", "completed"));
@@ -49,7 +49,7 @@ await delivery.tick();
 assert.equal(sends.length, 2);
 assert.equal(sends[1].tabId, 81);
 await delivery.tick(); assert.equal(sends.length, 2);
-await delivery.register(task("tsk_0000000003"), "timer", 42);
+await delivery.register(task("tsk_0000000003"), "custom", 42);
 let release; pollGate = new Promise(resolve => { release = resolve; });
 pollResult = task("tsk_0000000003", "completed");
 const ticking = delivery.tick();
@@ -273,7 +273,7 @@ const launchNames = ["youtube_download", "youtube_storyboard_download", "media_c
 for (const name of launchNames) {
  const tool = tools.find(t => t.name === name);
  assert.ok(tool, name); assert.equal(tool.inputSchema.properties.tabId.type, "integer", name);
- assert.ok(!(tool.inputSchema.required || []).includes("tabId"), name + " optional context");
+ assert.equal((tool.inputSchema.required || []).includes("tabId"),name==="timer_start",name+" context requirement");
  assert.ok(tool.description.length <= 600, name);
 }
 for (const name of ["site_get_images", "site_get_files"]) {
@@ -297,7 +297,7 @@ let allowCloud=true, cloudSends=0, cloudRecords=[];
 const cloudDelivery=createTaskCompletionDelivery({now:()=>0,historyLimit:()=>20,load:async()=>[],save:async value=>{cloudRecords=structuredClone(value);},schedule:()=>{},
   verifyContext:async task=>{assert.equal(task.cloudTarget.bindingId,"original");if(!allowCloud)throw Error("revoked");},
   send:async(_tab,options)=>{await options.beforeSend();cloudSends++;}});
-const publicStart=await cloudDelivery.register({taskId:"cloud-test",status:"working"},"timer",42,{bindingId:"original"});
+const publicStart=await cloudDelivery.register({taskId:"cloud-test",status:"working"},"custom",42,{bindingId:"original"});
 assert.ok(!Object.hasOwn(publicStart,"cloudTarget"));assert.equal(cloudRecords[0].cloudTarget.bindingId,"original");
 allowCloud=false;await cloudDelivery.observe({taskId:"cloud-test",status:"completed"});assert.equal(cloudSends,0);
 

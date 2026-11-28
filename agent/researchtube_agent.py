@@ -48,7 +48,7 @@ except ImportError:
     from task_history import TaskHistory
     from browser_resources import save_browser_resource
 
-AGENT_VERSION = "2.8.21"
+AGENT_VERSION = "2.8.22"
 INTERFACE_VERSION = 97
 DEFAULT_PORT = 17843
 MAX_REQUEST_BODY_BYTES = 64 * 1024
@@ -5979,7 +5979,7 @@ async def handle_public_share_client(reader: asyncio.StreamReader, writer: async
         except ConnectionError:
             pass
     finally:
-        for manager in (TASKS, SPEECH_TASKS, VISUAL_MAP_TASKS, CAMERA_RECORD_TASKS, CAPTURE_FRAME_TASKS, MEDIA_CLIP_TASKS, STORYBOARD_TASKS, TIMER_TASKS):
+        for manager in (TASKS, SPEECH_TASKS, VISUAL_MAP_TASKS, CAMERA_RECORD_TASKS, CAPTURE_FRAME_TASKS, MEDIA_CLIP_TASKS, STORYBOARD_TASKS):
             manager.tasks.prune()
         writer.close()
         try:
@@ -6266,13 +6266,6 @@ try:
 except ImportError:  # Direct python researchtube_agent.py launch.
     from storyboards import StoryboardService
 
-try:
-    from .timers import TimerService
-except ImportError:
-    from timers import TimerService
-
-TIMER_TASKS = TimerService(sys.modules[__name__])
-
 STORYBOARD_TASKS = StoryboardService(sys.modules[__name__])
 
 
@@ -6333,14 +6326,6 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
             if parse_json_body(body) != {}:
                 raise AgentApiError("CUSTOM_TOOL_REQUEST_INVALID", "Custom tool cancellation accepts an empty body.")
             response_status, response_body = "200 OK", await CUSTOM_TOOLS.cancel(path.removeprefix("/custom-tools/tasks/").removesuffix("/cancel"))
-        elif method == "POST" and path == "/timer/start":
-            response_status, response_body = "200 OK", await TIMER_TASKS.create(parse_json_body(body))
-        elif method == "GET" and re.fullmatch(r"/tasks/timer/[^/]+", path):
-            response_status, response_body = "200 OK", await TIMER_TASKS.status(path.removeprefix("/tasks/timer/"))
-        elif method == "POST" and re.fullmatch(r"/tasks/timer/[^/]+/cancel", path):
-            if parse_json_body(body) != {}:
-                raise AgentApiError("TIMER_INVALID", "Timer cancellation accepts an empty body.")
-            response_status, response_body = "200 OK", await TIMER_TASKS.cancel(path.removeprefix("/tasks/timer/").removesuffix("/cancel"))
         elif method == "POST" and path == "/workspace/list":
             response_status, response_body = "200 OK", workspace_list(parse_json_body(body))
         elif method == "POST" and path == "/workspace/stat":
@@ -6527,7 +6512,7 @@ async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWrit
         # Health and prompt reads only return startup snapshots. Task pruning reads
         # user configuration and belongs to task/other requests and done callbacks.
         if not (method == "GET" and path in {"/health", "/internal/prompt-templates"}):
-            for manager in (TASKS, SPEECH_TASKS, VISUAL_MAP_TASKS, CAMERA_RECORD_TASKS, CAPTURE_FRAME_TASKS, MEDIA_CLIP_TASKS, STORYBOARD_TASKS, TIMER_TASKS):
+            for manager in (TASKS, SPEECH_TASKS, VISUAL_MAP_TASKS, CAMERA_RECORD_TASKS, CAPTURE_FRAME_TASKS, MEDIA_CLIP_TASKS, STORYBOARD_TASKS):
                 manager.tasks.prune()
         writer.close()
         try:
@@ -6671,7 +6656,6 @@ async def serve(port: int, on_started: Callable[[], None] | None = None) -> None
         async with PUBLIC_SHARE_LOCK:
             await stop_public_share_unlocked()
         await LOCAL_MCP.shutdown()
-        await TIMER_TASKS.shutdown()
         await CAPTURE_FRAME_TASKS.shutdown()
         await MEDIA_CLIP_TASKS.shutdown()
         await SPEECH_TASKS.shutdown()

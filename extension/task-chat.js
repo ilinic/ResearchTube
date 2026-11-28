@@ -33,7 +33,7 @@ function repeatingTimerSnapshot(record,now){
     tabId:record.tabId,repeat:true,fireCount:record.fireCount,deliveryPending:record.status==="working"&&instant>=record.nextDueAt,deliveryUncertain:record.repeatPhase==="sending"||record.repeatPhase==="uncertain"};
 }
 export function createTaskCompletionDelivery(host) {
-  // Used for Agent-owned timers and Custom Tools only. Other managers already
+  // Used for persistent chat timers and asynchronous Custom Tools. Other managers already
   // own their task records and invoke completed directly.
   let records = [], loaded = false, loading = null, ticking = false, writing = Promise.resolve();
   const delivering=new Map();
@@ -52,7 +52,7 @@ export function createTaskCompletionDelivery(host) {
     loading = (async () => {
       records = await host.load();
       if (!Array.isArray(records)) records = [];
-      records = records.filter(task => typeof task.taskId === "string" && ["timer", "custom"].includes(task.kind));
+      records = records.filter(task => typeof task.taskId === "string" && (task.kind==="custom" || task.kind==="timer"&&task.repeat===true));
       loaded = true;
     })().finally(() => { loading = null; });
     return loading;
@@ -131,6 +131,7 @@ export function createTaskCompletionDelivery(host) {
   async function register(task, kind, tabId, cloudTarget = null) {
     await ensure();
     if (tabId == null) return task;
+    if(kind!=="custom")throw Object.assign(Error("Only persistent chat timers can be started."),{code:"TIMER_INVALID"});
     let record = records.find(item => item.taskId === task.taskId);
     if (!record) { record = { ...task, kind, tabId, ...(cloudTarget ? { cloudTarget } : {}) }; records.push(record); }
     else Object.assign(record, task);
